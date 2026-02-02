@@ -9,9 +9,14 @@ Agentic coding framework that goes from idea to code using orchestrator personas
 curl -fsSL https://raw.githubusercontent.com/djinnos/djinn/main/install.sh | bash
 ```
 
-**Go Install** (requires Go 1.21+):
+**npm** (Node.js 16+):
 ```bash
-go install github.com/djinnos/cli/cmd/djinn@latest
+npm install -g djinn-cli
+```
+
+**npx** (run without installing):
+```bash
+npx djinn-cli
 ```
 
 ## Requirements
