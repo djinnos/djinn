@@ -1,0 +1,36 @@
+{
+  "name": "djinn-cli",
+  "version": "0.1.0",
+  "description": "Agentic coding framework - from idea to code using orchestrator personas",
+  "bin": {
+    "djinn": "bin/djinn"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "files": [
+    "bin",
+    "scripts"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/djinnos/djinn.git"
+  },
+  "keywords": [
+    "ai",
+    "coding",
+    "assistant",
+    "cli",
+    "agentic",
+    "llm"
+  ],
+  "author": "Djinn",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/djinnos/djinn/issues"
+  },
+  "homepage": "https://github.com/djinnos/djinn#readme",
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
