@@ -11,12 +11,12 @@ curl -fsSL https://raw.githubusercontent.com/djinnos/djinn/main/install.sh | bas
 
 **npm** (Node.js 16+):
 ```bash
-npm install -g djinn-cli
+npm install -g @djinnos/djinn
 ```
 
 **npx** (run without installing):
 ```bash
-npx djinn-cli
+npx @djinnos/djinn
 ```
 
 ## Requirements
