@@ -4,8 +4,6 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
-const zlib = require('zlib');
-const tar = require('tar');
 
 const REPO = 'djinnos/djinn';
 const BINARY_NAME = 'djinn';
@@ -84,27 +82,6 @@ async function downloadFile(url, dest) {
   });
 }
 
-async function extractTarGz(archivePath, destDir) {
-  return new Promise((resolve, reject) => {
-    fs.createReadStream(archivePath)
-      .pipe(zlib.createGunzip())
-      .pipe(tar.extract({ cwd: destDir }))
-      .on('finish', resolve)
-      .on('error', reject);
-  });
-}
-
-async function extractZip(archivePath, destDir) {
-  // For Windows, use PowerShell to extract
-  try {
-    execSync(`powershell -command "Expand-Archive -Path '${archivePath}' -DestinationPath '${destDir}' -Force"`, {
-      stdio: 'pipe'
-    });
-  } catch (e) {
-    throw new Error('Failed to extract zip archive');
-  }
-}
-
 async function main() {
   try {
     const platform = getPlatform();
@@ -132,9 +109,15 @@ async function main() {
     
     console.log('Extracting...');
     if (ext === 'zip') {
-      await extractZip(archivePath, tmpDir);
+      // Windows: use PowerShell
+      execSync(`powershell -command "Expand-Archive -Path '${archivePath}' -DestinationPath '${tmpDir}' -Force"`, {
+        stdio: 'pipe'
+      });
     } else {
-      await extractTarGz(archivePath, tmpDir);
+      // macOS/Linux: use tar command
+      execSync(`tar -xzf "${archivePath}" -C "${tmpDir}"`, {
+        stdio: 'pipe'
+      });
     }
     
     // Move binary to bin directory
