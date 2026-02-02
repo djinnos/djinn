@@ -1,5 +1,5 @@
 {
-  "name": "djinn-cli",
+  "name": "@djinnos/djinn",
   "version": "0.1.0",
   "description": "Agentic coding framework - from idea to code using orchestrator personas",
   "bin": {

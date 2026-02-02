@@ -1,17 +1,17 @@
-# djinn-cli
+# @djinnos/djinn
 
 Agentic coding framework that goes from idea to code using orchestrator personas.
 
 ## Install
 
 ```bash
-npm install -g djinn-cli
+npm install -g @djinnos/djinn
 ```
 
 Or use directly with npx:
 
 ```bash
-npx djinn-cli
+npx @djinnos/djinn
 ```
 
 ## Usage
