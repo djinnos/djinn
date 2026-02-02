@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout public repo (for install.sh, README)
+        uses: actions/checkout@v4
+
+      - name: Checkout private source code
+        uses: actions/checkout@v4
+        with:
+          repository: djinnos/cli
+          token: ${{ secrets.CLI_REPO_TOKEN }}
+          path: cli-source
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: cli-source/go.sum
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build binaries
+        working-directory: cli-source
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          
+          # Build for all platforms
+          platforms=(
+            "linux amd64"
+            "linux arm64"
+            "darwin amd64"
+            "darwin arm64"
+            "windows amd64"
+          )
+          
+          mkdir -p dist
+          
+          for platform in "${platforms[@]}"; do
+            read -r os arch <<< "$platform"
+            output="djinn"
+            if [ "$os" = "windows" ]; then
+              output="djinn.exe"
+            fi
+            
+            echo "Building for $os/$arch..."
+            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build \
+              -ldflags "-s -w -X github.com/djinn/auto-dev/internal/scaffold.Version=$VERSION" \
+              -o "dist/${output}" \
+              ./cmd/djinn
+            
+            # Create archive
+            cd dist
+            if [ "$os" = "windows" ]; then
+              zip "djinn_${VERSION}_${os}_${arch}.zip" "$output" ../README.md
+            else
+              tar -czf "djinn_${VERSION}_${os}_${arch}.tar.gz" "$output" -C .. README.md
+            fi
+            rm "$output"
+            cd ..
+          done
+          
+          # Create checksums
+          cd dist
+          sha256sum *.tar.gz *.zip > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: cli-source/dist/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
