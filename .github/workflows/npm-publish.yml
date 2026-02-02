@@ -20,7 +20,7 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Publish to npm
+      - name: Publish to npm with provenance
         working-directory: npm
         run: npm publish --access public --provenance
         env:
