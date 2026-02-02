@@ -38,13 +38,12 @@ jobs:
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
           
-          # Build for all platforms
+          # Build for all platforms (Windows excluded - uses syscall.Kill)
           platforms=(
             "linux amd64"
             "linux arm64"
             "darwin amd64"
             "darwin arm64"
-            "windows amd64"
           )
           
           mkdir -p dist
@@ -75,7 +74,7 @@ jobs:
           
           # Create checksums
           cd dist
-          sha256sum *.tar.gz *.zip > checksums.txt
+          sha256sum *.tar.gz > checksums.txt
           cat checksums.txt
 
       - name: Create Release
