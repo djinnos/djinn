@@ -1,39 +1,34 @@
 # Djinn
 
-Agentic coding framework that goes from idea to code using orchestrator personas.
+AI-native development orchestrator. From idea to code using specialized AI personas.
 
 ## Install
 
-**macOS / Linux:**
+Download the latest release for your platform from [GitHub Releases](https://github.com/djinnos/djinn/releases).
+
+| Platform | Download |
+|----------|----------|
+| **macOS (Apple Silicon)** | `Djinn-x.x.x-arm64.dmg` |
+| **macOS (Intel)** | `Djinn-x.x.x-x64.dmg` |
+| **Linux** | `Djinn-x.x.x-x86_64.AppImage` |
+| **Linux (Debian/Ubuntu)** | `Djinn-x.x.x-amd64.deb` |
+
+### Linux (AppImage)
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/djinnos/djinn/main/install.sh | bash
+chmod +x Djinn-*.AppImage
+./Djinn-*.AppImage
 ```
 
-**npm** (Node.js 16+):
-```bash
-npm install -g @djinnos/djinn
-```
+### Linux (deb)
 
-**npx** (run without installing):
 ```bash
-npx @djinnos/djinn
+sudo dpkg -i Djinn-*.deb
 ```
 
 ## Requirements
 
-- [OpenCode](https://opencode.ai) - Djinn uses OpenCode as the underlying AI coding assistant
-- An Anthropic API key (or other supported provider)
-
-## Quick Start
-
-1. Install djinn (see above)
-2. Navigate to your project directory
-3. Run `djinn`
-
-```bash
-cd my-project
-djinn
-```
+- An Anthropic API key (or other supported LLM provider)
 
 ## What is Djinn?
 
@@ -52,12 +47,7 @@ Press **Tab** to switch between personas while preserving context.
 
 ## Autonomous Execution
 
-For autonomous task execution from your backlog:
-
-```bash
-djinn auto-dev                    # Run until no tasks
-djinn auto-dev --dry-run          # Preview without executing
-```
+Create tasks via the kanban board, then hit Play. AI agents work on them in parallel in isolated git worktrees with built-in review.
 
 ## Documentation
 

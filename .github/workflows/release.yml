@@ -1,4 +1,4 @@
-name: Release
+name: Release Desktop App
 
 on:
   push:
@@ -9,13 +9,34 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14          # Apple Silicon runner
+            platform: darwin
+            arch: arm64
+            server-binary: djinn-server-darwin-arm64
+            opencode-target: bun-darwin-arm64
+          - os: macos-13          # Intel runner
+            platform: darwin
+            arch: x64
+            server-binary: djinn-server-darwin-x64
+            opencode-target: bun-darwin-x64
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            server-binary: djinn-server-linux-x64
+            opencode-target: bun-linux-x64
+
+    runs-on: ${{ matrix.os }}
+
     steps:
-      - name: Checkout public repo (for install.sh, README)
+      - name: Checkout public repo
         uses: actions/checkout@v4
 
-      - name: Checkout private source code
+      - name: Checkout private source
         uses: actions/checkout@v4
         with:
           repository: djinnos/cli
@@ -23,64 +44,161 @@ jobs:
           path: cli-source
           fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
-          cache-dependency-path: cli-source/go.sum
-
       - name: Extract version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
-      - name: Build binaries
+      # --- Toolchain Setup ---
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: |
+            cli-source/apps/server/go.sum
+            cli-source/apps/cli/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # --- Build djinn-server (Go, current platform only) ---
+
+      - name: Build djinn-server
+        working-directory: cli-source/apps/server
+        run: |
+          mkdir -p bin
+          GOOS=${{ matrix.platform }} GOARCH=${{ matrix.arch == 'arm64' && 'arm64' || 'amd64' }} \
+            go build -o bin/${{ matrix.server-binary }} ./cmd/djinn-server
+
+      # --- Build OpenCode CLI (Bun compile, current platform only) ---
+
+      - name: Install OpenCode dependencies
+        working-directory: cli-source/packages/opencode
+        run: bun install
+
+      - name: Build OpenCode CLI
+        working-directory: cli-source/packages/opencode/packages/opencode
+        run: bun run build --single
+        env:
+          MODELS_DEV_API_JSON: ''
+
+      - name: Copy OpenCode binary to resources
         working-directory: cli-source
         run: |
-          VERSION=${{ steps.version.outputs.VERSION }}
-          
-          # Build for all platforms (Windows excluded - uses syscall.Kill)
-          platforms=(
-            "linux amd64"
-            "linux arm64"
-            "darwin amd64"
-            "darwin arm64"
-          )
-          
-          mkdir -p dist
-          
-          for platform in "${platforms[@]}"; do
-            read -r os arch <<< "$platform"
-            output="djinn"
-            if [ "$os" = "windows" ]; then
-              output="djinn.exe"
-            fi
-            
-            echo "Building for $os/$arch..."
-            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build \
-              -ldflags "-s -w -X github.com/djinn/auto-dev/internal/scaffold.Version=$VERSION" \
-              -o "dist/${output}" \
-              ./cmd/djinn
-            
-            # Create archive
-            cd dist
-            if [ "$os" = "windows" ]; then
-              zip "djinn_${VERSION}_${os}_${arch}.zip" "$output" ../README.md
-            else
-              tar -czf "djinn_${VERSION}_${os}_${arch}.tar.gz" "$output" -C .. README.md
-            fi
-            rm "$output"
-            cd ..
-          done
-          
-          # Create checksums
-          cd dist
-          sha256sum *.tar.gz > checksums.txt
+          OPENCODE_DIST="packages/opencode/packages/opencode/dist"
+          OPENCODE_RESOURCES="apps/desktop/resources/opencode"
+          mkdir -p "$OPENCODE_RESOURCES"
+
+          # Find the compiled binary — build --single produces one dist/opencode-{target}/bin/opencode
+          BUILT_DIR=$(ls -d "$OPENCODE_DIST"/opencode-* 2>/dev/null | head -1)
+          if [ -z "$BUILT_DIR" ]; then
+            echo "ERROR: No OpenCode build output found in $OPENCODE_DIST"
+            ls -la "$OPENCODE_DIST" || true
+            exit 1
+          fi
+
+          # Map platform to the binary name the desktop app expects
+          if [ "${{ matrix.platform }}" = "darwin" ]; then
+            OPENCODE_BIN_NAME="opencode-cli-darwin-${{ matrix.arch }}"
+          elif [ "${{ matrix.platform }}" = "linux" ]; then
+            OPENCODE_BIN_NAME="opencode-cli-linux-x64"
+          elif [ "${{ matrix.platform }}" = "win32" ]; then
+            OPENCODE_BIN_NAME="opencode-cli-win-x64.exe"
+          fi
+
+          cp "$BUILT_DIR/bin/opencode" "$OPENCODE_RESOURCES/$OPENCODE_BIN_NAME"
+          chmod +x "$OPENCODE_RESOURCES/$OPENCODE_BIN_NAME"
+          echo "Copied OpenCode binary: $OPENCODE_BIN_NAME"
+          ls -la "$OPENCODE_RESOURCES/"
+
+      # --- Copy server binary to desktop resources ---
+
+      - name: Copy server binary to resources
+        working-directory: cli-source
+        run: |
+          mkdir -p apps/desktop/resources/server
+          cp apps/server/bin/${{ matrix.server-binary }} apps/desktop/resources/server/
+          chmod +x apps/desktop/resources/server/${{ matrix.server-binary }}
+          ls -la apps/desktop/resources/server/
+
+      # --- Build OpenCode App UI (SolidJS) ---
+
+      - name: Build OpenCode App UI
+        working-directory: cli-source/packages/opencode
+        run: bun --cwd packages/app run build
+
+      # --- Configure Production Environment ---
+
+      - name: Write production env
+        working-directory: cli-source/apps/desktop
+        run: |
+          echo "VITE_CLERK_PUBLISHABLE_KEY=${{ secrets.CLERK_PUBLISHABLE_KEY }}" > .env.production
+
+      # --- Build & Package Electron App ---
+
+      - name: Install desktop dependencies
+        working-directory: cli-source
+        run: pnpm install
+
+      - name: Build Electron app
+        working-directory: cli-source/apps/desktop
+        run: pnpm build
+
+      - name: Package Electron app
+        working-directory: cli-source/apps/desktop
+        run: pnpm package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Upload artifacts ---
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            cli-source/apps/desktop/dist/*.dmg
+            cli-source/apps/desktop/dist/*.zip
+            cli-source/apps/desktop/dist/*.AppImage
+            cli-source/apps/desktop/dist/*.deb
+            cli-source/apps/desktop/dist/*.exe
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Create checksums
+        working-directory: artifacts
+        run: |
+          sha256sum * > checksums.txt
           cat checksums.txt
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: cli-source/dist/*
+          files: artifacts/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
