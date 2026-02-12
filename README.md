@@ -49,15 +49,15 @@ Download the latest release for your platform:
 <table>
   <tr>
     <td>🍎 <strong>macOS</strong></td>
-    <td><a href="https://github.com/djinnos/djinn/releases/latest">Djinn-x.x.x-arm64.dmg</a></td>
+    <td><a href="https://djinnai.io/api/download?platform=mac-arm64">Apple Silicon (.dmg)</a></td>
   </tr>
   <tr>
     <td>🐧 <strong>Linux</strong></td>
-    <td><a href="https://github.com/djinnos/djinn/releases/latest">Djinn-x.x.x-x86_64.AppImage</a> · <a href="https://github.com/djinnos/djinn/releases/latest">Djinn-x.x.x-amd64.deb</a></td>
+    <td><a href="https://djinnai.io/api/download?platform=linux-appimage">AppImage</a> · <a href="https://djinnai.io/api/download?platform=linux-deb">.deb</a></td>
   </tr>
   <tr>
     <td>🪟 <strong>Windows</strong></td>
-    <td><a href="https://github.com/djinnos/djinn/releases/latest">Djinn-x.x.x-x64.exe</a></td>
+    <td><a href="https://djinnai.io/api/download?platform=windows">Installer (.exe)</a></td>
   </tr>
 </table>
 
