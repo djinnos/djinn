@@ -222,7 +222,7 @@ jobs:
 
       - name: Package Electron app
         working-directory: cli-source/apps/desktop
-        run: npx electron-builder ${{ matrix.eb-flag }} --${{ matrix.arch }}
+        run: npx electron-builder ${{ matrix.eb-flag }} --${{ matrix.arch }} -c.extraMetadata.version=${{ steps.version.outputs.VERSION }} --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
