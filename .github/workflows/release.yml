@@ -133,7 +133,7 @@ jobs:
 
       - name: Build OpenCode App UI
         working-directory: cli-source/packages/opencode
-        run: bun --cwd packages/app run build
+        run: bun run --cwd packages/app build
 
       # --- Configure Production Environment ---
 
