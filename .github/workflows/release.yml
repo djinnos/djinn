@@ -217,6 +217,10 @@ jobs:
         working-directory: cli-source
         run: pnpm install
 
+      - name: Set version in package.json
+        working-directory: cli-source/apps/desktop
+        run: npm version ${{ steps.version.outputs.VERSION }} --no-git-tag-version --allow-same-version
+
       - name: Build Electron app
         working-directory: cli-source/apps/desktop
         run: pnpm build
