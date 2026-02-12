@@ -233,8 +233,8 @@ jobs:
         with:
           name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
-            cli-source/apps/desktop/dist/*.dmg
-            cli-source/apps/desktop/dist/*.zip
+            cli-source/apps/desktop/dist/*-${{ matrix.arch }}.dmg
+            cli-source/apps/desktop/dist/*-${{ matrix.arch }}.zip
             cli-source/apps/desktop/dist/*.AppImage
             cli-source/apps/desktop/dist/*.deb
             cli-source/apps/desktop/dist/*.exe
