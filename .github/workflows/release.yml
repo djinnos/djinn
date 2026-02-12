@@ -84,16 +84,15 @@ jobs:
         run: bun install
 
       - name: Build OpenCode CLI
-        working-directory: cli-source/packages/opencode
-        run: bun --cwd packages/opencode run build --single
+        working-directory: cli-source/packages/opencode/packages/opencode
+        run: |
+          # Symlink hoisted @opentui into package node_modules (build.ts uses relative ../node_modules/ import)
+          ln -sf ../../../node_modules/@opentui node_modules/@opentui
+          bun run build -- --single
 
       - name: Copy OpenCode binary to resources
         working-directory: cli-source
         run: |
-          echo "Looking for OpenCode build output..."
-          find packages/opencode/packages/opencode/dist -type f 2>/dev/null || echo "dist/ not found, searching wider..."
-          find packages/opencode -name "opencode" -type f 2>/dev/null | head -20
-
           OPENCODE_DIST="packages/opencode/packages/opencode/dist"
           OPENCODE_RESOURCES="apps/desktop/resources/opencode"
           mkdir -p "$OPENCODE_RESOURCES"
