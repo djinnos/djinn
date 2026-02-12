@@ -5,31 +5,27 @@
 <h1 align="center">Djinn</h1>
 
 <p align="center">
-  <strong>Autonomous AI agents that build software while you sleep.</strong>
+  <strong>Manage AI agents, not terminals.</strong>
   <br />
-  Local-first. Any LLM. Parallel execution with built-in review.
+  Local-first. Multi-project. Mix and match any LLM. You stay in control.
 </p>
 
 <p align="center">
   <a href="https://github.com/djinnos/djinn/releases"><strong>Download</strong></a> ·
-  <a href="https://djinn.dev"><strong>Website</strong></a> ·
-  <a href="https://djinn.dev/docs"><strong>Docs</strong></a> ·
-  <a href="https://discord.gg/djinn"><strong>Discord</strong></a>
+  <a href="https://djinnai.io"><strong>Website</strong></a>
 </p>
 
 <br />
 
-> **Linear organizes work for humans. Djinn organizes work for AIs.**
+Djinn is an AI development orchestrator. Organize work across multiple projects as epics and tasks, run AI agents in parallel on your machine, and review every decision before it merges.
 
-Djinn is an AI-native project management and autonomous development orchestrator. Create hundreds of tasks — features, tech debt, bugs — and have AI agents work on them in parallel, 24/7, on your machine, with any LLM provider.
-
-It's not just another coding agent. It's the first **task management system built for AI workers**: epics, dependencies, review pipelines, persistent memory, and architectural quality gates — all designed for autonomous agents, not humans with keyboards.
+Instead of juggling terminal windows and manually switching between models and repos, you direct work from a kanban board. Djinn handles the execution — you review the results.
 
 <br />
 
 <!-- TODO: Replace with actual screenshot -->
 <!-- <p align="center">
-  <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/screenshot.png?raw=true" width="800" alt="Djinn Desktop — Kanban board with autonomous execution" />
+  <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/screenshot.png?raw=true" width="800" alt="Djinn Desktop — Kanban board with parallel AI agents across multiple projects" />
 </p> -->
 
 ## How It Works
@@ -37,29 +33,14 @@ It's not just another coding agent. It's the first **task management system buil
 ```
   Create tasks ──→ Hit Play ──→ Agents work in parallel ──→ Review ──→ Merge
        │                │                │                      │
-   Kanban board    Coordinator     Isolated git worktrees    SM + Architect
-   or CLI          spawns agents   one per task              review pipeline
+   Kanban board    Coordinator     Isolated git worktrees    You review the
+   or CLI          spawns agents   one per task              finished work
 ```
 
-1. **Create tasks** — Features, bugs, tech debt. Organize as epics with dependencies and blockers. Use the kanban board or let AI decompose work for you.
+1. **Create tasks** — Features, bugs, tech debt. Organize as epics with dependencies and blockers across any number of projects.
 2. **Hit Play** — The coordinator spawns AI agents in isolated git worktrees, respecting dependency order.
-3. **Agents work in parallel** — Multiple dev agents execute simultaneously, each sandboxed. Circuit breakers catch stuck agents.
-4. **Built-in review** — An SM agent reviews each task against acceptance criteria. An Architect agent reviews every N tasks for architectural drift.
-5. **Merge when ready** — Verified work merges to main automatically.
-
-## Why Djinn
-
-|   | Djinn | Codex | Devin | Cursor |
-|---|-------|-------|-------|--------|
-| Parallel agents | ✅ Unlimited | ❌ | ❌ | ❌ |
-| Runs locally | ✅ Your machine | ❌ Cloud | ❌ Cloud | ✅ |
-| Any LLM | ✅ BYO keys | ❌ OpenAI only | ❌ Proprietary | ⚠️ Limited |
-| Task management | ✅ Built-in | ❌ | ⚠️ Basic | ❌ |
-| Review pipeline | ✅ SM + Architect | ❌ | ⚠️ | ❌ |
-| Persistent memory | ✅ Knowledge base | ❌ | ❌ | ❌ |
-| Price | **Free (beta)** | $200/mo | $500+/mo | $20/mo |
-
-**Your code never leaves your machine.** Djinn runs entirely on your infrastructure. Agents are sandboxed to only the projects you specify.
+3. **Agents work in parallel** — Multiple dev agents execute simultaneously, each sandboxed in its own worktree.
+4. **You review** — AI reviewers check each task against your acceptance criteria. You review the finished work and decide when to merge.
 
 ## Install
 
@@ -88,7 +69,7 @@ Download the latest release for your platform:
   </tr>
 </table>
 
-> **Requirement:** An API key from any supported LLM provider (Anthropic, OpenAI, Google, or local models).
+> Works with any LLM provider supported by [OpenCode](https://opencode.ai) — use your existing subscription plans or API keys.
 
 <details>
 <summary>Linux install instructions</summary>
@@ -107,33 +88,33 @@ sudo dpkg -i Djinn-*.deb
 
 ## Features
 
-### 🎯 AI-Native Task Management
+### ⚡ Parallel Execution
 
-Epics, stories, blockers, dependencies, and priority ordering — designed for AI agents as workers, humans as directors. Manage everything from the kanban board or CLI.
+Run multiple AI agents in parallel, each in its own isolated git worktree. Manage tasks on a kanban board instead of switching between terminal windows.
 
-### ⚡ Parallel Autonomous Execution
+### 📁 Multi-Project
 
-Spawn multiple AI agents that work simultaneously. Each gets its own isolated git worktree. No conflicts. No stepping on toes. Run overnight and wake up to completed work.
+Microservices, monorepos, multiple repositories — Djinn manages them all in parallel. Each project has its own task database and knowledge base. One app to direct everything.
 
-### 🔍 Built-in Review Pipeline
+### 🔀 Mix & Match Models
 
-Every task is reviewed by an SM agent against acceptance criteria. Every N tasks, an Architect agent reviews the batch for architectural drift and can spawn corrective tasks.
+Works with any provider supported by OpenCode — Claude, GPT, Gemini, local models, and more. Use them all at the same time: one model for coding, another for reviews, another for research. Configure which models handle which tasks and at what priority. Use your existing plans or API keys.
 
 ### 🧠 Persistent Memory
 
-A human-readable knowledge base (markdown, Obsidian-compatible) that compounds over time. Architectural decisions, patterns, and project context persist across sessions. You can read, edit, and version control what the AI knows.
+Decisions, patterns, and architectural rules live in a human-readable knowledge base — markdown files you can read, edit, and version control. You decide what context agents get.
 
-### 🔑 Any LLM Provider
+### 🔍 Built-in Review
 
-Bring your own API keys. Claude, GPT, Gemini, local models — switch providers anytime. No vendor lock-in.
+AI reviewers check each task against your acceptance criteria. You review the finished work and decide when to merge. Nothing ships without your approval.
 
-### 🏠 Local-First & Secure
+### 🏠 Local-First
 
-Everything runs on your machine. Code never touches external servers. Agents are sandboxed to only the projects you specify with limited permissions.
+Everything runs on your machine. Your code never touches external servers. Agents are sandboxed to only the projects you specify.
 
 ## AI Personas
 
-Djinn includes specialized AI personas (orchestrators) for every stage of development:
+Djinn includes specialized AI personas (orchestrators) for different stages of development:
 
 | Persona | Focus |
 |---------|-------|
@@ -146,28 +127,11 @@ Djinn includes specialized AI personas (orchestrators) for every stage of develo
 
 Press **Tab** to switch between personas. Context is preserved across switches.
 
-## Tech Stack
-
-- **Desktop:** Electron + React + Tailwind
-- **Server:** Go (event-driven coordinator)
-- **Agent Engine:** [OpenCode](https://opencode.ai) (open-source)
-- **Task DB:** Per-project SQLite, loaded from all registered repos
-- **Memory:** Markdown knowledge base with semantic linking
-
-## Documentation
-
-- [Getting Started](https://djinn.dev/docs/getting-started)
-- [Orchestrators & Personas](https://djinn.dev/docs/orchestrators)
-- [Skills & Thinking Techniques](https://djinn.dev/docs/skills)
-- [Autonomous Execution](https://djinn.dev/docs/auto-dev)
-- [Memory System](https://djinn.dev/docs/memory)
-
 ## Community
 
-- [Discord](https://discord.gg/djinn) — Chat, questions, show & tell
 - [GitHub Issues](https://github.com/djinnos/djinn/issues) — Bug reports and feature requests
 - [GitHub Discussions](https://github.com/djinnos/djinn/discussions) — Ideas and general conversation
 
 ## License
 
-[MIT](LICENSE)
+Proprietary. © 2026 Djinn AI, Inc. Free to use during beta.
