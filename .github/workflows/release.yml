@@ -89,8 +89,8 @@ jobs:
         run: bun install
 
       - name: Build OpenCode CLI
-        working-directory: cli-source/packages/opencode/packages/opencode
-        run: bun run build --single
+        working-directory: cli-source/packages/opencode
+        run: bun --cwd packages/opencode run build --single
         env:
           MODELS_DEV_API_JSON: ''
 
