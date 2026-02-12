@@ -110,7 +110,7 @@ jobs:
         working-directory: cli-source/packages/opencode/packages/opencode
         run: |
           # Symlink hoisted @opentui into package node_modules (build.ts uses relative ../node_modules/ import)
-          ln -sf ../../node_modules/@opentui node_modules/@opentui
+          ln -sf ../../../node_modules/@opentui node_modules/@opentui
           bun run build -- --single
 
       - name: Build OpenCode CLI (Windows)
