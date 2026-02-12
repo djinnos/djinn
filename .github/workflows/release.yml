@@ -18,12 +18,23 @@ jobs:
             platform: darwin
             arch: arm64
             server-binary: djinn-server-darwin-arm64
-            opencode-target: bun-darwin-arm64
+            server-ext: ''
+            opencode-ext: ''
+            eb-flag: --mac
           - os: ubuntu-latest
             platform: linux
             arch: x64
             server-binary: djinn-server-linux-x64
-            opencode-target: bun-linux-x64
+            server-ext: ''
+            opencode-ext: ''
+            eb-flag: --linux
+          - os: windows-latest
+            platform: win32
+            arch: x64
+            server-binary: djinn-server-win-x64.exe
+            server-ext: .exe
+            opencode-ext: .exe
+            eb-flag: --win
 
     runs-on: ${{ matrix.os }}
 
@@ -70,12 +81,23 @@ jobs:
 
       # --- Build djinn-server (Go, current platform only) ---
 
-      - name: Build djinn-server
+      - name: Build djinn-server (Unix)
+        if: runner.os != 'Windows'
         working-directory: cli-source/apps/server
         run: |
           mkdir -p bin
           GOOS=${{ matrix.platform }} GOARCH=${{ matrix.arch == 'arm64' && 'arm64' || 'amd64' }} \
             go build -o bin/${{ matrix.server-binary }} ./cmd/djinn-server
+
+      - name: Build djinn-server (Windows)
+        if: runner.os == 'Windows'
+        working-directory: cli-source/apps/server
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bin
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          go build -o bin/${{ matrix.server-binary }} ./cmd/djinn-server
 
       # --- Build OpenCode CLI (Bun compile, current platform only) ---
 
@@ -83,21 +105,32 @@ jobs:
         working-directory: cli-source/packages/opencode
         run: bun install
 
-      - name: Build OpenCode CLI
+      - name: Build OpenCode CLI (Unix)
+        if: runner.os != 'Windows'
         working-directory: cli-source/packages/opencode/packages/opencode
         run: |
           # Symlink hoisted @opentui into package node_modules (build.ts uses relative ../node_modules/ import)
           ln -sf ../../../node_modules/@opentui node_modules/@opentui
           bun run build -- --single
 
-      - name: Copy OpenCode binary to resources
+      - name: Build OpenCode CLI (Windows)
+        if: runner.os == 'Windows'
+        working-directory: cli-source/packages/opencode/packages/opencode
+        shell: pwsh
+        run: |
+          # Copy hoisted @opentui into package node_modules (symlinks unreliable on Windows)
+          if (Test-Path node_modules/@opentui) { Remove-Item -Recurse -Force node_modules/@opentui }
+          Copy-Item -Recurse ../../../node_modules/@opentui node_modules/@opentui
+          bun run build -- --single
+
+      - name: Copy OpenCode binary to resources (Unix)
+        if: runner.os != 'Windows'
         working-directory: cli-source
         run: |
           OPENCODE_DIST="packages/opencode/packages/opencode/dist"
           OPENCODE_RESOURCES="apps/desktop/resources/opencode"
           mkdir -p "$OPENCODE_RESOURCES"
 
-          # Find the compiled binary — build --single produces one dist/opencode-{target}/bin/opencode
           BUILT_DIR=$(ls -d "$OPENCODE_DIST"/opencode-* 2>/dev/null | head -1)
           if [ -z "$BUILT_DIR" ]; then
             echo "ERROR: No OpenCode build output found in $OPENCODE_DIST"
@@ -105,13 +138,10 @@ jobs:
             exit 1
           fi
 
-          # Map platform to the binary name the desktop app expects
           if [ "${{ matrix.platform }}" = "darwin" ]; then
             OPENCODE_BIN_NAME="opencode-cli-darwin-${{ matrix.arch }}"
-          elif [ "${{ matrix.platform }}" = "linux" ]; then
+          else
             OPENCODE_BIN_NAME="opencode-cli-linux-x64"
-          elif [ "${{ matrix.platform }}" = "win32" ]; then
-            OPENCODE_BIN_NAME="opencode-cli-win-x64.exe"
           fi
 
           cp "$BUILT_DIR/bin/opencode" "$OPENCODE_RESOURCES/$OPENCODE_BIN_NAME"
@@ -119,15 +149,45 @@ jobs:
           echo "Copied OpenCode binary: $OPENCODE_BIN_NAME"
           ls -la "$OPENCODE_RESOURCES/"
 
+      - name: Copy OpenCode binary to resources (Windows)
+        if: runner.os == 'Windows'
+        working-directory: cli-source
+        shell: pwsh
+        run: |
+          $dist = "packages/opencode/packages/opencode/dist"
+          $resources = "apps/desktop/resources/opencode"
+          New-Item -ItemType Directory -Force -Path $resources
+
+          $builtDir = Get-ChildItem -Directory "$dist/opencode-*" | Select-Object -First 1
+          if (-not $builtDir) {
+            Write-Error "No OpenCode build output found in $dist"
+            Get-ChildItem $dist -ErrorAction SilentlyContinue
+            exit 1
+          }
+
+          Copy-Item "$($builtDir.FullName)/bin/opencode.exe" "$resources/opencode-cli-win-x64.exe"
+          Write-Host "Copied OpenCode binary: opencode-cli-win-x64.exe"
+          Get-ChildItem $resources
+
       # --- Copy server binary to desktop resources ---
 
-      - name: Copy server binary to resources
+      - name: Copy server binary to resources (Unix)
+        if: runner.os != 'Windows'
         working-directory: cli-source
         run: |
           mkdir -p apps/desktop/resources/server
           cp apps/server/bin/${{ matrix.server-binary }} apps/desktop/resources/server/
           chmod +x apps/desktop/resources/server/${{ matrix.server-binary }}
           ls -la apps/desktop/resources/server/
+
+      - name: Copy server binary to resources (Windows)
+        if: runner.os == 'Windows'
+        working-directory: cli-source
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path apps/desktop/resources/server
+          Copy-Item "apps/server/bin/${{ matrix.server-binary }}" apps/desktop/resources/server/
+          Get-ChildItem apps/desktop/resources/server/
 
       # --- Build OpenCode App UI (SolidJS) ---
 
@@ -137,10 +197,18 @@ jobs:
 
       # --- Configure Production Environment ---
 
-      - name: Write production env
+      - name: Write production env (Unix)
+        if: runner.os != 'Windows'
         working-directory: cli-source/apps/desktop
         run: |
           echo "VITE_CLERK_PUBLISHABLE_KEY=${{ secrets.CLERK_PUBLISHABLE_KEY }}" > .env.production
+
+      - name: Write production env (Windows)
+        if: runner.os == 'Windows'
+        working-directory: cli-source/apps/desktop
+        shell: pwsh
+        run: |
+          "VITE_CLERK_PUBLISHABLE_KEY=${{ secrets.CLERK_PUBLISHABLE_KEY }}" | Out-File -Encoding utf8 .env.production
 
       # --- Build & Package Electron App ---
 
@@ -154,13 +222,7 @@ jobs:
 
       - name: Package Electron app
         working-directory: cli-source/apps/desktop
-        run: |
-          if [ "${{ matrix.platform }}" = "darwin" ]; then
-            PLATFORM_FLAG="--mac"
-          elif [ "${{ matrix.platform }}" = "linux" ]; then
-            PLATFORM_FLAG="--linux"
-          fi
-          npx electron-builder $PLATFORM_FLAG --${{ matrix.arch }}
+        run: npx electron-builder ${{ matrix.eb-flag }} --${{ matrix.arch }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -194,7 +256,7 @@ jobs:
       - name: Create checksums
         working-directory: artifacts
         run: |
-          sha256sum * > checksums.txt
+          sha256sum *.dmg *.zip *.AppImage *.deb *.exe 2>/dev/null > checksums.txt || true
           cat checksums.txt
 
       - name: Create GitHub Release
