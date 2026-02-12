@@ -154,7 +154,13 @@ jobs:
 
       - name: Package Electron app
         working-directory: cli-source/apps/desktop
-        run: pnpm package --${{ matrix.platform }} --${{ matrix.arch }}
+        run: |
+          if [ "${{ matrix.platform }}" = "darwin" ]; then
+            PLATFORM_FLAG="--mac"
+          elif [ "${{ matrix.platform }}" = "linux" ]; then
+            PLATFORM_FLAG="--linux"
+          fi
+          npx electron-builder $PLATFORM_FLAG --${{ matrix.arch }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
