@@ -14,12 +14,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14          # Apple Silicon runner
+          - os: macos-15          # Apple Silicon runner (arm64)
             platform: darwin
             arch: arm64
             server-binary: djinn-server-darwin-arm64
             opencode-target: bun-darwin-arm64
-          - os: macos-13          # Intel runner
+          - os: macos-15-large    # Intel runner (x64)
             platform: darwin
             arch: x64
             server-binary: djinn-server-darwin-x64
