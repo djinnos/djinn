@@ -19,6 +19,7 @@
 
 # production
 /build
+.turbo
 
 # misc
 .DS_Store
