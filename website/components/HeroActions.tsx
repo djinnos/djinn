@@ -36,11 +36,14 @@ export default function HeroActions() {
     };
   }, []);
 
+  // Links point to the releases page since filenames contain the version number.
+  // TODO: Add a /api/download redirect on djinnai.io that fetches latest release from GitHub API
+  const releasesPage = "https://github.com/djinnos/djinn/releases/latest";
   const downloadLinks = {
-    mac_silicon: "https://github.com/djinnos/djinn/releases/latest/download/Djinn-darwin-arm64.dmg",
-    mac_intel: "https://github.com/djinnos/djinn/releases/latest/download/Djinn-darwin-x64.dmg",
-    windows: "https://github.com/djinnos/djinn/releases/latest/download/Djinn-win32-x64.exe",
-    linux: "https://github.com/djinnos/djinn/releases/latest/download/djinn-linux-x64.AppImage"
+    mac_silicon: releasesPage,
+    mac_intel: releasesPage,
+    windows: releasesPage,
+    linux: releasesPage,
   };
 
   const MacDropdownMenu = () => (
