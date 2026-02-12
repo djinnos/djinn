@@ -1,0 +1,79 @@
+@import "tailwindcss";
+
+:root {
+  /* Brand Colors */
+  --color-brand-purple: #A855F7;
+  --color-brand-purple-dark: #7C3AED;
+  
+  /* App Theme Colors */
+  --color-bg-page: #09090B;
+  --color-bg-surface: #101010;
+  --color-bg-surface-elevated: #1C1C1C;
+  --color-border: #282828;
+  
+  /* Text */
+  --color-text-primary: #FFFFFF;
+  --color-text-secondary: #A0A0A0;
+  --color-text-muted: #525252;
+  
+  /* Accents */
+  --color-accent-peach: #FFC799;
+  --color-accent-mint: #99FFE4;
+  --color-accent-coral: #FF8080;
+}
+
+@theme {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  
+  --color-brand-purple: var(--color-brand-purple);
+  --color-brand-purple-dark: var(--color-brand-purple-dark);
+  
+  --color-bg-page: var(--color-bg-page);
+  --color-bg-surface: var(--color-bg-surface);
+  --color-bg-surface-elevated: var(--color-bg-surface-elevated);
+  --color-border: var(--color-border);
+  
+  --color-text-primary: var(--color-text-primary);
+  --color-text-secondary: var(--color-text-secondary);
+  --color-text-muted: var(--color-text-muted);
+  
+  --color-accent-peach: var(--color-accent-peach);
+  --color-accent-mint: var(--color-accent-mint);
+  --color-accent-coral: var(--color-accent-coral);
+  
+  --animate-float: float 6s ease-in-out infinite;
+  --animate-float-delayed: float 6s ease-in-out infinite 3s;
+  --animate-pulse-slow: pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+body {
+  background-color: var(--color-bg-page);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+}
+
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-20px); }
+  100% { transform: translateY(0px); }
+}
+
+.glass-nav {
+  background: rgba(16, 16, 16, 0.7);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.glass-card {
+  background: rgba(28, 28, 28, 0.4);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+
+.hero-gradient {
+  background: radial-gradient(circle at 50% 0%, #2e1065 0%, #09090b 80%);
+}
