@@ -6,7 +6,6 @@ const GITHUB_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 // Map platform params to asset filename patterns
 const PLATFORM_PATTERNS: Record<string, RegExp> = {
   "mac-arm64": /Djinn-.*-arm64\.dmg$/,
-  "mac-x64": /Djinn-.*-x64\.dmg$/,
   "windows": /Djinn-.*-x64\.exe$/,
   "linux-appimage": /Djinn-.*\.AppImage$/,
   "linux-deb": /Djinn-.*\.deb$/,
