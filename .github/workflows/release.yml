@@ -88,7 +88,8 @@ jobs:
         run: |
           mkdir -p bin
           GOOS=${{ matrix.platform }} GOARCH=${{ matrix.arch == 'arm64' && 'arm64' || 'amd64' }} \
-            go build -o bin/${{ matrix.server-binary }} ./cmd/djinn-server
+            go build -ldflags "-X github.com/djinn-os/djinn/apps/server/pkg/scaffold.Version=${{ steps.version.outputs.VERSION }}" \
+            -o bin/${{ matrix.server-binary }} ./cmd/djinn-server
 
       - name: Build djinn-server (Windows)
         if: runner.os == 'Windows'
@@ -98,7 +99,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path bin
           $env:GOOS = "windows"
           $env:GOARCH = "amd64"
-          go build -o bin/${{ matrix.server-binary }} ./cmd/djinn-server
+          go build -ldflags "-X github.com/djinn-os/djinn/apps/server/pkg/scaffold.Version=${{ steps.version.outputs.VERSION }}" -o bin/${{ matrix.server-binary }} ./cmd/djinn-server
 
       # --- Build OpenCode CLI (Bun compile, current platform only) ---
 
@@ -293,10 +294,13 @@ jobs:
           sha256sum *.dmg *.zip *.AppImage *.deb *.exe 2>/dev/null > checksums.txt || true
           cat checksums.txt
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/*
-          generate_release_notes: true
+      - name: Upload to existing release or create new
+        run: |
+          EXISTING=$(gh release view ${{ github.ref_name }} --json isDraft --jq '.isDraft' 2>/dev/null || echo "none")
+          if [ "$EXISTING" = "true" ]; then
+            gh release upload ${{ github.ref_name }} artifacts/* --clobber
+          else
+            gh release create ${{ github.ref_name }} artifacts/* --generate-release-notes
+          fi
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
