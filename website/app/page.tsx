@@ -15,6 +15,7 @@ import {
 import HeroActions from "../components/HeroActions";
 import Logo from "../components/Logo";
 import Footer from "../components/Footer";
+import LightboxImage from "../components/Lightbox";
 
 export default function Home() {
   return (
@@ -64,7 +65,7 @@ export default function Home() {
           <div className="mt-20 max-w-5xl mx-auto relative group">
              <div className="absolute -inset-1 bg-gradient-to-b from-brand-purple/20 to-transparent rounded-2xl blur-lg opacity-50 group-hover:opacity-75 transition-opacity" />
              <div className="relative bg-[#1a1a1a] rounded-xl border border-border p-2 shadow-2xl">
-               <img
+               <LightboxImage
                  src="/kanban.jpg"
                  alt="Djinn Desktop — Kanban board with parallel AI agents across multiple projects"
                  className="rounded-lg w-full"
@@ -168,7 +169,7 @@ export default function Home() {
             <div className="order-2 md:order-1 relative group">
               <div className="absolute -inset-1 bg-gradient-to-tr from-brand-purple to-accent-peach rounded-2xl blur opacity-20 group-hover:opacity-40 transition-duration-500" />
               <div className="relative rounded-xl border border-border bg-bg-surface overflow-hidden">
-                <img
+                <LightboxImage
                   src="/epics.jpg"
                   alt="Djinn Roadmap — Epic dependency graph showing task organization across projects"
                   className="w-full"
@@ -200,7 +201,7 @@ export default function Home() {
             <div className="relative group">
               <div className="absolute -inset-1 bg-gradient-to-tr from-accent-mint to-blue-500 rounded-2xl blur opacity-20 group-hover:opacity-40 transition-duration-500" />
               <div className="relative rounded-xl border border-border bg-bg-surface overflow-hidden">
-                <img
+                <LightboxImage
                   src="/memory.jpg"
                   alt="Djinn Memory Graph — Knowledge base visualization with connected decisions, patterns, and architecture notes"
                   className="w-full"
