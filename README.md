@@ -24,15 +24,21 @@ Instead of juggling terminal windows and manually switching between models and r
 <br />
 
 <p align="center">
-  <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/kanban.jpg?raw=true" width="800" alt="Djinn Desktop — Kanban board with parallel AI agents across multiple projects" />
+  <a href="https://github.com/djinnos/djinn/blob/main/.github/assets/kanban.jpg?raw=true">
+    <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/kanban.jpg?raw=true" width="800" alt="Djinn Desktop — Kanban board with parallel AI agents across multiple projects" />
+  </a>
 </p>
 
 <p align="center">
-  <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/epics.jpg?raw=true" width="800" alt="Djinn Roadmap — Epic dependency graph with tasks and blockers" />
+  <a href="https://github.com/djinnos/djinn/blob/main/.github/assets/epics.jpg?raw=true">
+    <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/epics.jpg?raw=true" width="800" alt="Djinn Roadmap — Epic dependency graph with tasks and blockers" />
+  </a>
 </p>
 
 <p align="center">
-  <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/memory.jpg?raw=true" width="800" alt="Djinn Memory Graph — Knowledge base visualization with connected notes" />
+  <a href="https://github.com/djinnos/djinn/blob/main/.github/assets/memory.jpg?raw=true">
+    <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/memory.jpg?raw=true" width="800" alt="Djinn Memory Graph — Knowledge base visualization with connected notes" />
+  </a>
 </p>
 
 ## How It Works
