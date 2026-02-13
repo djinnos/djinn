@@ -12,7 +12,7 @@ export default function Logo() {
     >
       <div className="relative w-8 h-8 rounded-md overflow-hidden border border-white/10 shadow-sm">
         <Image 
-          src="/logo.png" 
+          src="/logo.jpg" 
           alt="Djinn Logo" 
           fill 
           className="object-contain"

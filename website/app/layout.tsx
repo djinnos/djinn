@@ -37,7 +37,7 @@ export const metadata: Metadata = {
     siteName: "Djinn",
     images: [
       {
-        url: "/og-image.png",
+        url: "/kanban.jpg",
         width: 1200,
         height: 630,
         alt: "Djinn — AI Development Orchestrator",
@@ -48,7 +48,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Djinn | AI Development Orchestrator",
     description: "Manage AI agents like tasks, not terminal windows. Parallel execution, any LLM, your machine.",
-    images: ["/og-image.png"],
+    images: ["/kanban.jpg"],
     creator: "@djinnos", 
   },
   icons: {

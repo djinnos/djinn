@@ -23,10 +23,13 @@ Instead of juggling terminal windows and manually switching between models and r
 
 <br />
 
-<!-- TODO: Replace with actual screenshot -->
-<!-- <p align="center">
-  <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/screenshot.png?raw=true" width="800" alt="Djinn Desktop — Kanban board with parallel AI agents across multiple projects" />
-</p> -->
+<p align="center">
+  <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/kanban.jpg?raw=true" width="800" alt="Djinn Desktop — Kanban board with parallel AI agents across multiple projects" />
+</p>
+
+<p align="center">
+  <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/epics.jpg?raw=true" width="800" alt="Djinn Roadmap — Epic dependency graph with tasks and blockers" />
+</p>
 
 ## How It Works
 
