@@ -119,6 +119,102 @@ Djinn includes specialized AI personas (orchestrators) for different stages of d
 
 Press **Tab** to switch between personas. Context is preserved across switches.
 
+## Using Djinn with Your Own Tools
+
+Djinn Desktop runs an MCP server that exposes task management and persistent memory as tools. While the embedded OpenCode instance connects automatically, you can also use these tools from **your own OpenCode installation**, **Claude Code**, **Cursor**, or any MCP-compatible client.
+
+> **Important:** Djinn Desktop must be running for MCP tools to be available. The MCP server starts with the desktop app — external tools connect to it, they don't start their own server. Launch Djinn Desktop first, then start your external tool.
+
+The MCP endpoint is:
+
+```
+http://localhost:4440/mcp
+```
+
+<details>
+<summary>Port configuration</summary>
+
+Djinn defaults to port `4440`. If that port is busy, it automatically picks an available port and saves it for next time. You can change the port in Djinn Desktop settings.
+
+If you need to check the current port programmatically:
+```bash
+cat ~/.djinn/server.json
+# { "port": 4440, "url": "http://localhost:4440/mcp", ... }
+```
+</details>
+
+### OpenCode (Native Install)
+
+If you have [OpenCode](https://opencode.ai) installed separately, you can run it with Djinn's full config — all personas, skills, and MCP tools:
+
+```bash
+OPENCODE_CONFIG=~/.djinn/opencode.json \
+OPENCODE_CONFIG_DIR=~/.djinn/.opencode \
+opencode
+```
+
+This gives you:
+- All Djinn personas (Analyst, Architect, PM, UX, Marketer, Recruiter)
+- All skills (TDD, debugging, Go best practices, React best practices, etc.)
+- Djinn MCP tools (tasks, memory, settings, projects)
+- Third-party MCPs (grep, context7)
+
+> **Tip:** Create a shell alias for convenience:
+> ```bash
+> alias djinn-opencode='OPENCODE_CONFIG=~/.djinn/opencode.json OPENCODE_CONFIG_DIR=~/.djinn/.opencode opencode'
+> ```
+
+You can also load just the personas and skills without the Djinn MCP server:
+
+```bash
+OPENCODE_CONFIG_DIR=~/.djinn/.opencode opencode
+```
+
+Task and memory tools won't be available, but you'll get all the personas and skills. Useful when working offline or without Djinn Desktop.
+
+### Claude Code
+
+Add to your project's `.mcp.json` (or `~/.claude.json` for global):
+
+```json
+{
+  "mcpServers": {
+    "djinn": {
+      "type": "url",
+      "url": "http://localhost:4440/mcp"
+    }
+  }
+}
+```
+
+### Cursor
+
+Add to `.cursor/mcp.json` in your project:
+
+```json
+{
+  "mcpServers": {
+    "djinn": {
+      "url": "http://localhost:4440/mcp"
+    }
+  }
+}
+```
+
+### Any MCP Client
+
+Any tool that supports the [MCP protocol](https://modelcontextprotocol.io) can connect to Djinn's HTTP+SSE endpoint at `http://localhost:4440/mcp`.
+
+### What's Available Over MCP
+
+| Tool Group | Examples | Description |
+|-----------|----------|-------------|
+| **Tasks** | `task_create`, `task_list`, `task_show`, `task_transition` | Full task lifecycle — create, update, transition, comment |
+| **Memory** | `memory_search`, `memory_read`, `memory_write` | Knowledge base — ADRs, patterns, research notes |
+| **Projects** | `projects_list`, `projects_add` | Multi-project management |
+| **Settings** | `settings_get`, `settings_save` | Configuration management |
+| **Execution** | `execution_start`, `execution_pause` | Control the task executor |
+
 ## Community
 
 - [GitHub Issues](https://github.com/djinnos/djinn/issues) — Bug reports and feature requests
