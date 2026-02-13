@@ -190,11 +190,8 @@ jobs:
           Copy-Item "apps/server/bin/${{ matrix.server-binary }}" apps/desktop/resources/server/
           Get-ChildItem apps/desktop/resources/server/
 
-      # --- Build OpenCode App UI (SolidJS) ---
-
-      - name: Build OpenCode App UI
-        working-directory: cli-source/packages/opencode
-        run: bun run --cwd packages/app build
+      # Note: OpenCode App UI is built automatically by build.ts during
+      # the OpenCode CLI build step above (embedded into the binary via $bunfs)
 
       # --- Build & Package Electron App ---
 
