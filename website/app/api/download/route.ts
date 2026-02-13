@@ -5,10 +5,10 @@ const GITHUB_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 
 // Map platform params to asset filename patterns
 const PLATFORM_PATTERNS: Record<string, RegExp> = {
-  "mac-arm64": /Djinn-arm64\.dmg$/,
-  "windows": /Djinn-x64\.exe$/,
-  "linux-appimage": /Djinn-x64\.AppImage$/,
-  "linux-deb": /Djinn-x64\.deb$/,
+  "mac-arm64": /Djinn-.*arm64\.dmg$/,
+  "windows": /Djinn-.*x64\.exe$/,
+  "linux-appimage": /Djinn-.*\.AppImage$/,
+  "linux-deb": /Djinn-.*\.deb$/,
 };
 
 // Cache the latest release for 5 minutes to avoid hitting GitHub API rate limits
