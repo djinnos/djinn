@@ -60,81 +60,15 @@ export default function Home() {
             
           </div>
 
-          {/* Abstract App Preview */}
+          {/* App Preview */}
           <div className="mt-20 max-w-5xl mx-auto relative group">
              <div className="absolute -inset-1 bg-gradient-to-b from-brand-purple/20 to-transparent rounded-2xl blur-lg opacity-50 group-hover:opacity-75 transition-opacity" />
              <div className="relative bg-[#1a1a1a] rounded-xl border border-border p-2 shadow-2xl">
-               <div className="bg-bg-page rounded-lg overflow-hidden border border-border/50 aspect-[16/9] flex flex-col">
-                  {/* Fake UI Header */}
-                  <div className="h-10 border-b border-border flex items-center px-4 justify-between bg-bg-surface">
-                    <div className="flex gap-2">
-                      <div className="w-3 h-3 rounded-full bg-red-500/20" />
-                      <div className="w-3 h-3 rounded-full bg-yellow-500/20" />
-                      <div className="w-3 h-3 rounded-full bg-green-500/20" />
-                    </div>
-                    <div className="text-xs text-text-secondary font-mono">djinn-kanban — 8 agents active</div>
-                  </div>
-                  {/* Fake UI Body */}
-                  <div className="flex-1 p-6 grid grid-cols-4 gap-4 bg-bg-page">
-                    {/* Column 1 */}
-                    <div className="space-y-3">
-                      <div className="text-xs font-bold text-text-secondary uppercase tracking-wider flex justify-between">
-                        <span>To Do</span>
-                        <span className="bg-white/5 px-1.5 rounded text-[10px]">12</span>
-                      </div>
-                      {[1, 2, 3].map(i => (
-                        <div key={i} className="bg-bg-surface border border-border p-3 rounded-lg space-y-2">
-                          <div className="h-1.5 w-12 bg-brand-purple/20 rounded-full" />
-                          <div className="h-2 w-3/4 bg-white/10 rounded-full" />
-                        </div>
-                      ))}
-                    </div>
-                    {/* Column 2 */}
-                    <div className="space-y-3">
-                      <div className="text-xs font-bold text-accent-peach uppercase tracking-wider flex justify-between">
-                        <span>In Progress</span>
-                        <span className="bg-accent-peach/10 px-1.5 rounded text-[10px]">8</span>
-                      </div>
-                      {[1, 2].map(i => (
-                        <div key={i} className="bg-bg-surface border border-accent-peach/20 p-3 rounded-lg space-y-2 shadow-[0_0_15px_rgba(255,199,153,0.05)]">
-                           <div className="flex justify-between items-center">
-                             <div className="h-1.5 w-12 bg-accent-peach/40 rounded-full" />
-                             <div className="w-1.5 h-1.5 rounded-full bg-accent-peach animate-pulse" />
-                           </div>
-                          <div className="h-2 w-full bg-white/10 rounded-full" />
-                          <div className="text-[10px] text-text-secondary font-mono pt-1">&gt; Agent executing...</div>
-                        </div>
-                      ))}
-                    </div>
-                    {/* Column 3 */}
-                    <div className="space-y-3">
-                      <div className="text-xs font-bold text-accent-mint uppercase tracking-wider flex justify-between">
-                        <span>Review</span>
-                        <span className="bg-accent-mint/10 px-1.5 rounded text-[10px]">4</span>
-                      </div>
-                      <div className="bg-bg-surface border border-accent-mint/20 p-3 rounded-lg space-y-2">
-                         <div className="flex justify-between items-center">
-                           <div className="h-1.5 w-12 bg-accent-mint/40 rounded-full" />
-                           <Bot className="w-3 h-3 text-accent-mint" />
-                         </div>
-                        <div className="h-2 w-2/3 bg-white/10 rounded-full" />
-                      </div>
-                    </div>
-                     {/* Column 4 */}
-                     <div className="space-y-3">
-                      <div className="text-xs font-bold text-text-secondary uppercase tracking-wider flex justify-between">
-                        <span>Done</span>
-                        <span className="bg-white/5 px-1.5 rounded text-[10px]">45</span>
-                      </div>
-                      {[1, 2, 3, 4].map(i => (
-                        <div key={i} className="bg-bg-surface/50 border border-border/50 p-3 rounded-lg space-y-2 opacity-60">
-                          <div className="h-1.5 w-12 bg-white/10 rounded-full" />
-                          <div className="h-2 w-1/2 bg-white/5 rounded-full" />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-               </div>
+               <img
+                 src="/kanban.jpg"
+                 alt="Djinn Desktop — Kanban board with parallel AI agents across multiple projects"
+                 className="rounded-lg w-full"
+               />
              </div>
           </div>
         </section>
@@ -233,8 +167,12 @@ export default function Home() {
           <div className="max-w-6xl mx-auto grid md:grid-cols-2 gap-16 items-center">
             <div className="order-2 md:order-1 relative group">
               <div className="absolute -inset-1 bg-gradient-to-tr from-brand-purple to-accent-peach rounded-2xl blur opacity-20 group-hover:opacity-40 transition-duration-500" />
-              <div className="relative rounded-xl border border-border bg-bg-surface p-4 aspect-[4/3] overflow-hidden flex items-center justify-center">
-                <div className="text-text-muted font-mono text-sm">[Kanban Board Screenshot]</div>
+              <div className="relative rounded-xl border border-border bg-bg-surface overflow-hidden">
+                <img
+                  src="/epics.jpg"
+                  alt="Djinn Roadmap — Epic dependency graph showing task organization across projects"
+                  className="w-full"
+                />
               </div>
             </div>
             <div className="order-1 md:order-2">
