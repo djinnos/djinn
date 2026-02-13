@@ -31,6 +31,10 @@ Instead of juggling terminal windows and manually switching between models and r
   <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/epics.jpg?raw=true" width="800" alt="Djinn Roadmap — Epic dependency graph with tasks and blockers" />
 </p>
 
+<p align="center">
+  <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/memory.jpg?raw=true" width="800" alt="Djinn Memory Graph — Knowledge base visualization with connected notes" />
+</p>
+
 ## How It Works
 
 ```

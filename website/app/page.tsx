@@ -199,8 +199,12 @@ export default function Home() {
             </div>
             <div className="relative group">
               <div className="absolute -inset-1 bg-gradient-to-tr from-accent-mint to-blue-500 rounded-2xl blur opacity-20 group-hover:opacity-40 transition-duration-500" />
-              <div className="relative rounded-xl border border-border bg-bg-surface p-4 aspect-[4/3] overflow-hidden flex items-center justify-center">
-                <div className="text-text-muted font-mono text-sm">[Memory Graph Visual]</div>
+              <div className="relative rounded-xl border border-border bg-bg-surface overflow-hidden">
+                <img
+                  src="/memory.jpg"
+                  alt="Djinn Memory Graph — Knowledge base visualization with connected decisions, patterns, and architecture notes"
+                  className="w-full"
+                />
               </div>
             </div>
           </div>
