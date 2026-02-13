@@ -1,7 +1,78 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Github, Apple, Monitor, Terminal } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { Github, Apple, Monitor, Terminal, ChevronDown } from "lucide-react";
+
+function MacDropdown({ primary }: { primary: boolean }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  if (primary) {
+    return (
+      <div ref={ref} className="relative">
+        <button
+          onClick={() => setOpen(!open)}
+          className="px-8 py-4 bg-white text-bg-page rounded-xl font-bold text-lg flex items-center gap-3 hover:bg-gray-100 transition-all shadow-[0_0_20px_rgba(168,85,247,0.3)] hover:shadow-[0_0_30px_rgba(168,85,247,0.5)] cursor-pointer"
+        >
+          <Apple className="w-5 h-5" />
+          Download for Mac
+          <ChevronDown className={`w-4 h-4 transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+        {open && (
+          <div className="absolute top-full left-0 right-0 mt-2 bg-white rounded-xl border border-gray-200 shadow-xl overflow-hidden z-50">
+            <a
+              href="/api/download?platform=mac-arm64"
+              className="block px-6 py-3 text-bg-page font-medium hover:bg-gray-100 transition-colors"
+              onClick={() => setOpen(false)}
+            >
+              Apple Silicon
+            </a>
+            <div className="px-6 py-3 text-gray-400 font-medium cursor-not-allowed flex items-center justify-between border-t border-gray-100">
+              Intel
+              <span className="text-xs bg-gray-100 text-gray-400 px-2 py-0.5 rounded-full">Coming Soon</span>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className="hover:text-white cursor-pointer transition-colors text-sm text-text-secondary flex items-center gap-1"
+      >
+        Download for Mac
+        <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 bg-bg-surface-elevated rounded-xl border border-border shadow-xl overflow-hidden z-50 min-w-[180px]">
+          <a
+            href="/api/download?platform=mac-arm64"
+            className="block px-4 py-2.5 text-white text-sm font-medium hover:bg-white/10 transition-colors"
+            onClick={() => setOpen(false)}
+          >
+            Apple Silicon
+          </a>
+          <div className="px-4 py-2.5 text-text-muted text-sm font-medium cursor-not-allowed flex items-center justify-between border-t border-border">
+            Intel
+            <span className="text-[10px] bg-white/5 text-text-muted px-1.5 py-0.5 rounded-full">Soon</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function HeroActions() {
   const [os, setOs] = useState<"mac" | "windows" | "linux" | "unknown">("unknown");
@@ -14,7 +85,6 @@ export default function HeroActions() {
   }, []);
 
   const downloadLinks = {
-    mac: "/api/download?platform=mac-arm64",
     windows: "/api/download?platform=windows",
     linux: "/api/download?platform=linux-appimage",
   };
@@ -39,12 +109,7 @@ export default function HeroActions() {
     }
 
     // Default to Mac (also covers "unknown")
-    return (
-      <a href={downloadLinks.mac} className="px-8 py-4 bg-white text-bg-page rounded-xl font-bold text-lg flex items-center gap-3 hover:bg-gray-100 transition-all shadow-[0_0_20px_rgba(168,85,247,0.3)] hover:shadow-[0_0_30px_rgba(168,85,247,0.5)]">
-        <Apple className="w-5 h-5" />
-        Download for Mac
-      </a>
-    );
+    return <MacDropdown primary />;
   };
 
   return (
@@ -58,11 +123,7 @@ export default function HeroActions() {
       </div>
       
       <div className="text-sm text-text-secondary flex gap-6 justify-center relative">
-        {os !== "mac" && (
-          <a href={downloadLinks.mac} className="hover:text-white cursor-pointer transition-colors">
-            Download for Mac
-          </a>
-        )}
+        {os !== "mac" && <MacDropdown primary={false} />}
         {os !== "windows" && (
           <a href={downloadLinks.windows} className="hover:text-white cursor-pointer transition-colors">
             Download for Windows
