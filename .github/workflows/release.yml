@@ -196,21 +196,6 @@ jobs:
         working-directory: cli-source/packages/opencode
         run: bun run --cwd packages/app build
 
-      # --- Configure Production Environment ---
-
-      - name: Write production env (Unix)
-        if: runner.os != 'Windows'
-        working-directory: cli-source/apps/desktop
-        run: |
-          echo "VITE_CLERK_PUBLISHABLE_KEY=${{ secrets.CLERK_PUBLISHABLE_KEY }}" > .env.production
-
-      - name: Write production env (Windows)
-        if: runner.os == 'Windows'
-        working-directory: cli-source/apps/desktop
-        shell: pwsh
-        run: |
-          "VITE_CLERK_PUBLISHABLE_KEY=${{ secrets.CLERK_PUBLISHABLE_KEY }}" | Out-File -Encoding utf8 .env.production
-
       # --- Build & Package Electron App ---
 
       - name: Install desktop dependencies
