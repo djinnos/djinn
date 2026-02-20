@@ -185,9 +185,36 @@ OPENCODE_CONFIG_DIR=~/.djinn/.opencode opencode
 
 Task and memory tools won't be available, but you'll get all the personas and skills. Useful when working offline or without Djinn Desktop.
 
-### Claude Code
+### Claude Code (Native Install)
 
-Add to your project's `.mcp.json` (or `~/.claude.json` for global):
+If you have [Claude Code](https://claude.ai/code) installed separately, you can run it with Djinn's full config — all personas, skills, and MCP tools:
+
+```bash
+CLAUDE_CONFIG_DIR=~/.djinn/.claude claude
+```
+
+This gives you:
+- All Djinn personas as slash commands (`/architect`, `/analyst`, `/pm`, `/ux`, `/dev`, `/recruiter`)
+- All skills (TDD, debugging, Go best practices, React best practices, etc.)
+- Djinn MCP tools (tasks, memory, settings, projects)
+- Skill permissions pre-approved in `settings.json`
+
+> **Tip:** Create a shell alias for convenience:
+> ```bash
+> alias djinn-claude='CLAUDE_CONFIG_DIR=~/.djinn/.claude claude'
+> ```
+
+You can also load just the personas and skills without the Djinn MCP server:
+
+```bash
+CLAUDE_CONFIG_DIR=~/.djinn/.claude claude
+```
+
+Task and memory tools won't be available unless Djinn Desktop is running, but you'll get all the personas and skills regardless.
+
+### Claude Code (MCP only)
+
+If you just want Djinn's MCP tools without the personas and skills, add to your project's `.mcp.json`:
 
 ```json
 {
