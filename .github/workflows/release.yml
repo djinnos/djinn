@@ -28,13 +28,6 @@ jobs:
             server-ext: ''
             opencode-ext: ''
             eb-flag: --linux
-          - os: windows-latest
-            platform: win32
-            arch: x64
-            server-binary: djinn-server-win-x64.exe
-            server-ext: .exe
-            opencode-ext: .exe
-            eb-flag: --win
 
     runs-on: ${{ matrix.os }}
 
@@ -89,16 +82,6 @@ jobs:
             go build -ldflags "-X github.com/djinn-os/djinn/apps/server/pkg/scaffold.Version=${{ steps.version.outputs.VERSION }}" \
             -o bin/${{ matrix.server-binary }} ./cmd/djinn-server
 
-      - name: Build djinn-server (Windows)
-        if: runner.os == 'Windows'
-        working-directory: cli-source/apps/server
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path bin
-          $env:GOOS = "windows"
-          $env:GOARCH = "amd64"
-          go build -ldflags "-X github.com/djinn-os/djinn/apps/server/pkg/scaffold.Version=${{ steps.version.outputs.VERSION }}" -o bin/${{ matrix.server-binary }} ./cmd/djinn-server
-
       # --- Build OpenCode CLI (Bun compile, current platform only) ---
 
       - name: Install OpenCode dependencies
@@ -111,16 +94,6 @@ jobs:
         run: |
           # Symlink hoisted @opentui into package node_modules (build.ts uses relative ../node_modules/ import)
           ln -sf ../../../node_modules/@opentui node_modules/@opentui
-          bun run build -- --single
-
-      - name: Build OpenCode CLI (Windows)
-        if: runner.os == 'Windows'
-        working-directory: cli-source/packages/opencode/packages/opencode
-        shell: pwsh
-        run: |
-          # Copy hoisted @opentui into package node_modules (symlinks unreliable on Windows)
-          if (Test-Path node_modules/@opentui) { Remove-Item -Recurse -Force node_modules/@opentui }
-          Copy-Item -Recurse ../../node_modules/@opentui node_modules/@opentui
           bun run build -- --single
 
       - name: Copy OpenCode binary to resources (Unix)
@@ -149,26 +122,6 @@ jobs:
           echo "Copied OpenCode binary: $OPENCODE_BIN_NAME"
           ls -la "$OPENCODE_RESOURCES/"
 
-      - name: Copy OpenCode binary to resources (Windows)
-        if: runner.os == 'Windows'
-        working-directory: cli-source
-        shell: pwsh
-        run: |
-          $dist = "packages/opencode/packages/opencode/dist"
-          $resources = "apps/desktop/resources/opencode"
-          New-Item -ItemType Directory -Force -Path $resources
-
-          $builtDir = Get-ChildItem -Directory "$dist/opencode-*" | Select-Object -First 1
-          if (-not $builtDir) {
-            Write-Error "No OpenCode build output found in $dist"
-            Get-ChildItem $dist -ErrorAction SilentlyContinue
-            exit 1
-          }
-
-          Copy-Item "$($builtDir.FullName)/bin/opencode.exe" "$resources/opencode-cli-win-x64.exe"
-          Write-Host "Copied OpenCode binary: opencode-cli-win-x64.exe"
-          Get-ChildItem $resources
-
       # --- Copy server binary to desktop resources ---
 
       - name: Copy server binary to resources (Unix)
@@ -179,15 +132,6 @@ jobs:
           cp apps/server/bin/${{ matrix.server-binary }} apps/desktop/resources/server/
           chmod +x apps/desktop/resources/server/${{ matrix.server-binary }}
           ls -la apps/desktop/resources/server/
-
-      - name: Copy server binary to resources (Windows)
-        if: runner.os == 'Windows'
-        working-directory: cli-source
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path apps/desktop/resources/server
-          Copy-Item "apps/server/bin/${{ matrix.server-binary }}" apps/desktop/resources/server/
-          Get-ChildItem apps/desktop/resources/server/
 
       # Note: OpenCode App UI is built automatically by build.ts during
       # the OpenCode CLI build step above (embedded into the binary via $bunfs)
@@ -270,7 +214,6 @@ jobs:
             cli-source/apps/desktop/dist/*-${{ matrix.arch }}.zip
             cli-source/apps/desktop/dist/*.AppImage
             cli-source/apps/desktop/dist/*.deb
-            cli-source/apps/desktop/dist/*.exe
           if-no-files-found: error
 
   release:
@@ -289,7 +232,7 @@ jobs:
       - name: Create checksums
         working-directory: artifacts
         run: |
-          sha256sum *.dmg *.zip *.AppImage *.deb *.exe 2>/dev/null > checksums.txt || true
+          sha256sum *.dmg *.zip *.AppImage *.deb 2>/dev/null > checksums.txt || true
           cat checksums.txt
 
       - name: Upload to existing release or create new
