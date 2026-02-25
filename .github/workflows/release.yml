@@ -18,15 +18,11 @@ jobs:
             platform: darwin
             arch: arm64
             server-binary: djinn-server-darwin-arm64
-            server-ext: ''
-            opencode-ext: ''
             eb-flag: --mac
           - os: ubuntu-latest
             platform: linux
             arch: x64
             server-binary: djinn-server-linux-x64
-            server-ext: ''
-            opencode-ext: ''
             eb-flag: --linux
 
     runs-on: ${{ matrix.os }}
@@ -73,8 +69,7 @@ jobs:
 
       # --- Build djinn-server (Go, current platform only) ---
 
-      - name: Build djinn-server (Unix)
-        if: runner.os != 'Windows'
+      - name: Build djinn-server
         working-directory: cli-source/apps/server
         run: |
           mkdir -p bin
@@ -88,16 +83,14 @@ jobs:
         working-directory: cli-source/packages/opencode
         run: bun install
 
-      - name: Build OpenCode CLI (Unix)
-        if: runner.os != 'Windows'
+      - name: Build OpenCode CLI
         working-directory: cli-source/packages/opencode/packages/opencode
         run: |
           # Symlink hoisted @opentui into package node_modules (build.ts uses relative ../node_modules/ import)
           ln -sf ../../../node_modules/@opentui node_modules/@opentui
           bun run build -- --single
 
-      - name: Copy OpenCode binary to resources (Unix)
-        if: runner.os != 'Windows'
+      - name: Copy OpenCode binary to resources
         working-directory: cli-source
         run: |
           OPENCODE_DIST="packages/opencode/packages/opencode/dist"
@@ -124,8 +117,7 @@ jobs:
 
       # --- Copy server binary to desktop resources ---
 
-      - name: Copy server binary to resources (Unix)
-        if: runner.os != 'Windows'
+      - name: Copy server binary to resources
         working-directory: cli-source
         run: |
           mkdir -p apps/desktop/resources/server
@@ -185,7 +177,7 @@ jobs:
 
       - name: Package Electron app
         working-directory: cli-source/apps/desktop
-        run: npx electron-builder ${{ matrix.eb-flag }} --${{ matrix.arch }}
+        run: npx electron-builder ${{ matrix.eb-flag }} --${{ matrix.arch }} --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # macOS code signing (electron-builder reads these automatically)
@@ -220,6 +212,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
