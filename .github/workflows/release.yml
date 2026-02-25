@@ -83,6 +83,10 @@ jobs:
         working-directory: cli-source/packages/opencode
         run: bun install
 
+      - name: Build OpenCode App UI
+        working-directory: cli-source/packages/opencode
+        run: bun run --cwd packages/app build
+
       - name: Build OpenCode CLI
         working-directory: cli-source/packages/opencode/packages/opencode
         run: |
@@ -125,8 +129,8 @@ jobs:
           chmod +x apps/desktop/resources/server/${{ matrix.server-binary }}
           ls -la apps/desktop/resources/server/
 
-      # Note: OpenCode App UI is built automatically by build.ts during
-      # the OpenCode CLI build step above (embedded into the binary via $bunfs)
+      # Note: OpenCode App UI must be built BEFORE the CLI step so that
+      # generate-embed.ts (prebuild hook) finds app/dist and embeds assets via $bunfs
 
       # --- macOS Code Signing Setup ---
 
