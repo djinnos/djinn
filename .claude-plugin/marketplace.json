@@ -15,7 +15,7 @@
         "name": "Djinn OS",
         "url": "https://github.com/djinnos"
       },
-      "source": "./",
+      "source": "./plugin",
       "category": "productivity",
       "homepage": "https://github.com/djinnos/djinn"
     }
