@@ -185,47 +185,19 @@ OPENCODE_CONFIG_DIR=~/.djinn/.opencode opencode
 
 Task and memory tools won't be available, but you'll get all the personas and skills. Useful when working offline or without Djinn Desktop.
 
-### Claude Code (Native Install)
+### Claude Code
 
-If you have [Claude Code](https://claude.ai/code) installed separately, you can run it with Djinn's full config — all personas, skills, and MCP tools:
+Djinn Desktop automatically installs a [Claude Code plugin](https://code.claude.com/docs/en/plugins) when it detects Claude Code on your system. No manual setup required — just have both installed.
 
-```bash
-CLAUDE_CONFIG_DIR=~/.djinn/.claude claude
-```
+The plugin gives you:
+- All Djinn personas as slash commands (`/djinn:architect`, `/djinn:analyst`, `/djinn:pm`, `/djinn:ux`, `/djinn:dev`, `/djinn:recruiter`, `/djinn:marketer`)
+- All skills (`/djinn:debugging`, `/djinn:test-driven-development`, `/djinn:go-best-practices`, `/djinn:react-best-practices`, etc.)
+- Djinn MCP tools (tasks, memory, settings, projects) via `djinn-server`
+- Session hooks that auto-start the Djinn daemon
 
-This gives you:
-- All Djinn personas as slash commands (`/architect`, `/analyst`, `/pm`, `/ux`, `/dev`, `/recruiter`)
-- All skills (TDD, debugging, Go best practices, React best practices, etc.)
-- Djinn MCP tools (tasks, memory, settings, projects)
-- Skill permissions pre-approved in `settings.json`
+Everything is namespaced under `djinn:` to avoid conflicts with your own customizations.
 
-> **Tip:** Create a shell alias for convenience:
-> ```bash
-> alias djinn-claude='CLAUDE_CONFIG_DIR=~/.djinn/.claude claude'
-> ```
-
-You can also load just the personas and skills without the Djinn MCP server:
-
-```bash
-CLAUDE_CONFIG_DIR=~/.djinn/.claude claude
-```
-
-Task and memory tools won't be available unless Djinn Desktop is running, but you'll get all the personas and skills regardless.
-
-### Claude Code (MCP only)
-
-If you just want Djinn's MCP tools without the personas and skills, add to your project's `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "djinn": {
-      "type": "url",
-      "url": "http://localhost:4440/mcp"
-    }
-  }
-}
-```
+> **Note:** Djinn Desktop must have been launched at least once to install the plugin and register `djinn-server` on your PATH.
 
 ### Cursor
 
