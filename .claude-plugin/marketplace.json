@@ -1,0 +1,23 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "djinn",
+  "description": "Djinn - AI project management with task boards, memory, and multi-agent coordination",
+  "owner": {
+    "name": "Djinn OS",
+    "url": "https://github.com/djinnos"
+  },
+  "plugins": [
+    {
+      "name": "djinn",
+      "description": "Djinn - AI project management with task boards, memory, and multi-agent coordination",
+      "version": "1.0.0",
+      "author": {
+        "name": "Djinn OS",
+        "url": "https://github.com/djinnos"
+      },
+      "source": "./",
+      "category": "productivity",
+      "homepage": "https://github.com/djinnos/djinn"
+    }
+  ]
+}

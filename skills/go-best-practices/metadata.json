@@ -1,0 +1,19 @@
+{
+  "version": "1.1.0",
+  "organization": "Google, Uber, Go Community, Alternative (enhanced)",
+  "date": "February 2026",
+  "abstract": "Comprehensive style and best practices guide for Go applications, synthesized from Google Go Style Guide, Uber Go Style Guide, Effective Go, Go Code Review Comments, and Alternative's fintech-inspired safety-first practices. Contains 60+ rules across 14 categories covering naming, error handling, domain modeling, concurrency, interfaces, testing, database patterns, and performance. Designed for AI agents implementing or reviewing Go code.",
+  "references": [
+    "https://go.dev/doc/effective_go",
+    "https://go.dev/wiki/CodeReviewComments",
+    "https://google.github.io/styleguide/go/",
+    "https://google.github.io/styleguide/go/decisions",
+    "https://google.github.io/styleguide/go/best-practices",
+    "https://github.com/uber-go/guide/blob/master/style.md",
+    "https://github.com/golang-standards/project-layout",
+    "https://go.dev/blog/package-names",
+    "https://go.dev/wiki/TableDrivenTests",
+    "https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md",
+    "https://en.wikipedia.org/wiki/The_Power_of_10:_Rules_for_Developing_Safety-Critical_Code"
+  ]
+}
