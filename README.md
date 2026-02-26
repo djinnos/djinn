@@ -134,56 +134,11 @@ Press **Tab** to switch between personas. Context is preserved across switches.
 
 ## Using Djinn with Your Own Tools
 
-Djinn Desktop runs an MCP server that exposes task management and persistent memory as tools. While the embedded OpenCode instance connects automatically, you can also use these tools from **your own OpenCode installation**, **Claude Code**, **Cursor**, or any MCP-compatible client.
+Djinn runs a background daemon (`djinn-server`) that exposes task management and persistent memory as MCP tools. The daemon starts automatically and stays running between sessions — Djinn Desktop does not need to be open.
 
-> **Important:** Djinn Desktop must be running for MCP tools to be available. The MCP server starts with the desktop app — external tools connect to it, they don't start their own server. Launch Djinn Desktop first, then start your external tool.
+Any MCP-compatible tool can connect via the `djinn-server --mcp-connect` stdio bridge, which auto-discovers and auto-starts the daemon.
 
-The MCP endpoint is:
-
-```
-http://localhost:4440/mcp
-```
-
-<details>
-<summary>Port configuration</summary>
-
-Djinn defaults to port `4440`. If that port is busy, it automatically picks an available port and saves it for next time. You can change the port in Djinn Desktop settings.
-
-If you need to check the current port programmatically:
-```bash
-cat ~/.djinn/server.json
-# { "port": 4440, "url": "http://localhost:4440/mcp", ... }
-```
-</details>
-
-### OpenCode (Native Install)
-
-If you have [OpenCode](https://opencode.ai) installed separately, you can run it with Djinn's full config — all personas, skills, and MCP tools:
-
-```bash
-OPENCODE_CONFIG=~/.djinn/opencode.json \
-OPENCODE_CONFIG_DIR=~/.djinn/.opencode \
-opencode
-```
-
-This gives you:
-- All Djinn personas (Analyst, Architect, PM, UX, Marketer, Recruiter)
-- All skills (TDD, debugging, Go best practices, React best practices, etc.)
-- Djinn MCP tools (tasks, memory, settings, projects)
-- Third-party MCPs (grep, context7)
-
-> **Tip:** Create a shell alias for convenience:
-> ```bash
-> alias djinn-opencode='OPENCODE_CONFIG=~/.djinn/opencode.json OPENCODE_CONFIG_DIR=~/.djinn/.opencode opencode'
-> ```
-
-You can also load just the personas and skills without the Djinn MCP server:
-
-```bash
-OPENCODE_CONFIG_DIR=~/.djinn/.opencode opencode
-```
-
-Task and memory tools won't be available, but you'll get all the personas and skills. Useful when working offline or without Djinn Desktop.
+> **Note:** Djinn Desktop must have been launched at least once to install `djinn-server` on your PATH.
 
 ### Claude Code
 
@@ -197,8 +152,6 @@ The plugin gives you:
 
 Everything is namespaced under `djinn:` to avoid conflicts with your own customizations.
 
-> **Note:** Djinn Desktop must have been launched at least once to install the plugin and register `djinn-server` on your PATH.
-
 ### Cursor
 
 Add to `.cursor/mcp.json` in your project:
@@ -207,15 +160,67 @@ Add to `.cursor/mcp.json` in your project:
 {
   "mcpServers": {
     "djinn": {
-      "url": "http://localhost:4440/mcp"
+      "command": "djinn-server",
+      "args": ["--mcp-connect"]
     }
   }
 }
 ```
 
+### Windsurf
+
+Add to your Windsurf MCP config:
+
+```json
+{
+  "mcpServers": {
+    "djinn": {
+      "command": "djinn-server",
+      "args": ["--mcp-connect"]
+    }
+  }
+}
+```
+
+### OpenCode
+
+If you have [OpenCode](https://opencode.ai) installed separately, add to your `opencode.json`:
+
+```json
+{
+  "mcp": {
+    "djinn": {
+      "type": "local",
+      "command": ["djinn-server", "--mcp-connect"],
+      "enabled": true
+    }
+  }
+}
+```
+
+To also get Djinn's personas and skills, use the bundled config:
+
+```bash
+OPENCODE_CONFIG=~/.djinn/opencode.json \
+OPENCODE_CONFIG_DIR=~/.djinn/.opencode \
+opencode
+```
+
 ### Any MCP Client
 
-Any tool that supports the [MCP protocol](https://modelcontextprotocol.io) can connect to Djinn's HTTP+SSE endpoint at `http://localhost:4440/mcp`.
+Any tool that supports [MCP](https://modelcontextprotocol.io) can connect via stdio:
+
+```bash
+djinn-server --mcp-connect
+```
+
+Or via HTTP if your client doesn't support stdio:
+
+```bash
+# Find the daemon's HTTP endpoint
+cat ~/.djinn/server.json
+# { "port": 4440, "url": "http://localhost:4440/mcp", ... }
+```
 
 ### What's Available Over MCP
 
