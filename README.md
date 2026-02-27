@@ -117,21 +117,6 @@ AI reviewers check each task against your acceptance criteria. You review the fi
 
 Everything runs on your machine. Your code never touches external servers. Agents are sandboxed to only the projects you specify.
 
-## AI Personas
-
-Djinn includes specialized AI personas (orchestrators) for different stages of development:
-
-| Persona | Focus |
-|---------|-------|
-| **Analyst** | Market research, competitive analysis, idea validation |
-| **Architect** | System design, ADRs, technical decisions |
-| **UX Designer** | User research, personas, journey mapping |
-| **Product Manager** | Epics, stories, roadmap planning |
-| **Growth Marketer** | Go-to-market, content, growth strategy |
-| **Recruiter** | Create new agents and skills for your project |
-
-Press **Tab** to switch between personas. Context is preserved across switches.
-
 ## Using Djinn with Your Own Tools
 
 Djinn runs a background daemon (`djinn-server`) that exposes task management and persistent memory as MCP tools. The daemon starts automatically and stays running between sessions — Djinn Desktop does not need to be open.
@@ -145,12 +130,11 @@ Any MCP-compatible tool can connect via the `djinn-server --mcp-connect` stdio b
 Djinn Desktop automatically installs a [Claude Code plugin](https://code.claude.com/docs/en/plugins) when it detects Claude Code on your system. No manual setup required — just have both installed.
 
 The plugin gives you:
-- All Djinn personas as slash commands (`/djinn:architect`, `/djinn:analyst`, `/djinn:pm`, `/djinn:ux`, `/djinn:dev`, `/djinn:recruiter`, `/djinn:marketer`)
-- All skills (`/djinn:debugging`, `/djinn:test-driven-development`, `/djinn:go-best-practices`, `/djinn:react-best-practices`, etc.)
-- Djinn MCP tools (tasks, memory, settings, projects) via `djinn-server`
+- The `djinn` skill — auto-activates when you work with tasks, memory, or execution
+- Djinn MCP tools (tasks, memory, settings, projects, execution) via `djinn-server`
 - Session hooks that auto-start the Djinn daemon
 
-Everything is namespaced under `djinn:` to avoid conflicts with your own customizations.
+The skill is workflow-agnostic — it teaches Claude Code how to use Djinn's task board, memory system, and execution engine without prescribing any specific methodology. Everything is namespaced under `djinn:` to avoid conflicts with your own customizations.
 
 ### Cursor
 
@@ -198,7 +182,7 @@ If you have [OpenCode](https://opencode.ai) installed separately, add to your `o
 }
 ```
 
-To also get Djinn's personas and skills, use the bundled config:
+To also get Djinn's skills, use the bundled config:
 
 ```bash
 OPENCODE_CONFIG=~/.djinn/opencode.json \
