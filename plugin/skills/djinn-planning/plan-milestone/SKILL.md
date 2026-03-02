@@ -178,49 +178,113 @@ Assign wave labels and set blocker dependencies to control execution order.
 
 See `cookbook/task-templates.md` for wave ordering examples.
 
-### Step 6: Plan Validation
+### Step 6: Plan Validation (4-dimension checker with revision iterations)
 
-Verify the task decomposition achieves the milestone's goals.
+Verify the task decomposition achieves the milestone's goals. The plan-checker runs INLINE (not as a separate agent) for direct access to all created task IDs from Steps 3-5.
 
-1. **Success criteria coverage**: Check that every milestone success criterion has at least one task whose acceptance criteria addresses it
-2. **Requirement coverage**: Verify every REQ-ID assigned to this milestone has at least one task with a `memory_refs` link to the requirements note
-3. **Hierarchy integrity**: Confirm no orphaned tasks (all tasks have a parent feature, all features have a parent epic)
-4. **Wave ordering sanity**: Verify no dependency cycles in the blocker graph. Wave 1 tasks must have no blockers.
-5. **Scope check**: Ensure no tasks exceed one-commit scope. Split oversized tasks into smaller units.
+1. **Collect the full task inventory.** After all tasks are created (Steps 3-5), gather the complete list of created task IDs with their details: `{id, title, parent, labels, acceptance_criteria, memory_refs, blocked_by}`. This is the dataset the checker validates against.
 
-If validation finds gaps, create additional tasks or adjust existing ones. Repeat validation after fixes.
+2. **Run up to 3 validation iterations.** For each iteration, check all four dimensions below. If any dimension finds a gap, auto-fix it immediately and log the fix. After checking all four dimensions, evaluate whether any gaps were found:
 
-`[Phase 3 implements the plan-checker with 3 revision iterations here]`
+   **Dimension 1 -- Success criteria coverage:**
+   For each milestone success criterion from Step 1's context summary (`success_criteria[]`):
+   - Check if any created task's `acceptance_criteria` addresses this criterion
+   - If not covered: create a task to cover it using the same `task_create` pattern as Step 4 -- with `parent` set to the most relevant feature, `labels=["wave:N"]` for appropriate wave, `acceptance_criteria` addressing the criterion, `memory_refs` linking to requirements, and `priority` as integer (0=critical, 1=high, 2=medium, 3=low)
+   - Log: "Gap found: criterion '{criterion}' not covered -> created task {new_task_id}"
+
+   **Dimension 2 -- Requirement coverage:**
+   For each REQ-ID from the milestone's requirements list (`req_ids[]`):
+   - Check if any created task has `memory_refs` linking to the requirements note permalink
+   - If not covered: find the most relevant existing task and update it with `task_update(id=task_id, memory_refs_add=[requirements_permalink])`. If no existing task is relevant, create a new task to address the requirement
+   - Log: "Gap found: {REQ-ID} not linked -> updated/created task {task_id}"
+
+   **Dimension 3 -- Hierarchy integrity:**
+   For each created task and feature:
+   - Verify `parent` is set: tasks must have a parent feature, features must have a parent epic
+   - If an item is orphaned: assign it to the most appropriate parent using `task_update(id=item_id, parent=best_match_id)`
+   - Log: "Gap found: orphan task {task_id} -> assigned to feature {feature_id}"
+
+   **Dimension 4 -- Wave ordering sanity:**
+   - Verify wave:1 tasks have NO blockers. If a wave:1 task has blockers, either reclassify it to a higher wave number or remove the incorrect blockers
+   - Verify every wave:N+1 task (N >= 1) is blocked by at least one wave:N task. If not, add a blocker: `task_blockers_add(id=task_id, blocking_id=appropriate_wave_n_task_id, project=PROJECT)`
+   - Verify no dependency cycles exist. For milestone-sized graphs of 8-15 tasks, a simple invariant check is sufficient: wave 1 has no blockers, each subsequent wave references only lower waves. If a cycle is detected, break it by removing the blocker that violates the wave ordering
+   - Log: "Gap found: wave:{N} task {task_id} missing blocker -> added blocker on {blocking_task_id}"
+
+3. **Evaluate iteration result.** After checking all 4 dimensions: if no gaps were found in this iteration, validation passes -- break out of the loop and proceed to Step 7.
+
+4. **If gaps were found:** The auto-fixes have already been applied inline during the checks above. Increment the iteration counter and re-validate from dimension 1 to catch any cascading issues introduced by the fixes (e.g., a new gap-filling task might itself be an orphan or missing a wave label).
+
+5. **After 3 iterations with gaps still remaining:** Stop iterating. This is the best-effort case. Collect all remaining uncovered gaps into a list for the output summary in Step 8. Do NOT block the workflow -- proceed to Steps 7-8 and report what could not be covered. Let the user decide next steps.
 
 ### Step 7: Bidirectional Linking
 
 Establish traceability connections between memory notes and task board items.
 
-1. Verify all tasks have `memory_refs` pointing to relevant memory notes (requirements, research, ADRs)
-2. Optionally update memory notes to reference task IDs in their Relations section:
+1. **Verify forward links (task -> memory):** Confirm all tasks have `memory_refs` pointing to relevant memory notes (requirements, research, ADRs). If any task is missing `memory_refs`, update it: `task_update(id=task_id, memory_refs_add=[requirements_permalink])`
+
+2. **Create backward links (memory -> task):** Update memory notes to reference task IDs in their Relations section. For each requirement note that has tasks implementing its REQ-IDs:
    ```
-   memory_edit(identifier="requirements/v1-requirements", operation="append",
-     section="Relations", content="\n- Task {id}: {title} -- implements {REQ-ID}")
+   memory_edit(
+     identifier="requirements/v1-requirements",
+     operation="append",
+     section="Relations",
+     content="\n- Task {id}: {title} -- implements {REQ-ID}"
+   )
    ```
-3. Verify that the link chain is traceable: Requirement -> Task -> Feature -> Epic -> Roadmap milestone
+   **Note:** `memory_edit` is the exception to the "Do NOT Use memory write tools" rule listed above -- it is explicitly allowed here for appending backlinks in Relations sections. If the requirements note has no existing `## Relations` section, use `operation="append"` without the `section` parameter to add the backlinks at the end of the note.
+
+3. **Verify the traceability chain** is complete end-to-end: Requirement -> Task -> Feature -> Epic -> Roadmap milestone. Spot-check at least 2-3 tasks to confirm the chain is intact.
 
 See `cookbook/task-templates.md` for bidirectional linking patterns.
 
 ### Step 8: Output Summary
 
-Present the planning results to the user.
+Present the planning results to the user in a structured format. Include all six sections below, in order:
 
-1. **Features and tasks created**: List all new features and tasks organized by epic
-2. **Wave ordering diagram**: Show waves with dependencies between them
+1. **Task Board Overview** -- Epics, features, and tasks organized by domain (not by wave). This gives the user a clear picture of what was created and where it lives on the board:
    ```
-   Wave 1: [task-a, task-b] (no blockers)
-   Wave 2: [task-c, task-d] (blocked by Wave 1)
-   Wave 3: [task-e] (blocked by Wave 2)
+   Epic: {name} ({emoji})
+     Feature: {name} ({task_count} tasks)
+       - {task_title} [wave:{N}] ({priority_label})
+       - {task_title} [wave:{N}] ({priority_label})
+     Feature: {name} ({task_count} tasks)
+       - {task_title} [wave:{N}] ({priority_label})
    ```
-3. **Success criteria mapping**: Table showing each milestone success criterion and the tasks that address it
-4. **Requirement coverage**: Table showing each REQ-ID and the tasks implementing it
-5. **Uncovered items**: Report any success criteria or requirements that could not be mapped to tasks
-6. **Scope notes**: Any decisions made about scope boundaries during decomposition
+   Priority labels: 0=critical, 1=high, 2=medium, 3=low.
+
+2. **Wave Ordering Diagram** -- Visual representation of the wave structure showing execution order and dependencies:
+   ```
+   Wave 1: [{task_a}, {task_b}] (no blockers)
+   Wave 2: [{task_c}, {task_d}] (blocked by Wave 1)
+   Wave 3: [{task_e}] (blocked by Wave 2)
+   ```
+   Include the task IDs and short titles for each wave.
+
+3. **Success Criteria Coverage Table** -- Maps each milestone success criterion to the task(s) that address it:
+   ```
+   | Milestone Success Criterion | Covering Task(s) | Status |
+   |----------------------------|-------------------|--------|
+   | {criterion from roadmap}   | {task_id}: {title}| Covered |
+   | {criterion from roadmap}   | --                | Gap     |
+   ```
+
+4. **Requirement Coverage Table** -- Maps each REQ-ID to the task(s) that implement it:
+   ```
+   | REQ-ID   | Covering Task(s)   | Status  |
+   |----------|--------------------|---------|
+   | {REQ-ID} | {task_id}: {title} | Covered |
+   | {REQ-ID} | --                 | Gap     |
+   ```
+
+5. **Validation Summary** -- Report from the plan-checker (Step 6):
+   - Number of validation iterations run (out of 3 maximum)
+   - Gaps found and auto-fixed (list each fix with its dimension and action taken)
+   - Any remaining uncovered items from the best-effort case (if all 3 iterations ran and gaps remain)
+
+6. **Missing Context Notice** (conditional) -- Only include this section if Step 1 found missing notes:
+   - Display: "Warning: No discussion context found -- planning with defaults"
+   - List which notes were missing (e.g., "No ADRs found", "No scope notes from discuss-milestone", "No research notes found")
+   - This helps the user understand what context was unavailable and whether they should run discuss-milestone before the next milestone planning
 
 ## Output Summary
 
@@ -228,30 +292,19 @@ After a successful run, the following artifacts exist:
 
 **On the task board:**
 - Features under domain-structured epics, each with design and acceptance criteria
-- Tasks under features, scoped to one-commit outcomes
-- Wave labels (wave:1, wave:2, wave:3) on all tasks
-- Blocker dependencies enforcing wave ordering
-- memory_refs on all tasks linking to requirements, research, and ADR notes
+- Tasks under features, scoped to one-commit outcomes with `{criterion, met}` acceptance criteria
+- Wave labels (wave:1, wave:2, wave:3+) on all tasks
+- Blocker dependencies enforcing wave ordering via `task_blockers_add`
+- `memory_refs` on all tasks linking to requirements, research, and ADR notes
 
 **Traceability:**
-- Every milestone success criterion maps to at least one task
-- Every REQ-ID for this milestone maps to at least one task
-- Bidirectional links between memory notes and task board items
-- No orphaned tasks -- complete hierarchy from epic to task
+- Every milestone success criterion maps to at least one task (verified by plan-checker dimension 1)
+- Every REQ-ID for this milestone maps to at least one task (verified by plan-checker dimension 2)
+- Bidirectional links between memory notes and task board items (established in Step 7)
+- No orphaned tasks -- complete hierarchy from epic to task (verified by plan-checker dimension 3)
 
 **Validation:**
-- No dependency cycles in the blocker graph
+- Plan-checker has run up to 3 iterations across 4 dimensions with auto-fix
+- No dependency cycles in the blocker graph (verified by plan-checker dimension 4)
 - All tasks are one-commit scope
-- Plan-checker has verified coverage (when Phase 3 implements it)
-
----
-
-## Reference: Phase 3 Extension Points
-
-Phase 3 will implement the full methodology for these areas. The markers below identify where implementation logic will be added:
-
-| Step | Extension Point | What Phase 3 Adds |
-|------|----------------|-------------------|
-| Step 1 | `[Phase 3 implements the full context loading here]` | Structured context assembly with wikilink traversal and relevance filtering |
-| Step 2 | `[Phase 3 implements the researcher agent here]` | Domain research agent spawning with memory-write capability |
-| Step 6 | `[Phase 3 implements the plan-checker with 3 revision iterations here]` | Automated plan validation with up to 3 revision loops before escalating |
+- Any remaining uncovered gaps are reported in the output summary for user review
