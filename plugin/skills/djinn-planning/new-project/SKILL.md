@@ -265,40 +265,80 @@ Include a `## Relations` wikilink to `[[Project Brief]]`. See `cookbook/planning
 
 ### Step 8: Task Board Setup
 
-Create domain-structured epics and features on the task board.
+Translate the roadmap into domain-structured epics and features on the Djinn task board. This step has no GSD equivalent -- it bridges the gap between narrative planning (memory) and executable work (task board).
 
-**Epic creation (per ADR-001):**
-- Name epics after domain concepts, NOT milestones: "User Authentication System" not "Phase 1"
-- Epics may span multiple milestones -- a domain area persists as long as it has active work
-- Use `task_create(issue_type="epic", ...)` for each domain area
+**8a. Identify domain areas** from the roadmap:
+- Look at which requirement categories (CATEGORY-NN prefixes) each phase addresses
+- Group by domain concept: "Authentication System", "Data Pipeline", "Content Management"
+- A domain area may span multiple phases
+- Aim for 3-7 epics for a standard project
 
-**Feature creation:**
-- Create features under the appropriate epic: `task_create(issue_type="feature", parent="{epic_id}", ...)`
-- Include `design` and `acceptance_criteria` fields on features
-- Add `memory_refs` linking features to the requirements and roadmap notes
+**8b. Create epics** for each domain area:
+```
+task_create(
+  issue_type="epic",
+  title="{Domain Name}",
+  project="{project_path}",
+  description="...",
+  emoji="{relevant_emoji}",
+  color="{hex_color}"
+)
+```
+- Name after domain concepts, NOT milestone labels (per ADR-001): "Authentication System" not "Phase 1"
+- Include emoji and color for visual identity on the board
 
-**Sequencing:**
-- Set blocker dependencies between epics for milestone sequencing: `task_blockers_add()`
-- Only block on real technical/logical dependencies -- do not create artificial sequencing
+**8c. Create features** under each epic for phase-specific work:
+```
+task_create(
+  issue_type="feature",
+  parent="{epic_id}",
+  project="{project_path}",
+  title="{Specific deliverable}",
+  description="...",
+  design="...",
+  acceptance_criteria=[...],
+  memory_refs=["requirements/v1-requirements", "roadmap"]
+)
+```
+- Features correspond to deliverables within a roadmap phase for that domain area
+- Include `design`, `acceptance_criteria`, and `memory_refs` on every feature
 
-**Traceability:**
-- Add `memory_refs` to each epic and feature linking back to roadmap and requirements notes
-- Use `task_update(memory_refs_add=...)` if refs need to be added after creation
+**8d. Set cross-phase blocker dependencies:**
+```
+task_blockers_add(
+  id="{phase_N+1_feature_id}",
+  blocking_id="{phase_N_feature_id}",
+  project="{project_path}"
+)
+```
+- Features in Phase N+1 must be blocked by **at least one** feature in Phase N that they actually depend on
+- Only block on real technical or logical dependencies -- do NOT block every Phase 2 feature on every Phase 1 feature
+- Let the Djinn coordinator parallelize everything that is not explicitly blocked
 
-See `cookbook/task-templates.md` for hierarchy creation patterns and wave ordering examples.
+**8e. Add traceability links:**
+- Every epic and feature should have `memory_refs` pointing to `["requirements/v1-requirements", "roadmap"]`
+- Use `task_update(id=..., memory_refs_add=[...])` if refs need to be added after creation
+
+**Individual tasks are NOT created during new-project.** Only epics and features. Task decomposition into individual work items happens when `plan-milestone` runs for each phase.
+
+See `cookbook/task-templates.md` for epic/feature creation patterns and wave ordering examples.
 
 ### Step 9: Verification
 
-Verify all artifacts were created correctly before completing the workflow.
+Verify all artifacts were created correctly.
 
-1. **Memory check**: Run `memory_catalog()` and verify these notes exist:
-   - Brief (type=brief) -- 1 note
-   - Research notes (type=research) -- at least 4 dimension notes + 1 synthesis
-   - Requirements (type=requirement) -- at least 1 note
-   - Roadmap (type=roadmap) -- 1 note
-2. **Task board check**: Run `task_list(issue_type="epic")` and verify domain-structured epics exist
-3. **Wikilink check**: Spot-check that Relations sections contain valid wikilinks to existing notes
-4. **Traceability check**: Verify that epics and features have `memory_refs` set
+1. **Memory check**: Run `memory_catalog()` and verify:
+   - 1 brief (type=brief)
+   - 4+ research notes (type=research) with dimension tags
+   - 1 research synthesis (type=research, tag=synthesis)
+   - 1 requirements note (type=requirement)
+   - 1 roadmap note (type=roadmap)
+   - 1 workflow preferences note (type=reference)
+2. **Task board check**: Run `task_list(issue_type="epic", project="{project_path}")` and verify:
+   - Domain-structured epics exist (3-7 for a standard project)
+   - Each epic has features under it
+3. **Wikilink check**: Spot-check that `## Relations` sections contain valid wikilinks by reading 2-3 notes and confirming linked titles exist
+4. **Traceability check**: Verify epics and features have `memory_refs` set by inspecting a sample via `task_show(id="{epic_id}")`
 5. Report any gaps to the user and offer to fix them
 
 ## Output Summary
@@ -306,19 +346,20 @@ Verify all artifacts were created correctly before completing the workflow.
 After a successful run, the following artifacts exist:
 
 **In Djinn memory:**
-- 1 project brief (type=brief) -- vision, problem, users, constraints
-- 4+ research notes (type=research) -- stack, features, architecture, pitfalls
-- 1 research synthesis (type=research, tag=synthesis) -- cross-cutting findings
-- 1 requirements note (type=requirement) -- categorized REQ-IDs
-- 1 roadmap note (type=roadmap) -- phased milestones with success criteria
+- 1 project brief (type=brief) -- vision, problem, users, success metrics, constraints
+- 4 research notes (type=research) -- stack, features, architecture, pitfalls
+- 1 research synthesis (type=research, tag=synthesis) -- cross-cutting findings and recommendations
+- 1 requirements note (type=requirement) -- categorized REQ-IDs with v1/v2/out-of-scope classification
+- 1 roadmap note (type=roadmap) -- phased milestones with success criteria and requirement traceability
+- 1 workflow preferences note (type=reference) -- planning depth, research toggle, model profile, plan-checker toggle
 
 **On the task board:**
-- Domain-structured epics with sequencing dependencies
-- Features under each epic with design and acceptance criteria
-- memory_refs linking task board items to memory notes
+- 3-7 domain-structured epics (named after domain concepts, not milestones)
+- Features under each epic with design, acceptance criteria, and memory_refs
+- Cross-phase blocker dependencies enforcing roadmap sequencing
 
 **In the knowledge graph:**
-- Wikilinks connecting all memory notes bidirectionally
-- Traceability from requirements through roadmap to task board items
+- Wikilinks connecting all memory notes: brief <-> research <-> synthesis <-> requirements <-> roadmap
+- memory_refs linking task board items back to requirements and roadmap notes
 
 ---
