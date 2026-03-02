@@ -18,16 +18,16 @@ GSD's planning methodology outputs directly into Djinn's memory and task systems
 
 - [ ] Fork GSD's planning workflows adapted for Djinn MCP
 - [ ] `/djinn:new-project` — questioning → research → requirements → roadmap, all stored in Djinn memory
-- [ ] `/djinn:plan-phase` — phase planning that creates Djinn tasks (phases → epics, plans → tasks)
-- [ ] `/djinn:discuss-phase` — phase context gathering before planning
+- [ ] `/djinn:plan-milestone` — milestone planning that creates domain-structured Djinn tasks with blocker dependencies
+- [ ] `/djinn:discuss-milestone` — milestone context gathering before planning
 - [ ] `/djinn:progress` — check project state and route to next action
-- [ ] Parallel research agents (project-researcher, phase-researcher, research-synthesizer) adapted for Djinn memory output
+- [ ] Parallel research agents (project-researcher, milestone-researcher, research-synthesizer) adapted for Djinn memory output
 - [ ] Memory mapping: brief (PROJECT), requirement (REQUIREMENTS), roadmap (ROADMAP), research notes
-- [ ] Task mapping: phases become epics, plans become tasks with blocker dependencies for wave ordering
+- [ ] Task creation: domain-structured epics and features, sequenced via blocker dependencies (roadmap milestones are narrative, not task hierarchy)
 - [ ] Multi-runtime installer (NPM) for OpenCode, Gemini, Codex
 - [ ] Claude Code plugin distribution (skills in plugin/ directory)
 - [ ] MCP-first storage — all planning artifacts go to Djinn memory, no `.planning/` files
-- [ ] Command namespace: `/djinn:*` commands (new-project, plan-phase, discuss-phase, progress)
+- [ ] Command namespace: `/djinn:*` commands (new-project, plan-milestone, discuss-milestone, progress)
 
 ### Out of Scope
 
@@ -77,13 +77,16 @@ GSD's planning methodology outputs directly into Djinn's memory and task systems
 | Phase plans | Djinn tasks | Created via task_create |
 | config.json | `reference` | Workflow preferences |
 
-**Djinn task hierarchy mapping:**
-| GSD Concept | Djinn Entity |
-|---|---|
-| Milestone | Epic |
-| Phase | Feature (child of epic) |
-| Plan/Task | Task (child of feature) |
-| Wave ordering | Blocker dependencies |
+**Planning → Djinn mapping:**
+| Planning Concept | Djinn Representation | Notes |
+|---|---|---|
+| Roadmap milestones | Memory note (type=roadmap) | Narrative — describes goals, success criteria, sequencing |
+| Epics | Djinn epics (domain-structured) | e.g., "User Authentication System", not "Milestone 1" |
+| Features | Djinn features (deliverables) | 2-4h units under epics |
+| Tasks | Djinn tasks (implementation) | One commit, one outcome |
+| Milestone sequencing | Blocker dependencies | Features in milestone 2 blocked by milestone 1 features |
+| Wave ordering | Blocker dependencies | Same mechanism, finer-grained |
+| Execution grouping | Djinn execution phases | Auto-generated from ready tasks — NOT the same as roadmap milestones |
 
 ## Constraints
 
@@ -98,10 +101,12 @@ GSD's planning methodology outputs directly into Djinn's memory and task systems
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
 | Fork GSD, don't wrap it | Wrapping adds a bridge layer; forking lets us deeply integrate with Djinn MCP | — Pending |
-| MCP-only, no file fallback | Simplifies architecture; Djinn MCP is the source of truth | — Pending |
-| Phases → Epics not Features | Epics give better visibility in kanban; features are too granular for phases | — Pending |
+| MCP-only, no file fallback | Simplifies architecture; Djinn MCP is the source of truth. See Artifact Mapping reference note. | Accepted |
+| Roadmap milestones are narrative, not task entities | See ADR-001: Hierarchy Mapping in Djinn memory. Domain-structured epics, features, and tasks. Milestones are narrative in roadmap note. | Accepted |
+| Rename GSD "phases" to "milestones" | Avoids confusion with Djinn execution phases. See ADR-001 disambiguation table. | Accepted |
 | v1 = planning + research only | Get the core loop right before adding admin/lifecycle workflows | — Pending |
 | Preserve multi-runtime support | Key differentiator over pure Claude Code solutions | — Pending |
+| All progress derived from live queries | No stored state notes. See ADR-002: State Derivation. Roadmap note is immutable. | Accepted |
 
 ---
-*Last updated: 2026-03-02 after initialization*
+*Last updated: 2026-03-02 after Phase 0 architecture decisions*
