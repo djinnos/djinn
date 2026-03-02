@@ -50,9 +50,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Supporting Workflows
 
-- [ ] **SUPP-01**: `/djinn:discuss-milestone {N}` command gathers phase context through adaptive questioning
-- [ ] **SUPP-02**: Design decisions captured as type=adr memory notes during discussion
-- [ ] **SUPP-03**: Scope boundaries and preferences stored in memory for plan-milestone to consume
+- [x] **SUPP-01**: `/djinn:discuss-milestone {N}` command gathers phase context through adaptive questioning
+- [x] **SUPP-02**: Design decisions captured as type=adr memory notes during discussion
+- [x] **SUPP-03**: Scope boundaries and preferences stored in memory for plan-milestone to consume
 
 ### Distribution
 
@@ -138,9 +138,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLAN-06 | Phase 3 | Complete |
 | PLAN-07 | Phase 3 | Complete |
 | PLAN-08 | Phase 3 | Complete |
-| SUPP-01 | Phase 4 | Pending |
-| SUPP-02 | Phase 4 | Pending |
-| SUPP-03 | Phase 4 | Pending |
+| SUPP-01 | Phase 4 | Complete |
+| SUPP-02 | Phase 4 | Complete |
+| SUPP-03 | Phase 4 | Complete |
 | DIST-01 | Phase 5 | Pending |
 | DIST-02 | Phase 5 | Pending |
 | DIST-03 | Phase 5 | Pending |

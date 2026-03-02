@@ -2,12 +2,12 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: unknown
-last_updated: "2026-03-02T14:10:20.090Z"
+status: in-progress
+last_updated: "2026-03-02T14:11:03.431Z"
 progress:
   total_phases: 6
-  completed_phases: 5
-  total_plans: 11
+  completed_phases: 4
+  total_plans: 12
   completed_plans: 11
 ---
 
@@ -18,23 +18,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-02)
 
 **Core value:** GSD's planning methodology outputs directly into Djinn's memory and task systems, eliminating the bridge between planning and execution.
-**Current focus:** Phase 4 -- Core Workflow: progress
+**Current focus:** Phase 5 -- Distribution
 
 ## Current Position
 
-Phase: 4 of 5 (Core Workflow -- progress)
-Plan: 1 of ? in current phase
+Phase: 5 of 5 (Distribution)
+Plan: 0 of TBD in current phase
 Status: In Progress
-Last activity: 2026-03-02 -- Completed 03-02-PLAN.md (fix cookbook schema discrepancies)
+Last activity: 2026-03-02 -- Completed 04-01-PLAN.md (discuss-milestone extension points)
 
-Progress: [████████░░] 83%
+Progress: [█████████░] 92%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 10
+- Total plans completed: 11
 - Average duration: 3min
-- Total execution time: 29min
+- Total execution time: 31min
 
 **By Phase:**
 
@@ -44,9 +44,10 @@ Progress: [████████░░] 83%
 | 1. Skill Scaffolding | 4/4 | 12min | 3min |
 | 2. Core Workflow -- new-project | 2/2 | 7min | 3.5min |
 | 3. Core Workflow -- plan-milestone | 2/2 | 5min | 2.5min |
+| 4. Supporting Workflows | 1/1 | 2min | 2min |
 
 **Recent Trend:**
-- Last 5 plans: 01-03 (3min), 02-01 (4min), 02-02 (3min), 03-01 (3min), 03-02 (2min)
+- Last 5 plans: 02-01 (4min), 02-02 (3min), 03-01 (3min), 03-02 (2min), 04-01 (2min)
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -107,6 +108,9 @@ Recent decisions affecting current work:
 - [Phase 03]: [03-01]: Research notes per milestone gap titled "{Domain} Research - Milestone {N}"
 - [Phase 03]: [03-01]: Structured output: 6-section format (task board, wave diagram, coverage tables, validation, missing context)
 - [Phase 03]: [03-02]: Cookbook corrected: blocked_by is single string, priority is integer (0-3), common mistakes #7 and #8 added
+- [Phase 04]: [04-01]: Step 3 uses heuristics and principles, not rigid dialog scripts, enabling organic conversation flow
+- [Phase 04]: [04-01]: ADR granularity test: "Would a different choice here change how tasks are structured or what code gets written?"
+- [Phase 04]: [04-01]: Scope note existing-session handling uses memory_edit replace_section, not overwrite
 
 ### Pending Todos
 
@@ -121,5 +125,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: Completed 03-02-PLAN.md -- Phase 3 complete. Cookbook schema discrepancies fixed. Ready for Phase 4.
+Stopped at: Completed 04-01-PLAN.md -- Phase 4 complete. Discuss-milestone extension points filled. Ready for Phase 5.
 Resume file: None
