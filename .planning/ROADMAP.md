@@ -56,7 +56,9 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. A synthesizer reads all research and produces a summary note in Djinn memory
   4. Requirements are generated with REQ-IDs and category grouping, written to Djinn memory (type=requirement)
   5. A roadmap note (type=roadmap) is created with milestones and success criteria, AND domain-structured Djinn epics/features are created with sequencing via blocker dependencies
-**Plans**: TBD
+**Plans**: 2 plans
+- [ ] 02-01-PLAN.md -- Implement questioning methodology and research agent prompts (Steps 1-4)
+- [ ] 02-02-PLAN.md -- Implement synthesis, requirements, roadmap, task board setup, and verification (Steps 5-9)
 
 ### Phase 3: Core Workflow -- plan-milestone
 **Goal**: A user can run `/djinn:plan-milestone {N}` and get a fully decomposed set of domain-structured Djinn tasks with acceptance criteria, design context, and wave-based ordering
@@ -100,7 +102,7 @@ Phases execute in numeric order: 0 -> 1 -> 2 -> 3 -> 4 -> 5
 |-------|----------------|--------|-----------|
 | 0. Architecture Decisions | 2/2 | Complete | 2026-03-02 |
 | 1. Skill Scaffolding | 4/4 | Complete | 2026-03-02 |
-| 2. Core Workflow -- new-project | 0/TBD | Not started | - |
+| 2. Core Workflow -- new-project | 0/2 | Planned | - |
 | 3. Core Workflow -- plan-milestone | 0/TBD | Not started | - |
 | 4. Supporting Workflows | 0/TBD | Not started | - |
 | 5. Distribution | 0/TBD | Not started | - |

@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: unknown
-last_updated: "2026-03-02T13:07:00Z"
+status: in-progress
+last_updated: "2026-03-02T13:41:42Z"
 progress:
-  total_phases: 2
+  total_phases: 3
   completed_phases: 2
-  total_plans: 6
-  completed_plans: 6
+  total_plans: 7
+  completed_plans: 7
 ---
 
 # Project State
@@ -18,23 +18,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-02)
 
 **Core value:** GSD's planning methodology outputs directly into Djinn's memory and task systems, eliminating the bridge between planning and execution.
-**Current focus:** Phase 1 -- Skill Scaffolding
+**Current focus:** Phase 2 -- Core Workflow: new-project
 
 ## Current Position
 
-Phase: 1 of 5 (Skill Scaffolding)
-Plan: 4 of 4 in current phase (ALL COMPLETE)
-Status: Phase Complete
-Last activity: 2026-03-02 -- Completed 01-03-PLAN.md (new-project and plan-milestone sub-workflow SKILL.md scaffolding)
+Phase: 2 of 5 (Core Workflow -- new-project)
+Plan: 1 of 2 in current phase
+Status: In Progress
+Last activity: 2026-03-02 -- Completed 02-01-PLAN.md (questioning methodology and research agent prompts)
 
-Progress: [██████░░░░] 50%
+Progress: [███████░░░] 58%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6
-- Average duration: 2.8min
-- Total execution time: 17min
+- Total plans completed: 7
+- Average duration: 3min
+- Total execution time: 21min
 
 **By Phase:**
 
@@ -42,9 +42,10 @@ Progress: [██████░░░░] 50%
 |-------|-------|-------|----------|
 | 0. Architecture Decisions | 2/2 | 5min | 2.5min |
 | 1. Skill Scaffolding | 4/4 | 12min | 3min |
+| 2. Core Workflow -- new-project | 1/2 | 4min | 4min |
 
 **Recent Trend:**
-- Last 5 plans: 00-02 (2min), 01-01 (2min), 01-02 (4min), 01-04 (3min), 01-03 (3min)
+- Last 5 plans: 01-01 (2min), 01-02 (4min), 01-04 (3min), 01-03 (3min), 02-01 (4min)
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -54,6 +55,7 @@ Progress: [██████░░░░] 50%
 | Phase 01 P02 | 4min | 2 tasks | 2 files |
 | Phase 01 P04 | 3min | 2 tasks | 2 files |
 | Phase 01 P03 | 3min | 2 tasks | 2 files |
+| Phase 02 P01 | 4min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -84,6 +86,11 @@ Recent decisions affecting current work:
 - [Phase 01]: [01-03]: plan-milestone uses 8 tools focused on memory reading and task decomposition
 - [Phase 01]: [01-03]: plan-milestone excludes memory_write (reads context, doesn't create planning artifacts)
 - [Phase 01]: [01-03]: Sub-workflow structure pattern: Title -> Goal -> Tools -> Do NOT Use -> Steps -> Output Summary -> Reference appendix
+- [Phase 02]: [02-01]: Auto Mode section placed before Workflow Steps as a pre-step modifier
+- [Phase 02]: [02-01]: Research dimensions are sequential execution (no multi-agent spawning in single SKILL.md)
+- [Phase 02]: [02-01]: Stack dimension is reference example; other dimensions use compact format
+- [Phase 02]: [02-01]: Workflow configuration stored as Djinn memory note (type=reference, title=Workflow Preferences)
+- [Phase 02]: [02-01]: Wikilink naming convention established: Project Brief, Stack/Features/Architecture/Pitfalls Research, V1 Requirements, Roadmap
 
 ### Pending Todos
 
@@ -92,11 +99,11 @@ None yet.
 ### Blockers/Concerns
 
 - ~~Phase 0 must resolve PROJECT.md contradiction (phases as epics vs features) before Phase 1 begins~~ RESOLVED (00-02)
-- Phase 2 needs research on parallel agent coordination mechanism during planning
+- ~~Phase 2 needs research on parallel agent coordination mechanism during planning~~ RESOLVED (02-01: sequential execution, no multi-agent spawning)
 - Phase 3 needs design for plan-checker revision loop mapping to Djinn task comments
 
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: Completed 01-03-PLAN.md -- Phase 1 (Skill Scaffolding) all 4 plans complete. Ready for Phase 2.
+Stopped at: Completed 02-01-PLAN.md -- Phase 2 Plan 1 of 2 complete. Ready for 02-02-PLAN.md (Steps 5-9).
 Resume file: None
