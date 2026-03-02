@@ -24,45 +24,96 @@ These tools are outside this workflow's scope:
 - **Settings/provider tools** (settings_*, provider_*): Admin and model management functions. Planning workflows do not configure the system.
 - **Memory mutation tools** (memory_delete, memory_move): Project setup creates new artifacts. It does not reorganize or delete existing knowledge. Use memory_edit only in the context of appending Relations backlinks.
 
+### Auto Mode
+
+If `$ARGUMENTS` contains `--auto`:
+1. Require a document reference (file path or pasted text) following the flag
+2. Skip Step 2 (Deep Questioning) entirely
+3. Synthesize the brief from the document (Step 3), performing a gap check against the context checklist (what they are building, why it exists, who it is for, what done looks like). Note gaps as assumptions rather than silently skipping them.
+4. Collect workflow configuration with defaults (Step 3b): Planning Depth=Standard, Research=Yes, Model Profile=Balanced, Plan Checker=Yes. Ask the user if they want to change any defaults.
+5. Run Steps 3-9 automatically, presenting results for confirmation at Steps 6 (requirements) and 7 (roadmap) only.
+
 ## Workflow Steps
 
 ### Step 1: Orient
 
-Check what already exists in the project before creating anything.
+Check what already exists before creating anything.
 
-1. Run `memory_catalog()` to list all existing notes in Djinn memory
-2. If a brief already exists, confirm with the user before proceeding -- they may want to extend an existing project rather than overwrite it
-3. Run `task_list(issue_type="epic")` to check for existing epics on the task board
-4. If the project already has artifacts, summarize what exists and ask the user how to proceed
+1. Run `memory_catalog()` to list all existing notes
+2. Run `task_list(issue_type="epic", project="{project_path}")` to check for existing epics
+3. **If a brief already exists:** Tell the user what you found. Ask whether they want to:
+   - Start fresh (overwrites existing brief and creates new artifacts alongside existing ones)
+   - Extend the existing project (skip to a specific step like research or requirements)
+4. **If epics already exist:** Summarize the current task board state and confirm the user wants to add to it or start over
+5. If nothing exists, proceed to Step 2
 
 ### Step 2: Deep Questioning
 
 Guide the user through project definition with an adaptive, thread-following conversation.
 
-Cover these areas, adapting order and depth based on the user's responses:
-- **Vision**: What does the end state look like? What changes for the user?
-- **Problem**: What pain point does this solve? What is the current situation?
-- **Target users**: Who benefits and how? What are their workflows today?
-- **Scope**: What is in scope for v1? What is explicitly out of scope?
-- **Constraints**: Technical requirements, timeline, team size, existing systems?
-- **Technical preferences**: Language, framework, infrastructure, deployment model?
+**Start open:** Ask "What do you want to build?" as a plain question. Do not offer structured options. Let the user describe their vision in their own words.
 
-Follow up on interesting answers. If the user mentions a complex domain, explore it. If they describe a technical constraint, understand the reasoning behind it. Adapt questions based on responses rather than running through a static checklist.
+**Follow threads:** Based on what the user says, dig into their response. Each answer opens new threads to explore. Do not jump to a different topic until the current thread is explored.
 
-Continue until you have enough context to write a complete project brief. Confirm with the user that the questioning is complete before moving on.
+**Question techniques:**
+- **Challenge vagueness:** "Good" means what exactly? "Users" means who specifically?
+- **Make abstract concrete:** "Walk me through someone actually using this."
+- **Clarify ambiguity:** "When you say X, do you mean A or B?"
+- **Surface assumptions:** "What's already decided? What's flexible?"
+- **Find edges:** "What is this NOT? What's explicitly out of scope?"
+- **Reveal motivation:** "What prompted this? What's the pain point today?"
 
-`[Phase 2 implements the full questioning methodology here]`
+**Internal context checklist** (do not recite these to the user -- use them to gauge completeness):
+- What they are building (concrete enough to explain to a stranger)
+- Why it needs to exist (the problem or desire driving it)
+- Who it is for (even if just themselves)
+- What "done" looks like (observable outcomes, not vague goals)
+
+**Cover these areas** organically through the conversation (not as a checklist):
+- Vision and end state
+- Problem being solved and current situation
+- Target users and their workflows
+- Scope boundaries (v1 vs future, in vs out)
+- Technical constraints and preferences (language, framework, infrastructure)
+- Existing systems or integrations
+
+**Readiness gate:** When you have enough context to write a complete project brief, propose moving on: "I think I have a good picture of what you're building. Ready to create the project brief, or is there more to explore?" Let the user decide.
+
+**Do NOT:**
+- Walk through a checklist of questions
+- Ask canned questions regardless of context
+- Use corporate speak ("What are your stakeholders?" "What's the ROI?")
+- Interrogate without building on answers
+- Rush to skip questioning
+- Accept vague answers without probing ("It should be fast" -- how fast? Compared to what?)
+- Ask about the user's technical experience level
+
+**Workflow configuration** (collect after questioning, before brief):
+Present four configuration options for how the workflow runs:
+1. **Planning Depth**: Quick / Standard (default) / Comprehensive
+2. **Research**: Yes (default) / No -- whether to run research agents
+3. **Model Profile**: Quality / Balanced (default) / Budget
+4. **Plan Checker**: Yes (default) / No -- whether to verify plans
+
+Store configuration in Djinn memory:
+`memory_write(title="Workflow Preferences", type="reference", tags=["reference", "config"], content="[settings table with ## Relations]")`
 
 ### Step 3: Write Project Brief
 
-Create the project brief in Djinn memory.
+Synthesize the questioning session (or document analysis in auto mode) into a structured brief.
 
-1. Synthesize the questioning session into a structured brief
-2. Write to memory: `memory_write(type="brief", content=...)`
-3. Include wikilinks in the Relations section pointing to future notes (Requirements, Roadmap)
-4. See `cookbook/planning-templates.md` for the brief template and content structure
+1. Organize findings into sections: Vision, Problem, Target Users, Success Metrics, Constraints
+2. Write to memory: `memory_write(type="brief", title="Project Brief", content=..., tags=["planning"])`
+3. Include a `## Relations` section with wikilinks to notes that will be created:
+   - `[[V1 Requirements]]` -- detailed requirement breakdown
+   - `[[Roadmap]]` -- phased delivery plan
+   - `[[Stack Research]]`, `[[Features Research]]`, `[[Architecture Research]]`, `[[Pitfalls Research]]` -- research dimensions
+4. Present the brief to the user for confirmation before proceeding
+5. See `cookbook/planning-templates.md` for the brief template and content structure
 
-The brief is a singleton -- only one exists per project. If a brief already exists (detected in Step 1), confirm the overwrite with the user first.
+The brief is a singleton -- only one per project. If overwriting (confirmed in Step 1), the new brief replaces the old one.
+
+**Note title convention:** The title "Project Brief" is used for wikilink consistency, but Djinn ignores the title for singleton types.
 
 ### Step 4: Parallel Research
 
@@ -186,12 +237,3 @@ After a successful run, the following artifacts exist:
 - Traceability from requirements through roadmap to task board items
 
 ---
-
-## Reference: Phase 2 Extension Points
-
-Phase 2 will implement the full methodology for these areas. The markers below identify where implementation logic will be added:
-
-| Step | Extension Point | What Phase 2 Adds |
-|------|----------------|-------------------|
-| Step 2 | `[Phase 2 implements the full questioning methodology here]` | Adaptive questioning engine with thread-following, domain exploration, and completeness detection |
-| Step 4 | `[Phase 2 implements the parallel research agent pattern here]` | Multi-agent coordination for parallel research across four dimensions |
