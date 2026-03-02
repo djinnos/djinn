@@ -70,7 +70,9 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Wave ordering is enforced via blocker dependencies -- wave 2 tasks are blocked by wave 1 completion
   4. A plan-checker validates that the task decomposition achieves the milestone's success criteria, with up to 3 revision iterations
   5. Tasks and memory notes are bidirectionally linked -- tasks reference memory note permalinks, memory notes reference task IDs
-**Plans**: TBD
+**Plans**: 2 plans
+- [ ] 03-01-PLAN.md -- Fill all 3 SKILL.md extension points (context loading, researcher, plan-checker) and enhance output summary format
+- [ ] 03-02-PLAN.md -- Fix task-templates.md cookbook discrepancies (blocked_by type, priority type) and verify cross-file consistency
 
 ### Phase 4: Supporting Workflows
 **Goal**: Users can enrich planning quality by discussing milestone context before planning, capturing design decisions and scope boundaries
@@ -103,6 +105,6 @@ Phases execute in numeric order: 0 -> 1 -> 2 -> 3 -> 4 -> 5
 | 0. Architecture Decisions | 2/2 | Complete | 2026-03-02 |
 | 1. Skill Scaffolding | 4/4 | Complete | 2026-03-02 |
 | 2. Core Workflow -- new-project | 0/2 | Planned | - |
-| 3. Core Workflow -- plan-milestone | 0/TBD | Not started | - |
+| 3. Core Workflow -- plan-milestone | 0/2 | Planned | - |
 | 4. Supporting Workflows | 0/TBD | Not started | - |
 | 5. Distribution | 0/TBD | Not started | - |
