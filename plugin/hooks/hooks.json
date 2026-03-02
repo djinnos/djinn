@@ -9,6 +9,20 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node '${CLAUDE_PLUGIN_ROOT}/hooks/djinn-context-monitor.js'"
+          }
+        ]
+      }
     ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "node '${CLAUDE_PLUGIN_ROOT}/hooks/djinn-statusline.js'"
   }
 }
