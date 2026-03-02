@@ -57,8 +57,8 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. Requirements are generated with REQ-IDs and category grouping, written to Djinn memory (type=requirement)
   5. A roadmap note (type=roadmap) is created with milestones and success criteria, AND domain-structured Djinn epics/features are created with sequencing via blocker dependencies
 **Plans**: 2 plans
-- [ ] 02-01-PLAN.md -- Implement questioning methodology and research agent prompts (Steps 1-4)
-- [ ] 02-02-PLAN.md -- Implement synthesis, requirements, roadmap, task board setup, and verification (Steps 5-9)
+- [x] 02-01-PLAN.md -- Implement questioning methodology and research agent prompts (Steps 1-4)
+- [x] 02-02-PLAN.md -- Implement synthesis, requirements, roadmap, task board setup, and verification (Steps 5-9)
 
 ### Phase 3: Core Workflow -- plan-milestone
 **Goal**: A user can run `/djinn:plan-milestone {N}` and get a fully decomposed set of domain-structured Djinn tasks with acceptance criteria, design context, and wave-based ordering
@@ -71,7 +71,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. A plan-checker validates that the task decomposition achieves the milestone's success criteria, with up to 3 revision iterations
   5. Tasks and memory notes are bidirectionally linked -- tasks reference memory note permalinks, memory notes reference task IDs
 **Plans**: 2 plans
-- [ ] 03-01-PLAN.md -- Fill all 3 SKILL.md extension points (context loading, researcher, plan-checker) and enhance output summary format
+- [x] 03-01-PLAN.md -- Fill all 3 SKILL.md extension points (context loading, researcher, plan-checker) and enhance output summary format
 - [ ] 03-02-PLAN.md -- Fix task-templates.md cookbook discrepancies (blocked_by type, priority type) and verify cross-file consistency
 
 ### Phase 4: Supporting Workflows
@@ -104,7 +104,7 @@ Phases execute in numeric order: 0 -> 1 -> 2 -> 3 -> 4 -> 5
 |-------|----------------|--------|-----------|
 | 0. Architecture Decisions | 2/2 | Complete | 2026-03-02 |
 | 1. Skill Scaffolding | 4/4 | Complete | 2026-03-02 |
-| 2. Core Workflow -- new-project | 0/2 | Planned | - |
-| 3. Core Workflow -- plan-milestone | 0/2 | Planned | - |
+| 2. Core Workflow -- new-project | 2/2 | Complete | 2026-03-02 |
+| 3. Core Workflow -- plan-milestone | 1/2 | In Progress | - |
 | 4. Supporting Workflows | 0/TBD | Not started | - |
 | 5. Distribution | 0/TBD | Not started | - |
