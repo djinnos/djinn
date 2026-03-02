@@ -20,7 +20,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **SKAF-02**: Directory structure matches Claude Code plugin format (skills/djinn-planning/)
 - [ ] **SKAF-03**: Each workflow declares a tool subset (5-10 MCP tools, not 70+) to prevent context explosion
 - [x] **SKAF-04**: Progressive disclosure pattern — metadata → instructions → references/cookbooks
-- [ ] **SKAF-05**: Shared MCP adapter patterns extracted as reusable references (memory output templates, task creation templates)
+- [x] **SKAF-05**: Shared MCP adapter patterns extracted as reusable references (memory output templates, task creation templates)
 - [ ] **SKAF-06**: Workflow prompt budgets enforced (max 600 lines per workflow)
 
 ### Core Planning: new-project
@@ -117,7 +117,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SKAF-02 | Phase 1 | Complete |
 | SKAF-03 | Phase 1 | Pending |
 | SKAF-04 | Phase 1 | Complete |
-| SKAF-05 | Phase 1 | Pending |
+| SKAF-05 | Phase 1 | Complete |
 | SKAF-06 | Phase 1 | Pending |
 | PROJ-01 | Phase 2 | Pending |
 | PROJ-02 | Phase 2 | Pending |
