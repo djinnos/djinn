@@ -94,15 +94,21 @@ task_create(
     {"criterion": "Returns 401 on invalid email or password", "met": false},
     {"criterion": "Sets httpOnly cookie with refresh token", "met": false}
   ],
-  priority="high",
+  priority=1,
   labels=["wave:1"]
 )
 ```
 
+**Priority values (integer, 0=highest):**
+- `0` = Critical (foundation tasks, wave 1)
+- `1` = High (core logic, wave 2)
+- `2` = Medium (integration, wave 3+)
+- `3` = Low (nice-to-have, can be deferred)
+
 **Key points:**
 - `parent="p3x9"` links to the feature (use the feature's actual ID)
 - `acceptance_criteria` uses the object format `{criterion, met}` for tasks -- `met` starts as `false` and is updated during execution
-- `priority` field: `critical`, `high`, `medium`, `low`
+- `priority` field: integer (0=critical, 1=high, 2=medium, 3=low)
 - `labels=["wave:1"]` tags the task for wave-based ordering (see Wave Ordering below)
 
 ### Bug Creation
@@ -122,7 +128,7 @@ task_create(
     "Session lookup performance does not degrade with token rotations"
   ],
   labels=["bug", "wave:2"],
-  priority="high"
+  priority=1
 )
 ```
 
@@ -156,7 +162,7 @@ wave1_task_a = task_create(
     {"criterion": "Migration runs without errors", "met": false}
   ],
   labels=["wave:1"],
-  priority="high"
+  priority=0
 )
 # Returns: { id: "a1b2", ... }
 
@@ -171,7 +177,7 @@ wave1_task_b = task_create(
     {"criterion": "Access token expiry set to 15 minutes", "met": false}
   ],
   labels=["wave:1"],
-  priority="high"
+  priority=0
 )
 # Returns: { id: "c3d4", ... }
 ```
@@ -190,9 +196,9 @@ wave2_task = task_create(
     {"criterion": "Returns JWT pair on valid credentials", "met": false},
     {"criterion": "Returns 401 on invalid credentials", "met": false}
   ],
-  blocked_by=["a1b2"],
+  blocked_by="a1b2",
   labels=["wave:2"],
-  priority="high"
+  priority=1
 )
 # Returns: { id: "e5f6", ... }
 
@@ -218,19 +224,20 @@ wave3_task = task_create(
     {"criterion": "Protected routes return 401 without valid token", "met": false},
     {"criterion": "Valid tokens pass through to route handler", "met": false}
   ],
-  blocked_by=["e5f6"],
+  blocked_by="e5f6",
   labels=["wave:3"],
-  priority="medium"
+  priority=2
 )
 ```
 
 ### Wave Ordering Rules
 
 1. **Wave 1** tasks have no `blocked_by` -- they are the starting points
-2. **Wave N+1** tasks include `blocked_by` pointing to at least one Wave N task ID
-3. Use `task_blockers_add()` to add blockers after creation when a task depends on multiple Wave N tasks
-4. Label convention: `labels=["wave:N"]` for easy filtering with `task_list(label="wave:1")`
-5. **Only block on real dependencies** -- if two tasks CAN run in parallel, do not create an artificial blocker between them
+2. **Wave N+1** tasks set `blocked_by` to one Wave N task ID at creation. Use `task_blockers_add()` for additional blockers
+3. **Schema note:** The `blocked_by` field accepts a single task ID string, not an array. To block on multiple tasks, use `blocked_by` for one and `task_blockers_add()` for each additional blocker
+4. Use `task_blockers_add()` to add blockers after creation when a task depends on multiple Wave N tasks
+5. Label convention: `labels=["wave:N"]` for easy filtering with `task_list(label="wave:1")`
+6. **Only block on real dependencies** -- if two tasks CAN run in parallel, do not create an artificial blocker between them
 
 ---
 
