@@ -117,22 +117,85 @@ The brief is a singleton -- only one per project. If overwriting (confirmed in S
 
 ### Step 4: Parallel Research
 
-Spawn research across four dimensions to build a knowledge base for planning.
+Research across four dimensions to build a knowledge base for planning. Execute each dimension sequentially, writing findings to memory before starting the next.
 
-**Research dimensions:**
-1. **Stack** -- technology evaluation, framework selection, infrastructure options
-2. **Features** -- feature analysis, UX patterns, competitive landscape
-3. **Architecture** -- system design patterns, data models, integration approaches
-4. **Pitfalls** -- risks, anti-patterns, common mistakes in this domain
+**If Research is disabled** in workflow configuration (Step 2): skip this step entirely and proceed to Step 5 (synthesize from questioning session only).
 
-For each dimension:
-1. Research the topic using available tools and knowledge
-2. Write findings to memory: `memory_write(type="research", tags=["research", "<dimension>"])`
-3. Include wikilinks in the Relations section connecting back to the brief and to other research notes
+**For each dimension below**, use WebSearch and WebFetch to research the topic, then write findings to Djinn memory. Be prescriptive ("Use X because Y"), not exploratory ("Options include X, Y, Z"). Verify versions against official sources. Flag findings with LOW confidence that need validation.
 
-See `cookbook/planning-templates.md` for the research note template.
+#### Research: Stack
 
-`[Phase 2 implements the parallel research agent pattern here]`
+Investigate the standard technology stack for building the user's project.
+
+**Focus areas:**
+- Core frameworks and runtime (with current versions)
+- Database and persistence layer
+- Key supporting libraries and tools
+- Deployment and infrastructure patterns
+
+**Core question:** "What's the standard stack for building [project domain] in 2026?"
+
+Write findings:
+```
+memory_write(
+  title="Stack Research",
+  type="research",
+  tags=["research", "stack"],
+  content="[structured findings -- see cookbook/planning-templates.md]
+
+  ## Relations
+  - [[Project Brief]] -- project context
+  - [[Features Research]] -- feature needs inform stack choice
+  - [[Architecture Research]] -- architecture patterns drive stack decisions
+  - [[Pitfalls Research]] -- risks to consider in stack selection"
+)
+```
+
+#### Research: Features
+
+Analyze what features products in this domain typically have.
+
+**Focus areas:**
+- Table stakes features (must-have for viability)
+- Differentiating features (competitive advantages)
+- Common UX patterns and user expectations
+- Feature prioritization signals from the market
+
+**Core question:** "What features do [project domain] products have? What's table stakes vs differentiating?"
+
+Write findings: `memory_write(title="Features Research", type="research", tags=["research", "features"], content="[findings with ## Relations]")`
+
+#### Research: Architecture
+
+Investigate how systems in this domain are typically structured.
+
+**Focus areas:**
+- Major system components and their responsibilities
+- Data models and relationships
+- Integration patterns with external services
+- Scalability and performance considerations
+
+**Core question:** "How are [project domain] systems typically structured? What are the major components?"
+
+Write findings: `memory_write(title="Architecture Research", type="research", tags=["research", "architecture"], content="[findings with ## Relations]")`
+
+#### Research: Pitfalls
+
+Identify common mistakes and risks in this domain.
+
+**Focus areas:**
+- Critical mistakes that cause project failure
+- Anti-patterns teams commonly fall into
+- Security and performance pitfalls
+- Scope creep risk areas
+
+**Core question:** "What do [project domain] projects commonly get wrong? What are the critical mistakes?"
+
+Write findings: `memory_write(title="Pitfalls Research", type="research", tags=["research", "pitfalls"], content="[findings with ## Relations]")`
+
+---
+
+All research notes MUST include a `## Relations` section with wikilinks to `[[Project Brief]]` and the other three research dimension notes. See `cookbook/planning-templates.md` for the full research note template.
 
 ### Step 5: Research Synthesis
 
