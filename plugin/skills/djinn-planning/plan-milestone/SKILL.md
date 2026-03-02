@@ -35,35 +35,100 @@ These tools are outside this workflow's scope:
 
 ### Step 1: Load Context from Memory
 
-Read the planning artifacts needed to decompose this milestone.
+Read the planning artifacts needed to decompose this milestone. Execute these sub-steps in order, building a structured context map that all subsequent steps will reference.
 
-1. Read the roadmap: `memory_read(identifier="roadmap")`
-2. Find the target milestone/phase by number from `$ARGUMENTS`
-3. Extract the milestone's goal, requirements list (REQ-IDs), and success criteria
-4. Read requirements: `memory_search(query="{requirement_ids}", type="requirement")`
-5. Read relevant research: `memory_search(query="{milestone_topic}", type="research")`
-6. Build full context: `memory_build_context(url="roadmap", depth=2)` to traverse wikilinks and gather related notes
-7. If the milestone references specific ADRs or design notes, read those too
+1. **Read the roadmap:** `memory_read(identifier="roadmap")`
+   - Parse the content to find milestone/phase N (matching `$ARGUMENTS`)
+   - Extract three things: the milestone's **goal** (outcome statement), **success_criteria[]** (testable statements), and **req_ids[]** (the REQ-IDs listed in the milestone's Requirements field, e.g., `PLAN-02, PLAN-03, PLAN-04`)
+   - **If the roadmap note does not exist:** STOP the workflow with the error: "Cannot plan milestone {N}: no roadmap found in Djinn memory. Run `/djinn:new-project` first to create a roadmap." Do not proceed.
 
-At the end of this step, you should have a clear understanding of:
-- What the milestone must achieve (success criteria)
-- Which requirements it addresses (REQ-IDs)
-- What technical context exists from research and ADRs
+2. **Load requirements:** `memory_search(type="requirement")`
+   - From the returned requirement notes, match the REQ-IDs extracted in sub-step 1
+   - For each matched requirement, extract its description and domain category (the prefix before the dash, e.g., "PLAN" from "PLAN-02")
+   - Store the requirements permalink (e.g., `requirements/v1-requirements`) for use in `memory_refs` later
 
-`[Phase 3 implements the full context loading here]`
+3. **Catalog existing research:** `memory_search(type="research")`
+   - Build a list of existing research notes and the domain topics they cover (based on title, tags, and content summary)
+   - This catalog is used in Step 2 to determine which domains need additional research
+   - Do not read the full content of every research note yet -- just catalog what exists
 
-### Step 2: Domain Research (optional)
+4. **Load ADRs:** `memory_search(type="adr")`
+   - Filter results for ADRs relevant to this milestone's domain areas (match by tags, title keywords, or wikilinks referencing this milestone's requirements)
+   - Read the full content of relevant ADRs -- these contain architectural decisions that constrain task decomposition
 
-If the milestone involves unfamiliar domain concepts, spawn a researcher agent to gather context.
+5. **Load scope notes from discuss-milestone:** `memory_search(query="milestone {N} scope", type="reference")`
+   - Look for a scope reference note created by the discuss-milestone workflow (titled "Milestone {N} Scope")
+   - **If no scope notes found:** Display the warning: "No discussion context found for milestone {N} -- planning with defaults." Proceed with available context. This is normal if discuss-milestone was not run before planning.
 
-1. Identify knowledge gaps -- areas where the research notes lack sufficient detail for task decomposition
-2. Spawn a researcher to investigate the gap
-3. Researcher writes findings to memory: `memory_write(type="research", tags=["research", "{domain}"])`
-4. Read the new research note to incorporate findings into the plan
+6. **Check existing epics on the task board:** `task_list(issue_type="epic", project=PROJECT)`
+   - Retrieve all existing epics to avoid creating duplicates (per ADR-001, epics are domain-structured and persist across milestones)
+   - Record each epic's ID, title, and domain area for matching in Step 3
 
-See `cookbook/planning-templates.md` for research note template.
+7. **Build the context summary.** Assemble a structured working context from all sub-steps above:
+   ```
+   {
+     goal: "...",                    // from sub-step 1
+     success_criteria: [...],        // from sub-step 1
+     req_ids: [...],                 // from sub-step 1
+     requirements: [...],            // from sub-step 2 (matched requirement details)
+     research_topics: [...],         // from sub-step 3 (existing research catalog)
+     adrs: [...],                    // from sub-step 4 (relevant ADR content)
+     scope_preferences: [...],       // from sub-step 5 (may be empty)
+     existing_epics: [...]           // from sub-step 6 (ID + title pairs)
+   }
+   ```
+   This context map is the planner's working memory for all subsequent steps.
 
-`[Phase 3 implements the researcher agent here]`
+**Note on `memory_build_context`:** You may optionally call `memory_build_context(url="roadmap", depth=2, max_related=10)` to supplement the context above by traversing wikilinks from the roadmap. However, this should NOT replace the targeted reads in sub-steps 1-6. Broad context building risks pulling in the entire knowledge graph and consuming context window budget before task creation begins. Use it only if specific notes referenced via wikilinks were missed by the targeted searches.
+
+**Self-sufficiency:** If the roadmap note is missing, the workflow cannot proceed (see sub-step 1). But if other notes are missing -- no requirements, no research, no ADRs, no scope notes -- proceed with what exists and log what was not found. The workflow is designed to work with partial context, producing the best plan possible from available information.
+
+### Step 2: Domain Research (gap-triggered)
+
+If the milestone involves domain areas with no existing research coverage, investigate those gaps inline before decomposing into tasks. This step runs only when needed -- if existing research already covers all relevant domains, skip it entirely.
+
+1. **Extract domain areas** from the milestone's goal and requirements (from Step 1's context summary). For example, a milestone about "core planning" touches domains like "task decomposition", "wave ordering", "plan validation". Use the requirement category prefixes (e.g., "PLAN", "TRACE") and the milestone goal's key concepts as domain identifiers.
+
+2. **Check research coverage** for each domain area against Step 1's research catalog (`research_topics[]`). A domain is "covered" if an existing research note's title, tags, or content summary addresses that topic.
+
+3. **For domains with no research coverage:**
+
+   a. **Search the project codebase first** for existing patterns. Use Grep and Glob to find relevant files, imports, configurations, and established conventions related to the uncovered domain. This grounds the research in what already exists in the project.
+
+   b. **If domain knowledge gaps remain** after codebase exploration, use WebSearch to gather current best practices, standard patterns, and recommended approaches for the domain.
+
+   c. **Write findings to Djinn memory:**
+      ```
+      memory_write(
+        type="research",
+        title="{Domain} Research - Milestone {N}",
+        tags=["research", "{domain}", "milestone-{N}"],
+        content="# {Domain} Research - Milestone {N}
+
+        ## Summary
+        [Key findings from codebase exploration and web research]
+
+        ## Findings
+        [Detailed findings organized by sub-topic]
+
+        ## Recommendations
+        [Specific recommendations for task decomposition]
+
+        ## Relations
+        - [[Roadmap]] -- Milestone {N}
+        - [[V1 Requirements]] -- {relevant REQ-IDs}
+        - [[{related research note}]] -- prior research on related topic"
+      )
+      ```
+      See `cookbook/planning-templates.md` for the full research note template.
+
+   d. **Include wikilinks** to `[[Roadmap]]` and the relevant requirement notes in the Relations section so the research note is connected to the knowledge graph.
+
+4. **Re-read newly created research notes** to incorporate their findings into the planning context. Update the context summary's `research_topics[]` with the new coverage.
+
+5. **If ALL domain areas already have research coverage:** Skip this step entirely and log: "Existing research covers all domains for milestone {N} -- skipping domain research."
+
+**Note:** The researcher runs INLINE within this workflow -- it is not a separate agent. It has direct access to the context assembled in Step 1. Spawning a separate agent would lose that context and require re-loading it, adding overhead without benefit. The gap-triggered researcher's job is small and focused: fill specific knowledge gaps, not conduct full-dimension research like the new-project workflow.
 
 ### Step 3: Identify Epic and Features
 
