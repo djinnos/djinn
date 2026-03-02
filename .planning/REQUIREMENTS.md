@@ -29,13 +29,13 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **PROJ-02**: Deep questioning methodology preserved verbatim from GSD (thread-following, not checklist)
 - [x] **PROJ-03**: Project brief written to Djinn memory as type=brief via memory_write
 - [x] **PROJ-04**: 4 parallel research agents spawn (stack, features, architecture, pitfalls), each writing to Djinn memory as type=research
-- [ ] **PROJ-05**: Research synthesizer reads all 4 research notes and writes summary to Djinn memory
-- [ ] **PROJ-06**: Requirements definition with REQ-IDs, category grouping, v1/v2/out-of-scope classification
-- [ ] **PROJ-07**: Requirements written to Djinn memory as type=requirement
-- [ ] **PROJ-08**: Roadmap generation creates narrative roadmap note (type=roadmap) with phases, success criteria, requirement traceability
-- [ ] **PROJ-09**: Roadmap informs creation of domain-structured Djinn epics and features (e.g., "Auth System" not "Milestone 1"), with sequencing via blocker dependencies
+- [x] **PROJ-05**: Research synthesizer reads all 4 research notes and writes summary to Djinn memory
+- [x] **PROJ-06**: Requirements definition with REQ-IDs, category grouping, v1/v2/out-of-scope classification
+- [x] **PROJ-07**: Requirements written to Djinn memory as type=requirement
+- [x] **PROJ-08**: Roadmap generation creates narrative roadmap note (type=roadmap) with phases, success criteria, requirement traceability
+- [x] **PROJ-09**: Roadmap informs creation of domain-structured Djinn epics and features (e.g., "Auth System" not "Milestone 1"), with sequencing via blocker dependencies
 - [x] **PROJ-10**: Research notes use wikilinks to connect findings across dimensions
-- [ ] **PROJ-11**: Workflow configuration preferences collected (depth, parallelization, model profile) and stored as type=reference
+- [x] **PROJ-11**: Workflow configuration preferences collected (depth, parallelization, model profile) and stored as type=reference
 
 ### Core Planning: plan-milestone
 
@@ -123,13 +123,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PROJ-02 | Phase 2 | Complete |
 | PROJ-03 | Phase 2 | Complete |
 | PROJ-04 | Phase 2 | Complete |
-| PROJ-05 | Phase 2 | Pending |
-| PROJ-06 | Phase 2 | Pending |
-| PROJ-07 | Phase 2 | Pending |
-| PROJ-08 | Phase 2 | Pending |
-| PROJ-09 | Phase 2 | Pending |
+| PROJ-05 | Phase 2 | Complete |
+| PROJ-06 | Phase 2 | Complete |
+| PROJ-07 | Phase 2 | Complete |
+| PROJ-08 | Phase 2 | Complete |
+| PROJ-09 | Phase 2 | Complete |
 | PROJ-10 | Phase 2 | Complete |
-| PROJ-11 | Phase 2 | Pending |
+| PROJ-11 | Phase 2 | Complete |
 | PLAN-01 | Phase 3 | Pending |
 | PLAN-02 | Phase 3 | Pending |
 | PLAN-03 | Phase 3 | Pending |
