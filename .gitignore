@@ -1,2 +1,4 @@
 # Djinn task management
-.djinn/
+.djinn/*
+!.djinn/memory/
+.planning/
