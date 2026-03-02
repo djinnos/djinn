@@ -94,7 +94,9 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Non-Claude users can install via NPM and the installer configures MCP server connection for their runtime
   3. The Agent Skills spec (SKILL.md) is the universal format -- no per-runtime content transformation is needed
   4. Plugin hooks verify djinn-server is running before workflows execute, with a clear error message if not
-**Plans**: TBD
+**Plans**: 2 plans
+- [ ] 05-01-PLAN.md -- Create @djinn/planning NPM package with multi-runtime installer CLI, runtime detection, and per-runtime MCP config writers
+- [ ] 05-02-PLAN.md -- Add system_ping preamble health checks to all SKILL.md files and create skills content bundle for NPM distribution
 
 ## Progress
 
@@ -108,4 +110,4 @@ Phases execute in numeric order: 0 -> 1 -> 2 -> 3 -> 4 -> 5
 | 2. Core Workflow -- new-project | 2/2 | Complete | 2026-03-02 |
 | 3. Core Workflow -- plan-milestone | 2/2 | Complete | 2026-03-02 |
 | 4. Supporting Workflows | 1/1 | Complete | 2026-03-02 |
-| 5. Distribution | 0/TBD | Not started | - |
+| 5. Distribution | 0/2 | In progress | - |
