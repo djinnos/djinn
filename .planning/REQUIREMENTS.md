@@ -39,14 +39,14 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Core Planning: plan-milestone
 
-- [ ] **PLAN-01**: `/djinn:plan-milestone {N}` command triggers phase planning for a specific phase
-- [ ] **PLAN-02**: Phase researcher agent investigates domain context before planning, writes to Djinn memory as type=research
-- [ ] **PLAN-03**: Planner agent decomposes phase into tasks with acceptance_criteria, design fields, and wave assignments
-- [ ] **PLAN-04**: Tasks created in Djinn via task_create under the phase's feature, with structured fields
-- [ ] **PLAN-05**: Wave ordering enforced via blocker dependencies (wave 2 tasks blocked by wave 1 tasks)
-- [ ] **PLAN-06**: Plan-checker agent validates plan achieves phase goals, up to 3 revision iterations
-- [ ] **PLAN-07**: Plan reads roadmap, requirements, and research from Djinn memory (not filesystem)
-- [ ] **PLAN-08**: Bidirectional memory-task linking — tasks reference memory note permalinks, memory notes reference task IDs
+- [x] **PLAN-01**: `/djinn:plan-milestone {N}` command triggers phase planning for a specific phase
+- [x] **PLAN-02**: Phase researcher agent investigates domain context before planning, writes to Djinn memory as type=research
+- [x] **PLAN-03**: Planner agent decomposes phase into tasks with acceptance_criteria, design fields, and wave assignments
+- [x] **PLAN-04**: Tasks created in Djinn via task_create under the phase's feature, with structured fields
+- [x] **PLAN-05**: Wave ordering enforced via blocker dependencies (wave 2 tasks blocked by wave 1 tasks)
+- [x] **PLAN-06**: Plan-checker agent validates plan achieves phase goals, up to 3 revision iterations
+- [x] **PLAN-07**: Plan reads roadmap, requirements, and research from Djinn memory (not filesystem)
+- [x] **PLAN-08**: Bidirectional memory-task linking — tasks reference memory note permalinks, memory notes reference task IDs
 
 ### Supporting Workflows
 
@@ -130,14 +130,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PROJ-09 | Phase 2 | Complete |
 | PROJ-10 | Phase 2 | Complete |
 | PROJ-11 | Phase 2 | Complete |
-| PLAN-01 | Phase 3 | Pending |
-| PLAN-02 | Phase 3 | Pending |
-| PLAN-03 | Phase 3 | Pending |
-| PLAN-04 | Phase 3 | Pending |
-| PLAN-05 | Phase 3 | Pending |
-| PLAN-06 | Phase 3 | Pending |
-| PLAN-07 | Phase 3 | Pending |
-| PLAN-08 | Phase 3 | Pending |
+| PLAN-01 | Phase 3 | Complete |
+| PLAN-02 | Phase 3 | Complete |
+| PLAN-03 | Phase 3 | Complete |
+| PLAN-04 | Phase 3 | Complete |
+| PLAN-05 | Phase 3 | Complete |
+| PLAN-06 | Phase 3 | Complete |
+| PLAN-07 | Phase 3 | Complete |
+| PLAN-08 | Phase 3 | Complete |
 | SUPP-01 | Phase 4 | Pending |
 | SUPP-02 | Phase 4 | Pending |
 | SUPP-03 | Phase 4 | Pending |

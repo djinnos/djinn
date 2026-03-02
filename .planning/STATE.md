@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: in-progress
-last_updated: "2026-03-02T13:47:47Z"
+last_updated: "2026-03-02T13:57:11Z"
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 12
-  completed_plans: 8
+  completed_plans: 9
 ---
 
 # Project State
@@ -23,18 +23,18 @@ See: .planning/PROJECT.md (updated 2026-03-02)
 ## Current Position
 
 Phase: 3 of 5 (Core Workflow -- plan-milestone)
-Plan: 0 of ? in current phase
+Plan: 1 of 2 in current phase
 Status: In Progress
-Last activity: 2026-03-02 -- Completed 02-02-PLAN.md (synthesis, requirements, roadmap, task board setup, verification)
+Last activity: 2026-03-02 -- Completed 03-01-PLAN.md (fill extension points in plan-milestone SKILL.md)
 
-Progress: [████████░░] 67%
+Progress: [█████████░] 75%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 8
+- Total plans completed: 9
 - Average duration: 3min
-- Total execution time: 24min
+- Total execution time: 27min
 
 **By Phase:**
 
@@ -45,7 +45,7 @@ Progress: [████████░░] 67%
 | 2. Core Workflow -- new-project | 2/2 | 7min | 3.5min |
 
 **Recent Trend:**
-- Last 5 plans: 01-02 (4min), 01-04 (3min), 01-03 (3min), 02-01 (4min), 02-02 (3min)
+- Last 5 plans: 01-04 (3min), 01-03 (3min), 02-01 (4min), 02-02 (3min), 03-01 (3min)
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -57,6 +57,7 @@ Progress: [████████░░] 67%
 | Phase 01 P03 | 3min | 2 tasks | 2 files |
 | Phase 02 P01 | 4min | 2 tasks | 1 files |
 | Phase 02 P02 | 3min | 2 tasks | 1 files |
+| Phase 03 P01 | 3min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -96,6 +97,12 @@ Recent decisions affecting current work:
 - [Phase 02]: [02-02]: Workflow config storage placed at end of Step 7 (after roadmap confirmation) rather than a separate step
 - [Phase 02]: [02-02]: Verification step includes workflow preferences note in memory check (9+ total notes)
 - [Phase 02]: [02-02]: Output Summary lists specific artifact counts and descriptions for each memory note type
+- [Phase 03]: [03-01]: Researcher runs inline (not separate agent) for direct context access from Step 1
+- [Phase 03]: [03-01]: Plan-checker runs inline (not separate agent) for direct task ID access from Steps 3-5
+- [Phase 03]: [03-01]: memory_edit explicitly allowed in Step 7 as exception for backlink creation
+- [Phase 03]: [03-01]: Priority uses integers (0-3) per MCP schema; blocked_by is single string at creation
+- [Phase 03]: [03-01]: Research notes per milestone gap titled "{Domain} Research - Milestone {N}"
+- [Phase 03]: [03-01]: Structured output: 6-section format (task board, wave diagram, coverage tables, validation, missing context)
 
 ### Pending Todos
 
@@ -105,10 +112,10 @@ None yet.
 
 - ~~Phase 0 must resolve PROJECT.md contradiction (phases as epics vs features) before Phase 1 begins~~ RESOLVED (00-02)
 - ~~Phase 2 needs research on parallel agent coordination mechanism during planning~~ RESOLVED (02-01: sequential execution, no multi-agent spawning)
-- Phase 3 needs design for plan-checker revision loop mapping to Djinn task comments
+- ~~Phase 3 needs design for plan-checker revision loop mapping to Djinn task comments~~ RESOLVED (03-01: 4-dimension inline checker with auto-fix, up to 3 iterations, best-effort fallback)
 
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: Completed 02-02-PLAN.md -- Phase 2 complete (2/2 plans). Ready for Phase 3 (plan-milestone).
+Stopped at: Completed 03-01-PLAN.md -- Filled all 3 extension points in plan-milestone SKILL.md. Ready for 03-02-PLAN.md.
 Resume file: None
