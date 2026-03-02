@@ -11,8 +11,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **ARCH-01**: Hierarchy mapping resolved as ADR — roadmap milestones are narrative (memory note), task board uses domain-structured epics/features/tasks, sequencing via blockers
 - [x] **ARCH-02**: State derivation principle established — all progress derived from live task board queries, no stored state notes
-- [ ] **ARCH-03**: Artifact mapping reference note created — maps every GSD artifact to a Djinn memory type and MCP call
-- [ ] **ARCH-04**: PROJECT.md contradictions resolved (phases as epics vs features)
+- [x] **ARCH-03**: Artifact mapping reference note created — maps every GSD artifact to a Djinn memory type and MCP call
+- [x] **ARCH-04**: PROJECT.md contradictions resolved (phases as epics vs features)
 
 ### Skill Scaffolding
 
@@ -111,8 +111,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | ARCH-01 | Phase 0 | Complete |
 | ARCH-02 | Phase 0 | Complete |
-| ARCH-03 | Phase 0 | Pending |
-| ARCH-04 | Phase 0 | Pending |
+| ARCH-03 | Phase 0 | Complete |
+| ARCH-04 | Phase 0 | Complete |
 | SKAF-01 | Phase 1 | Pending |
 | SKAF-02 | Phase 1 | Pending |
 | SKAF-03 | Phase 1 | Pending |
