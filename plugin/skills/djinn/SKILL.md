@@ -5,7 +5,9 @@ description: Use when djinn MCP tools are available and user needs to manage tas
 
 # Djinn
 
-Djinn gives you three systems: **tasks** (kanban board), **memory** (persistent knowledge base), **execution** (parallel agent orchestration). This skill is workflow-agnostic — use it with GSD, Superpowers, or nothing.
+Djinn gives you three systems: **tasks** (kanban board), **memory** (persistent knowledge base), **execution** (parallel agent orchestration). This skill is workflow-agnostic -- use it your way.
+
+For project planning workflows, use the `djinn-planning` skill instead.
 
 ## Session Start
 
@@ -14,14 +16,6 @@ Always orient first:
 1. `memory_catalog()` — see what knowledge exists
 2. `task_list(project=..., status="in_progress")` — check active work
 3. `task_ready(project=..., issue_type="!epic")` — see what's next
-
-## Detect Workflow
-
-Check the project and load the right cookbook:
-
-- **`.planning/` directory exists** → GSD project. Read `cookbook/gsd.md` — djinn replaces GSD execution.
-- **Superpowers skills loaded** (brainstorming, writing-plans, executing-plans) → Read `cookbook/superpowers.md` — djinn replaces Superpowers execution.
-- **Neither** → Standalone djinn. Use the core cookbooks directly.
 
 ## Task Hierarchy
 
@@ -73,8 +67,6 @@ Load when you need detailed patterns:
 | Memory write, search, wikilinks, maintenance | `cookbook/memory-management.md` |
 | Phase planning, launch, monitor, review | `cookbook/execution-planning.md` |
 | Structuring epics → features → tasks | `cookbook/work-decomposition.md` |
-| GSD project (replaces execute-phase) | `cookbook/gsd.md` |
-| Superpowers project (replaces execute-plan) | `cookbook/superpowers.md` |
 
 ## Common Mistakes
 
