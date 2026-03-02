@@ -360,3 +360,7 @@ Task Board (domain-structured)
 5. **Forgetting to add memory_refs for traceability.** Every task should link to at least one memory note (usually requirements). Without `memory_refs`, there is no traceable path from requirement to implementation. Use `memory_refs` at creation or `task_update(memory_refs_add=...)` after.
 
 6. **Using task_transition instead of letting the execution pipeline manage lifecycle.** Planning workflows create tasks in `open` status. Status transitions (`open` -> `in_progress` -> `review` -> `done`) are managed by the execution pipeline (Djinn coordinator), not by planning workflows. Planning never calls `task_transition`.
+
+7. **Using array syntax for blocked_by.** The `blocked_by` field accepts a single task ID string, not an array. To set multiple blockers, use `blocked_by` at creation time for one, then `task_blockers_add()` for each additional blocker.
+
+8. **Using string values for priority.** The `priority` field accepts an integer (0=critical, 1=high, 2=medium, 3=low), not a string like `"high"` or `"medium"`. Always use the integer form in `task_create` calls.
