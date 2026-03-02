@@ -201,26 +201,38 @@ All research notes MUST include a `## Relations` section with wikilinks to `[[Pr
 
 Read all research notes and produce a cross-cutting synthesis.
 
-1. Read all four research dimension notes using `memory_read()` or `memory_search(type="research")`
-2. Identify convergent themes across dimensions
-3. Identify tensions or conflicts between dimensions and propose resolutions
-4. Surface open questions that need to be addressed in requirements
-5. Write the synthesis: `memory_write(type="research", tags=["research", "synthesis"])`
-6. Include wikilinks to all four dimension notes and the brief in the Relations section
+1. Read all four dimension notes: `memory_read(identifier="research/stack-research")`, etc., or use `memory_search(query="research", type="research")` to find them
+2. Identify **convergent themes** -- findings that appear across multiple dimensions
+3. Identify **tensions** between dimensions and propose resolutions (e.g., stack simplicity vs. feature complexity)
+4. Surface **open questions** that need to be addressed during requirements definition
+5. Derive **recommendations** that should inform the roadmap
+6. Write the synthesis: `memory_write(title="Research Summary", type="research", tags=["research", "synthesis"], content=...)`
+7. Include `## Relations` with wikilinks to all four dimension notes and the brief
 
 See `cookbook/planning-templates.md` for the synthesis template.
 
+Present a summary of key findings to the user before proceeding to requirements.
+
 ### Step 6: Requirements Definition
 
-Generate categorized requirements with REQ-ID identifiers.
+Generate categorized requirements from the brief, research, and synthesis.
 
-1. Draw requirements from the brief, research findings, and synthesis recommendations
-2. Assign REQ-IDs using the format `CATEGORY-NN` (e.g., SETUP-01, PLAN-03, AUTH-02)
-3. Group requirements by domain category, not by milestone or timeline
-4. Classify each requirement as v1, v2, or out-of-scope
-5. Include a traceability table mapping requirements to research findings and roadmap phases
-6. Write to memory: `memory_write(type="requirement", tags=["planning", "requirements"])`
-7. Include wikilinks to the brief, research synthesis, and roadmap in the Relations section
+1. Draw requirements from:
+   - The brief (user's stated needs and constraints)
+   - Research findings (standard features, architecture patterns)
+   - Synthesis recommendations (cross-cutting insights)
+2. Assign **REQ-IDs** using the format `CATEGORY-NN` (e.g., AUTH-01, DATA-03, UI-05)
+   - Category prefixes should map to domain areas (these will inform epic naming in Step 8)
+3. Group requirements by **domain category**, not by timeline or milestone
+4. **Classify each requirement:**
+   - **v1**: Must have for initial release
+   - **v2**: Important but can wait for a second iteration
+   - **Out of scope**: Explicitly excluded (prevents scope creep)
+5. Include a **traceability table** mapping requirements to research findings that support them
+6. Write to memory: `memory_write(title="V1 Requirements", type="requirement", tags=["planning", "requirements"], content=...)`
+7. Include `## Relations` with wikilinks: `[[Project Brief]]`, `[[Research Summary]]`, `[[Roadmap]]`
+
+Present requirements to the user organized by category. Let the user adjust classification (move items between v1/v2/out-of-scope) before confirming.
 
 See `cookbook/planning-templates.md` for the requirements template.
 
@@ -228,18 +240,28 @@ See `cookbook/planning-templates.md` for the requirements template.
 
 Create a narrative roadmap with phased delivery milestones.
 
-1. Structure the roadmap into phases, each with:
-   - **Goal**: What this phase achieves
+1. Identify **phases** by grouping v1 requirements into a logical delivery sequence:
+   - Each phase should have a clear goal (outcome, not task)
+   - Earlier phases should create foundations that later phases build on
+   - A phase should be completable in a focused effort (not months of work)
+2. For each phase, define:
+   - **Goal**: What this phase achieves (outcome-shaped)
    - **Depends on**: Which prior phases must complete first
-   - **Requirements**: REQ-IDs addressed in this phase
-   - **Success criteria**: Testable statements that prove the phase is done
-2. Ensure the dependency chain is strictly linear -- each phase builds on the previous
-3. Write to memory: `memory_write(type="roadmap", tags=["planning", "roadmap"])`
-4. Include wikilinks to requirements, brief, and research notes in the Relations section
+   - **Requirements**: REQ-IDs addressed in this phase (every v1 requirement must appear in exactly one phase)
+   - **Success criteria**: 3-5 testable statements that prove the phase is done
+3. Ensure the dependency chain is well-ordered -- each phase builds on the previous where there are real dependencies. Independent phases CAN run in parallel.
+4. Write to memory: `memory_write(title="Roadmap", type="roadmap", tags=["planning", "roadmap"], content=...)`
+5. Include `## Relations` with wikilinks: `[[Project Brief]]`, `[[V1 Requirements]]`, `[[Research Summary]]`
 
-The roadmap is a singleton -- only one exists per project. It is immutable after creation per ADR-002. Progress is tracked on the task board, not by editing the roadmap.
+The roadmap is a singleton and is immutable after creation per ADR-002. Progress is tracked on the task board, not by editing the roadmap.
+
+Present the roadmap to the user for confirmation. This is the last approval gate before task board creation.
 
 See `cookbook/planning-templates.md` for the roadmap template.
+
+**Workflow configuration storage:** After the roadmap is confirmed, store the configuration preferences collected in Step 2:
+`memory_write(title="Workflow Preferences", type="reference", tags=["reference", "config"], content=...)`
+Include a `## Relations` wikilink to `[[Project Brief]]`. See `cookbook/planning-templates.md` for the reference note pattern.
 
 ### Step 8: Task Board Setup
 
