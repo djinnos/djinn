@@ -1,3 +1,8 @@
+---
+name: plan-milestone
+description: Decompose a milestone into tasks on the Djinn board. Creates features and tasks with wave ordering, acceptance criteria, and full traceability.
+---
+
 # Plan Milestone Workflow
 
 Decompose a specific milestone from the roadmap into domain-structured Djinn tasks with acceptance criteria, design context, and wave-based ordering. This workflow reads context from Djinn memory (roadmap, requirements, research), creates features and tasks on the task board under the appropriate epics, validates the plan against the milestone's success criteria, and establishes bidirectional traceability between memory notes and task board items.

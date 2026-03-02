@@ -7,7 +7,7 @@ description: Use when djinn MCP tools are available and user needs to manage tas
 
 Djinn gives you three systems: **tasks** (kanban board), **memory** (persistent knowledge base), **execution** (parallel agent orchestration). This skill is workflow-agnostic -- use it your way.
 
-For project planning workflows, use the `djinn-planning` skill instead.
+For project planning workflows, use the dedicated skills: `new-project`, `discuss-milestone`, `plan-milestone`, `progress`.
 
 ## Session Start
 

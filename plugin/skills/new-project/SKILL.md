@@ -1,3 +1,8 @@
+---
+name: new-project
+description: Initialize a new project with Djinn. Guides through deep questioning, parallel research, requirements definition, roadmap creation, and task board setup with domain-structured epics and features.
+---
+
 # New Project Workflow
 
 Guide the user through project definition via deep questioning, then create a complete project in Djinn: a brief, parallel research notes, synthesized research summary, categorized requirements with REQ-IDs, a narrative roadmap in memory, and domain-structured epics and features on the task board. The output is a fully populated knowledge graph and actionable task board ready for milestone planning.

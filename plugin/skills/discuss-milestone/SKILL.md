@@ -1,3 +1,8 @@
+---
+name: discuss-milestone
+description: Discuss a milestone before planning. Captures design decisions as ADRs and scope boundaries in Djinn memory through adaptive conversation.
+---
+
 # Discuss Milestone Workflow
 
 Facilitate an adaptive discussion about a specific milestone before planning begins. This workflow captures design decisions as ADRs and scope boundaries in memory, enriching context for plan-milestone. It is a READ-heavy, WRITE-light workflow -- it reads extensively from the knowledge base and writes only ADR notes and scope reference notes as discussion outcomes.
@@ -149,7 +154,7 @@ memory_write(
 )
 ```
 
-See [cookbook/planning-templates.md](../cookbook/planning-templates.md) for the full ADR template with all fields and wikilink conventions.
+See `cookbook/planning-templates.md` for the full ADR template with all fields and wikilink conventions.
 
 **ADR numbering:** Check existing ADRs via `memory_search("adr")` and continue the sequence. If ADR-001 and ADR-002 exist, the next is ADR-003.
 
@@ -172,7 +177,7 @@ Before writing any new ADRs:
 
 #### Batch Write
 
-For each ADR-worthy decision, write it to Djinn memory using the ADR template from [cookbook/planning-templates.md](../cookbook/planning-templates.md):
+For each ADR-worthy decision, write it to Djinn memory using the ADR template from `cookbook/planning-templates.md`:
 
 ```
 memory_write(

@@ -1,3 +1,8 @@
+---
+name: progress
+description: Check project progress by querying the Djinn task board. Shows milestone completion, active waves, blockers, and routes to next action.
+---
+
 # Progress Workflow
 
 **Status: v2 -- Scaffold only.** This workflow's full implementation is tracked under PROG-01 and PROG-02 in the v2 requirements. The structural stub exists so the djinn-planning skill directory is complete and the router's file references all resolve.
