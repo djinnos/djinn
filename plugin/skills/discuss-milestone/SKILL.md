@@ -301,6 +301,8 @@ Present a summary of the discussion session to the user:
 
 Confirm with the user that the captured context is accurate. If they want to revise anything, use `memory_edit` to update the relevant note.
 
+End by telling the user: "Run `/clear` before starting `/djinn:plan-milestone` to free up context for planning."
+
 ## Output Summary
 
 After running this workflow, the following artifacts exist in Djinn memory:

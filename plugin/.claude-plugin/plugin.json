@@ -1,7 +1,7 @@
 {
   "name": "djinn",
   "description": "Djinn - AI project management with task boards, memory, and multi-agent coordination",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": {
     "name": "Djinn OS",
     "url": "https://github.com/djinnos"
