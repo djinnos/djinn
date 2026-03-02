@@ -153,7 +153,54 @@ See [cookbook/planning-templates.md](../cookbook/planning-templates.md) for the 
 
 **ADR numbering:** Check existing ADRs via `memory_search("adr")` and continue the sequence. If ADR-001 and ADR-002 exist, the next is ADR-003.
 
-`[Phase 4 implements ADR quality checks and cross-referencing logic here]`
+#### Granularity Filter
+
+Before writing any ADRs, review all decisions captured during discussion and classify each:
+
+- **ADR-worthy** (write as separate ADR): decisions that constrain implementation -- library choices, data models, API contracts, naming conventions, architectural patterns. These have downstream consequences that affect how tasks are decomposed.
+- **Preference-only** (goes to scope note Preferences section in Step 5): style choices, non-binding suggestions, cosmetic preferences. These inform but do not constrain implementation.
+
+If in doubt, apply this test: "Would a different choice here change how tasks are structured or what code gets written?" If yes, it is an ADR. If no, it is a preference.
+
+#### ADR Numbering Discovery
+
+Before writing any new ADRs:
+
+1. Run `memory_search(query="ADR", type="adr")` to find all existing ADRs
+2. Parse the titles to find the highest ADR number (e.g., if ADR-001 and ADR-002 exist, next is ADR-003)
+3. Continue the sequence for each new ADR in this session
+
+#### Batch Write
+
+For each ADR-worthy decision, write it to Djinn memory using the ADR template from [cookbook/planning-templates.md](../cookbook/planning-templates.md):
+
+```
+memory_write(
+  type="adr",
+  title="ADR-{NNN}: {decision title}",
+  content="## Context\n{what prompted this decision}\n\n## Decision\n{the choice and reasoning}\n\n## Consequences\n**Positive:**\n{benefits}\n\n**Negative:**\n{trade-offs}\n\n## Relations\n- [[Roadmap]] -- Milestone {N}\n- [[{related requirement title}]]\n- [[Milestone {N} Scope]] -- scope note for this session",
+  tags=["adr", "milestone-{N}"]
+)
+```
+
+Do NOT ask the user to confirm each ADR before writing. Trust that the conversation captured intent accurately. The user can edit later via `memory_edit`.
+
+#### Cross-Referencing
+
+After all ADRs are written, verify each ADR's Relations section includes:
+
+- A wikilink to `[[Milestone {N} Scope]]` (the scope note that Step 5 will create)
+- If a new ADR supersedes or relates to an existing ADR: `[[ADR-{existing}: {title}]]`
+- If a new ADR directly addresses a specific requirement: `[[{requirement note title}]]`
+
+#### Quality Checks
+
+Before proceeding to Step 5, verify:
+
+- Every ADR has all four sections (Context, Decision, Consequences, Relations)
+- Every ADR's title follows the `ADR-{NNN}: {Description}` format
+- No two ADRs in this session cover the same decision (deduplicate if needed)
+- Each ADR's Consequences section has both Positive and Negative sub-sections
 
 ### Step 5: Capture Scope Boundaries
 
@@ -189,7 +236,54 @@ memory_write(
 
 This note is the primary input for plan-milestone when it runs. It provides the decisions and boundaries that constrain task decomposition.
 
-`[Phase 4 implements scope note validation and completeness checks here]`
+#### Scope Note Assembly
+
+After all ADRs are written, assemble the scope note content:
+
+- **In Scope:** List specific deliverables discussed and confirmed during the session. Each item should be concrete enough to be unambiguous (not "authentication" but "JWT-based session authentication with refresh token rotation").
+- **Out of Scope:** Include all deferred ideas captured during discussion (from scope creep redirections in Step 3), each with an explicit reason (e.g., "belongs to milestone {M}", "deferred to v2", "out of project scope entirely").
+- **Preferences:** Include all preference-only decisions from the granularity filter in Step 4. These are free-form bullet points, not structured key-value pairs.
+
+#### Wikilink Aggregation
+
+The scope note's Relations section must include:
+
+- `[[Roadmap]] -- Milestone {N}`
+- A wikilink to each ADR created during this session: `[[ADR-{NNN}: {title}]]`
+- Wikilinks to any relevant requirement notes referenced during discussion
+
+This aggregation is critical -- it makes the scope note a single entry point for plan-milestone. Reading the scope note and following its wikilinks gives plan-milestone access to all decisions.
+
+#### Write the Scope Note
+
+```
+memory_write(
+  type="reference",
+  title="Milestone {N} Scope",
+  content="# Milestone {N} Scope\n\n## In Scope\n{items}\n\n## Out of Scope\n{items with reasons}\n\n## Preferences\n{preference bullets}\n\n## Relations\n- [[Roadmap]] -- Milestone {N}\n- [[ADR-{NNN}: {title}]]\n- [[{requirement note title}]]",
+  tags=["scope", "milestone-{N}", "reference"]
+)
+```
+
+The title, type, and tags MUST match exactly what plan-milestone expects (see plan-milestone SKILL.md Step 1 sub-step 5).
+
+#### Completeness Check
+
+After writing the scope note, verify:
+
+- Every topic discussed in Step 3 is reflected in at least one of: an ADR, the In Scope section, the Out of Scope section, or the Preferences section
+- The scope note's In Scope section is not empty (if it is, the discussion did not produce actionable scope boundaries -- warn the user)
+- All ADRs created in Step 4 are wikilinked from the scope note's Relations section
+
+If the completeness check fails, note the gap and proceed to Step 6 -- do not block the workflow. Report the gap in the Step 6 summary so the user can address it.
+
+#### Existing Scope Note Handling
+
+If a scope note for this milestone already exists (from a prior discuss-milestone session):
+
+1. Read the existing note with `memory_read("reference/milestone-{N}-scope")`
+2. Use `memory_edit(identifier="reference/milestone-{N}-scope", operation="replace_section", section="In Scope", content="...")` to update each section
+3. Append new ADR wikilinks to the Relations section rather than overwriting
 
 ### Step 6: Summary
 
