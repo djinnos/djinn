@@ -69,7 +69,58 @@ For each topic, engage in a structured but flexible discussion:
 
 **Methodology note:** This is NOT a checklist. Adapt based on what the user reveals. Some topics may need 30 seconds ("yes, use that library"), others may need 10 minutes of back-and-forth to work through trade-offs. Let the conversation breathe.
 
-`[Phase 4 implements the full adaptive discussion methodology here, including question generation strategies, thread-following heuristics, and decision confirmation patterns]`
+#### Context Presentation
+
+Before diving into any topic, present a brief summary of what you loaded in Step 1. Show the user what the knowledge base already contains so they do not repeat themselves:
+
+- The milestone's goal (one sentence from the roadmap)
+- Key requirements for this milestone (list REQ-IDs with short descriptions)
+- Relevant research themes found (list titles of research notes loaded)
+- Existing ADRs that touch this milestone's domain (list by title, noting they can be revisited)
+
+Keep this summary to 10-15 lines. Its purpose is orientation, not exhaustive cataloging.
+
+#### Discussion Loop
+
+For each topic selected by the user in Step 2, follow this pattern:
+
+1. **Announce the topic** and present the most relevant loaded context (research findings, requirement text, existing ADR if applicable). If an existing ADR covers this topic, explicitly surface it: "ADR-{NNN} already decided {X}. Want to revisit this, or move on?"
+
+2. **Ask focused questions** about preferences, constraints, and trade-offs. Do NOT ask generic questions ("What do you think?"). Ask specific questions that force a choice or reveal a constraint:
+   - "Should [feature X] use [approach A] or [approach B]? [Brief trade-off]"
+   - "What happens when [edge case]?"
+   - "Is [constraint] a hard requirement or flexible?"
+
+   Question techniques:
+   - **Challenge vagueness:** "Good" means what exactly?
+   - **Make abstract concrete:** "Walk me through someone actually using this."
+   - **Surface assumptions:** "What's already decided? What's flexible?"
+   - **Find edges:** "What is this NOT?"
+
+3. **Follow threads** -- when an answer reveals a connected concern or unexpected complexity, explore it before moving on. If a tangent reveals a new decision that affects implementation, follow it. If it wanders into adjacent milestone territory, redirect per the scope guardrail below.
+
+4. **Decision-driven checkpoint** -- when the user reaches a concrete decision, confirm it explicitly:
+   "So we're going with [X]. Anything else on this topic, or move on?"
+
+   Do NOT check after a fixed number of questions. The checkpoint triggers when a decision crystallizes, not when a counter expires. Some topics resolve in 30 seconds, others need extended back-and-forth.
+
+5. **Track decisions internally** for the batch ADR write in Step 4. For each decision, note:
+   - What was decided (the choice)
+   - Why (the reasoning or trade-off that led to it)
+   - What it affects downstream (which requirements or implementation areas it constrains)
+
+6. **Scope creep redirection** -- if the user suggests something outside the milestone boundary:
+   "[Feature X] sounds like it belongs in a later milestone. I'll note it so it doesn't get lost. For now, let's stay on [current topic]: [return to current question]"
+   Capture the deferred idea internally for inclusion in the scope note's Out of Scope section.
+
+#### Topic Completion
+
+After all selected topics are discussed:
+
+- Briefly summarize the decisions captured across all topics
+- If the discussion revealed new gray areas not in the original topic list, offer to explore them: "A few new areas came up during discussion: [list]. Want to dig into any of these, or are we good?"
+- Let the user decide whether to explore additional topics or proceed to ADR writing
+- When the user is satisfied, announce: "Discussion complete. I'll now capture the decisions and scope boundaries in Djinn memory."
 
 ### Step 4: Capture Design Decisions
 
