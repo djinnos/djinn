@@ -16,12 +16,12 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Skill Scaffolding
 
-- [ ] **SKAF-01**: SKILL.md files created for all v1 workflows following Agent Skills spec
+- [x] **SKAF-01**: SKILL.md files created for all v1 workflows following Agent Skills spec
 - [x] **SKAF-02**: Directory structure matches Claude Code plugin format (skills/djinn-planning/)
-- [ ] **SKAF-03**: Each workflow declares a tool subset (5-10 MCP tools, not 70+) to prevent context explosion
+- [x] **SKAF-03**: Each workflow declares a tool subset (5-10 MCP tools, not 70+) to prevent context explosion
 - [x] **SKAF-04**: Progressive disclosure pattern — metadata → instructions → references/cookbooks
 - [x] **SKAF-05**: Shared MCP adapter patterns extracted as reusable references (memory output templates, task creation templates)
-- [ ] **SKAF-06**: Workflow prompt budgets enforced (max 600 lines per workflow)
+- [x] **SKAF-06**: Workflow prompt budgets enforced (max 600 lines per workflow)
 
 ### Core Planning: new-project
 
@@ -113,12 +113,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ARCH-02 | Phase 0 | Complete |
 | ARCH-03 | Phase 0 | Complete |
 | ARCH-04 | Phase 0 | Complete |
-| SKAF-01 | Phase 1 | Pending |
+| SKAF-01 | Phase 1 | Complete |
 | SKAF-02 | Phase 1 | Complete |
-| SKAF-03 | Phase 1 | Pending |
+| SKAF-03 | Phase 1 | Complete |
 | SKAF-04 | Phase 1 | Complete |
 | SKAF-05 | Phase 1 | Complete |
-| SKAF-06 | Phase 1 | Pending |
+| SKAF-06 | Phase 1 | Complete |
 | PROJ-01 | Phase 2 | Pending |
 | PROJ-02 | Phase 2 | Pending |
 | PROJ-03 | Phase 2 | Pending |

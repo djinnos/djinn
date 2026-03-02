@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. PROJECT.md contains no contradictory hierarchy references (the "Phases -> Epics not Features" entry is resolved)
 **Plans**: 2 plans
 - [x] 00-01-PLAN.md -- Create ADR-001 (Hierarchy Mapping) and ADR-002 (State Derivation) in Djinn memory
-- [ ] 00-02-PLAN.md -- Create Artifact Mapping reference note and update PROJECT.md contradictions
+- [x] 00-02-PLAN.md -- Create Artifact Mapping reference note and update PROJECT.md contradictions
 
 ### Phase 1: Skill Scaffolding
 **Goal**: The skill directory structure and shared patterns exist so workflow authors can focus on methodology, not plumbing
@@ -98,8 +98,8 @@ Phases execute in numeric order: 0 -> 1 -> 2 -> 3 -> 4 -> 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 0. Architecture Decisions | 1/2 | In Progress | - |
-| 1. Skill Scaffolding | 1/4 | In Progress | - |
+| 0. Architecture Decisions | 2/2 | Complete | 2026-03-02 |
+| 1. Skill Scaffolding | 4/4 | Complete | 2026-03-02 |
 | 2. Core Workflow -- new-project | 0/TBD | Not started | - |
 | 3. Core Workflow -- plan-milestone | 0/TBD | Not started | - |
 | 4. Supporting Workflows | 0/TBD | Not started | - |
