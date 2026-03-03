@@ -3,9 +3,12 @@ use std::path::Path;
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::fs;
 
 use crate::db::repositories::project::ProjectRepository;
 use crate::mcp::server::DjinnMcpServer;
+
+const DJINN_GITIGNORE: &str = "worktrees/\n";
 
 // ── Param structs ────────────────────────────────────────────────────────────
 
@@ -74,6 +77,14 @@ impl DjinnMcpServer {
                     path: path.to_string(),
                 },
             });
+        }
+
+        // Ensure .djinn/ directory and .gitignore exist
+        let djinn_dir = Path::new(path).join(".djinn");
+        let _ = fs::create_dir_all(&djinn_dir).await;
+        let gitignore_path = djinn_dir.join(".gitignore");
+        if !gitignore_path.exists() {
+            let _ = fs::write(&gitignore_path, DJINN_GITIGNORE).await;
         }
 
         // Idempotent: if same name+path already exists, return it
