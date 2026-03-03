@@ -265,7 +265,7 @@ impl CoordinatorActor {
         let repo = self.task_repo();
         let mut ready = match repo
             .list_ready(ReadyQuery {
-                issue_type: Some("!epic".into()),
+                issue_type: None,
                 limit: self.dispatch_limit as i64,
                 ..Default::default()
             })

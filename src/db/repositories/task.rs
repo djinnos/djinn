@@ -1113,7 +1113,7 @@ impl TaskRepository {
                     "status" => "status",
                     "priority" => "priority",
                     "issue_type" => "issue_type",
-                    "parent" => "epic_id",
+                    "epic" => "epic_id",
                     other => {
                         return Err(Error::Internal(format!("unknown group_by: {other}")));
                     }

@@ -9,6 +9,12 @@ use crate::db::repositories::task::{
     ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository,
 };
 use crate::mcp::server::DjinnMcpServer;
+use crate::mcp::tools::validation::{
+    validate_ac_count, validate_actor_id, validate_actor_role, validate_body, validate_description,
+    validate_design, validate_issue_type, validate_label, validate_labels_count, validate_limit,
+    validate_offset, validate_owner, validate_priority, validate_reason, validate_sort,
+    validate_title,
+};
 use crate::mcp::tools::{AnyJson, ObjectJson, json_object};
 use crate::models::task::{Task, TaskStatus, TransitionAction};
 
@@ -50,12 +56,18 @@ fn not_found(id: &str) -> serde_json::Value {
     serde_json::json!({ "error": format!("task not found: {id}") })
 }
 
-// ── Param / response structs ──────────────────────────────────────────────────
+/// Validate and collect labels, returning the validated list or an error.
+fn validate_labels(labels: &[String]) -> Result<Vec<String>, String> {
+    validate_labels_count(labels.len())?;
+    labels.iter().map(|l| validate_label(l)).collect()
+}
+
+// ── Param / response structs ─────────────────────────────────────────────────
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskCreateParams {
     /// Parent epic ID — UUID or short_id (required).
-    pub parent: String,
+    pub epic_id: String,
     pub title: String,
     /// Task type: "task" (default), "feature", or "bug".
     pub issue_type: Option<String>,
@@ -83,7 +95,7 @@ pub struct TaskUpdateParams {
     /// Full replacement for acceptance_criteria.
     pub acceptance_criteria: Option<Vec<AnyJson>>,
     /// New parent epic UUID or short_id.
-    pub parent: Option<String>,
+    pub epic_id: Option<String>,
     /// Memory note permalinks to add to this task.
     pub memory_refs_add: Option<Vec<String>>,
     /// Memory note permalinks to remove from this task.
@@ -106,8 +118,6 @@ pub struct TaskListParams {
     pub label: Option<String>,
     /// Full-text search on title and description.
     pub text: Option<String>,
-    /// Filter by parent epic UUID or short_id.
-    pub parent: Option<String>,
     /// Sort order: "priority" (default), "created", "created_desc",
     /// "updated", "updated_desc", "closed".
     pub sort: Option<String>,
@@ -122,21 +132,8 @@ pub struct TaskCountParams {
     pub priority: Option<i64>,
     pub label: Option<String>,
     pub text: Option<String>,
-    pub parent: Option<String>,
-    /// Group results by: "status", "priority", "issue_type", or "parent".
+    /// Group results by: "status", "priority", "issue_type", or "epic".
     pub group_by: Option<String>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct TaskParentGetParams {
-    /// Task UUID or short_id.
-    pub id: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct TaskChildrenListParams {
-    /// Epic UUID or short_id.
-    pub epic_id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -183,8 +180,6 @@ pub struct TaskBlockedListParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskReadyParams {
-    /// Filter by issue type. Positive ("task") or negative ("!epic").
-    pub issue_type: Option<String>,
     /// Filter by label value.
     pub label: Option<String>,
     /// Filter by owner email.
@@ -256,8 +251,6 @@ pub struct TaskTransitionParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskClaimParams {
-    /// Filter by issue type. Positive ("task") or negative ("!epic").
-    pub issue_type: Option<String>,
     /// Filter by label value.
     pub label: Option<String>,
     /// Filter by owner email.
@@ -279,41 +272,63 @@ pub struct TaskListResponse {
     pub has_more: bool,
 }
 
-// ── Tool implementations ──────────────────────────────────────────────────────
+// ── Tool implementations ─────────────────────────────────────────────────────
 
 #[tool_router(router = task_tool_router, vis = "pub")]
 impl DjinnMcpServer {
     /// Create a new work item (task, feature, or bug) under an epic.
     #[tool(
-        description = "Create a new work item (epic, feature, task, or bug). Parent and blocked_by accept task ID (full UUID or short_id, e.g., 'k7m2')."
+        description = "Create a new work item (task, feature, or bug) under an epic. Accepts epic_id as UUID or short_id."
     )]
     pub async fn task_create(
         &self,
         Parameters(p): Parameters<TaskCreateParams>,
     ) -> Json<ObjectJson> {
+        // Validate fields.
+        let title = match validate_title(&p.title) {
+            Ok(t) => t,
+            Err(e) => return json_object(serde_json::json!({ "error": e })),
+        };
+        let description = p.description.as_deref().unwrap_or("");
+        if let Err(e) = validate_description(description) {
+            return json_object(serde_json::json!({ "error": e }));
+        }
+        let design = p.design.as_deref().unwrap_or("");
+        if let Err(e) = validate_design(design) {
+            return json_object(serde_json::json!({ "error": e }));
+        }
+        let issue_type = p.issue_type.as_deref().unwrap_or("task");
+        if let Err(e) = validate_issue_type(issue_type) {
+            return json_object(serde_json::json!({ "error": e }));
+        }
+        let priority = p.priority.unwrap_or(0);
+        if let Err(e) = validate_priority(priority) {
+            return json_object(serde_json::json!({ "error": e }));
+        }
+        let owner = match validate_owner(p.owner.as_deref().unwrap_or("")) {
+            Ok(o) => o,
+            Err(e) => return json_object(serde_json::json!({ "error": e })),
+        };
+        if let Some(ref labels) = p.labels {
+            if let Err(e) = validate_labels(labels) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+        if let Some(ref ac) = p.acceptance_criteria {
+            if let Err(e) = validate_ac_count(ac.len()) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+
         // Resolve parent epic.
-        let Some(epic_id) = self.resolve_epic_id(&p.parent).await else {
-            return json_object(serde_json::json!({ "error": format!("epic not found: {}", p.parent) }));
+        let Some(epic_id) = self.resolve_epic_id(&p.epic_id).await else {
+            return json_object(serde_json::json!({ "error": format!("epic not found: {}", p.epic_id) }));
         };
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
 
-        let issue_type = p.issue_type.as_deref().unwrap_or("task");
-        let description = p.description.as_deref().unwrap_or("");
-        let design = p.design.as_deref().unwrap_or("");
-        let priority = p.priority.unwrap_or(0);
-        let owner = p.owner.as_deref().unwrap_or("");
-
         let task = match repo
-            .create(
-                &epic_id,
-                &p.title,
-                description,
-                design,
-                issue_type,
-                priority,
-                owner,
-            )
+            .create(&epic_id, &title, description, design, issue_type, priority, &owner)
             .await
         {
             Ok(t) => t,
@@ -360,15 +375,51 @@ impl DjinnMcpServer {
         json_object(task_to_value(&task))
     }
 
-    /// Update allowed fields of a work item (title, description, acceptance_criteria,
-    /// design, priority, owner, labels, parent).
+    /// Update allowed fields of a work item.
     #[tool(
-        description = "Update allowed fields of a work item (title, description, acceptance_criteria, design, priority, owner, labels, parent). Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
+        description = "Update allowed fields of a work item (title, description, acceptance_criteria, design, priority, owner, labels, epic_id). Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
     )]
     pub async fn task_update(
         &self,
         Parameters(p): Parameters<TaskUpdateParams>,
     ) -> Json<ObjectJson> {
+        // Validate provided fields.
+        if let Some(ref t) = p.title {
+            if let Err(e) = validate_title(t) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+        if let Some(ref d) = p.description {
+            if let Err(e) = validate_description(d) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+        if let Some(ref d) = p.design {
+            if let Err(e) = validate_design(d) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+        if let Some(prio) = p.priority {
+            if let Err(e) = validate_priority(prio) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+        if let Some(ref o) = p.owner {
+            if let Err(e) = validate_owner(o) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+        if let Some(ref add) = p.labels_add {
+            if let Err(e) = validate_labels(add) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+        if let Some(ref ac) = p.acceptance_criteria {
+            if let Err(e) = validate_ac_count(ac.len()) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
 
         let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
@@ -376,7 +427,7 @@ impl DjinnMcpServer {
         };
 
         // Resolve new parent epic if provided.
-        let epic_id = if let Some(ref par) = p.parent {
+        let epic_id = if let Some(ref par) = p.epic_id {
             match self.resolve_epic_id(par).await {
                 Some(id) => id,
                 None => {
@@ -406,6 +457,9 @@ impl DjinnMcpServer {
             }
             if let Some(remove) = &p.labels_remove {
                 current.retain(|l| !remove.contains(l));
+            }
+            if let Err(e) = validate_labels_count(current.len()) {
+                return json_object(serde_json::json!({ "error": e }));
             }
             serde_json::to_string(&current).unwrap_or_else(|_| "[]".into())
         } else {
@@ -507,16 +561,14 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskListParams>,
     ) -> Json<TaskListResponse> {
-        // Resolve parent epic if provided.
-        let parent = if let Some(ref par) = p.parent {
-            self.resolve_epic_id(par).await
-        } else {
-            None
-        };
-        // If a parent was specified but couldn't be resolved, return empty.
-        if p.parent.is_some() && parent.is_none() {
-            let limit = p.limit.unwrap_or(25).clamp(1, 100);
-            let offset = p.offset.unwrap_or(0).max(0);
+        let sort = p.sort.as_deref().unwrap_or("priority");
+        if let Err(e) = validate_sort(
+            sort,
+            &["priority", "created", "created_desc", "updated", "updated_desc", "closed"],
+        ) {
+            let limit = validate_limit(p.limit.unwrap_or(25));
+            let offset = validate_offset(p.offset.unwrap_or(0));
+            tracing::error!(error = %e, "task_list: invalid sort");
             return Json(TaskListResponse {
                 tasks: vec![],
                 total_count: 0,
@@ -525,9 +577,23 @@ impl DjinnMcpServer {
                 has_more: false,
             });
         }
+        if let Some(prio) = p.priority {
+            if let Err(e) = validate_priority(prio) {
+                let limit = validate_limit(p.limit.unwrap_or(25));
+                let offset = validate_offset(p.offset.unwrap_or(0));
+                tracing::error!(error = %e, "task_list: invalid priority");
+                return Json(TaskListResponse {
+                    tasks: vec![],
+                    total_count: 0,
+                    limit,
+                    offset,
+                    has_more: false,
+                });
+            }
+        }
 
-        let limit = p.limit.unwrap_or(25).clamp(1, 100);
-        let offset = p.offset.unwrap_or(0).max(0);
+        let limit = validate_limit(p.limit.unwrap_or(25));
+        let offset = validate_offset(p.offset.unwrap_or(0));
 
         let query = ListQuery {
             status: p.status,
@@ -535,8 +601,8 @@ impl DjinnMcpServer {
             priority: p.priority,
             label: p.label,
             text: p.text,
-            parent,
-            sort: p.sort.unwrap_or_else(|| "priority".to_owned()),
+            parent: None,
+            sort: sort.to_owned(),
             limit,
             offset,
         };
@@ -572,11 +638,16 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskCountParams>,
     ) -> Json<ObjectJson> {
-        let parent = if let Some(ref par) = p.parent {
-            self.resolve_epic_id(par).await
-        } else {
-            None
-        };
+        if let Some(ref gb) = p.group_by {
+            if let Err(e) = validate_sort(gb, &["status", "priority", "issue_type", "epic"]) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+        if let Some(prio) = p.priority {
+            if let Err(e) = validate_priority(prio) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
 
         let query = CountQuery {
             status: p.status,
@@ -584,70 +655,13 @@ impl DjinnMcpServer {
             priority: p.priority,
             label: p.label,
             text: p.text,
-            parent,
+            parent: None,
             group_by: p.group_by,
         };
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.count_grouped(query).await {
             Ok(v) => json_object(v),
-            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
-        }
-    }
-
-    /// Get the parent epic of a work item.
-    #[tool(
-        description = "Get the parent epic of a work item. Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
-    )]
-    pub async fn task_parent_get(
-        &self,
-        Parameters(p): Parameters<TaskParentGetParams>,
-    ) -> Json<ObjectJson> {
-        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
-        let Some(task) = task_repo.resolve(&p.id).await.ok().flatten() else {
-            return json_object(not_found(&p.id));
-        };
-
-        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
-        match epic_repo.get(&task.epic_id).await {
-            Ok(Some(epic)) => json_object(serde_json::json!({
-                "id":          epic.id,
-                "short_id":    epic.short_id,
-                "title":       epic.title,
-                "description": epic.description,
-                "emoji":       epic.emoji,
-                "color":       epic.color,
-                "status":      epic.status,
-                "owner":       epic.owner,
-                "created_at":  epic.created_at,
-                "updated_at":  epic.updated_at,
-                "closed_at":   epic.closed_at,
-            })),
-            Ok(None) => {
-                json_object(serde_json::json!({ "error": format!("epic not found: {}", task.epic_id) }))
-            }
-            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
-        }
-    }
-
-    /// List direct children (tasks/features/bugs) of an epic.
-    #[tool(
-        description = "List direct children of an epic. Accepts epic ID (full UUID or short_id, e.g., 'k7m2')."
-    )]
-    pub async fn task_children_list(
-        &self,
-        Parameters(p): Parameters<TaskChildrenListParams>,
-    ) -> Json<ObjectJson> {
-        let Some(epic_id) = self.resolve_epic_id(&p.epic_id).await else {
-            return json_object(serde_json::json!({ "error": format!("epic not found: {}", p.epic_id) }));
-        };
-
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
-        match repo.list_by_epic(&epic_id).await {
-            Ok(tasks) => {
-                let items: Vec<_> = tasks.iter().map(task_to_value).collect();
-                json_object(serde_json::json!({ "tasks": items, "total_count": items.len() }))
-            }
             Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
@@ -731,7 +745,7 @@ impl DjinnMcpServer {
 
     /// List tasks that are blocked by the given task.
     #[tool(
-        description = "List task IDs that are blocked by the given task. Accepts task ID (full UUID or short_id, e.g., 'k7m2'). Epics will never appear in blocker relationships."
+        description = "List task IDs that are blocked by the given task. Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
     )]
     pub async fn task_blocked_list(
         &self,
@@ -768,13 +782,24 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskReadyParams>,
     ) -> Json<ObjectJson> {
+        if let Some(ref o) = p.owner {
+            if let Err(e) = validate_owner(o) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+        if let Some(pmax) = p.priority_max {
+            if let Err(e) = validate_priority(pmax) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let query = ReadyQuery {
-            issue_type: p.issue_type,
+            issue_type: None,
             label: p.label,
             owner: p.owner,
             priority_max: p.priority_max,
-            limit: p.limit.unwrap_or(25).clamp(1, 100),
+            limit: validate_limit(p.limit.unwrap_or(25)),
         };
         match repo.list_ready(query).await {
             Ok(tasks) => {
@@ -793,6 +818,20 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskTransitionParams>,
     ) -> Json<ObjectJson> {
+        let actor_id = p.actor_id.as_deref().unwrap_or("");
+        if let Err(e) = validate_actor_id(actor_id) {
+            return json_object(serde_json::json!({ "error": e }));
+        }
+        let actor_role = p.actor_role.as_deref().unwrap_or("user");
+        if let Err(e) = validate_actor_role(actor_role) {
+            return json_object(serde_json::json!({ "error": e }));
+        }
+        if let Some(ref r) = p.reason {
+            if let Err(e) = validate_reason(r) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
 
         let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
@@ -813,8 +852,6 @@ impl DjinnMcpServer {
             None
         };
 
-        let actor_id = p.actor_id.as_deref().unwrap_or("");
-        let actor_role = p.actor_role.as_deref().unwrap_or("user");
         let reason = p.reason.as_deref();
 
         match repo
@@ -841,9 +878,15 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskClaimParams>,
     ) -> Json<ObjectJson> {
+        if let Some(ref o) = p.owner {
+            if let Err(e) = validate_owner(o) {
+                return json_object(serde_json::json!({ "error": e }));
+            }
+        }
+
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let query = ReadyQuery {
-            issue_type: p.issue_type,
+            issue_type: None,
             label: p.label,
             owner: p.owner,
             priority_max: p.priority_max,
@@ -865,14 +908,24 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskCommentAddParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = validate_body(&p.body) {
+            return json_object(serde_json::json!({ "error": e }));
+        }
+        let actor_id = p.actor_id.as_deref().unwrap_or("");
+        if let Err(e) = validate_actor_id(actor_id) {
+            return json_object(serde_json::json!({ "error": e }));
+        }
+        let actor_role = p.actor_role.as_deref().unwrap_or("user");
+        if let Err(e) = validate_actor_role(actor_role) {
+            return json_object(serde_json::json!({ "error": e }));
+        }
+
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
 
         let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
             return json_object(not_found(&p.id));
         };
 
-        let actor_id = p.actor_id.as_deref().unwrap_or("");
-        let actor_role = p.actor_role.as_deref().unwrap_or("user");
         let payload = serde_json::json!({ "body": p.body }).to_string();
 
         match repo
@@ -919,8 +972,8 @@ impl DjinnMcpServer {
             event_type: p.event_type,
             from_time: p.from_time,
             to_time: p.to_time,
-            limit: p.limit.unwrap_or(50).clamp(1, 200),
-            offset: p.offset.unwrap_or(0).max(0),
+            limit: validate_limit(p.limit.unwrap_or(50)),
+            offset: validate_offset(p.offset.unwrap_or(0)),
         };
 
         match repo.query_activity(q).await {
@@ -978,8 +1031,7 @@ impl DjinnMcpServer {
         }
     }
 
-    /// List memory note permalinks associated with a task. Accepts task ID
-    /// (full UUID or short_id, e.g., 'k7m2').
+    /// List memory note permalinks associated with a task.
     #[tool(
         description = "List memory note permalinks associated with a task. Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
     )]
@@ -1020,13 +1072,13 @@ impl DjinnMcpServer {
 
     /// Resolve an epic UUID or short_id to its UUID.
     pub(crate) async fn resolve_epic_id(&self, id_or_short: &str) -> Option<String> {
-        let db = self.state.db();
-        db.ensure_initialized().await.ok()?;
-        sqlx::query_scalar::<_, String>("SELECT id FROM epics WHERE id = ?1 OR short_id = ?1")
-            .bind(id_or_short)
-            .fetch_optional(db.pool())
+        let epic_repo =
+            EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+        epic_repo
+            .resolve(id_or_short)
             .await
             .ok()
             .flatten()
+            .map(|e| e.id)
     }
 }

@@ -1,9 +1,57 @@
+use sqlx::Row;
 use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
 use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
 use crate::models::epic::Epic;
+
+// ── Query / result types ─────────────────────────────────────────────────────
+
+/// Aggregate child-task counts for an epic.
+pub struct EpicTaskCounts {
+    pub task_count: i64,
+    pub open_count: i64,
+    pub in_progress_count: i64,
+    pub closed_count: i64,
+}
+
+/// Filters and pagination for [`EpicRepository::list_filtered`].
+pub struct EpicListQuery {
+    pub status: Option<String>,
+    pub text: Option<String>,
+    pub sort: String,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+impl Default for EpicListQuery {
+    fn default() -> Self {
+        Self {
+            status: None,
+            text: None,
+            sort: "created".to_owned(),
+            limit: 25,
+            offset: 0,
+        }
+    }
+}
+
+pub struct EpicListResult {
+    pub epics: Vec<Epic>,
+    pub total_count: i64,
+}
+
+/// Filters for [`EpicRepository::count_grouped`].
+pub struct EpicCountQuery {
+    pub status: Option<String>,
+    pub group_by: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum SqlParam {
+    Text(String),
+}
 
 pub struct EpicRepository {
     db: Database,
@@ -161,6 +209,164 @@ impl EpicRepository {
         Ok(())
     }
 
+    // ── New methods (ADR-003) ────────────────────────────────────────────────
+
+    /// Resolve an epic by UUID or short_id.
+    pub async fn resolve(&self, id_or_short: &str) -> Result<Option<Epic>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Epic>(
+            "SELECT id, short_id, title, description, emoji, color, status,
+                    owner, created_at, updated_at, closed_at
+             FROM epics WHERE id = ?1 OR short_id = ?1",
+        )
+        .bind(id_or_short)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    /// Reopen a closed epic: set status=open, clear closed_at.
+    pub async fn reopen(&self, id: &str) -> Result<Epic> {
+        self.db.ensure_initialized().await?;
+        // Verify current status is closed.
+        let current = self.get(id).await?.ok_or_else(|| {
+            Error::Internal(format!("epic not found: {id}"))
+        })?;
+        if current.status != "closed" {
+            return Err(Error::InvalidTransition(format!(
+                "epic must be closed to reopen (current: {})",
+                current.status
+            )));
+        }
+        sqlx::query(
+            "UPDATE epics SET status = 'open',
+                    closed_at = NULL,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .execute(self.db.pool())
+        .await?;
+        let epic: Epic = sqlx::query_as(
+            "SELECT id, short_id, title, description, emoji, color, status,
+                    owner, created_at, updated_at, closed_at
+             FROM epics WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_one(self.db.pool())
+        .await?;
+
+        let _ = self.events.send(DjinnEvent::EpicUpdated(epic.clone()));
+        Ok(epic)
+    }
+
+    /// Aggregate child-task counts for an epic.
+    pub async fn task_counts(&self, epic_id: &str) -> Result<EpicTaskCounts> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query(
+            "SELECT
+                COUNT(*) AS task_count,
+                SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_count,
+                SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress_count,
+                SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_count
+             FROM tasks WHERE epic_id = ?1",
+        )
+        .bind(epic_id)
+        .fetch_one(self.db.pool())
+        .await?;
+        Ok(EpicTaskCounts {
+            task_count: row.get::<i64, _>(0),
+            open_count: row.get::<Option<i64>, _>(1).unwrap_or(0),
+            in_progress_count: row.get::<Option<i64>, _>(2).unwrap_or(0),
+            closed_count: row.get::<Option<i64>, _>(3).unwrap_or(0),
+        })
+    }
+
+    /// Count child tasks then CASCADE-delete the epic. Returns the child task count.
+    pub async fn delete_with_count(&self, id: &str) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE epic_id = ?1")
+                .bind(id)
+                .fetch_one(self.db.pool())
+                .await?;
+        self.delete(id).await?;
+        Ok(count)
+    }
+
+    /// List epics with optional filters, sorting, and pagination.
+    pub async fn list_filtered(&self, query: EpicListQuery) -> Result<EpicListResult> {
+        self.db.ensure_initialized().await?;
+        let (where_sql, params) = epic_build_where(&query.status, &query.text);
+        let order_sql = epic_sort_to_sql(&query.sort);
+
+        let total_sql = format!("SELECT COUNT(*) FROM epics WHERE {where_sql}");
+        let mut total_q = sqlx::query_scalar::<_, i64>(&total_sql);
+        for p in &params {
+            let SqlParam::Text(s) = p;
+            total_q = total_q.bind(s.clone());
+        }
+        let total = total_q.fetch_one(self.db.pool()).await?;
+
+        let sql = format!(
+            "SELECT id, short_id, title, description, emoji, color, status,
+                    owner, created_at, updated_at, closed_at
+             FROM epics WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
+        );
+        let mut epic_q = sqlx::query_as::<_, Epic>(&sql);
+        for p in &params {
+            let SqlParam::Text(s) = p;
+            epic_q = epic_q.bind(s.clone());
+        }
+        let epics = epic_q
+            .bind(query.limit)
+            .bind(query.offset)
+            .fetch_all(self.db.pool())
+            .await?;
+
+        Ok(EpicListResult {
+            epics,
+            total_count: total,
+        })
+    }
+
+    /// Count epics with optional group_by.
+    pub async fn count_grouped(&self, query: EpicCountQuery) -> Result<serde_json::Value> {
+        self.db.ensure_initialized().await?;
+        let (where_sql, params) = epic_build_where(&query.status, &None);
+
+        match query.group_by.as_deref() {
+            Some("status") => {
+                let sql = format!(
+                    "SELECT status, COUNT(*) FROM epics WHERE {where_sql}
+                     GROUP BY status ORDER BY COUNT(*) DESC"
+                );
+                let mut q = sqlx::query_as::<_, (String, i64)>(&sql);
+                for p in &params {
+                    let SqlParam::Text(s) = p;
+                    q = q.bind(s.clone());
+                }
+                let groups = q
+                    .fetch_all(self.db.pool())
+                    .await?
+                    .into_iter()
+                    .map(|(key, count)| serde_json::json!({"key": key, "count": count}))
+                    .collect::<Vec<_>>();
+                Ok(serde_json::json!({ "groups": groups }))
+            }
+            Some(other) => Err(Error::Internal(format!("unknown group_by: {other}"))),
+            None => {
+                let sql = format!("SELECT COUNT(*) FROM epics WHERE {where_sql}");
+                let mut q = sqlx::query_scalar::<_, i64>(&sql);
+                for p in &params {
+                    let SqlParam::Text(s) = p;
+                    q = q.bind(s.clone());
+                }
+                let total = q.fetch_one(self.db.pool()).await?;
+                Ok(serde_json::json!({ "total_count": total }))
+            }
+        }
+    }
+
     /// Generate a unique 4-char base36 short ID for the epics table.
     async fn generate_short_id(&self, seed_id: &str) -> Result<String> {
         self.db.ensure_initialized().await?;
@@ -199,6 +405,44 @@ fn encode_base36(mut n: u32) -> String {
         n /= 36;
     }
     String::from_utf8(buf.to_vec()).unwrap()
+}
+
+// ── Dynamic query helpers ────────────────────────────────────────────────────
+
+fn epic_build_where(
+    status: &Option<String>,
+    text: &Option<String>,
+) -> (String, Vec<SqlParam>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<SqlParam> = Vec::new();
+
+    if let Some(s) = status {
+        clauses.push("status = ?".to_owned());
+        params.push(SqlParam::Text(s.clone()));
+    }
+    if let Some(t) = text {
+        clauses.push("(title LIKE ? OR description LIKE ?)".to_owned());
+        let pattern = format!("%{t}%");
+        params.push(SqlParam::Text(pattern.clone()));
+        params.push(SqlParam::Text(pattern));
+    }
+
+    let where_sql = if clauses.is_empty() {
+        "1=1".to_owned()
+    } else {
+        clauses.join(" AND ")
+    };
+    (where_sql, params)
+}
+
+fn epic_sort_to_sql(sort: &str) -> &'static str {
+    match sort {
+        "created" => "created_at ASC",
+        "created_desc" => "created_at DESC",
+        "updated" => "updated_at ASC",
+        "updated_desc" => "updated_at DESC",
+        _ => "created_at ASC",
+    }
 }
 
 async fn short_id_exists(pool: &sqlx::SqlitePool, table: &str, short_id: &str) -> Result<bool> {
@@ -307,6 +551,82 @@ mod tests {
             DjinnEvent::EpicDeleted { id } => assert_eq!(id, epic.id),
             _ => panic!("expected EpicDeleted"),
         }
+    }
+
+    #[tokio::test]
+    async fn resolve_by_id_and_short_id() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let repo = EpicRepository::new(db, tx);
+
+        let epic = repo.create("Resolve", "", "", "", "").await.unwrap();
+
+        let by_id = repo.resolve(&epic.id).await.unwrap().unwrap();
+        assert_eq!(by_id.id, epic.id);
+
+        let by_short = repo.resolve(&epic.short_id).await.unwrap().unwrap();
+        assert_eq!(by_short.id, epic.id);
+
+        assert!(repo.resolve("nonexistent").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn reopen_from_closed() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let repo = EpicRepository::new(db, tx);
+
+        let epic = repo.create("Reopen", "", "", "", "").await.unwrap();
+        repo.close(&epic.id).await.unwrap();
+
+        let reopened = repo.reopen(&epic.id).await.unwrap();
+        assert_eq!(reopened.status, "open");
+        assert!(reopened.closed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn reopen_from_open_is_error() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let repo = EpicRepository::new(db, tx);
+
+        let epic = repo.create("Open", "", "", "", "").await.unwrap();
+        assert!(repo.reopen(&epic.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn task_counts_aggregation() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let task_repo = crate::db::repositories::task::TaskRepository::new(db, tx);
+
+        let epic = epic_repo.create("Counts", "", "", "", "").await.unwrap();
+        task_repo.create(&epic.id, "T1", "", "", "task", 0, "").await.unwrap();
+        task_repo.create(&epic.id, "T2", "", "", "task", 0, "").await.unwrap();
+        let t3 = task_repo.create(&epic.id, "T3", "", "", "task", 0, "").await.unwrap();
+        task_repo.set_status(&t3.id, "closed").await.unwrap();
+
+        let counts = epic_repo.task_counts(&epic.id).await.unwrap();
+        assert_eq!(counts.task_count, 3);
+        assert_eq!(counts.open_count, 2);
+        assert_eq!(counts.closed_count, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_with_count_returns_child_count() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let task_repo = crate::db::repositories::task::TaskRepository::new(db, tx);
+
+        let epic = epic_repo.create("Delete", "", "", "", "").await.unwrap();
+        task_repo.create(&epic.id, "T1", "", "", "task", 0, "").await.unwrap();
+        task_repo.create(&epic.id, "T2", "", "", "task", 0, "").await.unwrap();
+
+        let count = epic_repo.delete_with_count(&epic.id).await.unwrap();
+        assert_eq!(count, 2);
+        assert!(epic_repo.get(&epic.id).await.unwrap().is_none());
     }
 
     #[tokio::test]
