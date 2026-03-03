@@ -56,6 +56,7 @@ async fn main() {
     checkpoint::spawn(db.clone(), cancel.clone());
 
     let state = build_state(db, cancel.clone(), cli.token.as_deref(), &cli.clerk_jwks_url).await;
+    state.initialize().await;
     let router = server::router(state);
 
     server::run(router, cli.port, cancel).await;

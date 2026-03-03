@@ -5,6 +5,7 @@ pub mod error;
 pub mod events;
 pub mod mcp;
 pub mod models;
+pub mod provider;
 pub mod server;
 pub mod sse;
 

@@ -14,6 +14,7 @@ use crate::auth::JwksCache;
 use crate::db::connection::Database;
 use crate::events::DjinnEvent;
 use crate::mcp;
+use crate::provider::{CatalogService, HealthTracker};
 
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
@@ -32,6 +33,10 @@ struct Inner {
     pub jwks: Option<JwksCache>,
     /// Clerk user ID from the startup token (AUTH-03).
     pub user_id: Option<String>,
+    /// models.dev catalog + custom providers (in-memory, refreshed on startup).
+    pub catalog: CatalogService,
+    /// Per-model circuit-breaker health tracker.
+    pub health_tracker: HealthTracker,
 }
 
 impl AppState {
@@ -65,6 +70,8 @@ impl AppState {
                 git_actors: Mutex::new(HashMap::new()),
                 jwks,
                 user_id,
+                catalog: CatalogService::new(),
+                health_tracker: HealthTracker::new(),
             }),
         }
     }
@@ -95,6 +102,62 @@ impl AppState {
     pub async fn git_actor(&self, path: &Path) -> Result<GitActorHandle, GitError> {
         let mut map = self.inner.git_actors.lock().await;
         crate::actors::git::get_or_spawn(&mut map, path)
+    }
+
+    pub fn catalog(&self) -> &CatalogService {
+        &self.inner.catalog
+    }
+
+    pub fn health_tracker(&self) -> &HealthTracker {
+        &self.inner.health_tracker
+    }
+
+    /// Load custom providers from DB into the catalog and trigger a background
+    /// catalog refresh from models.dev.  Call once after server startup.
+    pub async fn initialize(&self) {
+        use crate::db::repositories::custom_provider::CustomProviderRepository;
+        use crate::models::provider::{Model, Provider};
+
+        // Load custom providers from DB → merge into in-memory catalog.
+        let repo = CustomProviderRepository::new(self.db().clone());
+        match repo.list().await {
+            Ok(providers) => {
+                for cp in providers {
+                    let provider = Provider {
+                        id: cp.id.clone(),
+                        name: cp.name,
+                        npm: String::new(),
+                        env_vars: vec![cp.env_var],
+                        base_url: cp.base_url,
+                        docs_url: String::new(),
+                        is_openai_compatible: true,
+                    };
+                    let seed_models: Vec<Model> = cp
+                        .seed_models
+                        .iter()
+                        .map(|s| Model {
+                            id: s.id.clone(),
+                            provider_id: cp.id.clone(),
+                            name: s.name.clone(),
+                            tool_call: false,
+                            reasoning: false,
+                            attachment: false,
+                            context_window: 0,
+                            output_limit: 0,
+                            pricing: crate::models::provider::Pricing::default(),
+                        })
+                        .collect();
+                    self.catalog().add_custom_provider(provider, seed_models);
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to load custom providers from DB"),
+        }
+
+        // Kick off background refresh from models.dev.
+        let catalog = self.catalog().clone();
+        tokio::spawn(async move {
+            catalog.refresh().await;
+        });
     }
 }
 

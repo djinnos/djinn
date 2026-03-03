@@ -25,9 +25,9 @@ impl DjinnMcpServer {
     pub fn new(state: AppState) -> Self {
         Self {
             state: state.clone(),
-            // Combine all domain tool routers here as features are added:
-            // e.g. Self::system_tool_router() + Self::task_tool_router()
-            tool_router: Self::system_tool_router(),
+            tool_router: Self::system_tool_router()
+                + Self::memory_tool_router()
+                + Self::provider_tool_router(),
         }
     }
 
