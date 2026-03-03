@@ -137,15 +137,15 @@ impl AppState {
             self.cancel().clone(),
             self.db().clone(),
             supervisor.clone(),
+            self.catalog().clone(),
             self.health_tracker().clone(),
         );
 
         *self.inner.supervisor.lock().await = Some(supervisor.clone());
         *self.inner.coordinator.lock().await = Some(coordinator.clone());
 
-        if let Err(e) = coordinator.trigger_dispatch().await {
-            tracing::warn!(error = %e, "initial coordinator dispatch trigger failed");
-        }
+        // Coordinator starts paused — require explicit `execution_start` to begin dispatching.
+        tracing::info!("coordinator spawned (paused — awaiting explicit execution_start)");
     }
 
     /// Load custom providers from DB into the catalog and trigger a background

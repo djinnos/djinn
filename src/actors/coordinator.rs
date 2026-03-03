@@ -19,15 +19,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::actors::supervisor::{AgentSupervisorHandle, SupervisorError};
 use crate::db::connection::Database;
+use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::task::{ReadyQuery, TaskRepository};
 use crate::events::DjinnEvent;
 use crate::models::task::TransitionAction;
+use crate::provider::catalog::CatalogService;
 use crate::provider::health::HealthTracker;
 
 /// Interval between stuck-detection passes (AGENT-08).
 const STUCK_INTERVAL: Duration = Duration::from_secs(30);
-#[cfg(not(test))]
-const DEFAULT_MODEL_ID: &str = "openai/gpt-4o-mini";
 #[cfg(test)]
 const DEFAULT_MODEL_ID: &str = "test/mock";
 
@@ -89,7 +89,7 @@ struct CoordinatorActor {
     db: Database,
     events_tx: broadcast::Sender<DjinnEvent>,
     supervisor: AgentSupervisorHandle,
-    #[allow(dead_code)] // will be used by d9s4 model-availability checks
+    catalog: CatalogService,
     health: HealthTracker,
     // State
     paused: bool,
@@ -100,7 +100,7 @@ struct CoordinatorActor {
 }
 
 // Field count: receiver, events, cancel, tick, db, events_tx, supervisor,
-//              health, paused, dispatched, recovered = 11 ✓ (≤20)
+//              catalog, health, paused, dispatched, recovered = 12 ✓ (≤20)
 
 impl CoordinatorActor {
     fn new(
@@ -109,6 +109,7 @@ impl CoordinatorActor {
         cancel: CancellationToken,
         db: Database,
         supervisor: AgentSupervisorHandle,
+        catalog: CatalogService,
         health: HealthTracker,
     ) -> Self {
         let events = events_tx.subscribe();
@@ -122,8 +123,9 @@ impl CoordinatorActor {
             db,
             events_tx,
             supervisor,
+            catalog,
             health,
-            paused: false,
+            paused: true,
             dispatch_limit: 50,
             dispatched: 0,
             recovered: 0,
@@ -259,9 +261,53 @@ impl CoordinatorActor {
         }
     }
 
+    /// Resolve dispatch model: find a provider with stored credentials and pick
+    /// its first tool_call-capable model. Returns `None` if no model is configured.
+    async fn resolve_dispatch_model(&self) -> Option<String> {
+        #[cfg(test)]
+        {
+            return Some(DEFAULT_MODEL_ID.to_owned());
+        }
+
+        #[cfg(not(test))]
+        {
+            let cred_repo = CredentialRepository::new(self.db.clone(), self.events_tx.clone());
+            let credentials = cred_repo.list().await.ok()?;
+            if credentials.is_empty() {
+                return None;
+            }
+
+            for cred in &credentials {
+                let models = self.catalog.list_models(&cred.provider_id);
+                // Prefer a model with tool_call capability.
+                if let Some(model) = models.iter().find(|m| m.tool_call) {
+                    return Some(format!("{}/{}", cred.provider_id, model.id));
+                }
+                // Fall back to first model if none has tool_call.
+                if let Some(model) = models.first() {
+                    return Some(format!("{}/{}", cred.provider_id, model.id));
+                }
+            }
+
+            None
+        }
+    }
+
     /// Find all ready tasks (open, no unresolved blockers, non-epic) and dispatch
     /// those that don't already have an active session.
     async fn dispatch_ready_tasks(&mut self) {
+        // Resolve the model to use for dispatch. If no model is configured
+        // (no credentials stored), skip dispatch entirely.
+        let model_id = match self.resolve_dispatch_model().await {
+            Some(id) => id,
+            None => {
+                tracing::debug!(
+                    "CoordinatorActor: no configured model found, skipping dispatch"
+                );
+                return;
+            }
+        };
+
         let repo = self.task_repo();
         let mut ready = match repo
             .list_ready(ReadyQuery {
@@ -296,9 +342,9 @@ impl CoordinatorActor {
         });
 
         for task in ready {
-            if !self.health.is_available(DEFAULT_MODEL_ID) {
+            if !self.health.is_available(&model_id) {
                 tracing::warn!(
-                    model_id = DEFAULT_MODEL_ID,
+                    model_id = %model_id,
                     task_id = %task.short_id,
                     "CoordinatorActor: model unavailable by health tracker, skipping dispatch"
                 );
@@ -322,8 +368,8 @@ impl CoordinatorActor {
                 }
             }
 
-            tracing::info!(task_id = %task.short_id, "CoordinatorActor: dispatching task");
-            match self.supervisor.dispatch(&task.id, DEFAULT_MODEL_ID).await {
+            tracing::info!(task_id = %task.short_id, model_id = %model_id, "CoordinatorActor: dispatching task");
+            match self.supervisor.dispatch(&task.id, &model_id).await {
                 Ok(()) => self.dispatched += 1,
                 Err(e) => {
                     tracing::warn!(
@@ -422,10 +468,12 @@ impl CoordinatorHandle {
         cancel: CancellationToken,
         db: Database,
         supervisor: AgentSupervisorHandle,
+        catalog: CatalogService,
         health: HealthTracker,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(32);
-        let actor = CoordinatorActor::new(receiver, events_tx, cancel, db, supervisor, health);
+        let actor =
+            CoordinatorActor::new(receiver, events_tx, cancel, db, supervisor, catalog, health);
         tokio::spawn(actor.run());
         Self { sender }
     }
@@ -515,8 +563,9 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let session_manager = init_session_manager(sessions_dir);
         let supervisor = AgentSupervisorHandle::spawn(app_state, session_manager, cancel.clone());
+        let catalog = CatalogService::new();
         let health = HealthTracker::new();
-        CoordinatorHandle::spawn(tx.clone(), cancel, db.clone(), supervisor, health)
+        CoordinatorHandle::spawn(tx.clone(), cancel, db.clone(), supervisor, catalog, health)
     }
 
     async fn make_epic(
@@ -532,13 +581,13 @@ mod tests {
     // ── Status ───────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn initial_status_is_not_paused() {
+    async fn initial_status_is_paused() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let handle = spawn_coordinator(&db, &tx);
 
         let status = handle.get_status().await.unwrap();
-        assert!(!status.paused);
+        assert!(status.paused, "coordinator should start paused by default");
         assert_eq!(status.tasks_dispatched, 0);
         assert_eq!(status.sessions_recovered, 0);
     }
@@ -590,6 +639,7 @@ mod tests {
             .unwrap();
 
         let handle = spawn_coordinator(&db, &tx);
+        handle.resume().await.unwrap();
         handle.trigger_dispatch().await.unwrap();
 
         // Give the actor time to process the message and run dispatch.
@@ -634,6 +684,7 @@ mod tests {
         .unwrap();
 
         let handle = spawn_coordinator(&db, &tx);
+        handle.resume().await.unwrap();
         handle.trigger_dispatch().await.unwrap();
 
         let status = handle.get_status().await.unwrap();
@@ -660,6 +711,7 @@ mod tests {
         repo.set_status(&task.id, "in_progress").await.unwrap();
 
         let handle = spawn_coordinator(&db, &tx);
+        handle.resume().await.unwrap();
         handle.trigger_stuck_scan().await.unwrap();
 
         let status = handle.get_status().await.unwrap();
