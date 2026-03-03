@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// A knowledge base note. Source of truth is the markdown file on disk;
 /// this struct represents the SQLite index row.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Note {
     pub id: String,
     pub project_id: String,
@@ -31,6 +31,51 @@ pub struct NoteSearchResult {
     pub note_type: String,
     /// HTML snippet with `<b>…</b>` highlights around matched terms.
     pub snippet: String,
+}
+
+/// Compact note summary (no full content) for list and recent queries.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct NoteCompact {
+    pub id: String,
+    pub permalink: String,
+    pub title: String,
+    pub note_type: String,
+    pub folder: String,
+    pub updated_at: String,
+}
+
+/// A single git commit entry for note history.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GitLogEntry {
+    pub sha: String,
+    pub message: String,
+    pub author: String,
+    pub date: String,
+}
+
+/// Health report for a project's knowledge base.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct HealthReport {
+    pub total_notes: i64,
+    pub broken_link_count: i64,
+    pub orphan_note_count: i64,
+    pub stale_notes_by_folder: Vec<StaleFolder>,
+}
+
+/// Stale-note count for one folder.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct StaleFolder {
+    pub folder: String,
+    pub count: i64,
+}
+
+/// Context built from a seed note + linked related notes.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BuildContextResponse {
+    /// Full-content notes at the seed.
+    pub primary: Vec<Note>,
+    /// Summary-only notes reached by link traversal.
+    pub related: Vec<NoteCompact>,
 }
 
 // ── Wikilink graph types ──────────────────────────────────────────────────────

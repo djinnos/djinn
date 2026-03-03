@@ -55,6 +55,36 @@ pub struct CountQuery {
     pub group_by: Option<String>,
 }
 
+/// Minimal task reference returned by blocker listing queries.
+#[derive(Debug)]
+pub struct BlockerRef {
+    pub task_id: String,
+    pub short_id: String,
+    pub title: String,
+    pub status: String,
+}
+
+/// Filters for [`TaskRepository::list_ready`].
+pub struct ReadyQuery {
+    pub issue_type: Option<String>,
+    pub label: Option<String>,
+    pub owner: Option<String>,
+    pub priority_max: Option<i64>,
+    pub limit: i64,
+}
+
+impl Default for ReadyQuery {
+    fn default() -> Self {
+        Self {
+            issue_type: None,
+            label: None,
+            owner: None,
+            priority_max: None,
+            limit: 25,
+        }
+    }
+}
+
 pub struct TaskRepository {
     db: Database,
     events: broadcast::Sender<DjinnEvent>,
@@ -73,7 +103,7 @@ impl TaskRepository {
                     "SELECT id, short_id, epic_id, title, description, design, issue_type,
                             status, priority, owner, labels, acceptance_criteria,
                             reopen_count, continuation_count, created_at, updated_at, closed_at,
-                            blocked_from_status, close_reason
+                            blocked_from_status, close_reason, memory_refs
                      FROM tasks WHERE epic_id = ?1 ORDER BY priority, created_at",
                 )?;
                 let tasks = stmt
@@ -92,7 +122,7 @@ impl TaskRepository {
                     "SELECT id, short_id, epic_id, title, description, design, issue_type,
                             status, priority, owner, labels, acceptance_criteria,
                             reopen_count, continuation_count, created_at, updated_at, closed_at,
-                            blocked_from_status, close_reason
+                            blocked_from_status, close_reason, memory_refs
                      FROM tasks WHERE status = ?1 ORDER BY priority, created_at",
                 )?;
                 let tasks = stmt
@@ -123,7 +153,7 @@ impl TaskRepository {
                         "SELECT id, short_id, epic_id, title, description, design, issue_type,
                                 status, priority, owner, labels, acceptance_criteria,
                                 reopen_count, continuation_count, created_at, updated_at, closed_at,
-                                blocked_from_status, close_reason
+                                blocked_from_status, close_reason, memory_refs
                          FROM tasks WHERE short_id = ?1",
                         [&short_id],
                         row_to_task,
@@ -252,9 +282,13 @@ impl TaskRepository {
                 let apply = compute_transition(&action, &from, target_override.as_ref())?;
 
                 // For Start: block if any unresolved blockers exist.
+                // A blocker is unresolved if its blocking task is not in approved/closed status.
                 if action == TransitionAction::Start {
                     let count: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM blockers WHERE task_id = ?1",
+                        "SELECT COUNT(*) FROM blockers b
+                         JOIN tasks bt ON b.blocking_task_id = bt.id
+                         WHERE b.task_id = ?1
+                           AND bt.status NOT IN ('approved', 'closed')",
                         [&id],
                         |r| r.get(0),
                     )?;
@@ -344,6 +378,13 @@ impl TaskRepository {
             .await?;
 
         let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
+
+        // Blocker resolution: when a task reaches approved/closed, notify any tasks
+        // it was blocking that are now fully unblocked, so coordinators can dispatch them.
+        if matches!(task.status.as_str(), "approved" | "closed") {
+            self.emit_unblocked_tasks(&task.id).await?;
+        }
+
         Ok(task)
     }
 
@@ -418,14 +459,37 @@ impl TaskRepository {
 
     // ── Blockers ─────────────────────────────────────────────────────────────
 
+    /// Add a blocker relationship: `task_id` is blocked by `blocking_id`.
+    ///
+    /// Rejects self-loops and cycles detected via a recursive CTE walk of the
+    /// existing blocking graph.
     pub async fn add_blocker(&self, task_id: &str, blocking_id: &str) -> Result<()> {
+        if task_id == blocking_id {
+            return Err(Error::Internal("task cannot block itself".into()));
+        }
         let task_id = task_id.to_owned();
         let blocking_id = blocking_id.to_owned();
         self.db
             .write(move |conn| {
+                // Cycle detection: check if task_id already (transitively) blocks blocking_id.
+                // If so, adding "blocking_id blocks task_id" would form a cycle.
+                let would_cycle: bool = conn.query_row(
+                    "WITH RECURSIVE reach(id) AS (
+                         SELECT task_id FROM blockers WHERE blocking_task_id = ?1
+                         UNION
+                         SELECT b.task_id FROM blockers b JOIN reach r ON b.blocking_task_id = r.id
+                     )
+                     SELECT EXISTS(SELECT 1 FROM reach WHERE id = ?2)",
+                    rusqlite::params![&task_id, &blocking_id],
+                    |r| r.get(0),
+                )?;
+                if would_cycle {
+                    return Err(Error::Internal(
+                        "would create circular blocker dependency".into(),
+                    ));
+                }
                 conn.execute(
-                    "INSERT OR IGNORE INTO blockers (task_id, blocking_task_id)
-                     VALUES (?1, ?2)",
+                    "INSERT OR IGNORE INTO blockers (task_id, blocking_task_id) VALUES (?1, ?2)",
                     [&task_id, &blocking_id],
                 )?;
                 Ok(())
@@ -447,19 +511,157 @@ impl TaskRepository {
             .await
     }
 
-    pub async fn list_blockers(&self, task_id: &str) -> Result<Vec<String>> {
+    /// List tasks that are blocking `task_id`, with title and status info.
+    pub async fn list_blockers(&self, task_id: &str) -> Result<Vec<BlockerRef>> {
         let task_id = task_id.to_owned();
         self.db
             .call(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT blocking_task_id FROM blockers WHERE task_id = ?1",
+                    "SELECT t.id, t.short_id, t.title, t.status
+                     FROM blockers b
+                     JOIN tasks t ON t.id = b.blocking_task_id
+                     WHERE b.task_id = ?1
+                     ORDER BY t.created_at",
                 )?;
-                let ids = stmt
-                    .query_map([&task_id], |r| r.get(0))?
-                    .collect::<std::result::Result<Vec<String>, _>>()?;
-                Ok(ids)
+                let refs = stmt
+                    .query_map([&task_id], |r| {
+                        Ok(BlockerRef {
+                            task_id: r.get(0)?,
+                            short_id: r.get(1)?,
+                            title: r.get(2)?,
+                            status: r.get(3)?,
+                        })
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(refs)
             })
             .await
+    }
+
+    /// List tasks that are blocked BY `blocking_task_id`.
+    pub async fn list_blocked_by(&self, blocking_task_id: &str) -> Result<Vec<BlockerRef>> {
+        let blocking_task_id = blocking_task_id.to_owned();
+        self.db
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT t.id, t.short_id, t.title, t.status
+                     FROM blockers b
+                     JOIN tasks t ON t.id = b.task_id
+                     WHERE b.blocking_task_id = ?1
+                     ORDER BY t.created_at",
+                )?;
+                let refs = stmt
+                    .query_map([&blocking_task_id], |r| {
+                        Ok(BlockerRef {
+                            task_id: r.get(0)?,
+                            short_id: r.get(1)?,
+                            title: r.get(2)?,
+                            status: r.get(3)?,
+                        })
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(refs)
+            })
+            .await
+    }
+
+    /// List tasks ready to start: status='open' with no unresolved blockers.
+    pub async fn list_ready(&self, query: ReadyQuery) -> Result<Vec<Task>> {
+        self.db
+            .call(move |conn| {
+                let mut clauses: Vec<String> = vec![
+                    "t.status = 'open'".to_owned(),
+                    "NOT EXISTS (
+                         SELECT 1 FROM blockers b2
+                         JOIN tasks bt ON bt.id = b2.blocking_task_id
+                         WHERE b2.task_id = t.id
+                           AND bt.status NOT IN ('approved', 'closed')
+                     )"
+                    .to_owned(),
+                ];
+                let mut params: Vec<rusqlite::types::Value> = Vec::new();
+
+                if let Some(it) = &query.issue_type {
+                    if let Some(neg) = it.strip_prefix('!') {
+                        clauses.push("t.issue_type != ?".to_owned());
+                        params.push(rusqlite::types::Value::Text(neg.to_owned()));
+                    } else {
+                        clauses.push("t.issue_type = ?".to_owned());
+                        params.push(rusqlite::types::Value::Text(it.clone()));
+                    }
+                }
+                if let Some(lbl) = &query.label {
+                    clauses.push(
+                        "EXISTS (SELECT 1 FROM json_each(t.labels) WHERE value = ?)".to_owned(),
+                    );
+                    params.push(rusqlite::types::Value::Text(lbl.clone()));
+                }
+                if let Some(owner) = &query.owner {
+                    clauses.push("t.owner = ?".to_owned());
+                    params.push(rusqlite::types::Value::Text(owner.clone()));
+                }
+                if let Some(pmax) = query.priority_max {
+                    clauses.push("t.priority <= ?".to_owned());
+                    params.push(rusqlite::types::Value::Integer(pmax));
+                }
+                params.push(rusqlite::types::Value::Integer(query.limit));
+
+                let where_sql = clauses.join(" AND ");
+                let sql = format!(
+                    "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
+                            t.issue_type, t.status, t.priority, t.owner, t.labels,
+                            t.acceptance_criteria, t.reopen_count, t.continuation_count,
+                            t.created_at, t.updated_at, t.closed_at,
+                            t.blocked_from_status, t.close_reason, t.memory_refs
+                     FROM tasks t
+                     WHERE {where_sql}
+                     ORDER BY t.priority ASC, t.created_at ASC
+                     LIMIT ?"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let tasks = stmt
+                    .query_map(rusqlite::params_from_iter(params.iter()), row_to_task)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(tasks)
+            })
+            .await
+    }
+
+    /// Emit `TaskUpdated` for tasks that were blocked by `completed_task_id` and
+    /// are now fully unblocked (all their remaining blockers are approved/closed).
+    async fn emit_unblocked_tasks(&self, completed_task_id: &str) -> Result<()> {
+        let completed = completed_task_id.to_owned();
+        let unblocked = self
+            .db
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
+                            t.issue_type, t.status, t.priority, t.owner, t.labels,
+                            t.acceptance_criteria, t.reopen_count, t.continuation_count,
+                            t.created_at, t.updated_at, t.closed_at,
+                            t.blocked_from_status, t.close_reason, t.memory_refs
+                     FROM blockers b
+                     JOIN tasks t ON t.id = b.task_id
+                     WHERE b.blocking_task_id = ?1
+                       AND t.status = 'open'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM blockers b2
+                           JOIN tasks bt ON bt.id = b2.blocking_task_id
+                           WHERE b2.task_id = t.id
+                             AND bt.status NOT IN ('approved', 'closed')
+                       )",
+                )?;
+                let tasks = stmt
+                    .query_map([&completed], row_to_task)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(tasks)
+            })
+            .await?;
+
+        for t in unblocked {
+            let _ = self.events.send(DjinnEvent::TaskUpdated(t));
+        }
+        Ok(())
     }
 
     // ── Activity log ─────────────────────────────────────────────────────────
@@ -525,7 +727,7 @@ impl TaskRepository {
                         "SELECT id, short_id, epic_id, title, description, design, issue_type,
                                 status, priority, owner, labels, acceptance_criteria,
                                 reopen_count, continuation_count, created_at, updated_at, closed_at,
-                                blocked_from_status, close_reason
+                                blocked_from_status, close_reason, memory_refs
                          FROM tasks WHERE id = ?1 OR short_id = ?1",
                         [&id],
                         row_to_task,
@@ -563,7 +765,7 @@ impl TaskRepository {
                     "SELECT id, short_id, epic_id, title, description, design, issue_type,
                             status, priority, owner, labels, acceptance_criteria,
                             reopen_count, continuation_count, created_at, updated_at, closed_at,
-                            blocked_from_status, close_reason
+                            blocked_from_status, close_reason, memory_refs
                      FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
                 );
                 let mut stmt = conn.prepare(&sql)?;
@@ -660,7 +862,7 @@ const TASK_SELECT_WHERE_ID: &str =
     "SELECT id, short_id, epic_id, title, description, design, issue_type,
             status, priority, owner, labels, acceptance_criteria,
             reopen_count, continuation_count, created_at, updated_at, closed_at,
-            blocked_from_status, close_reason
+            blocked_from_status, close_reason, memory_refs
      FROM tasks WHERE id = ?1";
 
 fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
@@ -684,6 +886,7 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         closed_at: row.get(16)?,
         blocked_from_status: row.get(17)?,
         close_reason: row.get(18)?,
+        memory_refs: row.get(19)?,
     })
 }
 
@@ -905,12 +1108,95 @@ mod tests {
         let t1 = repo.create(&epic.id, "T1", "", "", "task", 0, "").await.unwrap();
         let t2 = repo.create(&epic.id, "T2", "", "", "task", 1, "").await.unwrap();
 
+        // add blocker: t2 is blocked by t1
         repo.add_blocker(&t2.id, &t1.id).await.unwrap();
         let blockers = repo.list_blockers(&t2.id).await.unwrap();
-        assert_eq!(blockers, vec![t1.id.clone()]);
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].task_id, t1.id);
+        assert_eq!(blockers[0].status, "open");
+        assert!(!matches!(blockers[0].status.as_str(), "approved" | "closed"));
 
+        // inverse: t1 blocks t2
+        let blocked = repo.list_blocked_by(&t1.id).await.unwrap();
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].task_id, t2.id);
+
+        // self-loop rejected
+        assert!(repo.add_blocker(&t1.id, &t1.id).await.is_err());
+
+        // remove blocker
         repo.remove_blocker(&t2.id, &t1.id).await.unwrap();
         assert!(repo.list_blockers(&t2.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn blocker_cycle_detection() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let t1 = repo.create(&epic.id, "T1", "", "", "task", 0, "").await.unwrap();
+        let t2 = repo.create(&epic.id, "T2", "", "", "task", 1, "").await.unwrap();
+        let t3 = repo.create(&epic.id, "T3", "", "", "task", 2, "").await.unwrap();
+
+        // t2 is blocked by t1; t3 is blocked by t2
+        repo.add_blocker(&t2.id, &t1.id).await.unwrap();
+        repo.add_blocker(&t3.id, &t2.id).await.unwrap();
+
+        // Adding t1 blocked by t3 would create a cycle: t1 → t2 → t3 → t1
+        let result = repo.add_blocker(&t1.id, &t3.id).await;
+        assert!(result.is_err(), "expected cycle detection to reject this");
+    }
+
+    #[tokio::test]
+    async fn start_blocked_by_unresolved_blocker() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let t1 = repo.create(&epic.id, "T1", "", "", "task", 0, "").await.unwrap();
+        let t2 = repo.create(&epic.id, "T2", "", "", "task", 1, "").await.unwrap();
+
+        // t2 blocked by t1 (which is open = unresolved)
+        repo.add_blocker(&t2.id, &t1.id).await.unwrap();
+        let result = repo
+            .transition(&t2.id, TransitionAction::Start, "", "system", None, None)
+            .await;
+        assert!(result.is_err(), "should not start with unresolved blocker");
+
+        // Close t1 → t2 should now be startable
+        repo.set_status(&t1.id, "closed").await.unwrap();
+        repo
+            .transition(&t2.id, TransitionAction::Start, "", "system", None, None)
+            .await
+            .expect("should start after blocker resolved");
+    }
+
+    #[tokio::test]
+    async fn list_ready_excludes_blocked_tasks() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let t1 = repo.create(&epic.id, "T1", "", "", "task", 0, "").await.unwrap();
+        let t2 = repo.create(&epic.id, "T2", "", "", "task", 1, "").await.unwrap();
+
+        // t2 blocked by t1
+        repo.add_blocker(&t2.id, &t1.id).await.unwrap();
+
+        let ready = repo.list_ready(ReadyQuery::default()).await.unwrap();
+        let ids: Vec<&str> = ready.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&t1.id.as_str()), "t1 should be ready");
+        assert!(!ids.contains(&t2.id.as_str()), "t2 should not be ready (blocked)");
+
+        // Close t1 → t2 becomes ready
+        repo.set_status(&t1.id, "closed").await.unwrap();
+        let ready2 = repo.list_ready(ReadyQuery::default()).await.unwrap();
+        let ids2: Vec<&str> = ready2.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids2.contains(&t2.id.as_str()), "t2 should be ready after t1 closed");
     }
 
     #[tokio::test]

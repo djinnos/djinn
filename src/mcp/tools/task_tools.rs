@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::connection::OptionalExt;
 use crate::db::repositories::epic::EpicRepository;
-use crate::db::repositories::task::{CountQuery, ListQuery, TaskRepository};
+use crate::db::repositories::task::{CountQuery, ListQuery, ReadyQuery, TaskRepository};
 use crate::mcp::server::DjinnMcpServer;
 use crate::models::task::Task;
 
@@ -136,6 +136,53 @@ pub struct TaskCommentAddParams {
     pub body: String,
     pub actor_id: Option<String>,
     pub actor_role: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TaskBlockersAddParams {
+    /// Task UUID or short_id (the task being blocked).
+    pub id: String,
+    /// Task UUID or short_id of the task that blocks it.
+    pub blocking_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TaskBlockersRemoveParams {
+    /// Task UUID or short_id (the blocked task).
+    pub id: String,
+    /// Task UUID or short_id of the blocker to remove.
+    pub blocking_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TaskBlockersListParams {
+    /// Task UUID or short_id.
+    pub id: String,
+    /// Absolute project path (optional).
+    pub project: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TaskBlockedListParams {
+    /// Task UUID or short_id.
+    pub id: String,
+    /// Absolute project path (optional).
+    pub project: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TaskReadyParams {
+    /// Filter by issue type. Positive ("task") or negative ("!epic").
+    pub issue_type: Option<String>,
+    /// Filter by label value.
+    pub label: Option<String>,
+    /// Filter by owner email.
+    pub owner: Option<String>,
+    /// Maximum priority to include (0=highest, higher numbers=lower priority).
+    pub priority_max: Option<i64>,
+    pub limit: Option<i64>,
+    /// Absolute project path (optional).
+    pub project: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -436,6 +483,129 @@ impl DjinnMcpServer {
         }
     }
 
+    /// Add a blocker relationship between two tasks. Rejects epics and circular dependencies.
+    #[tool(description = "Add a blocker relationship: task 'id' is blocked by task 'blocking_id'. Both accept task ID (full UUID or short_id, e.g., 'k7m2'). Epics cannot participate in blocker relationships — both tasks must be non-epic (task, feature, or bug).")]
+    pub async fn task_blockers_add(
+        &self,
+        Parameters(p): Parameters<TaskBlockersAddParams>,
+    ) -> Json<serde_json::Value> {
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let task_id = match self.resolve_task_not_epic(&p.id).await {
+            Ok(id) => id,
+            Err(e) => return Json(e),
+        };
+        let blocking_id = match self.resolve_task_not_epic(&p.blocking_id).await {
+            Ok(id) => id,
+            Err(e) => return Json(e),
+        };
+        match repo.add_blocker(&task_id, &blocking_id).await {
+            Ok(()) => Json(serde_json::json!({ "ok": true })),
+            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        }
+    }
+
+    /// Remove a blocker relationship between two tasks.
+    #[tool(description = "Remove a blocker relationship. Both task IDs accept (full UUID or short_id, e.g., 'k7m2').")]
+    pub async fn task_blockers_remove(
+        &self,
+        Parameters(p): Parameters<TaskBlockersRemoveParams>,
+    ) -> Json<serde_json::Value> {
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(not_found(&p.id));
+        };
+        let Some(blocker) = repo.resolve(&p.blocking_id).await.ok().flatten() else {
+            return Json(not_found(&p.blocking_id));
+        };
+        match repo.remove_blocker(&task.id, &blocker.id).await {
+            Ok(()) => Json(serde_json::json!({ "ok": true })),
+            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        }
+    }
+
+    /// List tasks that block the given task.
+    #[tool(description = "List tasks that block the given task. Accepts task ID (full UUID or short_id, e.g., 'k7m2').")]
+    pub async fn task_blockers_list(
+        &self,
+        Parameters(p): Parameters<TaskBlockersListParams>,
+    ) -> Json<serde_json::Value> {
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(not_found(&p.id));
+        };
+        match repo.list_blockers(&task.id).await {
+            Ok(refs) => {
+                let blockers: Vec<serde_json::Value> = refs
+                    .iter()
+                    .map(|b| {
+                        let resolved = matches!(b.status.as_str(), "approved" | "closed");
+                        serde_json::json!({
+                            "blocking_task_id":       b.task_id,
+                            "blocking_task_short_id": b.short_id,
+                            "blocking_task_title":    b.title,
+                            "blocking_task_status":   b.status,
+                            "resolved":               resolved,
+                        })
+                    })
+                    .collect();
+                Json(serde_json::json!({ "blockers": blockers }))
+            }
+            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        }
+    }
+
+    /// List tasks that are blocked by the given task.
+    #[tool(description = "List task IDs that are blocked by the given task. Accepts task ID (full UUID or short_id, e.g., 'k7m2'). Epics will never appear in blocker relationships.")]
+    pub async fn task_blocked_list(
+        &self,
+        Parameters(p): Parameters<TaskBlockedListParams>,
+    ) -> Json<serde_json::Value> {
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(not_found(&p.id));
+        };
+        match repo.list_blocked_by(&task.id).await {
+            Ok(refs) => {
+                let tasks: Vec<serde_json::Value> = refs
+                    .iter()
+                    .map(|b| {
+                        serde_json::json!({
+                            "task_id":  b.task_id,
+                            "short_id": b.short_id,
+                            "title":    b.title,
+                            "status":   b.status,
+                        })
+                    })
+                    .collect();
+                Json(serde_json::json!({ "tasks": tasks }))
+            }
+            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        }
+    }
+
+    /// List work items ready to start (open status with no blocking dependencies).
+    #[tool(description = "List work items ready to start (open status with no blocking dependencies)")]
+    pub async fn task_ready(
+        &self,
+        Parameters(p): Parameters<TaskReadyParams>,
+    ) -> Json<serde_json::Value> {
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let query = ReadyQuery {
+            issue_type: p.issue_type,
+            label: p.label,
+            owner: p.owner,
+            priority_max: p.priority_max,
+            limit: p.limit.unwrap_or(25).clamp(1, 100),
+        };
+        match repo.list_ready(query).await {
+            Ok(tasks) => {
+                let items: Vec<serde_json::Value> = tasks.iter().map(task_to_value).collect();
+                Json(serde_json::json!({ "tasks": items }))
+            }
+            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        }
+    }
+
     /// Add a comment to a work item. Creates an activity_log entry with event_type='comment'.
     #[tool(description = "Add a comment to a work item. Accepts task ID (full UUID or short_id, e.g., 'k7m2').")]
     pub async fn task_comment_add(
@@ -474,6 +644,24 @@ impl DjinnMcpServer {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 impl DjinnMcpServer {
+    /// Resolve a task UUID/short_id to its UUID, rejecting epics with a clear error.
+    async fn resolve_task_not_epic(
+        &self,
+        id: &str,
+    ) -> std::result::Result<String, serde_json::Value> {
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        if let Ok(Some(task)) = repo.resolve(id).await {
+            return Ok(task.id);
+        }
+        // Not found in tasks — check if it's an epic to give a clearer error.
+        if self.resolve_epic_id(id).await.is_some() {
+            return Err(serde_json::json!({
+                "error": format!("epics cannot participate in blocker relationships: {id}")
+            }));
+        }
+        Err(serde_json::json!({ "error": format!("task not found: {id}") }))
+    }
+
     /// Resolve an epic UUID or short_id to its UUID.
     pub(crate) async fn resolve_epic_id(&self, id_or_short: &str) -> Option<String> {
         let id = id_or_short.to_owned();
