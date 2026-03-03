@@ -211,13 +211,13 @@ labels=["hotfix", "tech-debt", "a11y"]
 Query examples:
 ```
 # All auth work in sprint 3
-task_list(project="...", label="sprint:3", text="auth")
+task_list(label="sprint:3", text="auth")
 
 # All API tasks
-task_list(project="...", label="layer:api", issue_type="task")
+task_list(label="layer:api", issue_type="task")
 
 # Count by area
-task_count(project="...", group_by="parent")
+task_count(group_by="epic")
 ```
 
 ## Acceptance Criteria Patterns
@@ -275,7 +275,6 @@ Always connect work items to relevant architectural knowledge:
 # After writing an ADR
 task_update(
   id="feature-id",
-  project="...",
   memory_refs_add=["decisions/adr-005-jwt-session.md"]
 )
 

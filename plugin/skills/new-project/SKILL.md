@@ -15,7 +15,8 @@ Guide the user through project definition via deep questioning, then create a co
 | memory_read | Read existing notes for context or to check content before overwriting |
 | memory_search | Find notes by keyword to avoid duplicates and discover related content |
 | memory_catalog | Orient at session start -- list all existing knowledge in memory |
-| task_create | Create domain-structured epics and features on the task board |
+| epic_create | Create domain-structured epics on the task board |
+| task_create | Create features and tasks under epics on the task board |
 | task_blockers_add | Set sequencing dependencies between epics and features |
 | task_update | Add memory_refs linking tasks back to memory notes for traceability |
 
@@ -45,7 +46,7 @@ If `$ARGUMENTS` contains `--auto`:
 Check what already exists before creating anything.
 
 1. Run `memory_catalog()` to list all existing notes
-2. Run `task_list(issue_type="epic", project="{project_path}")` to check for existing epics
+2. Run `epic_list()` to check for existing epics
 3. **If a brief already exists:** Tell the user what you found. Ask whether they want to:
    - Start fresh (overwrites existing brief and creates new artifacts alongside existing ones)
    - Extend the existing project (skip to a specific step like research or requirements)
@@ -280,10 +281,8 @@ Translate the roadmap into domain-structured epics and features on the Djinn tas
 
 **8b. Create epics** for each domain area:
 ```
-task_create(
-  issue_type="epic",
+epic_create(
   title="{Domain Name}",
-  project="{project_path}",
   description="...",
   emoji="{relevant_emoji}",
   color="{hex_color}"
@@ -296,8 +295,7 @@ task_create(
 ```
 task_create(
   issue_type="feature",
-  parent="{epic_id}",
-  project="{project_path}",
+  epic_id="{epic_id}",
   title="{Specific deliverable}",
   description="...",
   design="...",
@@ -312,8 +310,7 @@ task_create(
 ```
 task_blockers_add(
   id="{phase_N+1_feature_id}",
-  blocking_id="{phase_N_feature_id}",
-  project="{project_path}"
+  blocking_id="{phase_N_feature_id}"
 )
 ```
 - Features in Phase N+1 must be blocked by **at least one** feature in Phase N that they actually depend on
@@ -339,7 +336,7 @@ Verify all artifacts were created correctly.
    - 1 requirements note (type=requirement)
    - 1 roadmap note (type=roadmap)
    - 1 workflow preferences note (type=reference)
-2. **Task board check**: Run `task_list(issue_type="epic", project="{project_path}")` and verify:
+2. **Task board check**: Run `epic_list()` and verify:
    - Domain-structured epics exist (3-7 for a standard project)
    - Each epic has features under it
 3. **Wikilink check**: Spot-check that `## Relations` sections contain valid wikilinks by reading 2-3 notes and confirming linked titles exist

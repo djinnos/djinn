@@ -375,7 +375,7 @@ Reference table mapping planning concepts to Djinn storage and MCP tool calls.
 | Requirements | Memory note | memory_write | requirement | No |
 | Roadmap | Memory note | memory_write | roadmap | Yes |
 | ADR | Memory note | memory_write | adr | No |
-| Epic | Task board | task_create | epic | No |
+| Epic | Task board | epic_create | epic | No |
 | Feature | Task board | task_create | feature | No |
 | Task | Task board | task_create | task | No |
 | Bug | Task board | task_create | bug | No |

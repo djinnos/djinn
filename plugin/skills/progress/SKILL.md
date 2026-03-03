@@ -22,7 +22,7 @@ Query the Djinn task board and execution state to determine project progress and
 | task_count | Get aggregate counts grouped by status or priority |
 | task_ready | Find tasks ready to start (no blockers) |
 | execution_status | Check if execution is running |
-| execution_phase_list | See active execution phases |
+| epic_tasks | List tasks under a specific epic |
 
 ## Do NOT Use
 
@@ -44,7 +44,7 @@ Gather all the data needed to derive progress from live queries.
 2. Query task counts by status: `task_count(group_by="status")` to see how many tasks are in each state
 3. Query ready tasks: `task_ready()` to find tasks with no unresolved blockers
 4. Check execution: `execution_status()` to see if an execution session is active
-5. If a specific milestone was requested, query its tasks: `task_list(parent="{milestone_epic_id}")`
+5. If a specific milestone was requested, query its tasks: `epic_tasks(epic_id="{milestone_epic_id}")`
 
 All data comes from live queries. Do not store, cache, or write progress state anywhere.
 

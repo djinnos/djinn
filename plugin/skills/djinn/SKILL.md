@@ -84,7 +84,7 @@ Load when you need detailed patterns:
 | Skipping `memory_catalog()` at session start | Run it first — it tells you what knowledge exists before you create or search |
 | Setting blockers on features that could run in parallel | Only block on real technical or logical dependencies — let the coordinator parallelize the rest |
 | Using `close` on a task that needs review | Use `submit_task_review` → let the review pipeline run. `close` skips review entirely. |
-| Omitting `project` path | Most tools require `project` — use the absolute path to the project directory |
+| Passing `project` when not needed | Most task/epic tools no longer require `project`. Only pass it when explicitly needed (e.g., `memory_*` tools). |
 | Creating tasks without `epic_id` | Every task/feature/bug needs an `epic_id`. Tasks without an epic are rejected by the API. |
 | Using `task_create` for epics | Use `epic_create()` — epics have their own tool namespace (ADR-003). |
 | Nesting tasks under features | Features, tasks, and bugs are flat siblings under an epic. There is no parent-child between them. |

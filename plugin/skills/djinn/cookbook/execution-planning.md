@@ -101,12 +101,12 @@ execution_start(project="...", auto_merge=false)
 execution_status(project="/path/to/project")
 ```
 
-### List all phases with details
+### List tasks under an epic (phase equivalent)
 ```
-execution_phase_list(project="/path/to/project")
+epic_tasks(epic_id="epic-id")
 ```
 
-Shows: phase name, status, branch, task summaries, dependencies.
+Shows: tasks under an epic with status, priority, and labels.
 
 ### Get the code diff for a phase
 ```
@@ -278,7 +278,7 @@ execution_force_review(project="...")
 ### Start fresh execution on ready tasks
 ```
 # 1. See what's ready
-task_ready(project="...", issue_type="!epic")
+task_ready()
 
 # 2. Preview the plan
 execution_preview_unified(project="...")
@@ -304,8 +304,8 @@ execution_phase_add_task(task_id="new-task-id", target="waiting_phase")
 
 ### Review and accept a completed phase
 ```
-# 1. See phase status
-execution_phase_list(project="...")
+# 1. See tasks under the epic
+epic_tasks(epic_id="epic-id")
 
 # 2. Review the diff
 step_diff(phase_id="phase-id", project="...")
