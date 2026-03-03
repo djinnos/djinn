@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::repositories::note::NoteRepository;
 use crate::mcp::server::DjinnMcpServer;
+use crate::mcp::tools::{ObjectJson, json_object};
 use crate::models::note::{
     BrokenLink, BuildContextResponse, GitLogEntry, GraphResponse, Note, NoteCompact, OrphanNote,
     ReindexSummary,
@@ -230,9 +231,9 @@ impl DjinnMcpServer {
     pub async fn memory_write(
         &self,
         Parameters(p): Parameters<WriteParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(
+            return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),
             );
         };
@@ -259,8 +260,10 @@ impl DjinnMcpServer {
                         .update(&existing.id, &p.title, &p.content, &tags_json)
                         .await
                     {
-                        Ok(note) => return Json(note_to_value(&note)),
-                        Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+                        Ok(note) => return json_object(note_to_value(&note)),
+                        Err(e) => {
+                            return json_object(serde_json::json!({ "error": e.to_string() }));
+                        }
                     }
                 }
                 None => {}
@@ -278,8 +281,8 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(note) => Json(note_to_value(&note)),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(note) => json_object(note_to_value(&note)),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -288,9 +291,9 @@ impl DjinnMcpServer {
     pub async fn memory_read(
         &self,
         Parameters(p): Parameters<ReadParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(
+            return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),
             );
         };
@@ -307,14 +310,14 @@ impl DjinnMcpServer {
                         match repo.get(&results[0].id).await.ok().flatten() {
                             Some(n) => n,
                             None => {
-                                return Json(serde_json::json!({
+                                return json_object(serde_json::json!({
                                     "error": format!("note not found: {}", p.identifier)
                                 }));
                             }
                         }
                     }
                     _ => {
-                        return Json(
+                        return json_object(
                             serde_json::json!({ "error": format!("note not found: {}", p.identifier) }),
                         );
                     }
@@ -325,7 +328,7 @@ impl DjinnMcpServer {
         // Update last_accessed in the background (best-effort).
         let _ = repo.touch_accessed(&note.id).await;
 
-        Json(note_to_value(&note))
+        json_object(note_to_value(&note))
     }
 
     /// Edit an existing note. Operations: "append" (add to end), "prepend" (add
@@ -341,9 +344,9 @@ impl DjinnMcpServer {
     pub async fn memory_edit(
         &self,
         Parameters(p): Parameters<EditParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(
+            return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),
             );
         };
@@ -354,7 +357,7 @@ impl DjinnMcpServer {
         let note = match resolve_note_by_identifier(&repo, &project_id, &p.identifier).await {
             Some(n) => n,
             None => {
-                return Json(
+                return json_object(
                     serde_json::json!({ "error": format!("note not found: {}", p.identifier) }),
                 );
             }
@@ -368,7 +371,9 @@ impl DjinnMcpServer {
                     .await
                 {
                     Ok(moved) => moved,
-                    Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+                    Err(e) => {
+                        return json_object(serde_json::json!({ "error": e.to_string() }));
+                    }
                 }
             } else {
                 note
@@ -386,15 +391,15 @@ impl DjinnMcpServer {
             p.section.as_deref(),
         ) {
             Ok(c) => c,
-            Err(e) => return Json(serde_json::json!({ "error": e })),
+            Err(e) => return json_object(serde_json::json!({ "error": e })),
         };
 
         match repo
             .update(&note.id, &note.title, &new_content, &note.tags)
             .await
         {
-            Ok(updated) => Json(note_to_value(&updated)),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(updated) => json_object(note_to_value(&updated)),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -471,9 +476,9 @@ impl DjinnMcpServer {
     pub async fn memory_delete(
         &self,
         Parameters(p): Parameters<DeleteParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(
+            return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),
             );
         };
@@ -481,14 +486,14 @@ impl DjinnMcpServer {
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
 
         let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await else {
-            return Json(
+            return json_object(
                 serde_json::json!({ "error": format!("note not found: {}", p.identifier) }),
             );
         };
 
         match repo.delete(&note.id).await {
-            Ok(()) => Json(serde_json::json!({ "ok": true })),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(()) => json_object(serde_json::json!({ "ok": true })),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -499,9 +504,9 @@ impl DjinnMcpServer {
     pub async fn memory_move(
         &self,
         Parameters(p): Parameters<MoveParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(
+            return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),
             );
         };
@@ -509,7 +514,7 @@ impl DjinnMcpServer {
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
 
         let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await else {
-            return Json(
+            return json_object(
                 serde_json::json!({ "error": format!("note not found: {}", p.identifier) }),
             );
         };
@@ -520,8 +525,8 @@ impl DjinnMcpServer {
             .move_note(&note.id, Path::new(&p.project), new_title, &p.note_type)
             .await
         {
-            Ok(moved) => Json(note_to_value(&moved)),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(moved) => json_object(note_to_value(&moved)),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -533,14 +538,14 @@ impl DjinnMcpServer {
     pub async fn memory_health(
         &self,
         Parameters(p): Parameters<HealthParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let project_path = match &p.project {
             Some(path) => path.clone(),
-            None => return Json(serde_json::json!({ "error": "project parameter required" })),
+            None => return json_object(serde_json::json!({ "error": "project parameter required" })),
         };
 
         let Some(project_id) = self.project_id_for_path(&project_path).await else {
-            return Json(
+            return json_object(
                 serde_json::json!({ "error": format!("project not found: {project_path}") }),
             );
         };
@@ -548,8 +553,8 @@ impl DjinnMcpServer {
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
 
         match repo.health(&project_id).await {
-            Ok(h) => Json(serde_json::to_value(&h).unwrap_or(serde_json::json!({}))),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(h) => json_object(serde_json::to_value(&h).unwrap_or(serde_json::json!({}))),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -605,9 +610,9 @@ impl DjinnMcpServer {
     pub async fn memory_history(
         &self,
         Parameters(p): Parameters<HistoryParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(
+            return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),
             );
         };
@@ -620,14 +625,14 @@ impl DjinnMcpServer {
             .ok()
             .flatten()
         else {
-            return Json(
+            return json_object(
                 serde_json::json!({ "error": format!("note not found: {}", p.permalink) }),
             );
         };
 
         let limit = p.limit.unwrap_or(20).clamp(1, 100);
         let history = git_log_for_file(&note.file_path, limit).await;
-        Json(serde_json::json!({ "history": history }))
+        json_object(serde_json::json!({ "history": history }))
     }
 
     /// Get unified diff for a specific commit of a docs/ file. No SHA = returns

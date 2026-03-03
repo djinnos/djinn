@@ -6,6 +6,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::Deserialize;
 
 use crate::mcp::server::DjinnMcpServer;
+use crate::mcp::tools::{ObjectJson, json_object};
 
 // ── Param structs ─────────────────────────────────────────────────────────────
 
@@ -52,17 +53,17 @@ impl DjinnMcpServer {
     pub async fn task_sync_enable(
         &self,
         Parameters(p): Parameters<TaskSyncEnableParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let project = PathBuf::from(&p.project);
         if !project.exists() {
-            return Json(serde_json::json!({
+            return json_object(serde_json::json!({
                 "error": format!("project path not found: {}", p.project)
             }));
         }
 
         let mgr = self.state.sync_manager();
         if let Err(e) = mgr.enable("tasks", &project).await {
-            return Json(serde_json::json!({ "error": e.to_string() }));
+            return json_object(serde_json::json!({ "error": e.to_string() }));
         }
 
         // Trigger an initial export.
@@ -70,16 +71,16 @@ impl DjinnMcpServer {
         let results = mgr.export_all(Some(uid)).await;
 
         match results.into_iter().find(|r| r.channel == "tasks") {
-            Some(r) if r.ok => Json(serde_json::json!({
+            Some(r) if r.ok => json_object(serde_json::json!({
                 "ok": true,
                 "tasks_exported": r.count.unwrap_or(0),
             })),
-            Some(r) => Json(serde_json::json!({
+            Some(r) => json_object(serde_json::json!({
                 "ok": false,
                 "error": r.error.unwrap_or_default(),
                 "note": "sync enabled but initial export failed; will retry automatically",
             })),
-            None => Json(serde_json::json!({
+            None => json_object(serde_json::json!({
                 "ok": true,
                 "note": "sync enabled; no tasks to export",
             })),
@@ -94,7 +95,7 @@ impl DjinnMcpServer {
     pub async fn task_sync_disable(
         &self,
         Parameters(p): Parameters<TaskSyncDisableParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let mgr = self.state.sync_manager();
         let team_wide = p.team_wide.unwrap_or(false);
 
@@ -110,10 +111,10 @@ impl DjinnMcpServer {
         }
 
         if let Err(e) = mgr.disable("tasks").await {
-            return Json(serde_json::json!({ "error": e.to_string() }));
+            return json_object(serde_json::json!({ "error": e.to_string() }));
         }
 
-        Json(serde_json::json!({ "ok": true, "team_wide": team_wide }))
+        json_object(serde_json::json!({ "ok": true, "team_wide": team_wide }))
     }
 
     /// Export task state to git sync branch.
@@ -121,20 +122,20 @@ impl DjinnMcpServer {
     pub async fn task_sync_export(
         &self,
         Parameters(_p): Parameters<TaskSyncExportParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let mgr = self.state.sync_manager();
         let uid = self.state.sync_user_id();
         let results = mgr.export_all(Some(uid)).await;
 
         if results.is_empty() {
-            return Json(serde_json::json!({
+            return json_object(serde_json::json!({
                 "ok": false,
                 "error": "sync not enabled — call task_sync_enable first"
             }));
         }
 
         let all_ok = results.iter().all(|r| r.ok);
-        Json(serde_json::json!({ "ok": all_ok, "channels": results }))
+        json_object(serde_json::json!({ "ok": all_ok, "channels": results }))
     }
 
     /// Import task state from git sync branch.
@@ -142,19 +143,19 @@ impl DjinnMcpServer {
     pub async fn task_sync_import(
         &self,
         Parameters(_p): Parameters<TaskSyncImportParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let mgr = self.state.sync_manager();
         let results = mgr.import_all().await;
 
         if results.is_empty() {
-            return Json(serde_json::json!({
+            return json_object(serde_json::json!({
                 "ok": false,
                 "error": "sync not enabled — call task_sync_enable first"
             }));
         }
 
         let all_ok = results.iter().all(|r| r.ok);
-        Json(serde_json::json!({ "ok": all_ok, "channels": results }))
+        json_object(serde_json::json!({ "ok": all_ok, "channels": results }))
     }
 
     /// Show full sync health status including backoff state and pending export count.
@@ -164,8 +165,8 @@ impl DjinnMcpServer {
     pub async fn task_sync_status(
         &self,
         Parameters(_p): Parameters<TaskSyncStatusParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let channels = self.state.sync_manager().status().await;
-        Json(serde_json::json!({ "channels": channels }))
+        json_object(serde_json::json!({ "channels": channels }))
     }
 }

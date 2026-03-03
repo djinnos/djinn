@@ -397,7 +397,10 @@ pub async fn run(router: Router, port: u16, cancel: CancellationToken) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use axum::body::Body;
+    use axum::http::header::{ACCEPT, CONTENT_TYPE};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -420,6 +423,68 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn mcp_initialize_returns_ok() {
+        let app = test_helpers::create_test_app();
+
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "test-client",
+                    "version": "0.0.0"
+                }
+            }
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json, text/event-stream")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[test]
+    fn mcp_tools_do_not_use_untyped_json_output() {
+        fn visit(dir: &Path, offenders: &mut Vec<String>) {
+            let entries = std::fs::read_dir(dir).expect("read tools directory");
+            for entry in entries {
+                let entry = entry.expect("read entry");
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(&path, offenders);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let content = std::fs::read_to_string(&path).expect("read rust file");
+                if content.contains("Json<serde_json::Value>") {
+                    offenders.push(path.display().to_string());
+                }
+            }
+        }
+
+        let tools_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mcp/tools");
+        let mut offenders = Vec::new();
+        visit(&tools_dir, &mut offenders);
+
+        assert!(
+            offenders.is_empty(),
+            "Found forbidden Json<serde_json::Value> output in: {:?}",
+            offenders
+        );
     }
 
     /// Unit test: verify the in-memory test DB has migrations applied.

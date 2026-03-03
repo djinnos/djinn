@@ -4,6 +4,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::Deserialize;
 
 use crate::mcp::server::DjinnMcpServer;
+use crate::mcp::tools::{ObjectJson, json_object};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ExecutionStartParams {
@@ -47,8 +48,8 @@ pub struct SessionForTaskParams {
     pub project: Option<String>,
 }
 
-fn json_error(message: impl Into<String>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "ok": false, "error": message.into() }))
+fn json_error(message: impl Into<String>) -> Json<ObjectJson> {
+    json_object(serde_json::json!({ "ok": false, "error": message.into() }))
 }
 
 #[tool_router(router = execution_tool_router, vis = "pub")]
@@ -58,7 +59,7 @@ impl DjinnMcpServer {
     pub async fn execution_start(
         &self,
         Parameters(_p): Parameters<ExecutionStartParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let Some(coordinator) = self.state.coordinator().await else {
             return json_error("coordinator actor not initialized");
         };
@@ -78,7 +79,7 @@ impl DjinnMcpServer {
             return json_error(e.to_string());
         }
 
-        Json(serde_json::json!({
+        json_object(serde_json::json!({
             "ok": true,
             "state": "active",
             "resumed": status.paused,
@@ -92,7 +93,7 @@ impl DjinnMcpServer {
     pub async fn execution_pause(
         &self,
         Parameters(p): Parameters<ExecutionPauseParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let Some(coordinator) = self.state.coordinator().await else {
             return json_error("coordinator actor not initialized");
         };
@@ -118,7 +119,7 @@ impl DjinnMcpServer {
             return json_error(e.to_string());
         }
 
-        Json(serde_json::json!({
+        json_object(serde_json::json!({
             "ok": true,
             "state": "paused",
             "mode": mode,
@@ -130,7 +131,7 @@ impl DjinnMcpServer {
     pub async fn execution_resume(
         &self,
         Parameters(_p): Parameters<ExecutionResumeParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let Some(coordinator) = self.state.coordinator().await else {
             return json_error("coordinator actor not initialized");
         };
@@ -139,7 +140,7 @@ impl DjinnMcpServer {
             return json_error(e.to_string());
         }
 
-        Json(serde_json::json!({
+        json_object(serde_json::json!({
             "ok": true,
             "state": "active",
         }))
@@ -152,7 +153,7 @@ impl DjinnMcpServer {
     pub async fn execution_status(
         &self,
         Parameters(_p): Parameters<ExecutionStatusParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let Some(coordinator) = self.state.coordinator().await else {
             return json_error("coordinator actor not initialized");
         };
@@ -197,7 +198,7 @@ impl DjinnMcpServer {
             })
             .collect::<Vec<_>>();
 
-        Json(serde_json::json!({
+        json_object(serde_json::json!({
             "state": if coordinator_status.paused { "paused" } else { "active" },
             "running_sessions": supervisor_status.active_sessions,
             "capacity": capacity,
@@ -216,7 +217,7 @@ impl DjinnMcpServer {
     pub async fn execution_kill_task(
         &self,
         Parameters(p): Parameters<ExecutionKillTaskParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let Some(supervisor) = self.state.supervisor().await else {
             return json_error("supervisor actor not initialized");
         };
@@ -225,7 +226,7 @@ impl DjinnMcpServer {
             return json_error(e.to_string());
         }
 
-        Json(serde_json::json!({
+        json_object(serde_json::json!({
             "ok": true,
             "task_id": p.task_id,
         }))
@@ -236,7 +237,7 @@ impl DjinnMcpServer {
     pub async fn session_for_task(
         &self,
         Parameters(p): Parameters<SessionForTaskParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let Some(supervisor) = self.state.supervisor().await else {
             return json_error("supervisor actor not initialized");
         };
@@ -247,14 +248,14 @@ impl DjinnMcpServer {
         };
 
         match session {
-            Some(session) => Json(serde_json::json!({
+            Some(session) => json_object(serde_json::json!({
                 "task_id": session.task_id,
                 "model_id": session.model_id,
                 "session_id": session.session_id,
                 "duration_seconds": session.duration_seconds,
                 "worktree_path": session.worktree_path,
             })),
-            None => Json(serde_json::json!({
+            None => json_object(serde_json::json!({
                 "task_id": p.task_id,
                 "session": null,
             })),

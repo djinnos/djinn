@@ -9,6 +9,7 @@ use crate::db::repositories::task::{
     ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository,
 };
 use crate::mcp::server::DjinnMcpServer;
+use crate::mcp::tools::{ObjectJson, json_object};
 use crate::models::task::{Task, TaskStatus, TransitionAction};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -289,10 +290,10 @@ impl DjinnMcpServer {
     pub async fn task_create(
         &self,
         Parameters(p): Parameters<TaskCreateParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         // Resolve parent epic.
         let Some(epic_id) = self.resolve_epic_id(&p.parent).await else {
-            return Json(serde_json::json!({ "error": format!("epic not found: {}", p.parent) }));
+            return json_object(serde_json::json!({ "error": format!("epic not found: {}", p.parent) }));
         };
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
@@ -316,7 +317,7 @@ impl DjinnMcpServer {
             .await
         {
             Ok(t) => t,
-            Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => return json_object(serde_json::json!({ "error": e.to_string() })),
         };
 
         // Apply labels / ac if provided.
@@ -352,11 +353,11 @@ impl DjinnMcpServer {
                 )
                 .await;
             if let Ok(t) = updated {
-                return Json(task_to_value(&t));
+                return json_object(task_to_value(&t));
             }
         }
 
-        Json(task_to_value(&task))
+        json_object(task_to_value(&task))
     }
 
     /// Update allowed fields of a work item (title, description, acceptance_criteria,
@@ -367,11 +368,11 @@ impl DjinnMcpServer {
     pub async fn task_update(
         &self,
         Parameters(p): Parameters<TaskUpdateParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
 
         let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
-            return Json(not_found(&p.id));
+            return json_object(not_found(&p.id));
         };
 
         // Resolve new parent epic if provided.
@@ -379,7 +380,7 @@ impl DjinnMcpServer {
             match self.resolve_epic_id(par).await {
                 Some(id) => id,
                 None => {
-                    return Json(serde_json::json!({ "error": format!("epic not found: {par}") }));
+                    return json_object(serde_json::json!({ "error": format!("epic not found: {par}") }));
                 }
             }
         } else {
@@ -420,7 +421,7 @@ impl DjinnMcpServer {
         // If parent changed, move the task first.
         if epic_id != task.epic_id {
             if let Err(e) = repo.move_to_epic(&task.id, &epic_id).await {
-                return Json(serde_json::json!({ "error": e.to_string() }));
+                return json_object(serde_json::json!({ "error": e.to_string() }));
             }
         }
 
@@ -438,7 +439,7 @@ impl DjinnMcpServer {
             .await
         {
             Ok(t) => t,
-            Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => return json_object(serde_json::json!({ "error": e.to_string() })),
         };
 
         // Apply memory_refs changes if requested.
@@ -457,12 +458,12 @@ impl DjinnMcpServer {
             }
             let refs_json = serde_json::to_string(&refs).unwrap_or_else(|_| "[]".into());
             match repo.update_memory_refs(&updated.id, &refs_json).await {
-                Ok(t) => return Json(task_to_value(&t)),
-                Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+                Ok(t) => return json_object(task_to_value(&t)),
+                Err(e) => return json_object(serde_json::json!({ "error": e.to_string() })),
             }
         }
 
-        Json(task_to_value(&updated))
+        json_object(task_to_value(&updated))
     }
 
     /// Show details of a work item. Accepts task UUID or short_id.
@@ -472,7 +473,7 @@ impl DjinnMcpServer {
     pub async fn task_show(
         &self,
         Parameters(p): Parameters<TaskShowParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let session_repo =
             SessionRepository::new(self.state.db().clone(), self.state.events().clone());
@@ -491,10 +492,10 @@ impl DjinnMcpServer {
                         serde_json::json!(active_session),
                     );
                 }
-                Json(value)
+                json_object(value)
             }
-            Ok(None) => Json(not_found(&p.id)),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(None) => json_object(not_found(&p.id)),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -570,7 +571,7 @@ impl DjinnMcpServer {
     pub async fn task_count(
         &self,
         Parameters(p): Parameters<TaskCountParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let parent = if let Some(ref par) = p.parent {
             self.resolve_epic_id(par).await
         } else {
@@ -589,8 +590,8 @@ impl DjinnMcpServer {
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.count_grouped(query).await {
-            Ok(v) => Json(v),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(v) => json_object(v),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -601,15 +602,15 @@ impl DjinnMcpServer {
     pub async fn task_parent_get(
         &self,
         Parameters(p): Parameters<TaskParentGetParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let task_repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let Some(task) = task_repo.resolve(&p.id).await.ok().flatten() else {
-            return Json(not_found(&p.id));
+            return json_object(not_found(&p.id));
         };
 
         let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
         match epic_repo.get(&task.epic_id).await {
-            Ok(Some(epic)) => Json(serde_json::json!({
+            Ok(Some(epic)) => json_object(serde_json::json!({
                 "id":          epic.id,
                 "short_id":    epic.short_id,
                 "title":       epic.title,
@@ -623,9 +624,9 @@ impl DjinnMcpServer {
                 "closed_at":   epic.closed_at,
             })),
             Ok(None) => {
-                Json(serde_json::json!({ "error": format!("epic not found: {}", task.epic_id) }))
+                json_object(serde_json::json!({ "error": format!("epic not found: {}", task.epic_id) }))
             }
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -636,18 +637,18 @@ impl DjinnMcpServer {
     pub async fn task_children_list(
         &self,
         Parameters(p): Parameters<TaskChildrenListParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let Some(epic_id) = self.resolve_epic_id(&p.epic_id).await else {
-            return Json(serde_json::json!({ "error": format!("epic not found: {}", p.epic_id) }));
+            return json_object(serde_json::json!({ "error": format!("epic not found: {}", p.epic_id) }));
         };
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.list_by_epic(&epic_id).await {
             Ok(tasks) => {
                 let items: Vec<serde_json::Value> = tasks.iter().map(task_to_value).collect();
-                Json(serde_json::json!({ "tasks": items, "total_count": items.len() }))
+                json_object(serde_json::json!({ "tasks": items, "total_count": items.len() }))
             }
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -658,19 +659,19 @@ impl DjinnMcpServer {
     pub async fn task_blockers_add(
         &self,
         Parameters(p): Parameters<TaskBlockersAddParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let task_id = match self.resolve_task_not_epic(&p.id).await {
             Ok(id) => id,
-            Err(e) => return Json(e),
+            Err(e) => return json_object(e),
         };
         let blocking_id = match self.resolve_task_not_epic(&p.blocking_id).await {
             Ok(id) => id,
-            Err(e) => return Json(e),
+            Err(e) => return json_object(e),
         };
         match repo.add_blocker(&task_id, &blocking_id).await {
-            Ok(()) => Json(serde_json::json!({ "ok": true })),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(()) => json_object(serde_json::json!({ "ok": true })),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -681,17 +682,17 @@ impl DjinnMcpServer {
     pub async fn task_blockers_remove(
         &self,
         Parameters(p): Parameters<TaskBlockersRemoveParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
-            return Json(not_found(&p.id));
+            return json_object(not_found(&p.id));
         };
         let Some(blocker) = repo.resolve(&p.blocking_id).await.ok().flatten() else {
-            return Json(not_found(&p.blocking_id));
+            return json_object(not_found(&p.blocking_id));
         };
         match repo.remove_blocker(&task.id, &blocker.id).await {
-            Ok(()) => Json(serde_json::json!({ "ok": true })),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(()) => json_object(serde_json::json!({ "ok": true })),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -702,10 +703,10 @@ impl DjinnMcpServer {
     pub async fn task_blockers_list(
         &self,
         Parameters(p): Parameters<TaskBlockersListParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
-            return Json(not_found(&p.id));
+            return json_object(not_found(&p.id));
         };
         match repo.list_blockers(&task.id).await {
             Ok(refs) => {
@@ -722,9 +723,9 @@ impl DjinnMcpServer {
                         })
                     })
                     .collect();
-                Json(serde_json::json!({ "blockers": blockers }))
+                json_object(serde_json::json!({ "blockers": blockers }))
             }
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -735,10 +736,10 @@ impl DjinnMcpServer {
     pub async fn task_blocked_list(
         &self,
         Parameters(p): Parameters<TaskBlockedListParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
-            return Json(not_found(&p.id));
+            return json_object(not_found(&p.id));
         };
         match repo.list_blocked_by(&task.id).await {
             Ok(refs) => {
@@ -753,9 +754,9 @@ impl DjinnMcpServer {
                         })
                     })
                     .collect();
-                Json(serde_json::json!({ "tasks": tasks }))
+                json_object(serde_json::json!({ "tasks": tasks }))
             }
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -766,7 +767,7 @@ impl DjinnMcpServer {
     pub async fn task_ready(
         &self,
         Parameters(p): Parameters<TaskReadyParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let query = ReadyQuery {
             issue_type: p.issue_type,
@@ -778,9 +779,9 @@ impl DjinnMcpServer {
         match repo.list_ready(query).await {
             Ok(tasks) => {
                 let items: Vec<serde_json::Value> = tasks.iter().map(task_to_value).collect();
-                Json(serde_json::json!({ "tasks": items }))
+                json_object(serde_json::json!({ "tasks": items }))
             }
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -791,22 +792,22 @@ impl DjinnMcpServer {
     pub async fn task_transition(
         &self,
         Parameters(p): Parameters<TaskTransitionParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
 
         let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
-            return Json(not_found(&p.id));
+            return json_object(not_found(&p.id));
         };
 
         let action = match TransitionAction::parse(&p.action) {
             Ok(a) => a,
-            Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => return json_object(serde_json::json!({ "error": e.to_string() })),
         };
 
         let target_override = if let Some(ref ts) = p.target_status {
             match TaskStatus::parse(ts) {
                 Ok(s) => Some(s),
-                Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+                Err(e) => return json_object(serde_json::json!({ "error": e.to_string() })),
             }
         } else {
             None
@@ -827,8 +828,8 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(updated) => Json(task_to_value(&updated)),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(updated) => json_object(task_to_value(&updated)),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -839,7 +840,7 @@ impl DjinnMcpServer {
     pub async fn task_claim(
         &self,
         Parameters(p): Parameters<TaskClaimParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let query = ReadyQuery {
             issue_type: p.issue_type,
@@ -850,9 +851,9 @@ impl DjinnMcpServer {
         };
         let actor_id = p.session_id.as_deref().unwrap_or("");
         match repo.claim(query, actor_id, "coordinator").await {
-            Ok(Some(task)) => Json(task_to_value(&task)),
-            Ok(None) => Json(serde_json::json!({ "task": null })),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(Some(task)) => json_object(task_to_value(&task)),
+            Ok(None) => json_object(serde_json::json!({ "task": null })),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -863,11 +864,11 @@ impl DjinnMcpServer {
     pub async fn task_comment_add(
         &self,
         Parameters(p): Parameters<TaskCommentAddParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
 
         let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
-            return Json(not_found(&p.id));
+            return json_object(not_found(&p.id));
         };
 
         let actor_id = p.actor_id.as_deref().unwrap_or("");
@@ -878,7 +879,7 @@ impl DjinnMcpServer {
             .log_activity(Some(&task.id), actor_id, actor_role, "comment", &payload)
             .await
         {
-            Ok(entry) => Json(serde_json::json!({
+            Ok(entry) => json_object(serde_json::json!({
                 "id":         entry.id,
                 "task_id":    entry.task_id,
                 "actor_id":   entry.actor_id,
@@ -888,7 +889,7 @@ impl DjinnMcpServer {
                                   .unwrap_or(serde_json::json!({})),
                 "created_at": entry.created_at,
             })),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -899,15 +900,15 @@ impl DjinnMcpServer {
     pub async fn task_activity_list(
         &self,
         Parameters(p): Parameters<TaskActivityListParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
 
         // If an id was supplied, resolve it to a full UUID.
         let task_id = if let Some(ref id) = p.id {
             match repo.resolve(id).await {
                 Ok(Some(t)) => Some(t.id),
-                Ok(None) => return Json(not_found(id)),
-                Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+                Ok(None) => return json_object(not_found(id)),
+                Err(e) => return json_object(serde_json::json!({ "error": e.to_string() })),
             }
         } else {
             None
@@ -939,9 +940,9 @@ impl DjinnMcpServer {
                         })
                     })
                     .collect();
-                Json(serde_json::json!({ "entries": items, "count": items.len() }))
+                json_object(serde_json::json!({ "entries": items, "count": items.len() }))
             }
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -952,12 +953,12 @@ impl DjinnMcpServer {
     pub async fn board_health(
         &self,
         Parameters(p): Parameters<BoardHealthParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let stale_hours = p.stale_threshold_hours.unwrap_or(24).max(1);
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.board_health(stale_hours).await {
-            Ok(report) => Json(report),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(report) => json_object(report),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -968,12 +969,12 @@ impl DjinnMcpServer {
     pub async fn board_reconcile(
         &self,
         Parameters(p): Parameters<BoardReconcileParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let stale_hours = p.stale_threshold_hours.unwrap_or(24).max(1);
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.reconcile(stale_hours).await {
-            Ok(result) => Json(result),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(result) => json_object(result),
+            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
@@ -985,14 +986,14 @@ impl DjinnMcpServer {
     pub async fn task_memory_refs(
         &self,
         Parameters(p): Parameters<TaskMemoryRefsParams>,
-    ) -> Json<serde_json::Value> {
+    ) -> Json<ObjectJson> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
-            return Json(not_found(&p.id));
+            return json_object(not_found(&p.id));
         };
         let refs: serde_json::Value =
             serde_json::from_str(&task.memory_refs).unwrap_or(serde_json::json!([]));
-        Json(serde_json::json!({ "id": task.id, "short_id": task.short_id, "memory_refs": refs }))
+        json_object(serde_json::json!({ "id": task.id, "short_id": task.short_id, "memory_refs": refs }))
     }
 }
 
