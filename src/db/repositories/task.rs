@@ -5,6 +5,56 @@ use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
 use crate::models::task::{ActivityEntry, Task, TaskStatus, TransitionAction, compute_transition};
 
+// ── Query / result types ──────────────────────────────────────────────────────
+
+/// Filters and pagination for [`TaskRepository::list_filtered`].
+pub struct ListQuery {
+    pub status: Option<String>,
+    pub issue_type: Option<String>,
+    pub priority: Option<i64>,
+    pub label: Option<String>,
+    pub text: Option<String>,
+    /// Filter by epic_id (already resolved to a UUID).
+    pub parent: Option<String>,
+    /// "priority" | "created" | "created_desc" | "updated" | "updated_desc" | "closed"
+    pub sort: String,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+impl Default for ListQuery {
+    fn default() -> Self {
+        Self {
+            status: None,
+            issue_type: None,
+            priority: None,
+            label: None,
+            text: None,
+            parent: None,
+            sort: "priority".to_owned(),
+            limit: 25,
+            offset: 0,
+        }
+    }
+}
+
+pub struct ListResult {
+    pub tasks: Vec<Task>,
+    pub total_count: i64,
+}
+
+/// Filters for [`TaskRepository::count_grouped`].
+pub struct CountQuery {
+    pub status: Option<String>,
+    pub issue_type: Option<String>,
+    pub priority: Option<i64>,
+    pub label: Option<String>,
+    pub text: Option<String>,
+    pub parent: Option<String>,
+    /// "status" | "priority" | "issue_type" | "parent"
+    pub group_by: Option<String>,
+}
+
 pub struct TaskRepository {
     db: Database,
     events: broadcast::Sender<DjinnEvent>,
@@ -330,6 +380,26 @@ impl TaskRepository {
         Ok(task)
     }
 
+    /// Move a task to a different epic.
+    pub async fn move_to_epic(&self, id: &str, new_epic_id: &str) -> Result<Task> {
+        let id = id.to_owned();
+        let new_epic_id = new_epic_id.to_owned();
+        let task: Task = self
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE tasks SET epic_id = ?2,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE id = ?1",
+                    rusqlite::params![&id, &new_epic_id],
+                )?;
+                Ok(conn.query_row(TASK_SELECT_WHERE_ID, [&id], row_to_task)?)
+            })
+            .await?;
+        let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
+        Ok(task)
+    }
+
     pub async fn delete(&self, id: &str) -> Result<()> {
         let id = id.to_owned();
         self.db
@@ -445,6 +515,125 @@ impl TaskRepository {
             .await
     }
 
+    /// Resolve a task by UUID or short_id.
+    pub async fn resolve(&self, id_or_short: &str) -> Result<Option<Task>> {
+        let id = id_or_short.to_owned();
+        self.db
+            .call(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT id, short_id, epic_id, title, description, design, issue_type,
+                                status, priority, owner, labels, acceptance_criteria,
+                                reopen_count, continuation_count, created_at, updated_at, closed_at,
+                                blocked_from_status, close_reason
+                         FROM tasks WHERE id = ?1 OR short_id = ?1",
+                        [&id],
+                        row_to_task,
+                    )
+                    .optional()?)
+            })
+            .await
+    }
+
+    /// List tasks with filters, sorting, and pagination.
+    pub async fn list_filtered(&self, query: ListQuery) -> Result<ListResult> {
+        self.db
+            .call(move |conn| {
+                let (where_sql, params) = build_where(
+                    &query.status,
+                    &query.issue_type,
+                    query.priority,
+                    &query.label,
+                    &query.text,
+                    &query.parent,
+                );
+                let order_sql = sort_to_sql(&query.sort);
+
+                let total: i64 = conn.query_row(
+                    &format!("SELECT COUNT(*) FROM tasks WHERE {where_sql}"),
+                    rusqlite::params_from_iter(params.iter()),
+                    |r| r.get(0),
+                )?;
+
+                let mut list_params = params.clone();
+                list_params.push(rusqlite::types::Value::Integer(query.limit));
+                list_params.push(rusqlite::types::Value::Integer(query.offset));
+
+                let sql = format!(
+                    "SELECT id, short_id, epic_id, title, description, design, issue_type,
+                            status, priority, owner, labels, acceptance_criteria,
+                            reopen_count, continuation_count, created_at, updated_at, closed_at,
+                            blocked_from_status, close_reason
+                     FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let tasks = stmt
+                    .query_map(rusqlite::params_from_iter(list_params.iter()), row_to_task)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+
+                Ok(ListResult { tasks, total_count: total })
+            })
+            .await
+    }
+
+    /// Count tasks with optional grouping.
+    pub async fn count_grouped(&self, query: CountQuery) -> Result<serde_json::Value> {
+        self.db
+            .call(move |conn| {
+                let (where_sql, params) = build_where(
+                    &query.status,
+                    &query.issue_type,
+                    query.priority,
+                    &query.label,
+                    &query.text,
+                    &query.parent,
+                );
+
+                match query.group_by.as_deref() {
+                    Some(gb) => {
+                        let col = match gb {
+                            "status" => "status",
+                            "priority" => "priority",
+                            "issue_type" => "issue_type",
+                            "parent" => "epic_id",
+                            other => {
+                                return Err(Error::Internal(format!("unknown group_by: {other}")));
+                            }
+                        };
+                        let sql = format!(
+                            "SELECT {col}, COUNT(*) FROM tasks WHERE {where_sql}
+                             GROUP BY {col} ORDER BY COUNT(*) DESC"
+                        );
+                        let mut stmt = conn.prepare(&sql)?;
+                        let groups: Vec<serde_json::Value> = stmt
+                            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                                let key: String =
+                                    row.get::<_, rusqlite::types::Value>(0).map(|v| match v {
+                                        rusqlite::types::Value::Text(s) => s,
+                                        rusqlite::types::Value::Integer(i) => i.to_string(),
+                                        _ => String::new(),
+                                    })?;
+                                let count: i64 = row.get(1)?;
+                                Ok((key, count))
+                            })?
+                            .filter_map(|r| r.ok())
+                            .map(|(key, count)| serde_json::json!({"key": key, "count": count}))
+                            .collect();
+                        Ok(serde_json::json!({ "groups": groups }))
+                    }
+                    None => {
+                        let total: i64 = conn.query_row(
+                            &format!("SELECT COUNT(*) FROM tasks WHERE {where_sql}"),
+                            rusqlite::params_from_iter(params.iter()),
+                            |r| r.get(0),
+                        )?;
+                        Ok(serde_json::json!({ "total_count": total }))
+                    }
+                }
+            })
+            .await
+    }
+
     async fn generate_short_id(&self, seed_id: &str) -> Result<String> {
         let seed_id = seed_id.to_owned();
         self.db
@@ -524,6 +713,82 @@ fn encode_base36(mut n: u32) -> String {
         n /= 36;
     }
     String::from_utf8(buf.to_vec()).unwrap()
+}
+
+// ── Dynamic query helpers ─────────────────────────────────────────────────────
+
+/// Build a SQL WHERE clause + params vector from optional filter fields.
+///
+/// Returns `("1=1", [])` when no filters are supplied.
+fn build_where(
+    status: &Option<String>,
+    issue_type: &Option<String>,
+    priority: Option<i64>,
+    label: &Option<String>,
+    text: &Option<String>,
+    parent: &Option<String>,
+) -> (String, Vec<rusqlite::types::Value>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+
+    if let Some(s) = status {
+        clauses.push("status = ?".to_owned());
+        params.push(rusqlite::types::Value::Text(s.clone()));
+    }
+
+    if let Some(it) = issue_type {
+        if let Some(neg) = it.strip_prefix('!') {
+            clauses.push("issue_type != ?".to_owned());
+            params.push(rusqlite::types::Value::Text(neg.to_owned()));
+        } else {
+            clauses.push("issue_type = ?".to_owned());
+            params.push(rusqlite::types::Value::Text(it.clone()));
+        }
+    }
+
+    if let Some(p) = priority {
+        clauses.push("priority = ?".to_owned());
+        params.push(rusqlite::types::Value::Integer(p));
+    }
+
+    if let Some(lbl) = label {
+        clauses.push(
+            "EXISTS (SELECT 1 FROM json_each(labels) WHERE value = ?)".to_owned(),
+        );
+        params.push(rusqlite::types::Value::Text(lbl.clone()));
+    }
+
+    if let Some(t) = text {
+        clauses.push("(title LIKE ? OR description LIKE ?)".to_owned());
+        let pattern = format!("%{t}%");
+        params.push(rusqlite::types::Value::Text(pattern.clone()));
+        params.push(rusqlite::types::Value::Text(pattern));
+    }
+
+    if let Some(p) = parent {
+        clauses.push("epic_id = ?".to_owned());
+        params.push(rusqlite::types::Value::Text(p.clone()));
+    }
+
+    let where_sql = if clauses.is_empty() {
+        "1=1".to_owned()
+    } else {
+        clauses.join(" AND ")
+    };
+
+    (where_sql, params)
+}
+
+/// Convert a sort key to a SQL ORDER BY clause.
+fn sort_to_sql(sort: &str) -> &'static str {
+    match sort {
+        "created" => "created_at ASC",
+        "created_desc" => "created_at DESC",
+        "updated" => "updated_at ASC",
+        "updated_desc" => "updated_at DESC",
+        "closed" => "closed_at DESC, created_at DESC",
+        _ => "priority ASC, created_at ASC", // default: "priority"
+    }
 }
 
 fn short_id_exists(
