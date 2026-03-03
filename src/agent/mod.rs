@@ -4,6 +4,7 @@
 // session lifecycle so the rest of the server stays decoupled from Goose internals.
 
 pub mod config;
+pub mod extension;
 pub mod prompts;
 
 use std::{path::PathBuf, sync::Arc};

@@ -5,9 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use goose::agents::{
-    Agent as GooseAgent,
-    AgentConfig as GooseAgentConfig,
-    GoosePlatform,
+    Agent as GooseAgent, AgentConfig as GooseAgentConfig, GoosePlatform,
     SessionConfig as GooseSessionConfig,
 };
 use goose::config::{Config as GooseConfig, GooseMode, PermissionManager};
@@ -18,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::agent::extension;
 use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::{AgentType, GooseSessionHandle, SessionManager, SessionType};
 use crate::db::repositories::credential::CredentialRepository;
@@ -38,7 +37,10 @@ pub enum SupervisorError {
     #[error("invalid model id '{model_id}', expected provider/model")]
     InvalidModelId { model_id: String },
     #[error("no credential stored for provider {provider_id} (expected key {key_name})")]
-    MissingCredential { provider_id: String, key_name: String },
+    MissingCredential {
+        provider_id: String,
+        key_name: String,
+    },
     #[error("task transition failed for {task_id}: {reason}")]
     TaskTransitionFailed { task_id: String, reason: String },
     #[error("goose session failed: {0}")]
@@ -147,10 +149,16 @@ impl AgentSupervisor {
             } => {
                 let _ = respond_to.send(self.dispatch(task_id, model_id).await);
             }
-            SupervisorMessage::HasSession { task_id, respond_to } => {
+            SupervisorMessage::HasSession {
+                task_id,
+                respond_to,
+            } => {
                 let _ = respond_to.send(Ok(self.sessions.contains_key(&task_id)));
             }
-            SupervisorMessage::KillSession { task_id, respond_to } => {
+            SupervisorMessage::KillSession {
+                task_id,
+                respond_to,
+            } => {
                 let _ = respond_to.send(self.kill_session(task_id));
             }
             SupervisorMessage::GetStatus { respond_to } => {
@@ -161,7 +169,8 @@ impl AgentSupervisor {
             }
             SupervisorMessage::SessionCompleted { task_id, result } => {
                 let agent_type = self.remove_session(&task_id);
-                self.handle_session_result(&task_id, agent_type, result).await;
+                self.handle_session_result(&task_id, agent_type, result)
+                    .await;
             }
         }
     }
@@ -172,8 +181,10 @@ impl AgentSupervisor {
         }
 
         let (active, max) = {
-            let entry =
-                self.capacity.entry(model_id.clone()).or_insert(ModelCapacity { active: 0, max: 1 });
+            let entry = self
+                .capacity
+                .entry(model_id.clone())
+                .or_insert(ModelCapacity { active: 0, max: 1 });
             (entry.active, entry.max)
         };
         if active >= max {
@@ -214,7 +225,9 @@ impl AgentSupervisor {
             .map_err(|e| SupervisorError::Goose(e.to_string()))?
             .with_canonical_limits(&provider_id);
 
-        let provider = providers::create(&provider_id, goose_model, self.extensions_for(agent_type))
+        let extensions = self.extensions_for(agent_type);
+
+        let provider = providers::create(&provider_id, goose_model, extensions.clone())
             .await
             .map_err(|e| SupervisorError::Goose(e.to_string()))?;
 
@@ -231,6 +244,13 @@ impl AgentSupervisor {
             .update_provider(provider, &session.id)
             .await
             .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+
+        for ext in extensions {
+            agent
+                .add_extension(ext, &session.id)
+                .await
+                .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+        }
 
         let prompt = render_prompt(
             agent_type,
@@ -261,6 +281,7 @@ impl AgentSupervisor {
         let task_id_for_join = task_id.clone();
         let session_id = session.id.clone();
         let sender = self.sender.clone();
+        let app_state = self.app_state.clone();
 
         let join = tokio::spawn(async move {
             let kickoff = GooseMessage::user().with_text(
@@ -289,7 +310,8 @@ impl AgentSupervisor {
                         }
                         evt = stream.next() => {
                             let Some(evt) = evt else { break; };
-                            evt.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                            let evt = evt.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                            extension::handle_event(&app_state, &agent, &evt).await;
                         }
                     }
                 }
@@ -397,12 +419,15 @@ impl AgentSupervisor {
         result: Result<(), String>,
     ) {
         let agent_type = agent_type.unwrap_or(AgentType::Worker);
-        let repo = TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let repo =
+            TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
 
         let transition = match (agent_type, result) {
             (AgentType::Worker, Ok(())) => Some((TransitionAction::SubmitTaskReview, None)),
             (AgentType::TaskReviewer, Ok(())) => Some((TransitionAction::TaskReviewApprove, None)),
-            (AgentType::PhaseReviewer, Ok(())) => Some((TransitionAction::PhaseReviewApprove, None)),
+            (AgentType::PhaseReviewer, Ok(())) => {
+                Some((TransitionAction::PhaseReviewApprove, None))
+            }
             (AgentType::Worker, Err(reason)) => Some((TransitionAction::Release, Some(reason))),
             (AgentType::TaskReviewer, Err(reason)) => {
                 Some((TransitionAction::ReleaseTaskReview, Some(reason)))
@@ -426,9 +451,14 @@ impl AgentSupervisor {
         }
     }
 
-    async fn transition_start(&self, task: &Task, agent_type: AgentType) -> Result<(), SupervisorError> {
+    async fn transition_start(
+        &self,
+        task: &Task,
+        agent_type: AgentType,
+    ) -> Result<(), SupervisorError> {
         if task.status == "open" && agent_type == AgentType::Worker {
-            let repo = TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+            let repo =
+                TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
             repo.transition(
                 &task.id,
                 TransitionAction::Start,
@@ -447,8 +477,12 @@ impl AgentSupervisor {
     }
 
     async fn load_task(&self, task_id: &str) -> Result<Task, SupervisorError> {
-        let repo = TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
-        let task = repo.get(task_id).await.map_err(|e| SupervisorError::Goose(e.to_string()))?;
+        let repo =
+            TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let task = repo
+            .get(task_id)
+            .await
+            .map_err(|e| SupervisorError::Goose(e.to_string()))?;
         task.ok_or_else(|| SupervisorError::TaskNotFound {
             task_id: task_id.to_owned(),
         })
@@ -479,7 +513,8 @@ impl AgentSupervisor {
             .provider_secret_key(provider_id)
             .unwrap_or_else(|| format!("{}_API_KEY", provider_id.to_ascii_uppercase()));
 
-        let repo = CredentialRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let repo =
+            CredentialRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
         let key = repo
             .get_decrypted(&key_name)
             .await
@@ -503,8 +538,8 @@ impl AgentSupervisor {
             .and_then(|p| p.env_vars.into_iter().next())
     }
 
-    fn extensions_for(&self, _agent_type: AgentType) -> Vec<goose::config::ExtensionConfig> {
-        Vec::new()
+    fn extensions_for(&self, agent_type: AgentType) -> Vec<goose::config::ExtensionConfig> {
+        vec![extension::config(agent_type)]
     }
 
     async fn shutdown(&mut self) {
@@ -543,7 +578,10 @@ impl AgentSupervisorHandle {
         f: impl FnOnce(Reply<T>) -> SupervisorMessage,
     ) -> Result<T, SupervisorError> {
         let (tx, rx) = oneshot::channel();
-        self.sender.send(f(tx)).await.map_err(|_| SupervisorError::ActorDead)?;
+        self.sender
+            .send(f(tx))
+            .await
+            .map_err(|_| SupervisorError::ActorDead)?;
         rx.await.map_err(|_| SupervisorError::NoResponse)?
     }
 
@@ -573,7 +611,8 @@ impl AgentSupervisorHandle {
     }
 
     pub async fn get_status(&self) -> Result<SupervisorStatus, SupervisorError> {
-        self.request(|tx| SupervisorMessage::GetStatus { respond_to: tx }).await
+        self.request(|tx| SupervisorMessage::GetStatus { respond_to: tx })
+            .await
     }
 }
 
@@ -613,7 +652,10 @@ mod tests {
         let supervisor = spawn_supervisor(&temp);
 
         supervisor.dispatch("task-1", "test/mock").await.unwrap();
-        let err = supervisor.dispatch("task-2", "test/mock").await.unwrap_err();
+        let err = supervisor
+            .dispatch("task-2", "test/mock")
+            .await
+            .unwrap_err();
         assert!(matches!(err, SupervisorError::ModelAtCapacity { .. }));
 
         supervisor.kill_session("task-1").await.unwrap();
