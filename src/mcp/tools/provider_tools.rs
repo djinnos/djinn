@@ -1,12 +1,14 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::db::repositories::custom_provider::CustomProviderRepository;
 use crate::mcp::server::DjinnMcpServer;
 use crate::mcp::tools::AnyJson;
 use crate::models::provider::{CustomProvider, Model, Provider, SeedModel};
 use crate::provider::validate::{self, ValidationRequest};
+use goose::providers::base::ProviderType;
 
 // ── Shared response helpers ───────────────────────────────────────────────────
 
@@ -41,6 +43,27 @@ fn model_to_json(m: &Model) -> serde_json::Value {
             "cache_write_per_million": m.pricing.cache_write_per_million,
         }
     })
+}
+
+pub(crate) async fn goose_provider_ids() -> HashSet<String> {
+    goose::providers::providers()
+        .await
+        .into_iter()
+        .map(|(meta, _)| meta.name)
+        .collect()
+}
+
+pub(crate) async fn is_goose_builtin_provider(provider_id: &str) -> bool {
+    goose::providers::providers()
+        .await
+        .into_iter()
+        .any(|(meta, ty)| {
+            meta.name == provider_id && matches!(ty, ProviderType::Builtin | ProviderType::Preferred)
+        })
+}
+
+fn is_provider_usable_by_goose(provider: &Provider, goose_ids: &HashSet<String>) -> bool {
+    provider.is_openai_compatible || goose_ids.contains(&provider.id)
 }
 
 // ── model_health ──────────────────────────────────────────────────────────────
@@ -230,14 +253,16 @@ impl DjinnMcpServer {
     /// metadata (env vars, base URL, OpenAI-compat flag) and a connected placeholder for
     /// the desktop to merge local credential state.
     #[tool(
-        description = "List all LLM providers from the models.dev catalog. Each entry includes connection metadata (env vars, base URL, OpenAI-compat flag) and a connected placeholder for the desktop to merge local credential state."
+        description = "List providers Goose can use. Includes built-ins, declarative providers, and OpenAI-compatible catalog providers."
     )]
     pub async fn provider_catalog(&self) -> Json<ProviderCatalogResponse> {
+        let goose_ids = goose_provider_ids().await;
         let providers: Vec<AnyJson> = self
             .state
             .catalog()
             .list_providers()
             .iter()
+            .filter(|p| is_provider_usable_by_goose(p, &goose_ids))
             .map(|p| AnyJson::from(provider_to_json(p)))
             .collect();
         let total = i64::try_from(providers.len()).unwrap_or(i64::MAX);
@@ -247,22 +272,44 @@ impl DjinnMcpServer {
     /// List all models for a provider. Each model includes capabilities
     /// (tool_call, reasoning, attachment), context limits, and per-million-token pricing.
     #[tool(
-        description = "List all models for a provider. Each model includes capabilities (tool_call, reasoning, attachment), context limits, and per-million-token pricing."
+        description = "List models for a Goose-usable provider. Returns empty for providers Goose cannot use."
     )]
     pub async fn provider_models(
         &self,
         Parameters(input): Parameters<ProviderModelsInput>,
     ) -> Json<ProviderModelsResponse> {
+        let goose_ids = goose_provider_ids().await;
+        let provider = self
+            .state
+            .catalog()
+            .list_providers()
+            .into_iter()
+            .find(|p| p.id == input.provider_id);
+        let Some(provider) = provider else {
+            return Json(ProviderModelsResponse {
+                provider_id: input.provider_id,
+                models: vec![],
+                total: 0,
+            });
+        };
+        if !is_provider_usable_by_goose(&provider, &goose_ids) {
+            return Json(ProviderModelsResponse {
+                provider_id: input.provider_id,
+                models: vec![],
+                total: 0,
+            });
+        }
+
         let models: Vec<AnyJson> = self
             .state
             .catalog()
-            .list_models(&input.provider_id)
+            .list_models(&provider.id)
             .iter()
             .map(|m| AnyJson::from(model_to_json(m)))
             .collect();
         let total = i64::try_from(models.len()).unwrap_or(i64::MAX);
         Json(ProviderModelsResponse {
-            provider_id: input.provider_id,
+            provider_id: provider.id,
             models,
             total,
         })
@@ -408,5 +455,43 @@ impl DjinnMcpServer {
             id: input.id,
             error: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider(id: &str, is_openai_compatible: bool) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: id.to_string(),
+            npm: String::new(),
+            env_vars: vec![],
+            base_url: String::new(),
+            docs_url: String::new(),
+            is_openai_compatible,
+        }
+    }
+
+    #[test]
+    fn goose_usable_provider_includes_openai_compatible_catalog_entries() {
+        let p = provider("synthetic", true);
+        let ids = HashSet::new();
+        assert!(is_provider_usable_by_goose(&p, &ids));
+    }
+
+    #[test]
+    fn goose_usable_provider_includes_goose_registered_ids() {
+        let p = provider("anthropic", false);
+        let ids = HashSet::from(["anthropic".to_string()]);
+        assert!(is_provider_usable_by_goose(&p, &ids));
+    }
+
+    #[test]
+    fn goose_usable_provider_excludes_unsupported_non_openai_compatible_entries() {
+        let p = provider("unknown", false);
+        let ids = HashSet::new();
+        assert!(!is_provider_usable_by_goose(&p, &ids));
     }
 }
