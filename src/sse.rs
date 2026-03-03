@@ -154,6 +154,25 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             id: Some(id),
             project_id: None,
         },
+        DjinnEvent::SessionCreated(v) => Envelope {
+            entity_type: "session",
+            action: "started",
+            data: serde_json::to_value(v).ok(),
+            id: None,
+            project_id: None,
+        },
+        DjinnEvent::SessionUpdated(v) => Envelope {
+            entity_type: "session",
+            action: match v.status.as_str() {
+                "completed" => "completed",
+                "interrupted" => "interrupted",
+                "failed" => "failed",
+                _ => "updated",
+            },
+            data: serde_json::to_value(v).ok(),
+            id: None,
+            project_id: None,
+        },
     }
 }
 

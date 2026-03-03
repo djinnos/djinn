@@ -45,6 +45,16 @@ pub enum AgentType {
     PhaseReviewer,
 }
 
+impl AgentType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::TaskReviewer => "task_reviewer",
+            Self::PhaseReviewer => "phase_reviewer",
+        }
+    }
+}
+
 // ─── SessionManager init ───────────────────────────────────────────────────────
 
 /// Create a `SessionManager` rooted at `data_dir`.

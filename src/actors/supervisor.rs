@@ -25,7 +25,9 @@ use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::{AgentType, GooseSessionHandle, SessionManager, SessionType};
 use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::git_settings::GitSettingsRepository;
+use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
+use crate::models::session::SessionStatus;
 use crate::models::task::{Task, TransitionAction};
 use crate::server::AppState;
 
@@ -100,12 +102,20 @@ enum SupervisorMessage {
     },
 }
 
+struct SessionClosure {
+    model_id: Option<String>,
+    agent_type: AgentType,
+    goose_session_id: String,
+    record_id: Option<String>,
+}
+
 struct AgentSupervisor {
     receiver: mpsc::Receiver<SupervisorMessage>,
     sessions: HashMap<String, GooseSessionHandle>,
     capacity: HashMap<String, ModelCapacity>,
     session_models: HashMap<String, String>,
     session_agent_types: HashMap<String, AgentType>,
+    task_session_records: HashMap<String, String>,
     interrupted_sessions: HashSet<String>,
     session_manager: Arc<SessionManager>,
     app_state: AppState,
@@ -127,6 +137,7 @@ impl AgentSupervisor {
             capacity: HashMap::new(),
             session_models: HashMap::new(),
             session_agent_types: HashMap::new(),
+            task_session_records: HashMap::new(),
             interrupted_sessions: HashSet::new(),
             session_manager,
             app_state,
@@ -191,9 +202,8 @@ impl AgentSupervisor {
                 if self.interrupted_sessions.remove(&task_id) {
                     return;
                 }
-                let model_id = self.session_models.get(&task_id).cloned();
-                let agent_type = self.remove_session(&task_id);
-                self.handle_session_result(&task_id, model_id.as_deref(), agent_type, result, output)
+                let session = self.remove_session(&task_id);
+                self.handle_session_result(&task_id, session, result, output)
                     .await;
             }
         }
@@ -243,6 +253,18 @@ impl AgentSupervisor {
         let session = self
             .session_manager
             .create_session(worktree_path.clone(), session_name, SessionType::SubAgent)
+            .await
+            .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+
+        let session_repo =
+            SessionRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let session_record = session_repo
+            .create(
+                &task.id,
+                &model_id,
+                agent_type.as_str(),
+                Some(&worktree_path.to_string_lossy()),
+            )
             .await
             .map_err(|e| SupervisorError::Goose(e.to_string()))?;
 
@@ -415,6 +437,8 @@ impl AgentSupervisor {
             },
         );
         self.session_models.insert(task_id.clone(), model_id);
+        self.task_session_records
+            .insert(task_id.clone(), session_record.id);
         self.session_agent_types.insert(task_id, agent_type);
         Ok(())
     }
@@ -461,12 +485,13 @@ impl AgentSupervisor {
         };
 
         self.interrupted_sessions.insert(task_id.clone());
-
         let model_id = self.session_models.remove(&task_id);
         let agent_type = self
             .session_agent_types
             .remove(&task_id)
             .unwrap_or(AgentType::Worker);
+        let session_record_id = self.task_session_records.remove(&task_id);
+        let goose_session_id = handle.session_id.clone();
 
         handle.cancel.cancel();
 
@@ -484,20 +509,40 @@ impl AgentSupervisor {
         if let Some(worktree_path) = handle.worktree_path.as_ref() {
             self.commit_wip_if_needed(&task_id, worktree_path).await;
         }
-        self.transition_interrupted(&task_id, agent_type, "session interrupted by supervisor kill")
-            .await;
+        let (tokens_in, tokens_out) = self.tokens_for_session(&goose_session_id).await;
+        self.update_session_record(
+            session_record_id.as_deref(),
+            SessionStatus::Interrupted,
+            tokens_in,
+            tokens_out,
+        )
+        .await;
+        self.transition_interrupted(
+            &task_id,
+            agent_type,
+            "session interrupted by supervisor kill",
+        )
+        .await;
 
         Ok(())
     }
 
-    fn remove_session(&mut self, task_id: &str) -> Option<AgentType> {
-        let agent_type = self.session_agent_types.get(task_id).copied();
-        if self.sessions.remove(task_id).is_some() {
-            self.decrement_capacity(task_id);
-            self.session_models.remove(task_id);
-            self.session_agent_types.remove(task_id);
+    fn remove_session(&mut self, task_id: &str) -> SessionClosure {
+        let goose_session_id = self
+            .sessions
+            .remove(task_id)
+            .map(|h| h.session_id)
+            .unwrap_or_else(|| format!("unknown-session-{task_id}"));
+        self.decrement_capacity(task_id);
+        SessionClosure {
+            model_id: self.session_models.remove(task_id),
+            agent_type: self
+                .session_agent_types
+                .remove(task_id)
+                .unwrap_or(AgentType::Worker),
+            goose_session_id,
+            record_id: self.task_session_records.remove(task_id),
         }
-        agent_type
     }
 
     fn decrement_capacity(&mut self, task_id: &str) {
@@ -568,7 +613,8 @@ impl AgentSupervisor {
             AgentType::PhaseReviewer => TransitionAction::ReleasePhaseReview,
         };
 
-        let repo = TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let repo =
+            TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
         if let Err(e) = repo
             .transition(
                 task_id,
@@ -587,21 +633,34 @@ impl AgentSupervisor {
     async fn handle_session_result(
         &self,
         task_id: &str,
-        model_id: Option<&str>,
-        agent_type: Option<AgentType>,
+        session: SessionClosure,
         result: Result<(), String>,
         output: ParsedAgentOutput,
     ) {
-        let agent_type = agent_type.unwrap_or(AgentType::Worker);
+        let agent_type = session.agent_type;
         let repo =
             TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
 
-        if let Some(model_id) = model_id {
+        if let Some(model_id) = session.model_id.as_deref() {
             match &result {
                 Ok(()) => self.app_state.health_tracker().record_success(model_id),
                 Err(_) => self.app_state.health_tracker().record_failure(model_id),
             }
         }
+
+        let (tokens_in, tokens_out) = self.tokens_for_session(&session.goose_session_id).await;
+        let session_status = if result.is_ok() {
+            SessionStatus::Completed
+        } else {
+            SessionStatus::Failed
+        };
+        self.update_session_record(
+            session.record_id.as_deref(),
+            session_status,
+            tokens_in,
+            tokens_out,
+        )
+        .await;
 
         if let Some(feedback) = output.reviewer_feedback.as_deref() {
             let payload = serde_json::json!({ "body": feedback }).to_string();
@@ -623,8 +682,12 @@ impl AgentSupervisor {
             Ok(()) => self.success_transition(agent_type, &output),
             Err(reason) => match agent_type {
                 AgentType::Worker => Some((TransitionAction::Release, Some(reason))),
-                AgentType::TaskReviewer => Some((TransitionAction::ReleaseTaskReview, Some(reason))),
-                AgentType::PhaseReviewer => Some((TransitionAction::ReleasePhaseReview, Some(reason))),
+                AgentType::TaskReviewer => {
+                    Some((TransitionAction::ReleaseTaskReview, Some(reason)))
+                }
+                AgentType::PhaseReviewer => {
+                    Some((TransitionAction::ReleasePhaseReview, Some(reason)))
+                }
             },
         };
 
@@ -672,7 +735,9 @@ impl AgentSupervisor {
                 }
             },
             AgentType::TaskReviewer => match output.reviewer_verdict {
-                Some(ReviewerVerdict::Verified) => Some((TransitionAction::TaskReviewApprove, None)),
+                Some(ReviewerVerdict::Verified) => {
+                    Some((TransitionAction::TaskReviewApprove, None))
+                }
                 Some(ReviewerVerdict::Reopen) => Some((
                     TransitionAction::TaskReviewReject,
                     Some(
@@ -700,13 +765,19 @@ impl AgentSupervisor {
                 }
             },
             AgentType::PhaseReviewer => match output.phase_verdict {
-                Some(PhaseReviewVerdict::Clean) => Some((TransitionAction::PhaseReviewApprove, None)),
+                Some(PhaseReviewVerdict::Clean) => {
+                    Some((TransitionAction::PhaseReviewApprove, None))
+                }
                 Some(PhaseReviewVerdict::IssuesFound) => Some((
                     TransitionAction::PhaseReviewReject,
-                    Some("phase reviewer reported ARCHITECT_BATCH_RESULT: ISSUES_FOUND".to_string()),
+                    Some(
+                        "phase reviewer reported ARCHITECT_BATCH_RESULT: ISSUES_FOUND".to_string(),
+                    ),
                 )),
                 None => {
-                    tracing::warn!("phase reviewer session completed without ARCHITECT_BATCH_RESULT marker");
+                    tracing::warn!(
+                        "phase reviewer session completed without ARCHITECT_BATCH_RESULT marker"
+                    );
                     Some((
                         TransitionAction::ReleasePhaseReview,
                         Some(
@@ -716,6 +787,44 @@ impl AgentSupervisor {
                     ))
                 }
             },
+        }
+    }
+
+    async fn tokens_for_session(&self, goose_session_id: &str) -> (i64, i64) {
+        let session = self
+            .session_manager
+            .get_session(goose_session_id, false)
+            .await;
+        let Ok(session) = session else {
+            return (0, 0);
+        };
+
+        let tokens_in = session
+            .accumulated_input_tokens
+            .or(session.input_tokens)
+            .unwrap_or(0) as i64;
+        let tokens_out = session
+            .accumulated_output_tokens
+            .or(session.output_tokens)
+            .unwrap_or(0) as i64;
+        (tokens_in, tokens_out)
+    }
+
+    async fn update_session_record(
+        &self,
+        record_id: Option<&str>,
+        status: SessionStatus,
+        tokens_in: i64,
+        tokens_out: i64,
+    ) {
+        let Some(record_id) = record_id else {
+            return;
+        };
+
+        let repo =
+            SessionRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        if let Err(e) = repo.update(record_id, status, tokens_in, tokens_out).await {
+            tracing::warn!(record_id = %record_id, error = %e, "failed to update session record");
         }
     }
 
@@ -878,6 +987,8 @@ impl AgentSupervisor {
             worktree_path: Option<PathBuf>,
             model_id: Option<String>,
             agent_type: AgentType,
+            goose_session_id: String,
+            session_record_id: Option<String>,
         }
 
         let mut pending = Vec::new();
@@ -890,9 +1001,11 @@ impl AgentSupervisor {
                     .session_agent_types
                     .remove(&task_id)
                     .unwrap_or(AgentType::Worker),
+                session_record_id: self.task_session_records.remove(&task_id),
                 task_id,
                 join: handle.join,
                 worktree_path: handle.worktree_path.take(),
+                goose_session_id: handle.session_id,
             });
         }
 
@@ -904,7 +1017,10 @@ impl AgentSupervisor {
                 continue;
             }
 
-            if tokio::time::timeout(remaining, &mut item.join).await.is_err() {
+            if tokio::time::timeout(remaining, &mut item.join)
+                .await
+                .is_err()
+            {
                 tracing::warn!(task_id = %item.task_id, "session join timed out during shutdown; aborting");
                 item.join.abort();
             }
@@ -913,8 +1029,17 @@ impl AgentSupervisor {
         for item in pending {
             self.decrement_capacity_for_model(item.model_id.as_deref());
             if let Some(worktree_path) = item.worktree_path.as_ref() {
-                self.commit_wip_if_needed(&item.task_id, worktree_path).await;
+                self.commit_wip_if_needed(&item.task_id, worktree_path)
+                    .await;
             }
+            let (tokens_in, tokens_out) = self.tokens_for_session(&item.goose_session_id).await;
+            self.update_session_record(
+                item.session_record_id.as_deref(),
+                SessionStatus::Interrupted,
+                tokens_in,
+                tokens_out,
+            )
+            .await;
             self.transition_interrupted(&item.task_id, item.agent_type, reason)
                 .await;
         }

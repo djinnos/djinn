@@ -3,6 +3,7 @@ use crate::models::epic::Epic;
 use crate::models::git_settings::GitSettings;
 use crate::models::note::Note;
 use crate::models::project::Project;
+use crate::models::session::SessionRecord;
 use crate::models::settings::Setting;
 use crate::models::task::Task;
 
@@ -59,4 +60,8 @@ pub enum DjinnEvent {
     CredentialDeleted {
         id: String,
     },
+
+    // Agent sessions
+    SessionCreated(SessionRecord),
+    SessionUpdated(SessionRecord),
 }
