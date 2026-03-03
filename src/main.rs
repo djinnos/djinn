@@ -3,6 +3,7 @@ use tokio::signal;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
+use djinn_server::db::checkpoint;
 use djinn_server::db::connection::Database;
 use djinn_server::server::{self, AppState};
 
@@ -32,6 +33,7 @@ async fn main() {
     });
 
     let db = Database::open_in_memory().expect("failed to open database");
+    checkpoint::spawn(db.clone(), cancel.clone());
     let state = AppState::new(db, cancel.clone());
     let router = server::router(state);
 

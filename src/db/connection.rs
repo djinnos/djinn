@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use rusqlite::Connection;
 use tokio::sync::Mutex;
@@ -6,18 +7,19 @@ use tokio::sync::Mutex;
 use crate::db::migrations;
 use crate::error::Result;
 
-/// Wraps a rusqlite `Connection` behind a tokio `Mutex` for async access.
+/// Wraps a rusqlite `Connection` behind an `Arc<Mutex>` for async access.
 ///
+/// Cheaply cloneable — clones share the same underlying connection.
 /// All database operations are performed via `spawn_blocking` to avoid
-/// blocking the Tokio runtime. A single `Database` instance represents
-/// one writer per process.
+/// blocking the Tokio runtime. A single writer connection per process.
+#[derive(Clone)]
 pub struct Database {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl Database {
     /// Open (or create) the database at `path`, auto-creating parent dirs.
-    /// Applies all required PRAGMAs after opening.
+    /// Applies PRAGMAs then runs all pending migrations.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -26,7 +28,7 @@ impl Database {
         apply_pragmas(&conn)?;
         migrations::run(&mut conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         })
     }
 
@@ -36,7 +38,7 @@ impl Database {
         apply_pragmas(&conn)?;
         migrations::run(&mut conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         })
     }
 
@@ -48,12 +50,10 @@ impl Database {
     {
         let guard = self.conn.lock().await;
         // SAFETY: we hold the Mutex across the spawn_blocking call.
-        // The Connection is not Send, so we use an unsafe trick to move
-        // a raw pointer into the blocking closure. The Mutex guarantee
-        // ensures exclusive access for the lifetime of the closure.
+        // Connection is not Send, so we transmit a raw pointer. The Mutex
+        // guarantee ensures exclusive access for the lifetime of the closure.
         let ptr = &*guard as *const Connection as usize;
         let result = tokio::task::spawn_blocking(move || {
-            // SAFETY: pointer is valid — we hold the lock in the outer scope.
             let conn = unsafe { &*(ptr as *const Connection) };
             f(conn)
         })
@@ -86,8 +86,6 @@ mod tests {
         db.call(|conn| {
             let journal: String =
                 conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
-            // In-memory databases use "memory" journal mode, not WAL.
-            // WAL is only meaningful for file-backed databases.
             assert!(
                 journal == "wal" || journal == "memory",
                 "unexpected journal_mode: {journal}"
