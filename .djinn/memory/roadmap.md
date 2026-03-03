@@ -15,21 +15,21 @@ _Updated: 2026-03-03_
 
 | Phase | Status | Remaining |
 |-------|--------|-----------|
-| Phase 1: Foundation | 🟡 85% | `168f` Clerk JWT, `u0rv` Repo pattern |
-| Phase 2: Task Board | ⚪ 0% | 6 features: `1la3` `1fdt` `1e43` `15p0` `1my3` `xdr3` |
-| Phase 3: Knowledge Base | ⚪ 0% | 3 features: `kt1l` `rw6q` `1iyh` |
+| Phase 1: Foundation | ✅ Complete | — |
+| Phase 2: Task Board | 🟡 33% | `1e43` `15p0` `1my3` `xdr3` |
+| Phase 3: Knowledge Base | 🟡 67% | `1iyh` |
 | Phase 4: Git Integration | ✅ Complete | — |
-| Phase 5: Coordinator | ⚪ 0% | 3 features: `1u1b` `d9s4` `n8e4` |
-| Phase 6: Review | ⚪ 0% | 2 features: `1nby` `lm7a` |
-| Phase 7: Desktop & Sync | ⚪ 0% | 4 features: `ywb0` `qhb4` `1tst` `2up9` |
+| Phase 5: Coordinator | 🟡 33% | `1u1b` `d9s4` |
+| Phase 6: Review | ⚪ 0% | `1nby` `lm7a` |
+| Phase 7: Desktop & Sync | 🟡 25% | `qhb4` `1tst` `2up9` |
 
-**Overall: 17/37 tasks closed (46%) — Critical path: `u0rv` → `1la3` → `1fdt` → `15p0` → `{1u1b, d9s4}`**
+**Overall: 25/37 items closed (68%) — Next up: `1e43` (ready now) → unblocks `15p0` → unblocks `{1u1b, d9s4}`**
 
-## Phase 1: Foundation — Database, Schema, and Core Server 🟡
+## Phase 1: Foundation — Database, Schema, and Core Server ✅
 
 **Goal**: A running Axum server with the DB layer, migrations, repository pattern, and Clerk JWT authentication. Nothing user-visible yet, but the foundation everything else is built on.
 
-**Progress**: 11/13 tasks closed. Axum server, rmcp MCP transport, rusqlite+WAL, refinery migrations, broadcast events, test infra all done. Remaining: Clerk JWT auth (`168f`), repository pattern enforcement (`u0rv`).
+**Progress**: COMPLETE. All 5 features closed: Axum server + rmcp (`cueu`), Clerk JWT auth (`168f`), rusqlite+WAL (`642n`), refinery migrations (`3x7d`), repository pattern + broadcast events (`u0rv`).
 
 **Requirements addressed**:
 - DB-01 (rusqlite + WAL)
@@ -63,6 +63,8 @@ _Updated: 2026-03-03_
 
 **Goal**: Full task board functionality — epics, tasks, state machine, blockers, activity log. The core domain model.
 
+**Progress**: 2/6 features closed. Schema (`1la3`) and state machine (`1fdt`) done. Remaining: CRUD tools (`1e43`, ready now), transition/dispatch (`15p0`), blocker management (`1my3`), activity log + health (`xdr3`).
+
 **Requirements addressed**:
 - TASK-01 (epics as separate entities)
 - TASK-02 (tasks under epics)
@@ -94,6 +96,8 @@ _Updated: 2026-03-03_
 ## Phase 3: Memory / Knowledge Base
 
 **Goal**: Full knowledge base — notes, FTS5 search, wikilink graph, memory↔task references.
+
+**Progress**: 2/3 features closed. Note schema + FTS5 (`kt1l`) and wikilink graph (`rw6q`) completed early in parallel with Phase 2. Remaining: Note CRUD MCP tools (`1iyh`, blocked on `1e43`).
 
 **Requirements addressed**:
 - MEM-01 (typed notes with folders)
@@ -150,6 +154,8 @@ _Updated: 2026-03-03_
 
 **Goal**: The coordinator dispatches agents to tasks, manages model health, handles graceful shutdown. The "brain" of the system.
 
+**Progress**: 1/3 features closed. Model health + circuit breakers (`n8e4`) completed early. Remaining: CoordinatorActor (`1u1b`) and AgentSupervisor (`d9s4`), both blocked on `15p0`.
+
 **Requirements addressed**:
 - AGENT-01 (actor hierarchy)
 - AGENT-02 (three agent types)
@@ -198,6 +204,8 @@ _Updated: 2026-03-03_
 ## Phase 7: Desktop Integration and Sync
 
 **Goal**: SSE change feed, direct DB reads, task sync via git branch, server lifecycle management. Desktop can consume the full system.
+
+**Progress**: 1/4 features closed. SSE change feed (`ywb0`) completed early. Remaining: Server lifecycle (`qhb4`), MCP-connect bridge (`1tst`), djinn/ namespace sync (`2up9`).
 
 **Requirements addressed**:
 - MCP-04 (SSE change feed with full entities)
@@ -248,7 +256,7 @@ Phase 3: Memory   ↘                       │
 Phase 7: Desktop Integration & Sync
 ```
 
-**Next up**: Finish Phase 1 (`168f`, `u0rv`) → unblocks Phase 2 → unblocks Phases 3 and 5.
+**Next up**: `1e43` (ready now) → unblocks `15p0` → unblocks `{1u1b, d9s4}` (Phase 5) and `1iyh` (Phase 3).
 
 ## Coverage Check
 
