@@ -11,6 +11,7 @@ Auto-generated index of all documentation.
 
 Technical decisions, trade-offs, and their rationale. Reference these when making implementation choices or understanding why something was built a certain way.
 
+- [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
 - [[Authentication — Clerk JWT Validation]]
 - [[Database Layer — rusqlite over libsql/Turso]]
 - [[Language Selection — Compiler as AI Code Reviewer]]
@@ -25,6 +26,12 @@ Product requirements documents. Use these to understand what we're building, why
 
 - [[V1 Requirements]]
 
+## 📖 Reference
+
+API references, implementation guides, and component documentation. Consult these for specific technical details during implementation.
+
+- [[Agent Harness Scope]]
+
 ## 🔬 Research
 
 Analysis, investigations, and discovery work. Background context for decisions — market analysis, architecture studies, UX research.
@@ -32,6 +39,7 @@ Analysis, investigations, and discovery work. Background context for decisions �
 - [[Architecture Research]]
 - [[Embedded Database Survey]]
 - [[Features Research]]
+- [[Goose Library Integration Research - Phase 5]]
 - [[Pitfalls Research]]
 - [[Research Summary]]
 - [[Rust Agentic Ecosystem Survey]]

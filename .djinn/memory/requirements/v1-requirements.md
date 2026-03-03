@@ -16,7 +16,7 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 |---|---|---|---|
 | MCP-01 | Serve MCP tools over Streamable HTTP transport (rmcp 0.16+) | v1 | Brief: Core MCP Server |
 | MCP-02 | Per-session server instances with shared state via Arc | v1 | Architecture Research §6 |
-| MCP-03 | MCP-connect bridge mode (stdio↔HTTP proxy) injecting project/task context into agent sessions | v1 | Brief: Core MCP Server |
+| MCP-03 | ~~MCP-connect bridge mode (stdio↔HTTP proxy) injecting project/task context into agent sessions~~ — DROPPED per ADR-008 (replaced by direct function calls via Goose extension) | ~~v1~~ | Brief: Core MCP Server |
 | MCP-04 | SSE change feed: repository-emitted full-entity events streamed to desktop via SSE endpoint. Desktop updates UI directly from event payload — no follow-up reads. Covers creates, updates, deletes across all entity types. | v1 | ADR-002, Research Summary |
 | MCP-05 | Tool registration organized by domain (task, memory, execution, system modules) | v1 | Architecture Research §6 |
 
@@ -72,21 +72,24 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 
 | ID | Requirement | Classification | Source |
 |---|---|---|---|
-| AGENT-01 | Actor hierarchy (Ryhl hand-rolled pattern): 1× CoordinatorActor (global — dispatch decisions across all projects), 1× AgentSupervisor (global — tracks all running sessions up to capacity limit), N× GitActor (per-project — serializes git ops per repository). Event broadcasting handled by repository's broadcast::Sender, not a separate actor. Sessions are subprocesses with monitoring tokio tasks, not actors. | v1 | Architecture Research §1 |
+| AGENT-01 | Actor hierarchy (Ryhl hand-rolled pattern): 1× CoordinatorActor (global — dispatch decisions across all projects), 1× AgentSupervisor (global — tracks all running sessions up to capacity limit), N× GitActor (per-project — serializes git ops per repository). Event broadcasting handled by repository's broadcast::Sender, not a separate actor. Sessions are in-process tokio tasks via Goose library, not subprocesses (revised per ADR-008). | v1 | Architecture Research §1, ADR-008 |
 | AGENT-02 | Three agent types: worker (developer), task reviewer, epic reviewer | v1 | Brief, Research Summary |
-| AGENT-03 | Agent dispatch via summon crate (uniform interface for Claude Code, OpenCode, Codex, etc.) | v1 | Brief |
+| AGENT-03 | Agent dispatch via Goose library — in-process async tasks, not subprocesses (revised per ADR-008, replaces summon crate) | v1 | Brief, ADR-008 |
 | AGENT-04 | Model discovery from models.dev catalog + custom providers | v1 | Brief |
 | AGENT-05 | Model health tracking: circuit breakers, cooldowns, auto-disable on repeated failures, rerouting to alternatives | v1 | Brief, Features Research |
 | AGENT-06 | Session limiting (per-model capacity) | v1 | Brief |
 | AGENT-07 | Event-driven dispatch (not polling) — `tokio::select!` with cancellation token + channel receivers | v1 | Brief, Stack Research |
 | AGENT-08 | Stuck detection and recovery (30s interval tick as safety net) | v1 | Brief, Stack Research |
-| AGENT-09 | Graceful shutdown: CancellationToken + TaskTracker, SIGTERM → 5s wait → SIGKILL on agent subprocesses | v1 | Stack Research, Architecture Research §8 |
+| AGENT-09 | Graceful shutdown: CancellationToken propagation to Goose agents (in-process), no SIGTERM/SIGKILL (revised per ADR-008) | v1 | Stack Research, Architecture Research §8, ADR-008 |
 | AGENT-10 | WIP commits on graceful pause/shutdown (`--no-verify` — incomplete work) | v1 | Brief |
 | AGENT-11 | Actor struct hard limits: ≤15 message variants per actor, ≤20 fields per struct | v1 | Architecture Research §1, Pitfalls Research §2 |
-| AGENT-12 | Scaffold system (deploy skills/prompts to projects for agent sessions) | v1 | Brief |
+| AGENT-12 | ~~Scaffold system (deploy skills/prompts to projects for agent sessions)~~ — DROPPED per ADR-008 (replaced by Goose prompt API + embedded templates) | ~~v1~~ | Brief |
 | AGENT-13 | Multi-model routing (premium for planning, cheap for execution) | v2 | Features Research |
 | AGENT-14 | Attribution-based quality loop (track finding acceptance rates) | v2 | Features Research |
 | AGENT-15 | Compute governance / ACU budgets per task | v2 | Features Research |
+| AGENT-16 | Credential vault in Djinn DB with encrypted API key storage — supports VPS, WSL, standalone deployment | v1 | ADR-008 |
+| AGENT-17 | Goose provider creation from vault credentials at dispatch time (runtime key management, no server restart) | v1 | ADR-008 |
+| AGENT-18 | Per-session Goose Agent configuration: prompt override + extension scoping per agent type | v1 | ADR-008 |
 
 ## Category: REVIEW (Review System)
 
@@ -142,8 +145,8 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 
 | ID | Requirement | Classification | Source |
 |---|---|---|---|
-| LIFE-01 | Desktop spawns server as child process, passes Clerk JWT + config via CLI args/env | v1 | ADR-005 |
-| LIFE-02 | Graceful shutdown on SIGTERM: stop new connections, stop dispatch, WIP-commit agents (5s timeout per agent), WAL checkpoint, clean exit | v1 | ADR-005 |
+| LIFE-01 | Desktop spawns server as child process OR server runs standalone (VPS/WSL) — passes Clerk JWT + config via CLI args/env (revised per ADR-008 for standalone support) | v1 | ADR-005, ADR-008 |
+| LIFE-02 | Graceful shutdown on SIGTERM: stop new connections, stop dispatch, CancellationToken → Goose agents stop → WIP-commit (30s timeout), WAL checkpoint, clean exit (revised per ADR-008 — CancellationToken, not SIGTERM/SIGKILL to agents) | v1 | ADR-005, ADR-008 |
 | LIFE-03 | Graceful restart for updates: desktop signals SIGTERM → waits for exit → starts new binary → new server reads state from DB and resumes | v1 | ADR-005 |
 | LIFE-04 | Board reconciliation on startup: detect interrupted agents (in_progress tasks with no running session), heal stale tasks, re-dispatch | v1 | ADR-005 |
 | LIFE-05 | Desktop monitors server process (exit codes, health checks), restarts on unexpected crash | v1 | ADR-005 |
@@ -163,7 +166,7 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 | CFG-01 | Settings stored in DB (replaces per-project JSON files) | v1 | Brief |
 | CFG-02 | Project registry: add/remove/list projects | v1 | Brief |
 | CFG-03 | Git settings per project (target branch, hook behavior) with global defaults | v1 | Brief |
-| CFG-04 | Model configuration (provider credentials, capacity limits) | v1 | Brief |
+| CFG-04 | Model configuration: capacity limits and routing preferences (narrowed per ADR-008 — credentials managed by vault + Goose providers) | v1 | Brief, ADR-008 |
 
 ## Category: WSL (WSL / Deployment)
 
@@ -218,3 +221,20 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 - [[Features Research]] — market features informing v1/v2 classification
 - [[Architecture Research]] — patterns informing design requirements
 - [[Pitfalls Research]] — risks driving defensive requirements
+
+
+
+
+## Phase 5 Task Traceability
+
+| Task | Title | Requirements Covered |
+|------|-------|---------------------|
+| sy31 | Credential vault schema and repository | AGENT-16 |
+| 1tal | Goose crate integration and agent module scaffold | AGENT-03 (partial) |
+| lnfo | Embedded prompt templates for agent types | AGENT-02, AGENT-18 (partial) |
+| ewkl | Djinn tools Goose extension | AGENT-03 (tool access) |
+| rvmf | AgentSupervisor actor with session tracking and capacity | AGENT-06, AGENT-11 |
+| xq5l | Agent dispatch flow with provider creation and per-session config | AGENT-03, AGENT-17, AGENT-18 |
+| 951w | Graceful shutdown and WIP commits for agent sessions | AGENT-09, AGENT-10 |
+| 1u1b | CoordinatorActor (closed) | AGENT-01, AGENT-07, AGENT-08, AGENT-11 |
+| n8e4 | Model health (closed) | AGENT-04, AGENT-05, CFG-04 |

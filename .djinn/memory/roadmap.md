@@ -16,14 +16,16 @@ _Updated: 2026-03-03_
 | Phase | Status | Remaining |
 |-------|--------|-----------|
 | Phase 1: Foundation | ✅ Complete | — |
-| Phase 2: Task Board | 🟡 33% | `1e43` `15p0` `1my3` `xdr3` |
-| Phase 3: Knowledge Base | 🟡 67% | `1iyh` |
+| Phase 2: Task Board | ✅ Complete | — |
+| Phase 3: Knowledge Base | ✅ Complete | — |
 | Phase 4: Git Integration | ✅ Complete | — |
-| Phase 5: Coordinator | 🟡 33% | `1u1b` `d9s4` |
-| Phase 6: Review | ⚪ 0% | `1nby` `lm7a` |
-| Phase 7: Desktop & Sync | 🟡 25% | `qhb4` `1tst` `2up9` |
+| Phase 5: Coordinator | 🟡 67% | `d9s4` |
+| Phase 6: Review | ⚪ 0% | `lm7a` |
+| Phase 7: Desktop & Sync | 🟡 67% | `qhb4` |
 
-**Overall: 25/37 items closed (68%) — Next up: `1e43` (ready now) → unblocks `15p0` → unblocks `{1u1b, d9s4}`**
+**Overall: 34/37 items closed (92%) — 3 features remaining across Phases 5-7**
+
+**ADR-008 changes:** Goose library replaces summon for agent dispatch. MCP-connect bridge (`1tst`) and scaffold system (`1nby`) dropped. See [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]].
 
 ## Phase 1: Foundation — Database, Schema, and Core Server ✅
 
@@ -63,7 +65,7 @@ _Updated: 2026-03-03_
 
 **Goal**: Full task board functionality — epics, tasks, state machine, blockers, activity log. The core domain model.
 
-**Progress**: 2/6 features closed. Schema (`1la3`) and state machine (`1fdt`) done. Remaining: CRUD tools (`1e43`, ready now), transition/dispatch (`15p0`), blocker management (`1my3`), activity log + health (`xdr3`).
+**Progress**: COMPLETE. All 8 features closed: Schema (`1la3`), state machine (`1fdt`), CRUD tools (`1e43`, `1ife`, `1e6d`, `1mw0`), transition/dispatch (`15p0`), blocker management (`1my3`), activity log + health (`xdr3`).
 
 **Requirements addressed**:
 - TASK-01 (epics as separate entities)
@@ -82,22 +84,20 @@ _Updated: 2026-03-03_
 - TASK-14 (design field)
 
 **Success criteria**:
-1. Create epics and tasks via MCP tools; tasks enforce parent epic requirement
-2. Task state machine prevents illegal transitions at compile time (typestate)
-3. Blocker dependencies prevent task dispatch when blockers are open
-4. Short IDs generated and unique; resolvable in all task tools
-5. Activity log records all state changes with structured JSON payloads
-6. Board health detects stale tasks and stuck states
+1. ~~Create epics and tasks via MCP tools; tasks enforce parent epic requirement~~ ✓
+2. ~~Task state machine prevents illegal transitions at compile time (typestate)~~ ✓
+3. ~~Blocker dependencies prevent task dispatch when blockers are open~~ ✓
+4. ~~Short IDs generated and unique; resolvable in all task tools~~ ✓
+5. ~~Activity log records all state changes with structured JSON payloads~~ ✓
+6. ~~Board health detects stale tasks and stuck states~~ ✓
 
 **Depends on**: Phase 1 (DB, MCP server, repository pattern)
-
----
 
 ## Phase 3: Memory / Knowledge Base
 
 **Goal**: Full knowledge base — notes, FTS5 search, wikilink graph, memory↔task references.
 
-**Progress**: 2/3 features closed. Note schema + FTS5 (`kt1l`) and wikilink graph (`rw6q`) completed early in parallel with Phase 2. Remaining: Note CRUD MCP tools (`1iyh`, blocked on `1e43`).
+**Progress**: COMPLETE. All 3 features closed: Note schema + FTS5 (`kt1l`), wikilink graph (`rw6q`), Note CRUD MCP tools (`1iyh`).
 
 **Requirements addressed**:
 - MEM-01 (typed notes with folders)
@@ -112,15 +112,13 @@ _Updated: 2026-03-03_
 - MEM-10 (broken link detection)
 
 **Success criteria**:
-1. Create, read, edit, search, delete notes via MCP tools
-2. FTS5 search returns ranked results with snippets
-3. Wikilinks resolved bidirectionally; graph endpoint returns all edges
-4. Memory↔task references work in both directions (task → notes, note → tasks)
-5. Catalog auto-generated from index; orphans and broken links detected
+1. ~~Create, read, edit, search, delete notes via MCP tools~~ ✓
+2. ~~FTS5 search returns ranked results with snippets~~ ✓
+3. ~~Wikilinks resolved bidirectionally; graph endpoint returns all edges~~ ✓
+4. ~~Memory↔task references work in both directions (task → notes, note → tasks)~~ ✓
+5. ~~Catalog auto-generated from index; orphans and broken links detected~~ ✓
 
 **Depends on**: Phase 2 (task board — for memory↔task references)
-
----
 
 ## Phase 4: Git Integration ✅
 
@@ -152,64 +150,67 @@ _Updated: 2026-03-03_
 
 ## Phase 5: Agent Orchestration (Coordinator)
 
-**Goal**: The coordinator dispatches agents to tasks, manages model health, handles graceful shutdown. The "brain" of the system.
+**Goal**: The coordinator dispatches agents to tasks, manages model health, handles graceful shutdown. The "brain" of the system. **ADR-008: Agents run in-process via Goose library, not as subprocesses via summon.**
 
-**Progress**: 1/3 features closed. Model health + circuit breakers (`n8e4`) completed early. Remaining: CoordinatorActor (`1u1b`) and AgentSupervisor (`d9s4`), both blocked on `15p0`.
+**Progress**: 2/3 features closed. CoordinatorActor (`1u1b`) and model health (`n8e4`) done. Remaining: AgentSupervisor (`d9s4`, renamed to "Goose in-process agent harness").
 
 **Requirements addressed**:
-- AGENT-01 (actor hierarchy)
+- AGENT-01 (actor hierarchy — sessions are tokio tasks, not subprocesses per ADR-008)
 - AGENT-02 (three agent types)
-- AGENT-03 (dispatch via summon)
-- AGENT-04 (model discovery)
-- AGENT-05 (model health / circuit breakers)
+- AGENT-03 (revised: dispatch via Goose library, in-process async tasks)
+- AGENT-04 (model discovery — delegated to Goose's provider system)
+- AGENT-05 (model health / circuit breakers — Djinn wraps Goose providers)
 - AGENT-06 (session limiting)
 - AGENT-07 (event-driven dispatch)
 - AGENT-08 (stuck detection)
-- AGENT-09 (graceful shutdown)
+- AGENT-09 (revised: CancellationToken to Goose agents, not SIGTERM/SIGKILL)
 - AGENT-10 (WIP commits on pause)
 - AGENT-11 (actor struct limits)
-- AGENT-12 (scaffold system)
-- CFG-04 (model configuration)
+- ~~AGENT-12 (scaffold system)~~ — DROPPED per ADR-008
+- CFG-04 (narrowed: capacity/routing only, credentials in vault)
+- AGENT-16 (NEW: credential vault in Djinn DB)
+- AGENT-17 (NEW: Goose provider creation from vault at dispatch time)
+- AGENT-18 (NEW: per-session Goose Agent configuration)
 
 **Success criteria**:
-1. Coordinator dispatches worker agent to an open task; agent works in worktree
+1. Coordinator dispatches Goose agent to an open task; agent works in worktree
 2. Model health tracks failures; circuit breaker trips after threshold; reroutes to alternative
 3. Session limiting enforces per-model capacity
-4. Graceful shutdown: SIGTERM → WIP commit → agent stop → worktree preserved
+4. Graceful shutdown: CancellationToken → Goose agent stops → WIP commit → worktree preserved
 5. Stuck detection recovers tasks from unresponsive agents within 30s
+6. Credential vault stores API keys; Goose providers created from vault at dispatch time
+7. Per-session prompt and extension configuration for different agent types
 
 **Depends on**: Phase 2 (task board for dispatch), Phase 4 (git for worktrees)
 
----
-
 ## Phase 6: Review System
 
-**Goal**: Task review and epic review agents verify quality before approval.
+**Goal**: Task review and phase review agents verify quality before approval. **Runs as Goose sessions per ADR-008.**
+
+**Progress**: 0/1 features remaining. Scaffold system (`1nby`) dropped per ADR-008. Only `lm7a` (review agents) remains.
 
 **Requirements addressed**:
 - REVIEW-01 (task review: AC verification + code nitpicks)
-- REVIEW-02 (epic review: completeness + aggregate quality)
+- REVIEW-02 (phase review: completeness + aggregate quality)
 - REVIEW-03 (rejection → rework loop)
 
 **Success criteria**:
-1. Task review agent checks acceptance criteria against code diff; approves or rejects with feedback
-2. Epic review agent checks for missing tasks and reviews aggregate diff for patterns/duplication
+1. Task review Goose agent checks acceptance criteria against code diff; approves or rejects with feedback
+2. Phase review Goose agent checks for missing tasks and reviews aggregate diff for patterns/duplication
 3. Rejected tasks return to agent with feedback; agent reworks and resubmits
-4. Full review cycle: work → task review → approve/reject → epic review → close
+4. Full review cycle: work → task review → approve/reject → phase review → close
 
 **Depends on**: Phase 5 (coordinator for agent dispatch), Phase 4 (git for diffs)
-
----
 
 ## Phase 7: Desktop Integration and Sync
 
 **Goal**: SSE change feed, direct DB reads, task sync via git branch, server lifecycle management. Desktop can consume the full system.
 
-**Progress**: 1/4 features closed. SSE change feed (`ywb0`) completed early. Remaining: Server lifecycle (`qhb4`), MCP-connect bridge (`1tst`), djinn/ namespace sync (`2up9`).
+**Progress**: 3/4 features closed. SSE change feed (`ywb0`), djinn/ namespace sync (`2up9`) completed. MCP-connect bridge (`1tst`) dropped per ADR-008. Remaining: Server lifecycle (`qhb4`, updated to include credential vault and VPS/standalone support).
 
 **Requirements addressed**:
 - MCP-04 (SSE change feed with full entities)
-- MCP-03 (MCP-connect bridge mode)
+- ~~MCP-03 (MCP-connect bridge mode)~~ — DROPPED per ADR-008
 - DB-05a (desktop initial load via direct DB read)
 - SYNC-01 (task sync via djinn/tasks branch)
 - SYNC-02 (fetch-rebase-push)
@@ -219,23 +220,26 @@ _Updated: 2026-03-03_
 - WSL-02 (Linux filesystem)
 - WSL-03 (HTTP over TCP)
 - WSL-04 (runtime detection of direct DB access)
-- LIFE-01 (desktop spawns server as child process)
-- LIFE-02 (graceful shutdown on SIGTERM)
+- LIFE-01 (revised: desktop-spawned OR standalone server modes)
+- LIFE-02 (revised: graceful shutdown with Goose CancellationToken, not subprocess SIGTERM)
 - LIFE-03 (graceful restart for updates)
 - LIFE-04 (board reconciliation on startup)
 - LIFE-05 (desktop monitors server process)
+- AGENT-16 (credential vault — shared with Phase 5)
+- AGENT-17 (runtime key management — shared with Phase 5)
 - OBS-01 (activity in DB)
 - OBS-02 (file-based operational log)
 
 **Success criteria**:
 1. Desktop connects via SSE; receives full-entity events for all mutations
 2. Desktop reads DB file directly for initial load (local mode)
-3. MCP-connect bridge injects project/task context into agent sessions
+3. ~~MCP-connect bridge injects project/task context into agent sessions~~ — DROPPED
 4. Task sync exports/imports via djinn/tasks git branch with conflict resolution
 5. WSL mode: server accessible from Windows desktop via TCP
-6. Graceful shutdown: SIGTERM → WIP commit → WAL checkpoint → clean exit
+6. Graceful shutdown: CancellationToken → Goose agents stop → WIP commit → WAL checkpoint → clean exit
 7. Graceful restart: desktop signals SIGTERM → waits → starts new binary → resumes from DB
 8. Board reconciliation on startup detects and heals interrupted agents
+9. Credential vault stores API keys; runtime key management without restart
 
 **Depends on**: Phase 2 (tasks), Phase 3 (memory), Phase 5 (coordinator events)
 
@@ -260,19 +264,18 @@ Phase 7: Desktop Integration & Sync
 
 ## Coverage Check
 
-All 85 v1 requirements are assigned to exactly one phase:
-- Phase 1: DB-01..07, MCP-01/02/05, AUTH-01..04, CFG-01/02 (17 reqs)
-- Phase 2: TASK-01..14 (14 reqs)
-- Phase 3: MEM-01..10 (10 reqs)
-- Phase 4: GIT-01..08, CFG-03 (9 reqs)
-- Phase 5: AGENT-01..12, CFG-04 (13 reqs)
+Updated post-ADR-008. Dropped requirements: AGENT-12 (scaffold), MCP-03 (bridge). Added: AGENT-16/17/18. Revised: AGENT-01/03/09, LIFE-01/02, CFG-04.
+
+- Phase 1: DB-01..07, MCP-01/02/05, AUTH-01..04, CFG-01/02 (17 reqs) ✅
+- Phase 2: TASK-01..14 (14 reqs) ✅
+- Phase 3: MEM-01..10 (10 reqs) ✅
+- Phase 4: GIT-01..08, CFG-03 (9 reqs) ✅
+- Phase 5: AGENT-01..11, AGENT-16..18, CFG-04 (15 reqs — was 13, +3 new, -1 dropped)
 - Phase 6: REVIEW-01..03 (3 reqs)
-- Phase 7: MCP-03/04, DB-05a, SYNC-01..04, WSL-01..04, LIFE-01..05, OBS-01/02 (18 reqs)
+- Phase 7: MCP-04, DB-05a, SYNC-01..04, WSL-01..04, LIFE-01..05, OBS-01/02 (17 reqs — was 18, MCP-03 dropped)
 - Cross-cutting: TEST-01..03 (3 reqs — testing patterns applied per phase)
 
-Total: 87 (85 v1 + 2 cross-cutting TEST reqs counted separately) ✓
-
-Note: AUTH-01..04 replace the original LIC-01..02 (ADR-004). LIFE-01..05 and TEST-01..03 are new categories added after the initial requirements pass.
+Total: 88 (85 original - 2 dropped + 3 new + 2 cross-cutting TEST) ✓
 
 ## Relations
 
@@ -283,6 +286,8 @@ Note: AUTH-01..04 replace the original LIC-01..02 (ADR-004). LIFE-01..05 and TES
 - [[Migrations — refinery with timestamp-based naming]] — ADR-003 driving migration approach in Phase 1
 - [[Authentication — Clerk JWT Validation]] — ADR-004 driving auth in Phase 1 (replaces LIC)
 - [[Server Lifecycle — Desktop-Managed Daemon with Graceful Restart]] — ADR-005 driving lifecycle in Phase 7
+- [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — ADR-008 driving Phases 5-7 (replaces summon, drops bridge + scaffold)
+- [[Agent Harness Scope]] — scope boundaries for Goose integration
 
 ## Traceability
 

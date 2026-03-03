@@ -42,7 +42,7 @@ The current Go server has accumulated significant complexity:
 - **Language:** Rust (decided — [[Language Selection — Compiler as AI Code Reviewer]])
 - **Database:** libSQL/Turso (decided — [[Embedded Database Survey]])
 - **Stack:** Axum + Tokio + Serde + Clap (decided — [[Rust Agentic Ecosystem Survey]])
-- **Agent spawning:** Via summon crate (sibling project) — uniform interface for Claude Code, OpenCode, Codex, etc.
+- **Agent harness:** Goose library (in-process async tasks) — see [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
 - **Licensing:** Server is closed source. Requires a license token to run. Desktop (open source later) authenticates via Clerk.
 - **Git integration:** Task branches merge directly to main upstream. No stacked branches. Local repo untouched.
 - **Hierarchy:** Epics are separate entities (not tasks). Tasks live under epics. No subepics, no subtasks. Flat.
@@ -53,7 +53,7 @@ The current Go server has accumulated significant complexity:
 
 **Core MCP Server:**
 - MCP server (Streamable HTTP) with task, memory, execution, and system tools
-- MCP-connect bridge mode (stdio↔HTTP proxy for agent sessions, injects project/task context)
+- ~~MCP-connect bridge mode~~ — DROPPED per ADR-008 (replaced by direct function calls via Goose extension)
 - License validation on startup (token-based, server won't run without it)
 
 **Database:**
@@ -79,13 +79,14 @@ The current Go server has accumulated significant complexity:
 
 **Agent Orchestration (Coordinator):**
 - Three agent types: worker (developer), task reviewer, epic reviewer
-- Agent dispatch via summon crate (uniform interface for Claude Code, Codex, OpenCode, Gemini, etc.)
-- Model discovery (models.dev catalog + custom providers) — server picks model, summon spawns agent
+- Agent dispatch via Goose library (in-process async tasks, not subprocesses — ADR-008)
+- Model discovery (models.dev catalog + custom providers) — server picks model, Goose runs agent in-process
 - Model health tracking (circuit breakers, cooldowns, auto-disable, rerouting)
 - Session limiting (per-model capacity)
 - Event-driven dispatch (not polling)
 - Stuck detection and recovery
-- Scaffold system (deploy skills/prompts to projects for agent sessions)
+- ~~Scaffold system~~ — DROPPED per ADR-008 (replaced by embedded prompt templates via include_str!())
+- Credential vault in Djinn DB for API keys (supports VPS/WSL/standalone — ADR-008)
 
 **Review System:**
 - Task review: acceptance criteria verification + code nitpicks on individual diffs
@@ -119,7 +120,7 @@ The current Go server has accumulated significant complexity:
 - Multi-user / team collaboration
 - VPS deployment mode (architecture supports it via Turso network sync, but v1 targets local/WSL)
 - Open-sourcing the desktop
-- Hook bridge HTTP server for agent hook interception (deferred to summon v2)
+- Hook bridge HTTP server for agent hook interception (deferred)
 ## Relations
 - [[Language Selection — Compiler as AI Code Reviewer]] — ADR driving language choice
 - [[Embedded Database Survey]] — ADR driving database choice
