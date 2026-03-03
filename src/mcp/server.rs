@@ -25,6 +25,7 @@ impl DjinnMcpServer {
         Self {
             state: state.clone(),
             tool_router: Self::system_tool_router()
+                + Self::project_tool_router()
                 + Self::memory_tool_router()
                 + Self::provider_tool_router()
                 + Self::credential_tool_router()

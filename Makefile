@@ -59,8 +59,7 @@ restart: build
 			while kill -0 "$$PID" 2>/dev/null; do sleep 0.1; done; \
 		fi; \
 	fi
-	$(TARGET_DEBUG) &
-	@echo "djinn-server started"
+	$(TARGET_DEBUG) --ensure-daemon
 
 clean:
 	cargo clean
