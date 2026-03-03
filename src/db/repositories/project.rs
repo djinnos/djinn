@@ -1,6 +1,6 @@
 use tokio::sync::broadcast;
 
-use crate::db::connection::Database;
+use crate::db::connection::{Database, OptionalExt};
 use crate::error::Result;
 use crate::events::DjinnEvent;
 use crate::models::project::Project;
@@ -137,19 +137,6 @@ impl ProjectRepository {
     }
 }
 
-trait OptionalExt<T> {
-    fn optional(self) -> std::result::Result<Option<T>, rusqlite::Error>;
-}
-
-impl<T> OptionalExt<T> for std::result::Result<T, rusqlite::Error> {
-    fn optional(self) -> std::result::Result<Option<T>, rusqlite::Error> {
-        match self {
-            Ok(val) => Ok(Some(val)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

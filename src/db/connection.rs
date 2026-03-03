@@ -7,6 +7,40 @@ use tokio::sync::Mutex;
 use crate::db::migrations;
 use crate::error::Result;
 
+// ── Dev-mode write guard ─────────────────────────────────────────────────────
+//
+// In debug builds we register a rusqlite update_hook that panics when a
+// data-modifying statement (INSERT/UPDATE/DELETE) fires outside of a
+// `Database::write()` call.  This catches bugs where `call()` is accidentally
+// used for writes.
+//
+// The guard is a thread-local flag because `spawn_blocking` runs each closure
+// on a dedicated thread-pool thread; both the flag set/reset and the hook
+// invocation happen on the same thread.
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static IN_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(debug_assertions)]
+struct WriteGuard;
+
+#[cfg(debug_assertions)]
+impl WriteGuard {
+    fn arm() -> Self {
+        IN_WRITE.with(|f| f.set(true));
+        WriteGuard
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for WriteGuard {
+    fn drop(&mut self) {
+        IN_WRITE.with(|f| f.set(false));
+    }
+}
+
 /// Default database path: `~/.djinn/djinn.db`.
 pub fn default_db_path() -> std::path::PathBuf {
     dirs::home_dir()
@@ -35,6 +69,8 @@ impl Database {
         let mut conn = Connection::open(path)?;
         apply_pragmas(&conn)?;
         migrations::run(&mut conn)?;
+        #[cfg(debug_assertions)]
+        register_write_hook(&conn);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -58,6 +94,8 @@ impl Database {
         let mut conn = Connection::open_in_memory()?;
         apply_pragmas(&conn)?;
         migrations::run(&mut conn)?;
+        #[cfg(debug_assertions)]
+        register_write_hook(&conn);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -99,6 +137,9 @@ impl Database {
         let ptr = &*guard as *const Connection as usize;
         let result = tokio::task::spawn_blocking(move || {
             let conn = unsafe { &*(ptr as *const Connection) };
+            // Arm the dev-mode write guard before any statements fire the hook.
+            #[cfg(debug_assertions)]
+            let _write_guard = WriteGuard::arm();
             conn.execute_batch("BEGIN IMMEDIATE")?;
             match f(conn) {
                 Ok(val) => {
@@ -116,6 +157,24 @@ impl Database {
         drop(guard);
         result
     }
+}
+
+/// Register the dev-mode update hook that panics when a write fires outside
+/// of `Database::write()`.  Only compiled in debug builds.
+///
+/// Uses a named `fn` rather than a closure to satisfy rusqlite's higher-rank
+/// lifetime requirement on the hook callback.
+#[cfg(debug_assertions)]
+fn register_write_hook(conn: &Connection) {
+    fn hook(_: rusqlite::hooks::Action, _: &str, _: &str, _: i64) {
+        IN_WRITE.with(|f| {
+            assert!(
+                f.get(),
+                "write detected outside Database::write() — use write(), not call()"
+            );
+        });
+    }
+    conn.update_hook(Some(hook));
 }
 
 fn apply_pragmas(conn: &Connection) -> Result<()> {
@@ -137,6 +196,26 @@ fn apply_pragmas_readonly(conn: &Connection) -> Result<()> {
          PRAGMA cache_size = -64000;",
     )?;
     Ok(())
+}
+
+// ── Shared DB helpers ────────────────────────────────────────────────────────
+
+/// Converts `QueryReturnedNoRows` into `None`; other errors propagate as `Err`.
+///
+/// Used by all repository `get` methods to return `Option<T>` instead of
+/// forcing callers to match on `rusqlite::Error::QueryReturnedNoRows`.
+pub(crate) trait OptionalExt<T> {
+    fn optional(self) -> std::result::Result<Option<T>, rusqlite::Error>;
+}
+
+impl<T> OptionalExt<T> for std::result::Result<T, rusqlite::Error> {
+    fn optional(self) -> std::result::Result<Option<T>, rusqlite::Error> {
+        match self {
+            Ok(val) => Ok(Some(val)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@
 //!   - Per-project: `git:{project_id}:target_branch`
 //!   - Global default: `git:global:target_branch`  (falls back to "main")
 
-use crate::db::connection::Database;
+use crate::db::connection::{Database, OptionalExt};
 use crate::error::Result;
 use crate::models::git_settings::GitSettings;
 
@@ -97,19 +97,6 @@ impl GitSettingsRepository {
     }
 }
 
-trait OptionalExt<T> {
-    fn optional(self) -> std::result::Result<Option<T>, rusqlite::Error>;
-}
-
-impl<T> OptionalExt<T> for std::result::Result<T, rusqlite::Error> {
-    fn optional(self) -> std::result::Result<Option<T>, rusqlite::Error> {
-        match self {
-            Ok(val) => Ok(Some(val)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
