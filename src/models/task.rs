@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 /// Task board work item, always scoped under an epic.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Task {
     pub id: String,
     pub short_id: String,
@@ -31,7 +31,7 @@ pub struct Task {
 }
 
 /// A single entry in the task activity log (audit trail + comments).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ActivityEntry {
     pub id: String,
     pub task_id: Option<String>,
@@ -166,7 +166,9 @@ impl TransitionAction {
             "unblock" => Ok(Self::Unblock),
             "force_close" => Ok(Self::ForceClose),
             "user_override" => Ok(Self::UserOverride),
-            other => Err(Error::Internal(format!("unknown transition action: {other}"))),
+            other => Err(Error::Internal(format!(
+                "unknown transition action: {other}"
+            ))),
         }
     }
 }
@@ -216,7 +218,10 @@ impl Default for TransitionApply {
 
 impl TransitionApply {
     fn simple(to: TaskStatus) -> Self {
-        Self { to_status: Some(to), ..Default::default() }
+        Self {
+            to_status: Some(to),
+            ..Default::default()
+        }
     }
 }
 

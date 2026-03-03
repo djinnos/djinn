@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// A knowledge base note. Source of truth is the markdown file on disk;
 /// this struct represents the SQLite index row.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, sqlx::FromRow)]
 pub struct Note {
     pub id: String,
     pub project_id: String,
@@ -14,8 +14,8 @@ pub struct Note {
     pub file_path: String,
     pub note_type: String,
     pub folder: String,
-    pub tags: String,      // JSON array string, e.g. '["rust","db"]'
-    pub content: String,   // Markdown body without frontmatter
+    pub tags: String,    // JSON array string, e.g. '["rust","db"]'
+    pub content: String, // Markdown body without frontmatter
     pub created_at: String,
     pub updated_at: String,
     pub last_accessed: String,
@@ -34,7 +34,7 @@ pub struct NoteSearchResult {
 }
 
 /// Compact note summary (no full content) for list and recent queries.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, sqlx::FromRow)]
 pub struct NoteCompact {
     pub id: String,
     pub permalink: String,

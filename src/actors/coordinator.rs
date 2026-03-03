@@ -59,6 +59,8 @@ enum CoordinatorMessage {
     Resume,
     /// Return current coordinator status.
     GetStatus { respond_to: Reply<CoordinatorStatus> },
+    /// Run an immediate stuck-task detection pass.
+    TriggerStuckScan,
 }
 
 // ─── Actor (≤20 fields — AGENT-11) ───────────────────────────────────────────
@@ -175,6 +177,11 @@ impl CoordinatorActor {
                     tasks_dispatched: self.dispatched,
                     sessions_recovered: self.recovered,
                 });
+            }
+            CoordinatorMessage::TriggerStuckScan => {
+                if !self.paused {
+                    self.detect_and_recover_stuck().await;
+                }
             }
         }
     }
@@ -389,6 +396,11 @@ impl CoordinatorHandle {
         self.send(CoordinatorMessage::GetStatus { respond_to: tx }).await?;
         rx.await.map_err(|_| CoordinatorError::NoResponse)
     }
+
+    /// Trigger an immediate stuck-task detection pass.
+    pub async fn trigger_stuck_scan(&self) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::TriggerStuckScan).await
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -487,7 +499,7 @@ mod tests {
 
     // ── Stuck detection ───────────────────────────────────────────────────────
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn stuck_detection_releases_orphaned_in_progress_task() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -499,14 +511,7 @@ mod tests {
         repo.set_status(&task.id, "in_progress").await.unwrap();
 
         let handle = spawn_coordinator(&db, &tx);
-
-        // Advance virtual time past the 30s stuck-detection interval.
-        tokio::time::advance(STUCK_INTERVAL + Duration::from_millis(100)).await;
-
-        // Yield to let the actor process the tick and the release transition.
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
+        handle.trigger_stuck_scan().await.unwrap();
 
         let status = handle.get_status().await.unwrap();
         assert!(status.sessions_recovered >= 1, "stuck task should have been recovered");

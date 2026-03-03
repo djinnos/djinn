@@ -6,7 +6,6 @@ use std::path::Path;
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::db::connection::OptionalExt;
 use crate::db::repositories::note::NoteRepository;
 use crate::mcp::server::DjinnMcpServer;
 use crate::models::note::{
@@ -741,18 +740,11 @@ impl DjinnMcpServer {
 impl DjinnMcpServer {
     /// Resolve an absolute project path to its DB project_id.
     pub(crate) async fn project_id_for_path(&self, project_path: &str) -> Option<String> {
-        let path = project_path.to_owned();
-        self.state
-            .db()
-            .call(move |conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT id FROM projects WHERE path = ?1",
-                        [&path],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .optional()?)
-            })
+        let db = self.state.db();
+        db.ensure_initialized().await.ok()?;
+        sqlx::query_scalar::<_, String>("SELECT id FROM projects WHERE path = ?1")
+            .bind(project_path)
+            .fetch_optional(db.pool())
             .await
             .ok()
             .flatten()

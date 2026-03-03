@@ -23,10 +23,15 @@ async fn checkpoint_loop(db: Database, cancel: CancellationToken) {
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if let Err(e) = db.call(|conn| {
-                    conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
-                    Ok(())
-                }).await {
+                let res = async {
+                    db.ensure_initialized().await?;
+                    sqlx::query("PRAGMA wal_checkpoint(PASSIVE);")
+                        .execute(db.pool())
+                        .await?;
+                    Ok::<(), crate::error::Error>(())
+                }
+                .await;
+                if let Err(e) = res {
                     tracing::error!("WAL checkpoint (PASSIVE) failed: {e}");
                 } else {
                     tracing::debug!("WAL checkpoint (PASSIVE) complete");
@@ -34,10 +39,15 @@ async fn checkpoint_loop(db: Database, cancel: CancellationToken) {
             }
             () = cancel.cancelled() => {
                 tracing::info!("WAL checkpoint task shutting down");
-                if let Err(e) = db.call(|conn| {
-                    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-                    Ok(())
-                }).await {
+                let res = async {
+                    db.ensure_initialized().await?;
+                    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE);")
+                        .execute(db.pool())
+                        .await?;
+                    Ok::<(), crate::error::Error>(())
+                }
+                .await;
+                if let Err(e) = res {
                     tracing::error!("WAL checkpoint (TRUNCATE) on shutdown failed: {e}");
                 }
                 break;

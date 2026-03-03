@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use sqlx::Sqlite;
 use tokio::sync::broadcast;
 
-use crate::db::connection::{Database, OptionalExt};
+use crate::db::connection::Database;
 use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
 use crate::models::note::{
@@ -39,6 +40,8 @@ impl NoteRepository {
         note_type: &str,
         tags: &str,
     ) -> Result<Note> {
+        self.db.ensure_initialized().await?;
+
         let id = uuid::Uuid::now_v7().to_string();
         let permalink = permalink_for(note_type, title);
         let file_path = file_path_for(project_path, note_type, title);
@@ -55,41 +58,58 @@ impl NoteRepository {
         // attempted here; a failure returns an error before touching the DB.
         write_note_file(&file_path, &title, &note_type, &tags, &content)?;
 
-        let note = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO notes
-                        (id, project_id, permalink, title, file_path,
-                         note_type, folder, tags, content)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    rusqlite::params![
-                        &id, &project_id, &permalink, &title, &file_path_str,
-                        &note_type, &folder, &tags, &content
-                    ],
-                )?;
-                index_links_for_note(conn, &id, &project_id, &content)?;
-                resolve_links_for_note(conn, &id, &title, &permalink, &project_id)?;
-                Ok(conn.query_row(NOTE_SELECT_WHERE_ID, [&id], row_to_note)?)
-            })
-            .await
-            .map_err(|e| {
-                // Best-effort cleanup: remove file if DB insert failed.
-                let _ = std::fs::remove_file(&file_path);
-                e
-            })?;
+        let note_result: Result<Note> = async {
+            let mut tx = self.db.pool().begin().await?;
+
+            sqlx::query(
+                "INSERT INTO notes
+                    (id, project_id, permalink, title, file_path,
+                     note_type, folder, tags, content)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )
+            .bind(&id)
+            .bind(&project_id)
+            .bind(&permalink)
+            .bind(&title)
+            .bind(&file_path_str)
+            .bind(&note_type)
+            .bind(&folder)
+            .bind(&tags)
+            .bind(&content)
+            .execute(&mut *tx)
+            .await?;
+
+            index_links_for_note(&mut tx, &id, &project_id, &content).await?;
+            resolve_links_for_note(&mut tx, &id, &title, &permalink, &project_id).await?;
+
+            let note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+                .bind(&id)
+                .fetch_one(&mut *tx)
+                .await?;
+
+            tx.commit().await?;
+            Ok(note)
+        }
+        .await;
+
+        let note = note_result.map_err(|e| {
+            // Best-effort cleanup: remove file if DB insert failed.
+            let _ = std::fs::remove_file(&file_path);
+            e
+        })?;
 
         let _ = self.events.send(DjinnEvent::NoteCreated(note.clone()));
         Ok(note)
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<Note>> {
-        let id = id.to_owned();
-        self.db
-            .call(move |conn| {
-                Ok(conn.query_row(NOTE_SELECT_WHERE_ID, [&id], row_to_note).optional()?)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+                .bind(id)
+                .fetch_optional(self.db.pool())
+                .await?,
+        )
     }
 
     pub async fn get_by_permalink(
@@ -97,21 +117,19 @@ impl NoteRepository {
         project_id: &str,
         permalink: &str,
     ) -> Result<Option<Note>> {
-        let project_id = project_id.to_owned();
-        let permalink = permalink.to_owned();
-        self.db
-            .call(move |conn| {
-                Ok(conn.query_row(
-                    "SELECT id, project_id, permalink, title, file_path,
-                            note_type, folder, tags, content,
-                            created_at, updated_at, last_accessed
-                     FROM notes WHERE project_id = ?1 AND permalink = ?2",
-                    [&project_id, &permalink],
-                    row_to_note,
-                )
-                .optional()?)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_as::<_, Note>(
+                "SELECT id, project_id, permalink, title, file_path,
+                        note_type, folder, tags, content,
+                        created_at, updated_at, last_accessed
+                 FROM notes WHERE project_id = ?1 AND permalink = ?2",
+            )
+            .bind(project_id)
+            .bind(permalink)
+            .fetch_optional(self.db.pool())
+            .await?,
+        )
     }
 
     /// List notes for a project, optionally filtered by folder.
@@ -120,34 +138,35 @@ impl NoteRepository {
         project_id: &str,
         folder: Option<&str>,
     ) -> Result<Vec<Note>> {
-        let project_id = project_id.to_owned();
-        let folder = folder.map(ToOwned::to_owned);
-        self.db
-            .call(move |conn| {
-                let notes = if let Some(ref f) = folder {
-                    let mut stmt = conn.prepare(
-                        "SELECT id, project_id, permalink, title, file_path,
-                                note_type, folder, tags, content,
-                                created_at, updated_at, last_accessed
-                         FROM notes WHERE project_id = ?1 AND folder = ?2
-                         ORDER BY folder, title",
-                    )?;
-                    stmt.query_map([&project_id, f], row_to_note)?
-                        .collect::<std::result::Result<Vec<_>, _>>()?
-                } else {
-                    let mut stmt = conn.prepare(
-                        "SELECT id, project_id, permalink, title, file_path,
-                                note_type, folder, tags, content,
-                                created_at, updated_at, last_accessed
-                         FROM notes WHERE project_id = ?1
-                         ORDER BY folder, title",
-                    )?;
-                    stmt.query_map([&project_id], row_to_note)?
-                        .collect::<std::result::Result<Vec<_>, _>>()?
-                };
-                Ok(notes)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        if let Some(folder) = folder {
+            Ok(
+                sqlx::query_as::<_, Note>(
+                    "SELECT id, project_id, permalink, title, file_path,
+                            note_type, folder, tags, content,
+                            created_at, updated_at, last_accessed
+                     FROM notes WHERE project_id = ?1 AND folder = ?2
+                     ORDER BY folder, title",
+                )
+                .bind(project_id)
+                .bind(folder)
+                .fetch_all(self.db.pool())
+                .await?,
+            )
+        } else {
+            Ok(
+                sqlx::query_as::<_, Note>(
+                    "SELECT id, project_id, permalink, title, file_path,
+                            note_type, folder, tags, content,
+                            created_at, updated_at, last_accessed
+                     FROM notes WHERE project_id = ?1
+                     ORDER BY folder, title",
+                )
+                .bind(project_id)
+                .fetch_all(self.db.pool())
+                .await?,
+            )
+        }
     }
 
     /// Update a note's title, content, and tags. The file is overwritten
@@ -159,6 +178,8 @@ impl NoteRepository {
         content: &str,
         tags: &str,
     ) -> Result<Note> {
+        self.db.ensure_initialized().await?;
+
         // Fetch current note to get file_path and note_type.
         let current = self.get(id).await?.ok_or_else(|| {
             Error::Internal(format!("note not found: {id}"))
@@ -179,23 +200,32 @@ impl NoteRepository {
 
         let permalink = current.permalink.clone();
 
-        let note: Note = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE notes SET
-                        title   = ?2,
-                        content = ?3,
-                        tags    = ?4,
-                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                     WHERE id = ?1",
-                    rusqlite::params![&id, &title, &content, &tags],
-                )?;
-                index_links_for_note(conn, &id, &current.project_id, &content)?;
-                resolve_links_for_note(conn, &id, &title, &permalink, &current.project_id)?;
-                Ok(conn.query_row(NOTE_SELECT_WHERE_ID, [&id], row_to_note)?)
-            })
+        let mut tx = self.db.pool().begin().await?;
+
+        sqlx::query(
+            "UPDATE notes SET
+                title   = ?2,
+                content = ?3,
+                tags    = ?4,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(&id)
+        .bind(&title)
+        .bind(&content)
+        .bind(&tags)
+        .execute(&mut *tx)
+        .await?;
+
+        index_links_for_note(&mut tx, &id, &current.project_id, &content).await?;
+        resolve_links_for_note(&mut tx, &id, &title, &permalink, &current.project_id).await?;
+
+        let note: Note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+            .bind(&id)
+            .fetch_one(&mut *tx)
             .await?;
+
+        tx.commit().await?;
 
         let _ = self.events.send(DjinnEvent::NoteUpdated(note.clone()));
         Ok(note)
@@ -204,6 +234,8 @@ impl NoteRepository {
     /// Delete a note. Removes the DB row (and FTS5 index via trigger) first,
     /// then attempts to remove the file from disk.
     pub async fn delete(&self, id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+
         // Fetch file_path before deleting from DB.
         let current = self.get(id).await?.ok_or_else(|| {
             Error::Internal(format!("note not found: {id}"))
@@ -212,11 +244,9 @@ impl NoteRepository {
         let id_owned = id.to_owned();
         let id_for_event = id.to_owned();
 
-        self.db
-            .write(move |conn| {
-                conn.execute("DELETE FROM notes WHERE id = ?1", [&id_owned])?;
-                Ok(())
-            })
+        sqlx::query("DELETE FROM notes WHERE id = ?1")
+            .bind(&id_owned)
+            .execute(self.db.pool())
             .await?;
 
         // Best-effort file removal — don't fail if file is already gone.
@@ -229,18 +259,16 @@ impl NoteRepository {
     /// Update `last_accessed` without emitting a change event (read-access
     /// tracking should not flood the SSE stream).
     pub async fn touch_accessed(&self, id: &str) -> Result<()> {
-        let id = id.to_owned();
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE notes SET
-                        last_accessed = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                     WHERE id = ?1",
-                    [&id],
-                )?;
-                Ok(())
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE notes SET
+                last_accessed = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
     }
 
     /// Full-text search with BM25 ranking and content snippets.
@@ -255,44 +283,43 @@ impl NoteRepository {
         note_type: Option<&str>,
         limit: usize,
     ) -> Result<Vec<NoteSearchResult>> {
-        let project_id = project_id.to_owned();
-        let query = query.to_owned();
-        let folder = folder.unwrap_or("").to_owned();
-        let note_type = note_type.unwrap_or("").to_owned();
+        self.db.ensure_initialized().await?;
+
+        let folder = folder.unwrap_or("");
+        let note_type = note_type.unwrap_or("");
         let limit = limit as i64;
 
-        self.db
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,
-                            snippet(notes_fts, 1, '<b>', '</b>', '...', 32)
-                     FROM notes_fts
-                     JOIN notes n ON notes_fts.rowid = n.rowid
-                     WHERE notes_fts MATCH ?1
-                       AND n.project_id = ?2
-                       AND (?3 = '' OR n.folder = ?3)
-                       AND (?4 = '' OR n.note_type = ?4)
-                     ORDER BY bm25(notes_fts)
-                     LIMIT ?5",
-                )?;
-                let results = stmt
-                    .query_map(
-                        rusqlite::params![&query, &project_id, &folder, &note_type, limit],
-                        |row| {
-                            Ok(NoteSearchResult {
-                                id: row.get(0)?,
-                                permalink: row.get(1)?,
-                                title: row.get(2)?,
-                                folder: row.get(3)?,
-                                note_type: row.get(4)?,
-                                snippet: row.get(5)?,
-                            })
-                        },
-                    )?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(results)
+        let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+            "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,
+                    snippet(notes_fts, 1, '<b>', '</b>', '...', 32)
+             FROM notes_fts
+             JOIN notes n ON notes_fts.rowid = n.rowid
+             WHERE notes_fts MATCH ?1
+               AND n.project_id = ?2
+               AND (?3 = '' OR n.folder = ?3)
+               AND (?4 = '' OR n.note_type = ?4)
+             ORDER BY bm25(notes_fts)
+             LIMIT ?5",
+        )
+        .bind(query)
+        .bind(project_id)
+        .bind(folder)
+        .bind(note_type)
+        .bind(limit)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, permalink, title, folder, note_type, snippet)| NoteSearchResult {
+                id,
+                permalink,
+                title,
+                folder,
+                note_type,
+                snippet,
             })
-            .await
+            .collect())
     }
 
     // ── Wikilink graph ────────────────────────────────────────────────────────
@@ -300,51 +327,56 @@ impl NoteRepository {
     /// Full knowledge graph for a project: all notes as nodes and all resolved
     /// wikilink edges. `connection_count` = inbound + outbound resolved edges.
     pub async fn graph(&self, project_id: &str) -> Result<GraphResponse> {
-        let project_id = project_id.to_owned();
-        self.db
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT n.id, n.permalink, n.title, n.note_type, n.folder,
-                            (SELECT COUNT(*) FROM note_links WHERE source_id = n.id
-                               AND target_id IS NOT NULL)
-                            + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)
-                              AS connection_count
-                     FROM notes n
-                     WHERE n.project_id = ?1
-                     ORDER BY n.folder, n.title",
-                )?;
-                let nodes = stmt
-                    .query_map([&project_id], |row| {
-                        Ok(GraphNode {
-                            id: row.get(0)?,
-                            permalink: row.get(1)?,
-                            title: row.get(2)?,
-                            note_type: row.get(3)?,
-                            folder: row.get(4)?,
-                            connection_count: row.get(5)?,
-                        })
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
+        self.db.ensure_initialized().await?;
 
-                let mut stmt = conn.prepare(
-                    "SELECT l.source_id, l.target_id, l.target_raw
-                     FROM note_links l
-                     JOIN notes src ON src.id = l.source_id AND src.project_id = ?1
-                     WHERE l.target_id IS NOT NULL",
-                )?;
-                let edges = stmt
-                    .query_map([&project_id], |row| {
-                        Ok(GraphEdge {
-                            source_id: row.get(0)?,
-                            target_id: row.get(1)?,
-                            raw_text: row.get(2)?,
-                        })
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
+        let node_rows = sqlx::query_as::<_, (String, String, String, String, String, i64)>(
+            "SELECT n.id, n.permalink, n.title, n.note_type, n.folder,
+                    (SELECT COUNT(*) FROM note_links WHERE source_id = n.id
+                       AND target_id IS NOT NULL)
+                    + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)
+                      AS connection_count
+             FROM notes n
+             WHERE n.project_id = ?1
+             ORDER BY n.folder, n.title",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?;
 
-                Ok(GraphResponse { nodes, edges })
+        let edge_rows = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT l.source_id, l.target_id, l.target_raw
+             FROM note_links l
+             JOIN notes src ON src.id = l.source_id AND src.project_id = ?1
+             WHERE l.target_id IS NOT NULL",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        let nodes = node_rows
+            .into_iter()
+            .map(
+                |(id, permalink, title, note_type, folder, connection_count)| GraphNode {
+                    id,
+                    permalink,
+                    title,
+                    note_type,
+                    folder,
+                    connection_count,
+                },
+            )
+            .collect();
+
+        let edges = edge_rows
+            .into_iter()
+            .map(|(source_id, target_id, raw_text)| GraphEdge {
+                source_id,
+                target_id,
+                raw_text,
             })
-            .await
+            .collect();
+
+        Ok(GraphResponse { nodes, edges })
     }
 
     /// All wikilinks in a project whose target note does not exist.
@@ -354,30 +386,30 @@ impl NoteRepository {
         project_id: &str,
         folder: Option<&str>,
     ) -> Result<Vec<BrokenLink>> {
-        let project_id = project_id.to_owned();
-        let folder = folder.map(ToOwned::to_owned);
-        self.db
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT src.id, src.permalink, src.title, l.target_raw
-                     FROM note_links l
-                     JOIN notes src ON src.id = l.source_id AND src.project_id = ?1
-                     WHERE l.target_id IS NULL
-                       AND (?2 IS NULL OR src.folder = ?2)
-                     ORDER BY src.permalink, l.target_raw",
-                )?;
-                Ok(stmt
-                    .query_map(rusqlite::params![&project_id, &folder], |row| {
-                        Ok(BrokenLink {
-                            source_id: row.get(0)?,
-                            source_permalink: row.get(1)?,
-                            source_title: row.get(2)?,
-                            raw_text: row.get(3)?,
-                        })
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?)
+        self.db.ensure_initialized().await?;
+
+        let rows = sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT src.id, src.permalink, src.title, l.target_raw
+             FROM note_links l
+             JOIN notes src ON src.id = l.source_id AND src.project_id = ?1
+             WHERE l.target_id IS NULL
+               AND (?2 IS NULL OR src.folder = ?2)
+             ORDER BY src.permalink, l.target_raw",
+        )
+        .bind(project_id)
+        .bind(folder)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(source_id, source_permalink, source_title, raw_text)| BrokenLink {
+                source_id,
+                source_permalink,
+                source_title,
+                raw_text,
             })
-            .await
+            .collect())
     }
 
     /// Notes with zero inbound wikilinks (potential dead-ends).
@@ -388,61 +420,49 @@ impl NoteRepository {
         project_id: &str,
         folder: Option<&str>,
     ) -> Result<Vec<OrphanNote>> {
-        let project_id = project_id.to_owned();
-        let folder = folder.map(ToOwned::to_owned);
-        self.db
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT n.id, n.permalink, n.title, n.note_type, n.folder
-                     FROM notes n
-                     WHERE n.project_id = ?1
-                       AND n.note_type NOT IN ('brief', 'roadmap')
-                       AND (?2 IS NULL OR n.folder = ?2)
-                       AND NOT EXISTS (
-                           SELECT 1 FROM note_links l WHERE l.target_id = n.id
-                       )
-                     ORDER BY n.folder, n.title",
-                )?;
-                Ok(stmt
-                    .query_map(rusqlite::params![&project_id, &folder], |row| {
-                        Ok(OrphanNote {
-                            id: row.get(0)?,
-                            permalink: row.get(1)?,
-                            title: row.get(2)?,
-                            note_type: row.get(3)?,
-                            folder: row.get(4)?,
-                        })
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?)
+        self.db.ensure_initialized().await?;
+
+        let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
+            "SELECT n.id, n.permalink, n.title, n.note_type, n.folder
+             FROM notes n
+             WHERE n.project_id = ?1
+               AND n.note_type NOT IN ('brief', 'roadmap')
+               AND (?2 IS NULL OR n.folder = ?2)
+               AND NOT EXISTS (
+                   SELECT 1 FROM note_links l WHERE l.target_id = n.id
+               )
+             ORDER BY n.folder, n.title",
+        )
+        .bind(project_id)
+        .bind(folder)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, permalink, title, note_type, folder)| OrphanNote {
+                id,
+                permalink,
+                title,
+                note_type,
+                folder,
             })
-            .await
+            .collect())
     }
 
     /// Generate a markdown catalog (table of contents) for all notes in a
     /// project, grouped by folder and sorted alphabetically within each.
     pub async fn catalog(&self, project_id: &str) -> Result<String> {
-        let project_id = project_id.to_owned();
-        let notes = self
-            .db
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT folder, title, permalink, updated_at
-                     FROM notes WHERE project_id = ?1
-                     ORDER BY folder, title",
-                )?;
-                let rows = stmt
-                    .query_map([&project_id], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                        ))
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
-            .await?;
+        self.db.ensure_initialized().await?;
+
+        let notes = sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT folder, title, permalink, updated_at
+             FROM notes WHERE project_id = ?1
+             ORDER BY folder, title",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?;
 
         Ok(build_catalog(&notes))
     }
@@ -459,6 +479,8 @@ impl NoteRepository {
         new_title: &str,
         new_note_type: &str,
     ) -> Result<Note> {
+        self.db.ensure_initialized().await?;
+
         let current = self.get(id).await?.ok_or_else(|| {
             Error::Internal(format!("note not found: {id}"))
         })?;
@@ -484,37 +506,43 @@ impl NoteRepository {
         // Rewrite frontmatter to reflect new title/type.
         write_note_file(&new_file_path, new_title, new_note_type, &current.tags, &current.content)?;
 
-        let id = id.to_owned();
-        let new_title = new_title.to_owned();
-        let new_note_type = new_note_type.to_owned();
-        let project_id = current.project_id.clone();
+        let mut tx = self.db.pool().begin().await?;
 
-        let note: Note = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE notes SET
-                        title      = ?2,
-                        file_path  = ?3,
-                        note_type  = ?4,
-                        folder     = ?5,
-                        permalink  = ?6,
-                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                     WHERE id = ?1",
-                    rusqlite::params![
-                        &id,
-                        &new_title,
-                        &new_file_path_str,
-                        &new_note_type,
-                        &new_folder,
-                        &new_permalink,
-                    ],
-                )?;
-                // Re-resolve previously-broken links that match the new title/permalink.
-                resolve_links_for_note(conn, &id, &new_title, &new_permalink, &project_id)?;
-                Ok(conn.query_row(NOTE_SELECT_WHERE_ID, [&id], row_to_note)?)
-            })
+        sqlx::query(
+            "UPDATE notes SET
+                title      = ?2,
+                file_path  = ?3,
+                note_type  = ?4,
+                folder     = ?5,
+                permalink  = ?6,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(new_title)
+        .bind(&new_file_path_str)
+        .bind(new_note_type)
+        .bind(&new_folder)
+        .bind(&new_permalink)
+        .execute(&mut *tx)
+        .await?;
+
+        // Re-resolve previously-broken links that match the new title/permalink.
+        resolve_links_for_note(
+            &mut tx,
+            id,
+            new_title,
+            &new_permalink,
+            &current.project_id,
+        )
+        .await?;
+
+        let note: Note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(&mut *tx)
             .await?;
+
+        tx.commit().await?;
 
         let _ = self.events.send(DjinnEvent::NoteUpdated(note.clone()));
         Ok(note)
@@ -529,30 +557,30 @@ impl NoteRepository {
         hours: i64,
         limit: i64,
     ) -> Result<Vec<NoteCompact>> {
-        let project_id = project_id.to_owned();
-        self.db
-            .call(move |conn| {
-                let sql = if hours > 0 {
-                    format!(
-                        "SELECT id, permalink, title, note_type, folder, updated_at
-                         FROM notes
-                         WHERE project_id = ?1
-                           AND updated_at >= datetime('now', '-{hours} hours')
-                         ORDER BY updated_at DESC LIMIT ?2"
-                    )
-                } else {
-                    "SELECT id, permalink, title, note_type, folder, updated_at
-                     FROM notes WHERE project_id = ?1
-                     ORDER BY updated_at DESC LIMIT ?2"
-                        .to_owned()
-                };
-                let mut stmt = conn.prepare(&sql)?;
-                let notes = stmt
-                    .query_map(rusqlite::params![&project_id, limit], row_to_compact)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(notes)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+
+        let sql = if hours > 0 {
+            format!(
+                "SELECT id, permalink, title, note_type, folder, updated_at
+                 FROM notes
+                 WHERE project_id = ?1
+                   AND updated_at >= datetime('now', '-{hours} hours')
+                 ORDER BY updated_at DESC LIMIT ?2"
+            )
+        } else {
+            "SELECT id, permalink, title, note_type, folder, updated_at
+             FROM notes WHERE project_id = ?1
+             ORDER BY updated_at DESC LIMIT ?2"
+                .to_owned()
+        };
+
+        Ok(
+            sqlx::query_as::<_, NoteCompact>(&sql)
+                .bind(project_id)
+                .bind(limit)
+                .fetch_all(self.db.pool())
+                .await?,
+        )
     }
 
     /// List compact note summaries in a folder with optional depth control.
@@ -564,114 +592,114 @@ impl NoteRepository {
         folder: &str,
         depth: i64,
     ) -> Result<Vec<NoteCompact>> {
-        let project_id = project_id.to_owned();
-        let folder = folder.to_owned();
-        self.db
-            .call(move |conn| {
-                let sql = if depth == 1 {
-                    "SELECT id, permalink, title, note_type, folder, updated_at
-                     FROM notes WHERE project_id = ?1 AND folder = ?2
-                     ORDER BY folder, title"
-                        .to_owned()
-                } else {
-                    // depth=0 or depth>1: return all descendants
-                    "SELECT id, permalink, title, note_type, folder, updated_at
-                     FROM notes WHERE project_id = ?1
-                       AND (folder = ?2 OR folder LIKE ?2 || '/%')
-                     ORDER BY folder, title"
-                        .to_owned()
-                };
-                let mut stmt = conn.prepare(&sql)?;
-                let notes = stmt
-                    .query_map(rusqlite::params![&project_id, &folder], row_to_compact)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(notes)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+
+        let sql = if depth == 1 {
+            "SELECT id, permalink, title, note_type, folder, updated_at
+             FROM notes WHERE project_id = ?1 AND folder = ?2
+             ORDER BY folder, title"
+                .to_owned()
+        } else {
+            // depth=0 or depth>1: return all descendants
+            "SELECT id, permalink, title, note_type, folder, updated_at
+             FROM notes WHERE project_id = ?1
+               AND (folder = ?2 OR folder LIKE ?2 || '/%')
+             ORDER BY folder, title"
+                .to_owned()
+        };
+
+        Ok(
+            sqlx::query_as::<_, NoteCompact>(&sql)
+                .bind(project_id)
+                .bind(folder)
+                .fetch_all(self.db.pool())
+                .await?,
+        )
     }
 
     /// Find tasks whose `memory_refs` JSON array contains `permalink`.
     ///
     /// Returns minimal task info: `(id, short_id, title, status)`.
     pub async fn task_refs(&self, permalink: &str) -> Result<Vec<serde_json::Value>> {
+        self.db.ensure_initialized().await?;
+
         let pattern = format!("%\"{permalink}\"%");
-        self.db
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, short_id, title, status FROM tasks
-                     WHERE memory_refs LIKE ?1
-                     ORDER BY priority, created_at",
-                )?;
-                let rows = stmt
-                    .query_map([&pattern], |r| {
-                        Ok(serde_json::json!({
-                            "id":       r.get::<_, String>(0)?,
-                            "short_id": r.get::<_, String>(1)?,
-                            "title":    r.get::<_, String>(2)?,
-                            "status":   r.get::<_, String>(3)?,
-                        }))
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
+
+        let rows = sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT id, short_id, title, status FROM tasks
+             WHERE memory_refs LIKE ?1
+             ORDER BY priority, created_at",
+        )
+        .bind(&pattern)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, short_id, title, status)| {
+                serde_json::json!({
+                    "id": id,
+                    "short_id": short_id,
+                    "title": title,
+                    "status": status,
+                })
             })
-            .await
+            .collect())
     }
 
     /// Aggregate health report for a project's knowledge base.
     ///
     /// Stale threshold: notes not updated in more than 30 days.
     pub async fn health(&self, project_id: &str) -> Result<HealthReport> {
-        let project_id = project_id.to_owned();
-        self.db
-            .call(move |conn| {
-                let total_notes: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM notes WHERE project_id = ?1",
-                    [&project_id],
-                    |r| r.get(0),
-                )?;
+        self.db.ensure_initialized().await?;
 
-                let broken_link_count: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM note_links l
-                     JOIN notes src ON src.id = l.source_id AND src.project_id = ?1
-                     WHERE l.target_id IS NULL",
-                    [&project_id],
-                    |r| r.get(0),
-                )?;
+        let total_notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?1")
+            .bind(project_id)
+            .fetch_one(self.db.pool())
+            .await?;
 
-                let orphan_note_count: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM notes n
-                     WHERE n.project_id = ?1
-                       AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
-                       AND NOT EXISTS (
-                           SELECT 1 FROM note_links l WHERE l.target_id = n.id
-                       )",
-                    [&project_id],
-                    |r| r.get(0),
-                )?;
+        let broken_link_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM note_links l
+             JOIN notes src ON src.id = l.source_id AND src.project_id = ?1
+             WHERE l.target_id IS NULL",
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
 
-                let mut stmt = conn.prepare(
-                    "SELECT folder, COUNT(*) FROM notes
-                     WHERE project_id = ?1
-                       AND updated_at < datetime('now', '-30 days')
-                     GROUP BY folder ORDER BY folder",
-                )?;
-                let stale_notes_by_folder = stmt
-                    .query_map([&project_id], |r| {
-                        Ok(StaleFolder {
-                            folder: r.get(0)?,
-                            count: r.get(1)?,
-                        })
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
+        let orphan_note_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notes n
+             WHERE n.project_id = ?1
+               AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
+               AND NOT EXISTS (
+                   SELECT 1 FROM note_links l WHERE l.target_id = n.id
+               )",
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
 
-                Ok(HealthReport {
-                    total_notes,
-                    broken_link_count,
-                    orphan_note_count,
-                    stale_notes_by_folder,
-                })
-            })
-            .await
+        let stale_rows = sqlx::query_as::<_, (String, i64)>(
+            "SELECT folder, COUNT(*) FROM notes
+             WHERE project_id = ?1
+               AND updated_at < datetime('now', '-30 days')
+             GROUP BY folder ORDER BY folder",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        let stale_notes_by_folder = stale_rows
+            .into_iter()
+            .map(|(folder, count)| StaleFolder { folder, count })
+            .collect();
+
+        Ok(HealthReport {
+            total_notes,
+            broken_link_count,
+            orphan_note_count,
+            stale_notes_by_folder,
+        })
     }
 }
 
@@ -710,58 +738,65 @@ fn extract_wikilinks(content: &str) -> Vec<(String, Option<String>)> {
 ///
 /// Deletes existing link rows for the note then re-inserts them, resolving
 /// each target by title or permalink within the same project.
-fn index_links_for_note(
-    conn: &rusqlite::Connection,
+async fn index_links_for_note(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
     source_id: &str,
     project_id: &str,
     content: &str,
 ) -> Result<()> {
-    conn.execute("DELETE FROM note_links WHERE source_id = ?1", [source_id])?;
+    sqlx::query("DELETE FROM note_links WHERE source_id = ?1")
+        .bind(source_id)
+        .execute(&mut **tx)
+        .await?;
 
     let links = extract_wikilinks(content);
     if links.is_empty() {
         return Ok(());
     }
 
-    let mut stmt = conn.prepare(
-        "INSERT OR IGNORE INTO note_links (id, source_id, target_id, target_raw, display_text)
-         VALUES (?1, ?2,
-                 (SELECT id FROM notes
-                  WHERE project_id = ?3 AND (title = ?4 OR permalink = ?4)
-                  LIMIT 1),
-                 ?4, ?5)",
-    )?;
-
     for (target_raw, display_text) in links {
         let id = uuid::Uuid::now_v7().to_string();
-        stmt.execute(rusqlite::params![
-            &id,
-            source_id,
-            project_id,
-            &target_raw,
-            display_text.as_deref(),
-        ])?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO note_links (id, source_id, target_id, target_raw, display_text)
+             VALUES (?1, ?2,
+                     (SELECT id FROM notes
+                      WHERE project_id = ?3 AND (title = ?4 OR permalink = ?4)
+                      LIMIT 1),
+                     ?4, ?5)",
+        )
+        .bind(&id)
+        .bind(source_id)
+        .bind(project_id)
+        .bind(&target_raw)
+        .bind(display_text.as_deref())
+        .execute(&mut **tx)
+        .await?;
     }
     Ok(())
 }
 
 /// After a note is created or its title/permalink changes, resolve any
 /// previously-broken links in the project that now match this note.
-fn resolve_links_for_note(
-    conn: &rusqlite::Connection,
+async fn resolve_links_for_note(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
     note_id: &str,
     title: &str,
     permalink: &str,
     project_id: &str,
 ) -> Result<()> {
-    conn.execute(
+    sqlx::query(
         "UPDATE note_links
          SET target_id = ?1
          WHERE target_id IS NULL
            AND (target_raw = ?2 OR target_raw = ?3)
            AND source_id IN (SELECT id FROM notes WHERE project_id = ?4)",
-        rusqlite::params![note_id, title, permalink, project_id],
-    )?;
+    )
+    .bind(note_id)
+    .bind(title)
+    .bind(permalink)
+    .bind(project_id)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
@@ -772,36 +807,6 @@ const NOTE_SELECT_WHERE_ID: &str =
             note_type, folder, tags, content,
             created_at, updated_at, last_accessed
      FROM notes WHERE id = ?1";
-
-// ── Row mapper ───────────────────────────────────────────────────────────────
-
-fn row_to_compact(row: &rusqlite::Row<'_>) -> rusqlite::Result<NoteCompact> {
-    Ok(NoteCompact {
-        id: row.get(0)?,
-        permalink: row.get(1)?,
-        title: row.get(2)?,
-        note_type: row.get(3)?,
-        folder: row.get(4)?,
-        updated_at: row.get(5)?,
-    })
-}
-
-fn row_to_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<Note> {
-    Ok(Note {
-        id: row.get(0)?,
-        project_id: row.get(1)?,
-        permalink: row.get(2)?,
-        title: row.get(3)?,
-        file_path: row.get(4)?,
-        note_type: row.get(5)?,
-        folder: row.get(6)?,
-        tags: row.get(7)?,
-        content: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
-        last_accessed: row.get(11)?,
-    })
-}
 
 // ── Note type helpers ────────────────────────────────────────────────────────
 

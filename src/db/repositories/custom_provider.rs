@@ -13,41 +13,28 @@ impl CustomProviderRepository {
 
     /// Return all custom providers, ordered by `created_at`.
     pub async fn list(&self) -> Result<Vec<CustomProvider>> {
-        self.db
-            .call(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, name, base_url, env_var, seed_models, created_at
-                     FROM custom_providers
-                     ORDER BY created_at ASC",
-                )?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                    ))
-                })?;
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+            "SELECT id, name, base_url, env_var, seed_models, created_at
+             FROM custom_providers
+             ORDER BY created_at ASC",
+        )
+        .fetch_all(self.db.pool())
+        .await?;
 
-                let mut providers = Vec::new();
-                for row in rows {
-                    let (id, name, base_url, env_var, seed_json, created_at) = row?;
-                    let seed_models: Vec<SeedModel> =
-                        serde_json::from_str(&seed_json).unwrap_or_default();
-                    providers.push(CustomProvider {
-                        id,
-                        name,
-                        base_url,
-                        env_var,
-                        seed_models,
-                        created_at,
-                    });
-                }
-                Ok(providers)
+        let providers = rows
+            .into_iter()
+            .map(|(id, name, base_url, env_var, seed_json, created_at)| CustomProvider {
+                id,
+                name,
+                base_url,
+                env_var,
+                seed_models: serde_json::from_str::<Vec<SeedModel>>(&seed_json)
+                    .unwrap_or_default(),
+                created_at,
             })
-            .await
+            .collect();
+        Ok(providers)
     }
 
     /// Insert or replace a custom provider.
@@ -58,63 +45,48 @@ impl CustomProviderRepository {
         let env_var = provider.env_var.clone();
         let seed_json = serde_json::to_string(&provider.seed_models).unwrap_or_else(|_| "[]".into());
 
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO custom_providers (id, name, base_url, env_var, seed_models)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(id) DO UPDATE SET
-                       name        = excluded.name,
-                       base_url    = excluded.base_url,
-                       env_var     = excluded.env_var,
-                       seed_models = excluded.seed_models",
-                    [&id, &name, &base_url, &env_var, &seed_json],
-                )?;
-                Ok(())
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "INSERT INTO custom_providers (id, name, base_url, env_var, seed_models)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+               name        = excluded.name,
+               base_url    = excluded.base_url,
+               env_var     = excluded.env_var,
+               seed_models = excluded.seed_models",
+        )
+        .bind(&id)
+        .bind(&name)
+        .bind(&base_url)
+        .bind(&env_var)
+        .bind(&seed_json)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
     }
 
     /// Return a single provider by ID, or `None`.
     pub async fn get(&self, id: &str) -> Result<Option<CustomProvider>> {
-        let id = id.to_owned();
-        self.db
-            .call(move |conn| {
-                let result = conn.query_row(
-                    "SELECT id, name, base_url, env_var, seed_models, created_at
-                     FROM custom_providers WHERE id = ?1",
-                    [&id],
-                    |row| {
-                        let seed_json: String = row.get(4)?;
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                            seed_json,
-                            row.get::<_, String>(5)?,
-                        ))
-                    },
-                );
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+            "SELECT id, name, base_url, env_var, seed_models, created_at
+             FROM custom_providers WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_optional(self.db.pool())
+        .await?;
 
-                match result {
-                    Ok((id, name, base_url, env_var, seed_json, created_at)) => {
-                        let seed_models: Vec<SeedModel> =
-                            serde_json::from_str(&seed_json).unwrap_or_default();
-                        Ok(Some(CustomProvider {
-                            id,
-                            name,
-                            base_url,
-                            env_var,
-                            seed_models,
-                            created_at,
-                        }))
-                    }
-                    Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                    Err(e) => Err(e.into()),
-                }
-            })
-            .await
+        Ok(row.map(|(id, name, base_url, env_var, seed_json, created_at)| {
+            let seed_models: Vec<SeedModel> = serde_json::from_str(&seed_json).unwrap_or_default();
+            CustomProvider {
+                id,
+                name,
+                base_url,
+                env_var,
+                seed_models,
+                created_at,
+            }
+        }))
     }
 }
 

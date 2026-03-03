@@ -1,6 +1,6 @@
 use tokio::sync::broadcast;
 
-use crate::db::connection::{Database, OptionalExt};
+use crate::db::connection::Database;
 use crate::error::Result;
 use crate::events::DjinnEvent;
 use crate::models::project::Project;
@@ -16,146 +16,89 @@ impl ProjectRepository {
     }
 
     pub async fn list(&self) -> Result<Vec<Project>> {
-        self.db
-            .call(|conn| {
-                let mut stmt =
-                    conn.prepare("SELECT id, name, path, created_at FROM projects ORDER BY name")?;
-                let projects = stmt
-                    .query_map([], |row| {
-                        Ok(Project {
-                            id: row.get(0)?,
-                            name: row.get(1)?,
-                            path: row.get(2)?,
-                            created_at: row.get(3)?,
-                        })
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(projects)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_as::<_, Project>(
+                "SELECT id, name, path, created_at FROM projects ORDER BY name",
+            )
+            .fetch_all(self.db.pool())
+            .await?,
+        )
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<Project>> {
-        let id = id.to_owned();
-        self.db
-            .call(move |conn| {
-                let project = conn
-                    .query_row(
-                        "SELECT id, name, path, created_at FROM projects WHERE id = ?1",
-                        [&id],
-                        |row| {
-                            Ok(Project {
-                                id: row.get(0)?,
-                                name: row.get(1)?,
-                                path: row.get(2)?,
-                                created_at: row.get(3)?,
-                            })
-                        },
-                    )
-                    .optional()?;
-                Ok(project)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_as::<_, Project>(
+                "SELECT id, name, path, created_at FROM projects WHERE id = ?1",
+            )
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await?,
+        )
     }
 
     pub async fn get_by_path(&self, path: &str) -> Result<Option<Project>> {
-        let path = path.to_owned();
-        self.db
-            .call(move |conn| {
-                let project = conn
-                    .query_row(
-                        "SELECT id, name, path, created_at FROM projects WHERE path = ?1",
-                        [&path],
-                        |row| {
-                            Ok(Project {
-                                id: row.get(0)?,
-                                name: row.get(1)?,
-                                path: row.get(2)?,
-                                created_at: row.get(3)?,
-                            })
-                        },
-                    )
-                    .optional()?;
-                Ok(project)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_as::<_, Project>(
+                "SELECT id, name, path, created_at FROM projects WHERE path = ?1",
+            )
+            .bind(path)
+            .fetch_optional(self.db.pool())
+            .await?,
+        )
     }
 
     pub async fn create(&self, name: &str, path: &str) -> Result<Project> {
+        self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
-        let name = name.to_owned();
-        let path = path.to_owned();
-        let project = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)",
-                    [&id, &name, &path],
-                )?;
-                let project = conn.query_row(
-                    "SELECT id, name, path, created_at FROM projects WHERE id = ?1",
-                    [&id],
-                    |row| {
-                        Ok(Project {
-                            id: row.get(0)?,
-                            name: row.get(1)?,
-                            path: row.get(2)?,
-                            created_at: row.get(3)?,
-                        })
-                    },
-                )?;
-                Ok(project)
-            })
+        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
+            .bind(&id)
+            .bind(name)
+            .bind(path)
+            .execute(self.db.pool())
             .await?;
+        let project = sqlx::query_as::<_, Project>(
+            "SELECT id, name, path, created_at FROM projects WHERE id = ?1",
+        )
+        .bind(&id)
+        .fetch_one(self.db.pool())
+        .await?;
 
         let _ = self.events.send(DjinnEvent::ProjectCreated(project.clone()));
         Ok(project)
     }
 
     pub async fn update(&self, id: &str, name: &str, path: &str) -> Result<Project> {
-        let id = id.to_owned();
-        let name = name.to_owned();
-        let path = path.to_owned();
-        let project = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE projects SET name = ?2, path = ?3 WHERE id = ?1",
-                    [&id, &name, &path],
-                )?;
-                let project = conn.query_row(
-                    "SELECT id, name, path, created_at FROM projects WHERE id = ?1",
-                    [&id],
-                    |row| {
-                        Ok(Project {
-                            id: row.get(0)?,
-                            name: row.get(1)?,
-                            path: row.get(2)?,
-                            created_at: row.get(3)?,
-                        })
-                    },
-                )?;
-                Ok(project)
-            })
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE projects SET name = ?2, path = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(name)
+            .bind(path)
+            .execute(self.db.pool())
             .await?;
+        let project = sqlx::query_as::<_, Project>(
+            "SELECT id, name, path, created_at FROM projects WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_one(self.db.pool())
+        .await?;
 
         let _ = self.events.send(DjinnEvent::ProjectUpdated(project.clone()));
         Ok(project)
     }
 
     pub async fn delete(&self, id: &str) -> Result<()> {
-        let id = id.to_owned();
-        self.db
-            .write({
-                let id = id.clone();
-                move |conn| {
-                    conn.execute("DELETE FROM projects WHERE id = ?1", [&id])?;
-                    Ok(())
-                }
-            })
+        self.db.ensure_initialized().await?;
+        sqlx::query("DELETE FROM projects WHERE id = ?1")
+            .bind(id)
+            .execute(self.db.pool())
             .await?;
 
-        let _ = self.events.send(DjinnEvent::ProjectDeleted { id });
+        let _ = self
+            .events
+            .send(DjinnEvent::ProjectDeleted { id: id.to_owned() });
         Ok(())
     }
 }

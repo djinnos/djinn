@@ -2,7 +2,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::crypto;
-use crate::db::connection::{Database, OptionalExt};
+use crate::db::connection::Database;
 use crate::error::Result;
 use crate::events::DjinnEvent;
 use crate::models::credential::Credential;
@@ -28,49 +28,43 @@ impl CredentialRepository {
         raw_value: &str,
     ) -> Result<Credential> {
         let encrypted = crypto::encrypt(raw_value)?;
-        let provider_id = provider_id.to_owned();
-        let key_name = key_name.to_owned();
+        self.db.ensure_initialized().await?;
+        let existing_id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM credentials WHERE key_name = ?1",
+        )
+        .bind(key_name)
+        .fetch_optional(self.db.pool())
+        .await?;
+        let id = existing_id
+            .clone()
+            .unwrap_or_else(|| Uuid::now_v7().to_string());
+        let is_new = existing_id.is_none();
 
-        let (cred, is_new) = self
-            .db
-            .write(move |conn| {
-                // Check if a row exists for this key_name.
-                let existing_id: Option<String> = conn
-                    .query_row(
-                        "SELECT id FROM credentials WHERE key_name = ?1",
-                        [&key_name],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
+        sqlx::query(
+            "INSERT INTO credentials (id, provider_id, key_name, encrypted_value,
+                                      created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4,
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT(key_name) DO UPDATE SET
+                 provider_id     = excluded.provider_id,
+                 encrypted_value = excluded.encrypted_value,
+                 updated_at      = excluded.updated_at",
+        )
+        .bind(&id)
+        .bind(provider_id)
+        .bind(key_name)
+        .bind(&encrypted)
+        .execute(self.db.pool())
+        .await?;
 
-                let id = existing_id
-                    .clone()
-                    .unwrap_or_else(|| Uuid::now_v7().to_string());
-                let is_new = existing_id.is_none();
-
-                conn.execute(
-                    "INSERT INTO credentials (id, provider_id, key_name, encrypted_value,
-                                              created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4,
-                             strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                             strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                     ON CONFLICT(key_name) DO UPDATE SET
-                         provider_id     = excluded.provider_id,
-                         encrypted_value = excluded.encrypted_value,
-                         updated_at      = excluded.updated_at",
-                    rusqlite::params![&id, &provider_id, &key_name, &encrypted],
-                )?;
-
-                let cred = conn.query_row(
-                    "SELECT id, provider_id, key_name, created_at, updated_at
-                     FROM credentials WHERE key_name = ?1",
-                    [&key_name],
-                    row_to_credential,
-                )?;
-
-                Ok((cred, is_new))
-            })
-            .await?;
+        let cred = sqlx::query_as::<_, Credential>(
+            "SELECT id, provider_id, key_name, created_at, updated_at
+             FROM credentials WHERE key_name = ?1",
+        )
+        .bind(key_name)
+        .fetch_one(self.db.pool())
+        .await?;
 
         if is_new {
             let _ = self.events.send(DjinnEvent::CredentialCreated(cred.clone()));
@@ -83,44 +77,34 @@ impl CredentialRepository {
 
     /// List all credentials. Never returns raw key values.
     pub async fn list(&self) -> Result<Vec<Credential>> {
-        self.db
-            .call(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, provider_id, key_name, created_at, updated_at
-                     FROM credentials
-                     ORDER BY provider_id, key_name",
-                )?;
-                let rows = stmt
-                    .query_map([], row_to_credential)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_as::<_, Credential>(
+                "SELECT id, provider_id, key_name, created_at, updated_at
+                 FROM credentials
+                 ORDER BY provider_id, key_name",
+            )
+            .fetch_all(self.db.pool())
+            .await?,
+        )
     }
 
     /// Delete a credential by `key_name`. Emits `CredentialDeleted` with the ID.
     pub async fn delete(&self, key_name: &str) -> Result<bool> {
-        let key_name = key_name.to_owned();
-        let deleted_id = self
-            .db
-            .write(move |conn| {
-                let id: Option<String> = conn
-                    .query_row(
-                        "SELECT id FROM credentials WHERE key_name = ?1",
-                        [&key_name],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
+        self.db.ensure_initialized().await?;
+        let deleted_id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM credentials WHERE key_name = ?1",
+        )
+        .bind(key_name)
+        .fetch_optional(self.db.pool())
+        .await?;
 
-                if let Some(ref id) = id {
-                    conn.execute(
-                        "DELETE FROM credentials WHERE id = ?1",
-                        [id],
-                    )?;
-                }
-                Ok(id)
-            })
-            .await?;
+        if let Some(ref id) = deleted_id {
+            sqlx::query("DELETE FROM credentials WHERE id = ?1")
+                .bind(id)
+                .execute(self.db.pool())
+                .await?;
+        }
 
         if let Some(id) = deleted_id {
             let _ = self.events.send(DjinnEvent::CredentialDeleted { id });
@@ -135,35 +119,19 @@ impl CredentialRepository {
     /// Called by `AgentSupervisor` at dispatch time to obtain the key for
     /// Goose provider creation. Never exposed via MCP tools.
     pub async fn get_decrypted(&self, key_name: &str) -> Result<Option<String>> {
-        let key_name = key_name.to_owned();
-        let blob: Option<Vec<u8>> = self
-            .db
-            .call(move |conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT encrypted_value FROM credentials WHERE key_name = ?1",
-                        [&key_name],
-                        |r| r.get(0),
-                    )
-                    .optional()?)
-            })
-            .await?;
+        self.db.ensure_initialized().await?;
+        let blob: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT encrypted_value FROM credentials WHERE key_name = ?1",
+        )
+        .bind(key_name)
+        .fetch_optional(self.db.pool())
+        .await?;
 
         match blob {
             Some(b) => Ok(Some(crypto::decrypt(&b)?)),
             None => Ok(None),
         }
     }
-}
-
-fn row_to_credential(row: &rusqlite::Row<'_>) -> rusqlite::Result<Credential> {
-    Ok(Credential {
-        id: row.get(0)?,
-        provider_id: row.get(1)?,
-        key_name: row.get(2)?,
-        created_at: row.get(3)?,
-        updated_at: row.get(4)?,
-    })
 }
 
 #[cfg(test)]

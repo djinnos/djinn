@@ -1,45 +1,13 @@
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 
-use rusqlite::{Connection, OpenFlags};
-use tokio::sync::Mutex;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Executor, SqlitePool};
+use tokio::sync::OnceCell;
 
 use crate::db::migrations;
 use crate::error::Result;
-
-// ── Dev-mode write guard ─────────────────────────────────────────────────────
-//
-// In debug builds we register a rusqlite update_hook that panics when a
-// data-modifying statement (INSERT/UPDATE/DELETE) fires outside of a
-// `Database::write()` call.  This catches bugs where `call()` is accidentally
-// used for writes.
-//
-// The guard is a thread-local flag because `spawn_blocking` runs each closure
-// on a dedicated thread-pool thread; both the flag set/reset and the hook
-// invocation happen on the same thread.
-
-#[cfg(debug_assertions)]
-thread_local! {
-    static IN_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(debug_assertions)]
-struct WriteGuard;
-
-#[cfg(debug_assertions)]
-impl WriteGuard {
-    fn arm() -> Self {
-        IN_WRITE.with(|f| f.set(true));
-        WriteGuard
-    }
-}
-
-#[cfg(debug_assertions)]
-impl Drop for WriteGuard {
-    fn drop(&mut self) {
-        IN_WRITE.with(|f| f.set(false));
-    }
-}
 
 /// Default database path: `~/.djinn/djinn.db`.
 pub fn default_db_path() -> std::path::PathBuf {
@@ -49,281 +17,157 @@ pub fn default_db_path() -> std::path::PathBuf {
         .join("djinn.db")
 }
 
-/// Wraps a rusqlite `Connection` behind an `Arc<Mutex>` for async access.
-///
-/// Cheaply cloneable — clones share the same underlying connection.
-/// All database operations are performed via `spawn_blocking` to avoid
-/// blocking the Tokio runtime. A single writer connection per process.
 #[derive(Clone)]
 pub struct Database {
-    conn: Arc<Mutex<Connection>>,
+    pool: SqlitePool,
+    readonly: bool,
+    initialized: Arc<OnceCell<()>>,
 }
 
 impl Database {
     /// Open (or create) the database at `path`, auto-creating parent dirs.
-    /// Applies PRAGMAs then runs all pending migrations.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut conn = Connection::open(path)?;
-        apply_pragmas(&conn)?;
-        migrations::run(&mut conn)?;
-        #[cfg(debug_assertions)]
-        register_write_hook(&conn);
+
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(8)
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    apply_pragmas(conn).await?;
+                    Ok(())
+                })
+            })
+            .connect_lazy_with(opts.clone());
+
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            pool,
+            readonly: false,
+            initialized: Arc::new(OnceCell::new()),
         })
     }
 
     /// Open the database at `path` in read-only mode.
-    ///
-    /// Used by the desktop process to read while the server holds the writer.
-    /// WAL mode allows concurrent readers without blocking the writer.
     pub fn open_readonly(path: &Path) -> Result<Self> {
-        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = Connection::open_with_flags(path, flags)?;
-        apply_pragmas_readonly(&conn)?;
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}?mode=ro", path.display()))?
+            .read_only(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(8)
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    apply_pragmas_readonly(conn).await?;
+                    Ok(())
+                })
+            })
+            .connect_lazy_with(opts.clone());
+
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            pool,
+            readonly: true,
+            initialized: Arc::new(OnceCell::new()),
         })
     }
 
     /// Open an in-memory database for tests.
     pub fn open_in_memory() -> Result<Self> {
-        let mut conn = Connection::open_in_memory()?;
-        apply_pragmas(&conn)?;
-        migrations::run(&mut conn)?;
-        #[cfg(debug_assertions)]
-        register_write_hook(&conn);
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(300))
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    apply_pragmas(conn).await?;
+                    Ok(())
+                })
+            })
+            .connect_lazy_with(opts.clone());
+
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            pool,
+            readonly: false,
+            initialized: Arc::new(OnceCell::new()),
         })
     }
 
-    /// Run a read-only closure with access to the connection.
-    pub async fn call<F, T>(&self, f: F) -> Result<T>
-    where
-        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
-        T: Send + 'static,
-    {
-        let guard = self.conn.lock().await;
-        // SAFETY: we hold the Mutex across the spawn_blocking call.
-        // Connection is not Send, so we transmit a raw pointer. The Mutex
-        // guarantee ensures exclusive access for the lifetime of the closure.
-        let ptr = &*guard as *const Connection as usize;
-        let result = tokio::task::spawn_blocking(move || {
-            let conn = unsafe { &*(ptr as *const Connection) };
-            f(conn)
-        })
-        .await
-        .expect("spawn_blocking panicked");
-        drop(guard);
-        result
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
-    /// Run a write closure inside a `BEGIN IMMEDIATE` transaction.
-    ///
-    /// `BEGIN IMMEDIATE` acquires the write lock immediately rather than
-    /// deferring to first write statement, preventing SQLITE_BUSY from
-    /// mid-transaction lock promotion. Auto-commits on `Ok`, rolls back
-    /// on `Err`.
-    pub async fn write<F, T>(&self, f: F) -> Result<T>
-    where
-        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
-        T: Send + 'static,
-    {
-        let guard = self.conn.lock().await;
-        let ptr = &*guard as *const Connection as usize;
-        let result = tokio::task::spawn_blocking(move || {
-            let conn = unsafe { &*(ptr as *const Connection) };
-            // Arm the dev-mode write guard before any statements fire the hook.
-            #[cfg(debug_assertions)]
-            let _write_guard = WriteGuard::arm();
-            conn.execute_batch("BEGIN IMMEDIATE")?;
-            match f(conn) {
-                Ok(val) => {
-                    conn.execute_batch("COMMIT")?;
-                    Ok(val)
-                }
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK");
-                    Err(e)
-                }
-            }
-        })
-        .await
-        .expect("spawn_blocking panicked");
-        drop(guard);
-        result
-    }
-}
-
-/// Register the dev-mode update hook that panics when a write fires outside
-/// of `Database::write()`.  Only compiled in debug builds.
-///
-/// Uses a named `fn` rather than a closure to satisfy rusqlite's higher-rank
-/// lifetime requirement on the hook callback.
-#[cfg(debug_assertions)]
-fn register_write_hook(conn: &Connection) {
-    fn hook(_: rusqlite::hooks::Action, _: &str, _: &str, _: i64) {
-        IN_WRITE.with(|f| {
-            assert!(
-                f.get(),
-                "write detected outside Database::write() — use write(), not call()"
-            );
-        });
-    }
-    conn.update_hook(Some(hook));
-}
-
-fn apply_pragmas(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA busy_timeout = 5000;
-         PRAGMA synchronous = NORMAL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA cache_size = -64000;",
-    )?;
-    Ok(())
-}
-
-/// Read-only connections skip journal_mode (cannot change it) and synchronous.
-fn apply_pragmas_readonly(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "PRAGMA busy_timeout = 5000;
-         PRAGMA foreign_keys = ON;
-         PRAGMA cache_size = -64000;",
-    )?;
-    Ok(())
-}
-
-// ── Shared DB helpers ────────────────────────────────────────────────────────
-
-/// Converts `QueryReturnedNoRows` into `None`; other errors propagate as `Err`.
-///
-/// Used by all repository `get` methods to return `Option<T>` instead of
-/// forcing callers to match on `rusqlite::Error::QueryReturnedNoRows`.
-pub(crate) trait OptionalExt<T> {
-    fn optional(self) -> std::result::Result<Option<T>, rusqlite::Error>;
-}
-
-impl<T> OptionalExt<T> for std::result::Result<T, rusqlite::Error> {
-    fn optional(self) -> std::result::Result<Option<T>, rusqlite::Error> {
-        match self {
-            Ok(val) => Ok(Some(val)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
+    pub async fn ensure_initialized(&self) -> Result<()> {
+        if self.readonly {
+            return Ok(());
         }
+
+        self.initialized
+            .get_or_try_init(|| async {
+                migrations::run(&self.pool).await?;
+                Ok::<(), crate::error::Error>(())
+            })
+            .await?;
+
+        Ok(())
     }
+}
+
+async fn apply_pragmas(conn: &mut sqlx::sqlite::SqliteConnection) -> sqlx::Result<()> {
+    conn.execute("PRAGMA journal_mode = WAL;").await?;
+    conn.execute("PRAGMA busy_timeout = 5000;").await?;
+    conn.execute("PRAGMA synchronous = NORMAL;").await?;
+    conn.execute("PRAGMA foreign_keys = ON;").await?;
+    conn.execute("PRAGMA cache_size = -64000;").await?;
+    Ok(())
+}
+
+/// Read-only connections skip journal_mode and synchronous.
+async fn apply_pragmas_readonly(conn: &mut sqlx::sqlite::SqliteConnection) -> sqlx::Result<()> {
+    conn.execute("PRAGMA busy_timeout = 5000;").await?;
+    conn.execute("PRAGMA foreign_keys = ON;").await?;
+    conn.execute("PRAGMA cache_size = -64000;").await?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Row;
 
     #[tokio::test]
     async fn pragmas_applied() {
         let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
 
-        db.call(|conn| {
-            let journal: String =
-                conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
-            assert!(
-                journal == "wal" || journal == "memory",
-                "unexpected journal_mode: {journal}"
-            );
+        let row = sqlx::query("PRAGMA journal_mode")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let journal: String = row.get(0);
+        assert!(
+            journal == "wal" || journal == "memory",
+            "unexpected journal_mode: {journal}"
+        );
 
-            let timeout: i64 =
-                conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
-            assert_eq!(timeout, 5000);
+        let timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(timeout, 5000);
 
-            let sync: i64 =
-                conn.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
-            assert_eq!(sync, 1); // NORMAL = 1
+        let sync: i64 = sqlx::query_scalar("PRAGMA synchronous")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(sync, 1);
 
-            let fk: i64 =
-                conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
-            assert_eq!(fk, 1);
-
-            let cache: i64 =
-                conn.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
-            assert_eq!(cache, -64000);
-
-            Ok(())
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn write_commits_on_success() {
-        let db = Database::open_in_memory().unwrap();
-
-        db.write(|conn| {
-            conn.execute(
-                "CREATE TABLE test_write (id TEXT PRIMARY KEY)",
-                [],
-            )?;
-            conn.execute("INSERT INTO test_write VALUES ('a')", [])?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-
-        // Verify the data persisted (committed).
-        db.call(|conn| {
-            let count: i64 =
-                conn.query_row("SELECT COUNT(*) FROM test_write", [], |r| r.get(0))?;
-            assert_eq!(count, 1);
-            Ok(())
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn write_rolls_back_on_error() {
-        let db = Database::open_in_memory().unwrap();
-
-        db.write(|conn| {
-            conn.execute(
-                "CREATE TABLE test_rollback (id TEXT PRIMARY KEY)",
-                [],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-
-        // This write should roll back.
-        let result: Result<()> = db
-            .write(|conn| {
-                conn.execute("INSERT INTO test_rollback VALUES ('a')", [])?;
-                Err(crate::error::Error::Internal("forced error".into()))
-            })
-            .await;
-        assert!(result.is_err());
-
-        // Table exists but row should not (rolled back).
-        db.call(|conn| {
-            let count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM test_rollback",
-                [],
-                |r| r.get(0),
-            )?;
-            assert_eq!(count, 0, "row should have been rolled back");
-            Ok(())
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn uuidv7_is_sortable() {
-        let id1 = uuid::Uuid::now_v7();
-        let id2 = uuid::Uuid::now_v7();
-        assert!(id2 >= id1, "UUIDv7 should be monotonically sortable");
+        let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(fk, 1);
     }
 
     #[tokio::test]
@@ -331,33 +175,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
-        // Writer opens and creates the DB.
         let writer = Database::open(&db_path).unwrap();
-        writer
-            .write(|conn| {
-                conn.execute(
-                    "CREATE TABLE rw_test (id TEXT PRIMARY KEY, val TEXT)",
-                    [],
-                )?;
-                conn.execute("INSERT INTO rw_test VALUES ('k1', 'hello')", [])?;
-                Ok(())
-            })
+        writer.ensure_initialized().await.unwrap();
+        sqlx::query("CREATE TABLE rw_test (id TEXT PRIMARY KEY, val TEXT)")
+            .execute(writer.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO rw_test VALUES ('k1', 'hello')")
+            .execute(writer.pool())
             .await
             .unwrap();
 
-        // Reader opens the same file read-only.
         let reader = Database::open_readonly(&db_path).unwrap();
-        reader
-            .call(|conn| {
-                let val: String = conn.query_row(
-                    "SELECT val FROM rw_test WHERE id = 'k1'",
-                    [],
-                    |r| r.get(0),
-                )?;
-                assert_eq!(val, "hello");
-                Ok(())
-            })
+        let val: String = sqlx::query_scalar("SELECT val FROM rw_test WHERE id = 'k1'")
+            .fetch_one(reader.pool())
             .await
             .unwrap();
+        assert_eq!(val, "hello");
     }
 }

@@ -6,7 +6,7 @@
 
 use tokio::sync::broadcast;
 
-use crate::db::connection::{Database, OptionalExt};
+use crate::db::connection::Database;
 use crate::error::Result;
 use crate::events::DjinnEvent;
 use crate::models::git_settings::GitSettings;
@@ -30,87 +30,79 @@ impl GitSettingsRepository {
     pub async fn get(&self, project_id: &str) -> Result<GitSettings> {
         let project_key = format!("git:{project_id}:target_branch");
         let global_key = "git:global:target_branch".to_owned();
+        self.db.ensure_initialized().await?;
 
-        self.db
-            .call(move |conn| {
-                // 1. Try project-specific setting.
-                if let Some(branch) = conn
-                    .query_row(
-                        "SELECT value FROM settings WHERE key = ?1",
-                        [&project_key],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?
-                {
-                    return Ok(GitSettings { target_branch: branch });
-                }
+        if let Some(branch) = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM settings WHERE key = ?1",
+        )
+        .bind(&project_key)
+        .fetch_optional(self.db.pool())
+        .await?
+        {
+            return Ok(GitSettings {
+                target_branch: branch,
+            });
+        }
 
-                // 2. Try global default.
-                if let Some(branch) = conn
-                    .query_row(
-                        "SELECT value FROM settings WHERE key = ?1",
-                        [&global_key],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?
-                {
-                    return Ok(GitSettings { target_branch: branch });
-                }
+        if let Some(branch) = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM settings WHERE key = ?1",
+        )
+        .bind(&global_key)
+        .fetch_optional(self.db.pool())
+        .await?
+        {
+            return Ok(GitSettings {
+                target_branch: branch,
+            });
+        }
 
-                // 3. Hard-coded fallback.
-                Ok(GitSettings::default())
-            })
-            .await
+        Ok(GitSettings::default())
     }
 
     /// Set the target branch for a specific project (GIT-08).
     pub async fn set_target_branch(&self, project_id: &str, branch: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
         let key = format!("git:{project_id}:target_branch");
-        let branch = branch.to_owned();
-        let project_id = project_id.to_owned();
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO settings (key, value, updated_at)
-                     VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                     ON CONFLICT(key) DO UPDATE SET
-                       value = excluded.value,
-                       updated_at = excluded.updated_at",
-                    [&key, &branch],
-                )?;
-                Ok((project_id, branch))
-            })
-            .await
-            .map(|(pid, branch)| {
-                let _ = self.events.send(DjinnEvent::GitSettingsUpdated {
-                    project_id: pid,
-                    settings: GitSettings { target_branch: branch },
-                });
-            })
+        sqlx::query(
+            "INSERT INTO settings (key, value, updated_at)
+             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT(key) DO UPDATE SET
+               value = excluded.value,
+               updated_at = excluded.updated_at",
+        )
+        .bind(&key)
+        .bind(branch)
+        .execute(self.db.pool())
+        .await?;
+        let _ = self.events.send(DjinnEvent::GitSettingsUpdated {
+            project_id: project_id.to_owned(),
+            settings: GitSettings {
+                target_branch: branch.to_owned(),
+            },
+        });
+        Ok(())
     }
 
     /// Set the global default target branch (CFG-03).
     pub async fn set_global_target_branch(&self, branch: &str) -> Result<()> {
-        let branch = branch.to_owned();
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO settings (key, value, updated_at)
-                     VALUES ('git:global:target_branch', ?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                     ON CONFLICT(key) DO UPDATE SET
-                       value = excluded.value,
-                       updated_at = excluded.updated_at",
-                    [&branch],
-                )?;
-                Ok(branch)
-            })
-            .await
-            .map(|branch| {
-                let _ = self.events.send(DjinnEvent::GitSettingsUpdated {
-                    project_id: "global".into(),
-                    settings: GitSettings { target_branch: branch },
-                });
-            })
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "INSERT INTO settings (key, value, updated_at)
+             VALUES ('git:global:target_branch', ?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT(key) DO UPDATE SET
+               value = excluded.value,
+               updated_at = excluded.updated_at",
+        )
+        .bind(branch)
+        .execute(self.db.pool())
+        .await?;
+        let _ = self.events.send(DjinnEvent::GitSettingsUpdated {
+            project_id: "global".into(),
+            settings: GitSettings {
+                target_branch: branch.to_owned(),
+            },
+        });
+        Ok(())
     }
 }
 

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Top-level grouping entity with a simplified open→closed lifecycle.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Epic {
     pub id: String,
     pub short_id: String,

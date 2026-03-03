@@ -1,6 +1,8 @@
 use tokio::sync::broadcast;
 
-use crate::db::connection::{Database, OptionalExt};
+use sqlx::{Row, SqlitePool};
+
+use crate::db::connection::Database;
 use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
 use crate::models::task::{ActivityEntry, Task, TaskStatus, TransitionAction, compute_transition};
@@ -79,12 +81,18 @@ impl Default for ActivityQuery {
 }
 
 /// Minimal task reference returned by blocker listing queries.
-#[derive(Debug)]
+#[derive(Debug, sqlx::FromRow)]
 pub struct BlockerRef {
     pub task_id: String,
     pub short_id: String,
     pub title: String,
     pub status: String,
+}
+
+#[derive(Clone, Debug)]
+enum SqlParam {
+    Text(String),
+    Integer(i64),
 }
 
 /// Filters for [`TaskRepository::list_ready`].
@@ -119,71 +127,53 @@ impl TaskRepository {
     }
 
     pub async fn list_by_epic(&self, epic_id: &str) -> Result<Vec<Task>> {
-        let epic_id = epic_id.to_owned();
-        self.db
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, short_id, epic_id, title, description, design, issue_type,
-                            status, priority, owner, labels, acceptance_criteria,
-                            reopen_count, continuation_count, created_at, updated_at, closed_at,
-                            blocked_from_status, close_reason, memory_refs
-                     FROM tasks WHERE epic_id = ?1 ORDER BY priority, created_at",
-                )?;
-                let tasks = stmt
-                    .query_map([&epic_id], row_to_task)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(tasks)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Task>(
+            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels, acceptance_criteria,
+                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    blocked_from_status, close_reason, memory_refs
+             FROM tasks WHERE epic_id = ?1 ORDER BY priority, created_at",
+        )
+        .bind(epic_id)
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     pub async fn list_by_status(&self, status: &str) -> Result<Vec<Task>> {
-        let status = status.to_owned();
-        self.db
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, short_id, epic_id, title, description, design, issue_type,
-                            status, priority, owner, labels, acceptance_criteria,
-                            reopen_count, continuation_count, created_at, updated_at, closed_at,
-                            blocked_from_status, close_reason, memory_refs
-                     FROM tasks WHERE status = ?1 ORDER BY priority, created_at",
-                )?;
-                let tasks = stmt
-                    .query_map([&status], row_to_task)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(tasks)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Task>(
+            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels, acceptance_criteria,
+                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    blocked_from_status, close_reason, memory_refs
+             FROM tasks WHERE status = ?1 ORDER BY priority, created_at",
+        )
+        .bind(status)
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<Task>> {
-        let id = id.to_owned();
-        self.db
-            .call(move |conn| {
-                Ok(conn
-                    .query_row(TASK_SELECT_WHERE_ID, [&id], row_to_task)
-                    .optional()?)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Task>(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await?)
     }
 
     pub async fn get_by_short_id(&self, short_id: &str) -> Result<Option<Task>> {
-        let short_id = short_id.to_owned();
-        self.db
-            .call(move |conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT id, short_id, epic_id, title, description, design, issue_type,
-                                status, priority, owner, labels, acceptance_criteria,
-                                reopen_count, continuation_count, created_at, updated_at, closed_at,
-                                blocked_from_status, close_reason, memory_refs
-                         FROM tasks WHERE short_id = ?1",
-                        [&short_id],
-                        row_to_task,
-                    )
-                    .optional()?)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Task>(
+            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels, acceptance_criteria,
+                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    blocked_from_status, close_reason, memory_refs
+             FROM tasks WHERE short_id = ?1",
+        )
+        .bind(short_id)
+        .fetch_optional(self.db.pool())
+        .await?)
     }
 
     pub async fn create(
@@ -196,30 +186,29 @@ impl TaskRepository {
         priority: i64,
         owner: &str,
     ) -> Result<Task> {
+        self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
-        let epic_id = epic_id.to_owned();
-        let title = title.to_owned();
-        let description = description.to_owned();
-        let design = design.to_owned();
-        let issue_type = issue_type.to_owned();
-        let owner = owner.to_owned();
-
-        let task: Task = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO tasks
-                        (id, short_id, epic_id, title, description, design,
-                         issue_type, priority, owner)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    rusqlite::params![
-                        &id, &short_id, &epic_id, &title, &description,
-                        &design, &issue_type, priority, &owner
-                    ],
-                )?;
-                Ok(conn.query_row(TASK_SELECT_WHERE_ID, [&id], row_to_task)?)
-            })
+        sqlx::query(
+            "INSERT INTO tasks
+                (id, short_id, epic_id, title, description, design,
+                 issue_type, priority, owner)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(&id)
+        .bind(&short_id)
+        .bind(epic_id)
+        .bind(title)
+        .bind(description)
+        .bind(design)
+        .bind(issue_type)
+        .bind(priority)
+        .bind(owner)
+        .execute(self.db.pool())
+        .await?;
+        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(&id)
+            .fetch_one(self.db.pool())
             .await?;
 
         let _ = self.events.send(DjinnEvent::TaskCreated(task.clone()));
@@ -237,31 +226,28 @@ impl TaskRepository {
         labels: &str,
         acceptance_criteria: &str,
     ) -> Result<Task> {
-        let id = id.to_owned();
-        let title = title.to_owned();
-        let description = description.to_owned();
-        let design = design.to_owned();
-        let owner = owner.to_owned();
-        let labels = labels.to_owned();
-        let acceptance_criteria = acceptance_criteria.to_owned();
-
-        let task: Task = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE tasks SET
-                        title = ?2, description = ?3, design = ?4,
-                        priority = ?5, owner = ?6, labels = ?7,
-                        acceptance_criteria = ?8,
-                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                     WHERE id = ?1",
-                    rusqlite::params![
-                        &id, &title, &description, &design,
-                        priority, &owner, &labels, &acceptance_criteria
-                    ],
-                )?;
-                Ok(conn.query_row(TASK_SELECT_WHERE_ID, [&id], row_to_task)?)
-            })
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE tasks SET
+                title = ?2, description = ?3, design = ?4,
+                priority = ?5, owner = ?6, labels = ?7,
+                acceptance_criteria = ?8,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(title)
+        .bind(description)
+        .bind(design)
+        .bind(priority)
+        .bind(owner)
+        .bind(labels)
+        .bind(acceptance_criteria)
+        .execute(self.db.pool())
+        .await?;
+        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(self.db.pool())
             .await?;
 
         let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
@@ -289,116 +275,118 @@ impl TaskRepository {
             )));
         }
 
-        let id = id.to_owned();
-        let actor_id = actor_id.to_owned();
-        let actor_role = actor_role.to_owned();
+        self.db.ensure_initialized().await?;
         let reason_str = reason.unwrap_or("").to_owned();
+        let mut tx = self.db.pool().begin().await?;
 
-        let task: Task = self
-            .db
-            .write(move |conn| {
-                // Load current task.
-                let current = conn.query_row(TASK_SELECT_WHERE_ID, [&id], row_to_task)?;
-                let from = TaskStatus::parse(&current.status)?;
-
-                // Validate and compute side effects.
-                let apply = compute_transition(&action, &from, target_override.as_ref())?;
-
-                // For Start: block if any unresolved blockers exist.
-                // A blocker is unresolved if its blocking task is not in approved/closed status.
-                if action == TransitionAction::Start {
-                    let count: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM blockers b
-                         JOIN tasks bt ON b.blocking_task_id = bt.id
-                         WHERE b.task_id = ?1
-                           AND bt.status NOT IN ('approved', 'closed')",
-                        [&id],
-                        |r| r.get(0),
-                    )?;
-                    if count > 0 {
-                        return Err(Error::InvalidTransition(
-                            "task has unresolved blockers".into(),
-                        ));
-                    }
-                }
-
-                // Resolve final target status.
-                // Unblock (to_status = None) restores blocked_from_status, defaulting to Open.
-                let to_status = match apply.to_status {
-                    Some(s) => s,
-                    None => current
-                        .blocked_from_status
-                        .as_deref()
-                        .and_then(|s| TaskStatus::parse(s).ok())
-                        .unwrap_or(TaskStatus::Open),
-                };
-                let to_str = to_status.as_str();
-                let from_str = from.as_str();
-
-                // Apply all side effects atomically.
-                conn.execute(
-                    "UPDATE tasks SET
-                        status = ?2,
-                        reopen_count = reopen_count + ?3,
-                        continuation_count = CASE WHEN ?4 THEN 0 ELSE continuation_count END,
-                        closed_at = CASE
-                            WHEN ?5 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                            WHEN ?6 THEN NULL
-                            ELSE closed_at
-                        END,
-                        blocked_from_status = CASE
-                            WHEN ?7 THEN ?10
-                            WHEN ?8 THEN NULL
-                            ELSE blocked_from_status
-                        END,
-                        close_reason = CASE
-                            WHEN ?11 IS NOT NULL THEN ?11
-                            WHEN ?9 THEN NULL
-                            ELSE close_reason
-                        END,
-                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                     WHERE id = ?1",
-                    rusqlite::params![
-                        &id,                                               // ?1
-                        to_str,                                            // ?2
-                        if apply.increment_reopen { 1i64 } else { 0 },    // ?3
-                        apply.reset_continuation,                          // ?4
-                        apply.set_closed_at,                               // ?5
-                        apply.clear_closed_at,                             // ?6
-                        apply.save_blocked_from,                           // ?7
-                        apply.clear_blocked_from,                          // ?8
-                        apply.clear_close_reason,                          // ?9
-                        from_str,                                          // ?10 (save_blocked_from value)
-                        apply.close_reason,                                // ?11
-                    ],
-                )?;
-
-                // Append activity log entry.
-                let activity_id = uuid::Uuid::now_v7().to_string();
-                let payload = serde_json::json!({
-                    "from_status": from_str,
-                    "to_status": to_str,
-                    "reason": if reason_str.is_empty() { None } else { Some(reason_str.as_str()) },
-                })
-                .to_string();
-
-                conn.execute(
-                    "INSERT INTO activity_log
-                        (id, task_id, actor_id, actor_role, event_type, payload)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![
-                        &activity_id,
-                        &id,
-                        &actor_id,
-                        &actor_role,
-                        apply.activity_type,
-                        &payload,
-                    ],
-                )?;
-
-                Ok(conn.query_row(TASK_SELECT_WHERE_ID, [&id], row_to_task)?)
-            })
+        // Load current task.
+        let current: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(&mut *tx)
             .await?;
+        let from = TaskStatus::parse(&current.status)?;
+
+        // Validate and compute side effects.
+        let apply = compute_transition(&action, &from, target_override.as_ref())?;
+
+        // For Start: block if any unresolved blockers exist.
+        // A blocker is unresolved if its blocking task is not in approved/closed status.
+        if action == TransitionAction::Start {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM blockers b
+                 JOIN tasks bt ON b.blocking_task_id = bt.id
+                 WHERE b.task_id = ?1
+                   AND bt.status NOT IN ('approved', 'closed')",
+            )
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if count > 0 {
+                return Err(Error::InvalidTransition(
+                    "task has unresolved blockers".into(),
+                ));
+            }
+        }
+
+        // Resolve final target status.
+        // Unblock (to_status = None) restores blocked_from_status, defaulting to Open.
+        let to_status = match apply.to_status {
+            Some(s) => s,
+            None => current
+                .blocked_from_status
+                .as_deref()
+                .and_then(|s| TaskStatus::parse(s).ok())
+                .unwrap_or(TaskStatus::Open),
+        };
+        let to_str = to_status.as_str();
+        let from_str = from.as_str();
+
+        // Apply all side effects atomically.
+        sqlx::query(
+            "UPDATE tasks SET
+                status = ?2,
+                reopen_count = reopen_count + ?3,
+                continuation_count = CASE WHEN ?4 THEN 0 ELSE continuation_count END,
+                closed_at = CASE
+                    WHEN ?5 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHEN ?6 THEN NULL
+                    ELSE closed_at
+                END,
+                blocked_from_status = CASE
+                    WHEN ?7 THEN ?10
+                    WHEN ?8 THEN NULL
+                    ELSE blocked_from_status
+                END,
+                close_reason = CASE
+                    WHEN ?11 IS NOT NULL THEN ?11
+                    WHEN ?9 THEN NULL
+                    ELSE close_reason
+                END,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(to_str)
+        .bind(if apply.increment_reopen { 1i64 } else { 0 })
+        .bind(apply.reset_continuation)
+        .bind(apply.set_closed_at)
+        .bind(apply.clear_closed_at)
+        .bind(apply.save_blocked_from)
+        .bind(apply.clear_blocked_from)
+        .bind(apply.clear_close_reason)
+        .bind(from_str)
+        .bind(apply.close_reason)
+        .execute(&mut *tx)
+        .await?;
+
+        // Append activity log entry.
+        let activity_id = uuid::Uuid::now_v7().to_string();
+        let payload = serde_json::json!({
+            "from_status": from_str,
+            "to_status": to_str,
+            "reason": if reason_str.is_empty() { None } else { Some(reason_str.as_str()) },
+        })
+        .to_string();
+
+        sqlx::query(
+            "INSERT INTO activity_log
+                (id, task_id, actor_id, actor_role, event_type, payload)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(&activity_id)
+        .bind(id)
+        .bind(actor_id)
+        .bind(actor_role)
+        .bind(apply.activity_type)
+        .bind(&payload)
+        .execute(&mut *tx)
+        .await?;
+
+        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
 
         let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
 
@@ -415,29 +403,27 @@ impl TaskRepository {
     ///
     /// Only used for tests and admin tooling. Production code should use `transition`.
     pub async fn set_status(&self, id: &str, status: &str) -> Result<Task> {
-        let id = id.to_owned();
-        let status = status.to_owned();
-
-        let task: Task = self
-            .db
-            .write(move |conn| {
-                let closed_at_sql = if status == "closed" {
-                    "closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),"
-                } else {
-                    ""
-                };
-                let reopen_inc: i64 = if status == "open" { 1 } else { 0 };
-                conn.execute(
-                    &format!(
-                        "UPDATE tasks SET status = ?2, {closed_at_sql}
-                            reopen_count = reopen_count + ?3,
-                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                         WHERE id = ?1"
-                    ),
-                    rusqlite::params![&id, &status, reopen_inc],
-                )?;
-                Ok(conn.query_row(TASK_SELECT_WHERE_ID, [&id], row_to_task)?)
-            })
+        self.db.ensure_initialized().await?;
+        let closed_at_sql = if status == "closed" {
+            "closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),"
+        } else {
+            ""
+        };
+        let reopen_inc: i64 = if status == "open" { 1 } else { 0 };
+        sqlx::query(&format!(
+            "UPDATE tasks SET status = ?2, {closed_at_sql}
+                reopen_count = reopen_count + ?3,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1"
+        ))
+        .bind(id)
+        .bind(status)
+        .bind(reopen_inc)
+        .execute(self.db.pool())
+        .await?;
+        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(self.db.pool())
             .await?;
 
         let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
@@ -446,37 +432,32 @@ impl TaskRepository {
 
     /// Move a task to a different epic.
     pub async fn move_to_epic(&self, id: &str, new_epic_id: &str) -> Result<Task> {
-        let id = id.to_owned();
-        let new_epic_id = new_epic_id.to_owned();
-        let task: Task = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE tasks SET epic_id = ?2,
-                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                     WHERE id = ?1",
-                    rusqlite::params![&id, &new_epic_id],
-                )?;
-                Ok(conn.query_row(TASK_SELECT_WHERE_ID, [&id], row_to_task)?)
-            })
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE tasks SET epic_id = ?2,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(new_epic_id)
+        .execute(self.db.pool())
+        .await?;
+        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(self.db.pool())
             .await?;
         let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
         Ok(task)
     }
 
     pub async fn delete(&self, id: &str) -> Result<()> {
-        let id = id.to_owned();
-        self.db
-            .write({
-                let id = id.clone();
-                move |conn| {
-                    conn.execute("DELETE FROM tasks WHERE id = ?1", [&id])?;
-                    Ok(())
-                }
-            })
+        self.db.ensure_initialized().await?;
+        sqlx::query("DELETE FROM tasks WHERE id = ?1")
+            .bind(id)
+            .execute(self.db.pool())
             .await?;
 
-        let _ = self.events.send(DjinnEvent::TaskDeleted { id });
+        let _ = self.events.send(DjinnEvent::TaskDeleted { id: id.to_owned() });
         Ok(())
     }
 
@@ -490,164 +471,133 @@ impl TaskRepository {
         if task_id == blocking_id {
             return Err(Error::Internal("task cannot block itself".into()));
         }
-        let task_id = task_id.to_owned();
-        let blocking_id = blocking_id.to_owned();
-        self.db
-            .write(move |conn| {
-                // Cycle detection: check if task_id already (transitively) blocks blocking_id.
-                // If so, adding "blocking_id blocks task_id" would form a cycle.
-                let would_cycle: bool = conn.query_row(
-                    "WITH RECURSIVE reach(id) AS (
-                         SELECT task_id FROM blockers WHERE blocking_task_id = ?1
-                         UNION
-                         SELECT b.task_id FROM blockers b JOIN reach r ON b.blocking_task_id = r.id
-                     )
-                     SELECT EXISTS(SELECT 1 FROM reach WHERE id = ?2)",
-                    rusqlite::params![&task_id, &blocking_id],
-                    |r| r.get(0),
-                )?;
-                if would_cycle {
-                    return Err(Error::Internal(
-                        "would create circular blocker dependency".into(),
-                    ));
-                }
-                conn.execute(
-                    "INSERT OR IGNORE INTO blockers (task_id, blocking_task_id) VALUES (?1, ?2)",
-                    [&task_id, &blocking_id],
-                )?;
-                Ok(())
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        // Cycle detection: check if task_id already (transitively) blocks blocking_id.
+        // If so, adding "blocking_id blocks task_id" would form a cycle.
+        let would_cycle: i64 = sqlx::query_scalar(
+            "WITH RECURSIVE reach(id) AS (
+                 SELECT task_id FROM blockers WHERE blocking_task_id = ?1
+                 UNION
+                 SELECT b.task_id FROM blockers b JOIN reach r ON b.blocking_task_id = r.id
+             )
+             SELECT EXISTS(SELECT 1 FROM reach WHERE id = ?2)",
+        )
+        .bind(task_id)
+        .bind(blocking_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if would_cycle > 0 {
+            return Err(Error::Internal(
+                "would create circular blocker dependency".into(),
+            ));
+        }
+        sqlx::query("INSERT OR IGNORE INTO blockers (task_id, blocking_task_id) VALUES (?1, ?2)")
+            .bind(task_id)
+            .bind(blocking_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn remove_blocker(&self, task_id: &str, blocking_id: &str) -> Result<()> {
-        let task_id = task_id.to_owned();
-        let blocking_id = blocking_id.to_owned();
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "DELETE FROM blockers WHERE task_id = ?1 AND blocking_task_id = ?2",
-                    [&task_id, &blocking_id],
-                )?;
-                Ok(())
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        sqlx::query("DELETE FROM blockers WHERE task_id = ?1 AND blocking_task_id = ?2")
+            .bind(task_id)
+            .bind(blocking_id)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
     }
 
     /// List tasks that are blocking `task_id`, with title and status info.
     pub async fn list_blockers(&self, task_id: &str) -> Result<Vec<BlockerRef>> {
-        let task_id = task_id.to_owned();
-        self.db
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT t.id, t.short_id, t.title, t.status
-                     FROM blockers b
-                     JOIN tasks t ON t.id = b.blocking_task_id
-                     WHERE b.task_id = ?1
-                     ORDER BY t.created_at",
-                )?;
-                let refs = stmt
-                    .query_map([&task_id], |r| {
-                        Ok(BlockerRef {
-                            task_id: r.get(0)?,
-                            short_id: r.get(1)?,
-                            title: r.get(2)?,
-                            status: r.get(3)?,
-                        })
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(refs)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, BlockerRef>(
+            "SELECT t.id AS task_id, t.short_id, t.title, t.status
+             FROM blockers b
+             JOIN tasks t ON t.id = b.blocking_task_id
+             WHERE b.task_id = ?1
+             ORDER BY t.created_at",
+        )
+        .bind(task_id)
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     /// List tasks that are blocked BY `blocking_task_id`.
     pub async fn list_blocked_by(&self, blocking_task_id: &str) -> Result<Vec<BlockerRef>> {
-        let blocking_task_id = blocking_task_id.to_owned();
-        self.db
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT t.id, t.short_id, t.title, t.status
-                     FROM blockers b
-                     JOIN tasks t ON t.id = b.task_id
-                     WHERE b.blocking_task_id = ?1
-                     ORDER BY t.created_at",
-                )?;
-                let refs = stmt
-                    .query_map([&blocking_task_id], |r| {
-                        Ok(BlockerRef {
-                            task_id: r.get(0)?,
-                            short_id: r.get(1)?,
-                            title: r.get(2)?,
-                            status: r.get(3)?,
-                        })
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(refs)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, BlockerRef>(
+            "SELECT t.id AS task_id, t.short_id, t.title, t.status
+             FROM blockers b
+             JOIN tasks t ON t.id = b.task_id
+             WHERE b.blocking_task_id = ?1
+             ORDER BY t.created_at",
+        )
+        .bind(blocking_task_id)
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     /// List tasks ready to start: status='open' with no unresolved blockers.
     pub async fn list_ready(&self, query: ReadyQuery) -> Result<Vec<Task>> {
-        self.db
-            .call(move |conn| {
-                let mut clauses: Vec<String> = vec![
-                    "t.status = 'open'".to_owned(),
-                    "NOT EXISTS (
-                         SELECT 1 FROM blockers b2
-                         JOIN tasks bt ON bt.id = b2.blocking_task_id
-                         WHERE b2.task_id = t.id
-                           AND bt.status NOT IN ('approved', 'closed')
-                     )"
-                    .to_owned(),
-                ];
-                let mut params: Vec<rusqlite::types::Value> = Vec::new();
+        self.db.ensure_initialized().await?;
+        let mut clauses: Vec<String> = vec![
+            "t.status = 'open'".to_owned(),
+            "NOT EXISTS (
+                 SELECT 1 FROM blockers b2
+                 JOIN tasks bt ON bt.id = b2.blocking_task_id
+                 WHERE b2.task_id = t.id
+                   AND bt.status NOT IN ('approved', 'closed')
+             )"
+            .to_owned(),
+        ];
+        let mut params: Vec<SqlParam> = Vec::new();
 
-                if let Some(it) = &query.issue_type {
-                    if let Some(neg) = it.strip_prefix('!') {
-                        clauses.push("t.issue_type != ?".to_owned());
-                        params.push(rusqlite::types::Value::Text(neg.to_owned()));
-                    } else {
-                        clauses.push("t.issue_type = ?".to_owned());
-                        params.push(rusqlite::types::Value::Text(it.clone()));
-                    }
-                }
-                if let Some(lbl) = &query.label {
-                    clauses.push(
-                        "EXISTS (SELECT 1 FROM json_each(t.labels) WHERE value = ?)".to_owned(),
-                    );
-                    params.push(rusqlite::types::Value::Text(lbl.clone()));
-                }
-                if let Some(owner) = &query.owner {
-                    clauses.push("t.owner = ?".to_owned());
-                    params.push(rusqlite::types::Value::Text(owner.clone()));
-                }
-                if let Some(pmax) = query.priority_max {
-                    clauses.push("t.priority <= ?".to_owned());
-                    params.push(rusqlite::types::Value::Integer(pmax));
-                }
-                params.push(rusqlite::types::Value::Integer(query.limit));
+        if let Some(it) = &query.issue_type {
+            if let Some(neg) = it.strip_prefix('!') {
+                clauses.push("t.issue_type != ?".to_owned());
+                params.push(SqlParam::Text(neg.to_owned()));
+            } else {
+                clauses.push("t.issue_type = ?".to_owned());
+                params.push(SqlParam::Text(it.clone()));
+            }
+        }
+        if let Some(lbl) = &query.label {
+            clauses.push("EXISTS (SELECT 1 FROM json_each(t.labels) WHERE value = ?)".to_owned());
+            params.push(SqlParam::Text(lbl.clone()));
+        }
+        if let Some(owner) = &query.owner {
+            clauses.push("t.owner = ?".to_owned());
+            params.push(SqlParam::Text(owner.clone()));
+        }
+        if let Some(pmax) = query.priority_max {
+            clauses.push("t.priority <= ?".to_owned());
+            params.push(SqlParam::Integer(pmax));
+        }
 
-                let where_sql = clauses.join(" AND ");
-                let sql = format!(
-                    "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
-                            t.issue_type, t.status, t.priority, t.owner, t.labels,
-                            t.acceptance_criteria, t.reopen_count, t.continuation_count,
-                            t.created_at, t.updated_at, t.closed_at,
-                            t.blocked_from_status, t.close_reason, t.memory_refs
-                     FROM tasks t
-                     WHERE {where_sql}
-                     ORDER BY t.priority ASC, t.created_at ASC
-                     LIMIT ?"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                let tasks = stmt
-                    .query_map(rusqlite::params_from_iter(params.iter()), row_to_task)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(tasks)
-            })
-            .await
+        let where_sql = clauses.join(" AND ");
+        let sql = format!(
+            "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
+                    t.issue_type, t.status, t.priority, t.owner, t.labels,
+                    t.acceptance_criteria, t.reopen_count, t.continuation_count,
+                    t.created_at, t.updated_at, t.closed_at,
+                    t.blocked_from_status, t.close_reason, t.memory_refs
+             FROM tasks t
+             WHERE {where_sql}
+             ORDER BY t.priority ASC, t.created_at ASC
+             LIMIT ?"
+        );
+        let mut q = sqlx::query_as::<_, Task>(&sql);
+        for p in params {
+            q = match p {
+                SqlParam::Text(s) => q.bind(s),
+                SqlParam::Integer(i) => q.bind(i),
+            };
+        }
+        Ok(q.bind(query.limit).fetch_all(self.db.pool()).await?)
     }
 
     /// Atomically claim the highest-priority, oldest ready task and transition it
@@ -664,95 +614,109 @@ impl TaskRepository {
         actor_id: &str,
         actor_role: &str,
     ) -> Result<Option<Task>> {
-        let actor_id = actor_id.to_owned();
-        let actor_role = actor_role.to_owned();
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
 
-        let task: Option<Task> = self
-            .db
-            .write(move |conn| {
-                // Build the same WHERE as list_ready, then LIMIT 1 for the claim.
-                let mut clauses: Vec<String> = vec![
-                    "t.status = 'open'".to_owned(),
-                    "NOT EXISTS (
-                         SELECT 1 FROM blockers b2
-                         JOIN tasks bt ON bt.id = b2.blocking_task_id
-                         WHERE b2.task_id = t.id
-                           AND bt.status NOT IN ('approved', 'closed')
-                     )"
-                    .to_owned(),
-                ];
-                let mut params: Vec<rusqlite::types::Value> = Vec::new();
+        // Build the same WHERE as list_ready, then LIMIT 1 for the claim.
+        let mut clauses: Vec<String> = vec![
+            "t.status = 'open'".to_owned(),
+            "NOT EXISTS (
+                 SELECT 1 FROM blockers b2
+                 JOIN tasks bt ON bt.id = b2.blocking_task_id
+                 WHERE b2.task_id = t.id
+                   AND bt.status NOT IN ('approved', 'closed')
+             )"
+            .to_owned(),
+        ];
+        let mut params: Vec<SqlParam> = Vec::new();
 
-                if let Some(it) = &query.issue_type {
-                    if let Some(neg) = it.strip_prefix('!') {
-                        clauses.push("t.issue_type != ?".to_owned());
-                        params.push(rusqlite::types::Value::Text(neg.to_owned()));
-                    } else {
-                        clauses.push("t.issue_type = ?".to_owned());
-                        params.push(rusqlite::types::Value::Text(it.clone()));
-                    }
-                }
-                if let Some(lbl) = &query.label {
-                    clauses.push(
-                        "EXISTS (SELECT 1 FROM json_each(t.labels) WHERE value = ?)".to_owned(),
-                    );
-                    params.push(rusqlite::types::Value::Text(lbl.clone()));
-                }
-                if let Some(owner) = &query.owner {
-                    clauses.push("t.owner = ?".to_owned());
-                    params.push(rusqlite::types::Value::Text(owner.clone()));
-                }
-                if let Some(pmax) = query.priority_max {
-                    clauses.push("t.priority <= ?".to_owned());
-                    params.push(rusqlite::types::Value::Integer(pmax));
-                }
+        if let Some(it) = &query.issue_type {
+            if let Some(neg) = it.strip_prefix('!') {
+                clauses.push("t.issue_type != ?".to_owned());
+                params.push(SqlParam::Text(neg.to_owned()));
+            } else {
+                clauses.push("t.issue_type = ?".to_owned());
+                params.push(SqlParam::Text(it.clone()));
+            }
+        }
+        if let Some(lbl) = &query.label {
+            clauses.push("EXISTS (SELECT 1 FROM json_each(t.labels) WHERE value = ?)".to_owned());
+            params.push(SqlParam::Text(lbl.clone()));
+        }
+        if let Some(owner) = &query.owner {
+            clauses.push("t.owner = ?".to_owned());
+            params.push(SqlParam::Text(owner.clone()));
+        }
+        if let Some(pmax) = query.priority_max {
+            clauses.push("t.priority <= ?".to_owned());
+            params.push(SqlParam::Integer(pmax));
+        }
 
-                let where_sql = clauses.join(" AND ");
-                let sql = format!(
-                    "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
-                            t.issue_type, t.status, t.priority, t.owner, t.labels,
-                            t.acceptance_criteria, t.reopen_count, t.continuation_count,
-                            t.created_at, t.updated_at, t.closed_at,
-                            t.blocked_from_status, t.close_reason, t.memory_refs
-                     FROM tasks t
-                     WHERE {where_sql}
-                     ORDER BY t.priority ASC, t.created_at ASC
-                     LIMIT 1"
-                );
+        let where_sql = clauses.join(" AND ");
+        let sql = format!(
+            "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
+                    t.issue_type, t.status, t.priority, t.owner, t.labels,
+                    t.acceptance_criteria, t.reopen_count, t.continuation_count,
+                    t.created_at, t.updated_at, t.closed_at,
+                    t.blocked_from_status, t.close_reason, t.memory_refs
+             FROM tasks t
+             WHERE {where_sql}
+             ORDER BY t.priority ASC, t.created_at ASC
+             LIMIT 1"
+        );
+        let mut candidate_q = sqlx::query_as::<_, Task>(&sql);
+        for p in params {
+            candidate_q = match p {
+                SqlParam::Text(s) => candidate_q.bind(s),
+                SqlParam::Integer(i) => candidate_q.bind(i),
+            };
+        }
 
-                let candidate: Option<Task> = conn
-                    .query_row(&sql, rusqlite::params_from_iter(params.iter()), row_to_task)
-                    .optional()?;
+        let candidate: Option<Task> = candidate_q.fetch_optional(&mut *tx).await?;
 
-                let task = match candidate {
-                    None => return Ok(None),
-                    Some(t) => t,
-                };
+        let task = match candidate {
+            None => {
+                tx.commit().await?;
+                return Ok(None);
+            }
+            Some(t) => t,
+        };
 
-                // Apply Start transition: open → in_progress.
-                conn.execute(
-                    "UPDATE tasks SET status = 'in_progress',
-                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                     WHERE id = ?1",
-                    [&task.id],
-                )?;
+        // Apply Start transition: open → in_progress.
+        sqlx::query(
+            "UPDATE tasks SET status = 'in_progress',
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(&task.id)
+        .execute(&mut *tx)
+        .await?;
 
-                let activity_id = uuid::Uuid::now_v7().to_string();
-                let payload = serde_json::json!({
-                    "from_status": "open",
-                    "to_status":   "in_progress",
-                })
-                .to_string();
-                conn.execute(
-                    "INSERT INTO activity_log
-                        (id, task_id, actor_id, actor_role, event_type, payload)
-                     VALUES (?1, ?2, ?3, ?4, 'status_changed', ?5)",
-                    rusqlite::params![&activity_id, &task.id, &actor_id, &actor_role, &payload],
-                )?;
+        let activity_id = uuid::Uuid::now_v7().to_string();
+        let payload = serde_json::json!({
+            "from_status": "open",
+            "to_status":   "in_progress",
+        })
+        .to_string();
+        sqlx::query(
+            "INSERT INTO activity_log
+                (id, task_id, actor_id, actor_role, event_type, payload)
+             VALUES (?1, ?2, ?3, ?4, 'status_changed', ?5)",
+        )
+        .bind(&activity_id)
+        .bind(&task.id)
+        .bind(actor_id)
+        .bind(actor_role)
+        .bind(&payload)
+        .execute(&mut *tx)
+        .await?;
 
-                Ok(Some(conn.query_row(TASK_SELECT_WHERE_ID, [&task.id], row_to_task)?))
-            })
+        let task = sqlx::query_as::<_, Task>(TASK_SELECT_WHERE_ID)
+            .bind(&task.id)
+            .fetch_one(&mut *tx)
             .await?;
+        tx.commit().await?;
+        let task = Some(task);
 
         if let Some(ref t) = task {
             let _ = self.events.send(DjinnEvent::TaskUpdated(t.clone()));
@@ -763,33 +727,27 @@ impl TaskRepository {
     /// Emit `TaskUpdated` for tasks that were blocked by `completed_task_id` and
     /// are now fully unblocked (all their remaining blockers are approved/closed).
     async fn emit_unblocked_tasks(&self, completed_task_id: &str) -> Result<()> {
-        let completed = completed_task_id.to_owned();
-        let unblocked = self
-            .db
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
-                            t.issue_type, t.status, t.priority, t.owner, t.labels,
-                            t.acceptance_criteria, t.reopen_count, t.continuation_count,
-                            t.created_at, t.updated_at, t.closed_at,
-                            t.blocked_from_status, t.close_reason, t.memory_refs
-                     FROM blockers b
-                     JOIN tasks t ON t.id = b.task_id
-                     WHERE b.blocking_task_id = ?1
-                       AND t.status = 'open'
-                       AND NOT EXISTS (
-                           SELECT 1 FROM blockers b2
-                           JOIN tasks bt ON bt.id = b2.blocking_task_id
-                           WHERE b2.task_id = t.id
-                             AND bt.status NOT IN ('approved', 'closed')
-                       )",
-                )?;
-                let tasks = stmt
-                    .query_map([&completed], row_to_task)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(tasks)
-            })
-            .await?;
+        self.db.ensure_initialized().await?;
+        let unblocked = sqlx::query_as::<_, Task>(
+            "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
+                    t.issue_type, t.status, t.priority, t.owner, t.labels,
+                    t.acceptance_criteria, t.reopen_count, t.continuation_count,
+                    t.created_at, t.updated_at, t.closed_at,
+                    t.blocked_from_status, t.close_reason, t.memory_refs
+             FROM blockers b
+             JOIN tasks t ON t.id = b.task_id
+             WHERE b.blocking_task_id = ?1
+               AND t.status = 'open'
+               AND NOT EXISTS (
+                   SELECT 1 FROM blockers b2
+                   JOIN tasks bt ON bt.id = b2.blocking_task_id
+                   WHERE b2.task_id = t.id
+                     AND bt.status NOT IN ('approved', 'closed')
+               )",
+        )
+        .bind(completed_task_id)
+        .fetch_all(self.db.pool())
+        .await?;
 
         for t in unblocked {
             let _ = self.events.send(DjinnEvent::TaskUpdated(t));
@@ -807,266 +765,252 @@ impl TaskRepository {
         event_type: &str,
         payload: &str,
     ) -> Result<ActivityEntry> {
+        self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
-        let task_id = task_id.map(ToOwned::to_owned);
-        let actor_id = actor_id.to_owned();
-        let actor_role = actor_role.to_owned();
-        let event_type = event_type.to_owned();
-        let payload = payload.to_owned();
-
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO activity_log
-                        (id, task_id, actor_id, actor_role, event_type, payload)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![
-                        &id, &task_id, &actor_id, &actor_role, &event_type, &payload
-                    ],
-                )?;
-                Ok(conn.query_row(
-                    "SELECT id, task_id, actor_id, actor_role, event_type, payload, created_at
-                     FROM activity_log WHERE id = ?1",
-                    [&id],
-                    row_to_activity,
-                )?)
-            })
-            .await
+        let mut tx = self.db.pool().begin().await?;
+        sqlx::query(
+            "INSERT INTO activity_log
+                (id, task_id, actor_id, actor_role, event_type, payload)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(&id)
+        .bind(task_id)
+        .bind(actor_id)
+        .bind(actor_role)
+        .bind(event_type)
+        .bind(payload)
+        .execute(&mut *tx)
+        .await?;
+        let entry = sqlx::query_as::<_, ActivityEntry>(
+            "SELECT id, task_id, actor_id, actor_role, event_type, payload, created_at
+             FROM activity_log WHERE id = ?1",
+        )
+        .bind(&id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(entry)
     }
 
     pub async fn list_activity(&self, task_id: &str) -> Result<Vec<ActivityEntry>> {
-        let task_id = task_id.to_owned();
-        self.db
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, task_id, actor_id, actor_role, event_type, payload, created_at
-                     FROM activity_log WHERE task_id = ?1 ORDER BY created_at",
-                )?;
-                let entries = stmt
-                    .query_map([&task_id], row_to_activity)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(entries)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, ActivityEntry>(
+            "SELECT id, task_id, actor_id, actor_role, event_type, payload, created_at
+             FROM activity_log WHERE task_id = ?1 ORDER BY created_at",
+        )
+        .bind(task_id)
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     /// Query activity log with optional filters: task_id, event_type, time range, pagination.
     pub async fn query_activity(&self, q: ActivityQuery) -> Result<Vec<ActivityEntry>> {
-        self.db
-            .call(move |conn| {
-                let mut clauses: Vec<String> = Vec::new();
-                let mut params: Vec<rusqlite::types::Value> = Vec::new();
+        self.db.ensure_initialized().await?;
+        let mut clauses: Vec<String> = Vec::new();
+        let mut params: Vec<SqlParam> = Vec::new();
 
-                if let Some(ref tid) = q.task_id {
-                    clauses.push("task_id = ?".to_owned());
-                    params.push(rusqlite::types::Value::Text(tid.clone()));
-                }
-                if let Some(ref et) = q.event_type {
-                    clauses.push("event_type = ?".to_owned());
-                    params.push(rusqlite::types::Value::Text(et.clone()));
-                }
-                if let Some(ref ft) = q.from_time {
-                    clauses.push("created_at >= ?".to_owned());
-                    params.push(rusqlite::types::Value::Text(ft.clone()));
-                }
-                if let Some(ref tt) = q.to_time {
-                    clauses.push("created_at <= ?".to_owned());
-                    params.push(rusqlite::types::Value::Text(tt.clone()));
-                }
+        if let Some(ref tid) = q.task_id {
+            clauses.push("task_id = ?".to_owned());
+            params.push(SqlParam::Text(tid.clone()));
+        }
+        if let Some(ref et) = q.event_type {
+            clauses.push("event_type = ?".to_owned());
+            params.push(SqlParam::Text(et.clone()));
+        }
+        if let Some(ref ft) = q.from_time {
+            clauses.push("created_at >= ?".to_owned());
+            params.push(SqlParam::Text(ft.clone()));
+        }
+        if let Some(ref tt) = q.to_time {
+            clauses.push("created_at <= ?".to_owned());
+            params.push(SqlParam::Text(tt.clone()));
+        }
 
-                let where_sql = if clauses.is_empty() {
-                    "1=1".to_owned()
-                } else {
-                    clauses.join(" AND ")
-                };
+        let where_sql = if clauses.is_empty() {
+            "1=1".to_owned()
+        } else {
+            clauses.join(" AND ")
+        };
 
-                let mut list_params = params;
-                list_params.push(rusqlite::types::Value::Integer(q.limit));
-                list_params.push(rusqlite::types::Value::Integer(q.offset));
-
-                let sql = format!(
-                    "SELECT id, task_id, actor_id, actor_role, event_type, payload, created_at
-                     FROM activity_log WHERE {where_sql}
-                     ORDER BY created_at DESC LIMIT ? OFFSET ?"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                let entries = stmt
-                    .query_map(rusqlite::params_from_iter(list_params.iter()), row_to_activity)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(entries)
-            })
-            .await
+        let sql = format!(
+            "SELECT id, task_id, actor_id, actor_role, event_type, payload, created_at
+             FROM activity_log WHERE {where_sql}
+             ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        );
+        let mut query = sqlx::query_as::<_, ActivityEntry>(&sql);
+        for p in params {
+            query = match p {
+                SqlParam::Text(s) => query.bind(s),
+                SqlParam::Integer(i) => query.bind(i),
+            };
+        }
+        Ok(query.bind(q.limit).bind(q.offset).fetch_all(self.db.pool()).await?)
     }
 
     /// Aggregate board health report: epic stats, stale in_progress tasks, review queue.
     pub async fn board_health(&self, stale_hours: i64) -> Result<serde_json::Value> {
-        self.db
-            .call(move |conn| {
-                // Per-epic task counts and % complete.
-                let epic_stats: Vec<serde_json::Value> = {
-                    let mut stmt = conn.prepare(
-                        "SELECT e.id, e.short_id, e.title,
-                                COUNT(t.id) AS total,
-                                SUM(CASE WHEN t.status = 'closed' THEN 1 ELSE 0 END) AS closed,
-                                SUM(CASE WHEN t.status IN (
-                                    'needs_task_review','in_task_review',
-                                    'needs_phase_review','in_phase_review'
-                                ) THEN 1 ELSE 0 END) AS in_review,
-                                MIN(CASE WHEN t.status IN (
-                                    'needs_task_review','in_task_review',
-                                    'needs_phase_review','in_phase_review'
-                                ) THEN t.updated_at ELSE NULL END) AS oldest_review_at
-                         FROM epics e
-                         LEFT JOIN tasks t ON t.epic_id = e.id
-                         GROUP BY e.id
-                         ORDER BY e.title",
-                    )?;
-                    stmt.query_map([], |row| {
-                        let total: i64 = row.get(3)?;
-                        let closed: i64 = row.get::<_, Option<i64>>(4)?.unwrap_or(0);
-                        let in_review: i64 = row.get::<_, Option<i64>>(5)?.unwrap_or(0);
-                        let oldest_review_at: Option<String> = row.get(6)?;
-                        let pct = if total > 0 {
-                            (closed as f64 / total as f64 * 1000.0).round() / 10.0
-                        } else {
-                            0.0
-                        };
-                        Ok(serde_json::json!({
-                            "epic_id":          row.get::<_, String>(0)?,
-                            "short_id":         row.get::<_, String>(1)?,
-                            "title":            row.get::<_, String>(2)?,
-                            "total":            total,
-                            "closed":           closed,
-                            "in_review":        in_review,
-                            "pct_complete":     pct,
-                            "oldest_review_at": oldest_review_at,
-                        }))
-                    })?
-                    .filter_map(|r| r.ok())
-                    .collect()
+        self.db.ensure_initialized().await?;
+        // Per-epic task counts and % complete.
+        let epic_rows = sqlx::query(
+            "SELECT e.id, e.short_id, e.title,
+                    COUNT(t.id) AS total,
+                    SUM(CASE WHEN t.status = 'closed' THEN 1 ELSE 0 END) AS closed,
+                    SUM(CASE WHEN t.status IN (
+                        'needs_task_review','in_task_review',
+                        'needs_phase_review','in_phase_review'
+                    ) THEN 1 ELSE 0 END) AS in_review,
+                    MIN(CASE WHEN t.status IN (
+                        'needs_task_review','in_task_review',
+                        'needs_phase_review','in_phase_review'
+                    ) THEN t.updated_at ELSE NULL END) AS oldest_review_at
+             FROM epics e
+             LEFT JOIN tasks t ON t.epic_id = e.id
+             GROUP BY e.id
+             ORDER BY e.title",
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        let epic_stats: Vec<serde_json::Value> = epic_rows
+            .into_iter()
+            .map(|row| {
+                let total: i64 = row.get(3);
+                let closed: i64 = row.get::<Option<i64>, _>(4).unwrap_or(0);
+                let in_review: i64 = row.get::<Option<i64>, _>(5).unwrap_or(0);
+                let oldest_review_at: Option<String> = row.get(6);
+                let pct = if total > 0 {
+                    (closed as f64 / total as f64 * 1000.0).round() / 10.0
+                } else {
+                    0.0
                 };
-
-                // Stale tasks: in_progress longer than the threshold.
-                let stale_tasks: Vec<serde_json::Value> = {
-                    let sql = format!(
-                        "SELECT t.id, t.short_id, t.title, t.status, t.updated_at, t.owner,
-                                e.short_id AS epic_short_id
-                         FROM tasks t
-                         JOIN epics e ON t.epic_id = e.id
-                         WHERE t.status = 'in_progress'
-                           AND t.updated_at < datetime('now', '-{stale_hours} hours')
-                         ORDER BY t.updated_at ASC"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    stmt.query_map([], |row| {
-                        Ok(serde_json::json!({
-                            "id":            row.get::<_, String>(0)?,
-                            "short_id":      row.get::<_, String>(1)?,
-                            "title":         row.get::<_, String>(2)?,
-                            "status":        row.get::<_, String>(3)?,
-                            "updated_at":    row.get::<_, String>(4)?,
-                            "owner":         row.get::<_, String>(5)?,
-                            "epic_short_id": row.get::<_, String>(6)?,
-                        }))
-                    })?
-                    .filter_map(|r| r.ok())
-                    .collect()
-                };
-
-                // Review queue: tasks waiting in any review status.
-                let review_queue: Vec<serde_json::Value> = {
-                    let mut stmt = conn.prepare(
-                        "SELECT t.id, t.short_id, t.title, t.status, t.updated_at,
-                                e.short_id AS epic_short_id
-                         FROM tasks t
-                         JOIN epics e ON t.epic_id = e.id
-                         WHERE t.status IN (
-                             'needs_task_review','in_task_review',
-                             'needs_phase_review','in_phase_review'
-                         )
-                         ORDER BY t.updated_at ASC",
-                    )?;
-                    stmt.query_map([], |row| {
-                        Ok(serde_json::json!({
-                            "id":            row.get::<_, String>(0)?,
-                            "short_id":      row.get::<_, String>(1)?,
-                            "title":         row.get::<_, String>(2)?,
-                            "status":        row.get::<_, String>(3)?,
-                            "updated_at":    row.get::<_, String>(4)?,
-                            "epic_short_id": row.get::<_, String>(5)?,
-                        }))
-                    })?
-                    .filter_map(|r| r.ok())
-                    .collect()
-                };
-
-                Ok(serde_json::json!({
-                    "epic_stats":            epic_stats,
-                    "stale_tasks":           stale_tasks,
-                    "review_queue":          review_queue,
-                    "stale_threshold_hours": stale_hours,
-                }))
+                serde_json::json!({
+                    "epic_id":          row.get::<String, _>(0),
+                    "short_id":         row.get::<String, _>(1),
+                    "title":            row.get::<String, _>(2),
+                    "total":            total,
+                    "closed":           closed,
+                    "in_review":        in_review,
+                    "pct_complete":     pct,
+                    "oldest_review_at": oldest_review_at,
+                })
             })
-            .await
+            .collect();
+
+        // Stale tasks: in_progress longer than the threshold.
+        let stale_sql = format!(
+            "SELECT t.id, t.short_id, t.title, t.status, t.updated_at, t.owner,
+                    e.short_id AS epic_short_id
+             FROM tasks t
+             JOIN epics e ON t.epic_id = e.id
+             WHERE t.status = 'in_progress'
+               AND t.updated_at < datetime('now', '-{stale_hours} hours')
+             ORDER BY t.updated_at ASC"
+        );
+        let stale_rows = sqlx::query(&stale_sql).fetch_all(self.db.pool()).await?;
+        let stale_tasks: Vec<serde_json::Value> = stale_rows
+            .into_iter()
+            .map(|row| {
+                serde_json::json!({
+                    "id":            row.get::<String, _>(0),
+                    "short_id":      row.get::<String, _>(1),
+                    "title":         row.get::<String, _>(2),
+                    "status":        row.get::<String, _>(3),
+                    "updated_at":    row.get::<String, _>(4),
+                    "owner":         row.get::<String, _>(5),
+                    "epic_short_id": row.get::<String, _>(6),
+                })
+            })
+            .collect();
+
+        // Review queue: tasks waiting in any review status.
+        let review_rows = sqlx::query(
+            "SELECT t.id, t.short_id, t.title, t.status, t.updated_at,
+                    e.short_id AS epic_short_id
+             FROM tasks t
+             JOIN epics e ON t.epic_id = e.id
+             WHERE t.status IN (
+                 'needs_task_review','in_task_review',
+                 'needs_phase_review','in_phase_review'
+             )
+             ORDER BY t.updated_at ASC",
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        let review_queue: Vec<serde_json::Value> = review_rows
+            .into_iter()
+            .map(|row| {
+                serde_json::json!({
+                    "id":            row.get::<String, _>(0),
+                    "short_id":      row.get::<String, _>(1),
+                    "title":         row.get::<String, _>(2),
+                    "status":        row.get::<String, _>(3),
+                    "updated_at":    row.get::<String, _>(4),
+                    "epic_short_id": row.get::<String, _>(5),
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "epic_stats":            epic_stats,
+            "stale_tasks":           stale_tasks,
+            "review_queue":          review_queue,
+            "stale_threshold_hours": stale_hours,
+        }))
     }
 
     /// Heal stale tasks: move `in_progress` tasks older than `stale_hours` back to `open`.
     /// Logs a `status_changed` activity entry for each healed task and emits `TaskUpdated` events.
     pub async fn reconcile(&self, stale_hours: i64) -> Result<serde_json::Value> {
         let events_tx = self.events.clone();
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let sql = format!(
+            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels, acceptance_criteria,
+                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    blocked_from_status, close_reason, memory_refs
+             FROM tasks
+             WHERE status = 'in_progress'
+               AND updated_at < datetime('now', '-{stale_hours} hours')"
+        );
+        let stale: Vec<Task> = sqlx::query_as(&sql).fetch_all(&mut *tx).await?;
 
-        let healed: Vec<Task> = self
-            .db
-            .write(move |conn| {
-                let sql = format!(
-                    "SELECT id, short_id, epic_id, title, description, design, issue_type,
-                            status, priority, owner, labels, acceptance_criteria,
-                            reopen_count, continuation_count, created_at, updated_at, closed_at,
-                            blocked_from_status, close_reason, memory_refs
-                     FROM tasks
-                     WHERE status = 'in_progress'
-                       AND updated_at < datetime('now', '-{stale_hours} hours')"
-                );
-                let stale: Vec<Task> = {
-                    let mut stmt = conn.prepare(&sql)?;
-                    stmt.query_map([], row_to_task)?
-                        .collect::<std::result::Result<Vec<_>, _>>()?
-                };
-
-                let mut healed: Vec<Task> = Vec::new();
-                for task in stale {
-                    conn.execute(
-                        "UPDATE tasks
-                         SET status = 'open',
-                             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                         WHERE id = ?1",
-                        [&task.id],
-                    )?;
-
-                    let activity_id = uuid::Uuid::now_v7().to_string();
-                    let payload = serde_json::json!({
-                        "from":   "in_progress",
-                        "to":     "open",
-                        "reason": "reconcile_stale",
-                    })
-                    .to_string();
-                    conn.execute(
-                        "INSERT INTO activity_log
-                            (id, task_id, actor_id, actor_role, event_type, payload)
-                         VALUES (?1, ?2, 'system', 'system', 'status_changed', ?3)",
-                        rusqlite::params![&activity_id, &task.id, &payload],
-                    )?;
-
-                    let updated: Task = conn.query_row(
-                        TASK_SELECT_WHERE_ID,
-                        [&task.id],
-                        row_to_task,
-                    )?;
-                    healed.push(updated);
-                }
-                Ok(healed)
-            })
+        let mut healed: Vec<Task> = Vec::new();
+        for task in stale {
+            sqlx::query(
+                "UPDATE tasks
+                 SET status = 'open',
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1",
+            )
+            .bind(&task.id)
+            .execute(&mut *tx)
             .await?;
+
+            let activity_id = uuid::Uuid::now_v7().to_string();
+            let payload = serde_json::json!({
+                "from":   "in_progress",
+                "to":     "open",
+                "reason": "reconcile_stale",
+            })
+            .to_string();
+            sqlx::query(
+                "INSERT INTO activity_log
+                    (id, task_id, actor_id, actor_role, event_type, payload)
+                 VALUES (?1, ?2, 'system', 'system', 'status_changed', ?3)",
+            )
+            .bind(&activity_id)
+            .bind(&task.id)
+            .bind(&payload)
+            .execute(&mut *tx)
+            .await?;
+
+            let updated: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+                .bind(&task.id)
+                .fetch_one(&mut *tx)
+                .await?;
+            healed.push(updated);
+        }
+        tx.commit().await?;
 
         for task in &healed {
             let _ = events_tx.send(DjinnEvent::TaskUpdated(task.clone()));
@@ -1083,141 +1027,140 @@ impl TaskRepository {
 
     /// Resolve a task by UUID or short_id.
     pub async fn resolve(&self, id_or_short: &str) -> Result<Option<Task>> {
-        let id = id_or_short.to_owned();
-        self.db
-            .call(move |conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT id, short_id, epic_id, title, description, design, issue_type,
-                                status, priority, owner, labels, acceptance_criteria,
-                                reopen_count, continuation_count, created_at, updated_at, closed_at,
-                                blocked_from_status, close_reason, memory_refs
-                         FROM tasks WHERE id = ?1 OR short_id = ?1",
-                        [&id],
-                        row_to_task,
-                    )
-                    .optional()?)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Task>(
+            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels, acceptance_criteria,
+                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    blocked_from_status, close_reason, memory_refs
+             FROM tasks WHERE id = ?1 OR short_id = ?1",
+        )
+        .bind(id_or_short)
+        .fetch_optional(self.db.pool())
+        .await?)
     }
 
     /// List tasks with filters, sorting, and pagination.
     pub async fn list_filtered(&self, query: ListQuery) -> Result<ListResult> {
-        self.db
-            .call(move |conn| {
-                let (where_sql, params) = build_where(
-                    &query.status,
-                    &query.issue_type,
-                    query.priority,
-                    &query.label,
-                    &query.text,
-                    &query.parent,
-                );
-                let order_sql = sort_to_sql(&query.sort);
+        self.db.ensure_initialized().await?;
+        let (where_sql, params) = build_where(
+            &query.status,
+            &query.issue_type,
+            query.priority,
+            &query.label,
+            &query.text,
+            &query.parent,
+        );
+        let order_sql = sort_to_sql(&query.sort);
 
-                let total: i64 = conn.query_row(
-                    &format!("SELECT COUNT(*) FROM tasks WHERE {where_sql}"),
-                    rusqlite::params_from_iter(params.iter()),
-                    |r| r.get(0),
-                )?;
+        let total_sql = format!("SELECT COUNT(*) FROM tasks WHERE {where_sql}");
+        let mut total_q = sqlx::query_scalar::<_, i64>(&total_sql);
+        for p in &params {
+            total_q = match p {
+                SqlParam::Text(s) => total_q.bind(s.clone()),
+                SqlParam::Integer(i) => total_q.bind(*i),
+            };
+        }
+        let total = total_q.fetch_one(self.db.pool()).await?;
 
-                let mut list_params = params.clone();
-                list_params.push(rusqlite::types::Value::Integer(query.limit));
-                list_params.push(rusqlite::types::Value::Integer(query.offset));
+        let sql = format!(
+            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels, acceptance_criteria,
+                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    blocked_from_status, close_reason, memory_refs
+             FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
+        );
+        let mut task_q = sqlx::query_as::<_, Task>(&sql);
+        for p in &params {
+            task_q = match p {
+                SqlParam::Text(s) => task_q.bind(s.clone()),
+                SqlParam::Integer(i) => task_q.bind(*i),
+            };
+        }
+        let tasks = task_q
+            .bind(query.limit)
+            .bind(query.offset)
+            .fetch_all(self.db.pool())
+            .await?;
 
-                let sql = format!(
-                    "SELECT id, short_id, epic_id, title, description, design, issue_type,
-                            status, priority, owner, labels, acceptance_criteria,
-                            reopen_count, continuation_count, created_at, updated_at, closed_at,
-                            blocked_from_status, close_reason, memory_refs
-                     FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                let tasks = stmt
-                    .query_map(rusqlite::params_from_iter(list_params.iter()), row_to_task)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-
-                Ok(ListResult { tasks, total_count: total })
-            })
-            .await
+        Ok(ListResult { tasks, total_count: total })
     }
 
     /// Count tasks with optional grouping.
     pub async fn count_grouped(&self, query: CountQuery) -> Result<serde_json::Value> {
-        self.db
-            .call(move |conn| {
-                let (where_sql, params) = build_where(
-                    &query.status,
-                    &query.issue_type,
-                    query.priority,
-                    &query.label,
-                    &query.text,
-                    &query.parent,
-                );
+        self.db.ensure_initialized().await?;
+        let (where_sql, params) = build_where(
+            &query.status,
+            &query.issue_type,
+            query.priority,
+            &query.label,
+            &query.text,
+            &query.parent,
+        );
 
-                match query.group_by.as_deref() {
-                    Some(gb) => {
-                        let col = match gb {
-                            "status" => "status",
-                            "priority" => "priority",
-                            "issue_type" => "issue_type",
-                            "parent" => "epic_id",
-                            other => {
-                                return Err(Error::Internal(format!("unknown group_by: {other}")));
-                            }
-                        };
-                        let sql = format!(
-                            "SELECT {col}, COUNT(*) FROM tasks WHERE {where_sql}
-                             GROUP BY {col} ORDER BY COUNT(*) DESC"
-                        );
-                        let mut stmt = conn.prepare(&sql)?;
-                        let groups: Vec<serde_json::Value> = stmt
-                            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                                let key: String =
-                                    row.get::<_, rusqlite::types::Value>(0).map(|v| match v {
-                                        rusqlite::types::Value::Text(s) => s,
-                                        rusqlite::types::Value::Integer(i) => i.to_string(),
-                                        _ => String::new(),
-                                    })?;
-                                let count: i64 = row.get(1)?;
-                                Ok((key, count))
-                            })?
-                            .filter_map(|r| r.ok())
-                            .map(|(key, count)| serde_json::json!({"key": key, "count": count}))
-                            .collect();
-                        Ok(serde_json::json!({ "groups": groups }))
+        match query.group_by.as_deref() {
+            Some(gb) => {
+                let col = match gb {
+                    "status" => "status",
+                    "priority" => "priority",
+                    "issue_type" => "issue_type",
+                    "parent" => "epic_id",
+                    other => {
+                        return Err(Error::Internal(format!("unknown group_by: {other}")));
                     }
-                    None => {
-                        let total: i64 = conn.query_row(
-                            &format!("SELECT COUNT(*) FROM tasks WHERE {where_sql}"),
-                            rusqlite::params_from_iter(params.iter()),
-                            |r| r.get(0),
-                        )?;
-                        Ok(serde_json::json!({ "total_count": total }))
-                    }
+                };
+                let sql = format!(
+                    "SELECT COALESCE(CAST({col} AS TEXT), ''), COUNT(*)
+                     FROM tasks WHERE {where_sql}
+                     GROUP BY {col} ORDER BY COUNT(*) DESC"
+                );
+                let mut groups_q = sqlx::query_as::<_, (String, i64)>(&sql);
+                for p in &params {
+                    groups_q = match p {
+                        SqlParam::Text(s) => groups_q.bind(s.clone()),
+                        SqlParam::Integer(i) => groups_q.bind(*i),
+                    };
                 }
-            })
-            .await
+                let groups = groups_q
+                    .fetch_all(self.db.pool())
+                    .await?
+                    .into_iter()
+                    .map(|(key, count)| serde_json::json!({"key": key, "count": count}))
+                    .collect::<Vec<_>>();
+                Ok(serde_json::json!({ "groups": groups }))
+            }
+            None => {
+                let sql = format!("SELECT COUNT(*) FROM tasks WHERE {where_sql}");
+                let mut total_q = sqlx::query_scalar::<_, i64>(&sql);
+                for p in &params {
+                    total_q = match p {
+                        SqlParam::Text(s) => total_q.bind(s.clone()),
+                        SqlParam::Integer(i) => total_q.bind(*i),
+                    };
+                }
+                let total = total_q.fetch_one(self.db.pool()).await?;
+                Ok(serde_json::json!({ "total_count": total }))
+            }
+        }
     }
 
     // ── Memory refs ──────────────────────────────────────────────────────────
 
     /// Replace the `memory_refs` JSON array on a task.
     pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Task> {
-        let id = id.to_owned();
-        let memory_refs_json = memory_refs_json.to_owned();
-
-        let task: Task = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE tasks SET memory_refs = ?2,
-                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                     WHERE id = ?1",
-                    rusqlite::params![&id, &memory_refs_json],
-                )?;
-                Ok(conn.query_row(TASK_SELECT_WHERE_ID, [&id], row_to_task)?)
-            })
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE tasks SET memory_refs = ?2,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(memory_refs_json)
+        .execute(self.db.pool())
+        .await?;
+        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(self.db.pool())
             .await?;
 
         let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
@@ -1230,22 +1173,18 @@ impl TaskRepository {
     /// sizes and avoids requiring a json_each virtual table scan.
     pub async fn list_by_memory_ref(&self, permalink: &str) -> Result<Vec<Task>> {
         let pattern = format!("%\"{permalink}\"%");
-        self.db
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, short_id, epic_id, title, description, design, issue_type,
-                            status, priority, owner, labels, acceptance_criteria,
-                            reopen_count, continuation_count, created_at, updated_at, closed_at,
-                            blocked_from_status, close_reason, memory_refs
-                     FROM tasks WHERE memory_refs LIKE ?1
-                     ORDER BY priority, created_at",
-                )?;
-                let tasks = stmt
-                    .query_map([&pattern], row_to_task)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(tasks)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Task>(
+            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels, acceptance_criteria,
+                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    blocked_from_status, close_reason, memory_refs
+             FROM tasks WHERE memory_refs LIKE ?1
+             ORDER BY priority, created_at",
+        )
+        .bind(&pattern)
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     /// Upsert a task received from a peer sync (last-writer-wins by updated_at).
@@ -1255,98 +1194,101 @@ impl TaskRepository {
     ///   - The local copy is already newer or equal (LWW check).
     ///   - Any other constraint violation (UNIQUE on short_id, CHECK, etc.).
     pub async fn upsert_peer(&self, task: &Task) -> Result<bool> {
-        let t = task.clone();
-        let changed = self
-            .db
-            .write(move |conn| {
-                // Verify epic exists before INSERT (foreign key is enforced).
-                let epic_exists: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM epics WHERE id = ?1",
-                    [&t.epic_id],
-                    |r| r.get(0),
-                )?;
-                if epic_exists == 0 {
-                    return Ok(0i64);
-                }
-
-                let n = match conn.execute(
-                    "INSERT INTO tasks (
-                        id, short_id, epic_id, title, description, design,
-                        issue_type, status, priority, owner, labels,
-                        acceptance_criteria, reopen_count, continuation_count,
-                        created_at, updated_at, closed_at,
-                        blocked_from_status, close_reason, memory_refs
-                     ) VALUES (
-                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                        ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
-                     )
-                     ON CONFLICT(id) DO UPDATE SET
-                        title               = excluded.title,
-                        description         = excluded.description,
-                        design              = excluded.design,
-                        issue_type          = excluded.issue_type,
-                        status              = excluded.status,
-                        priority            = excluded.priority,
-                        owner               = excluded.owner,
-                        labels              = excluded.labels,
-                        acceptance_criteria = excluded.acceptance_criteria,
-                        reopen_count        = excluded.reopen_count,
-                        continuation_count  = excluded.continuation_count,
-                        updated_at          = excluded.updated_at,
-                        closed_at           = excluded.closed_at,
-                        blocked_from_status = excluded.blocked_from_status,
-                        close_reason        = excluded.close_reason,
-                        memory_refs         = excluded.memory_refs
-                     WHERE excluded.updated_at > tasks.updated_at",
-                    rusqlite::params![
-                        &t.id, &t.short_id, &t.epic_id, &t.title, &t.description,
-                        &t.design, &t.issue_type, &t.status, t.priority, &t.owner,
-                        &t.labels, &t.acceptance_criteria, t.reopen_count,
-                        t.continuation_count, &t.created_at, &t.updated_at,
-                        &t.closed_at, &t.blocked_from_status, &t.close_reason,
-                        &t.memory_refs
-                    ],
-                ) {
-                    Ok(n) => n as i64,
-                    // Constraint violation (UNIQUE on short_id, CHECK, etc.) → skip.
-                    Err(rusqlite::Error::SqliteFailure(err, _))
-                        if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-                    {
-                        0
-                    }
-                    Err(e) => return Err(Error::Database(e)),
-                };
-                Ok(n)
-            })
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        // Verify epic exists before INSERT (foreign key is enforced).
+        let epic_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM epics WHERE id = ?1")
+            .bind(&task.epic_id)
+            .fetch_one(&mut *tx)
             .await?;
+        if epic_exists == 0 {
+            tx.commit().await?;
+            return Ok(false);
+        }
 
-        if changed > 0 {
+        let changed = match sqlx::query(
+            "INSERT INTO tasks (
+                id, short_id, epic_id, title, description, design,
+                issue_type, status, priority, owner, labels,
+                acceptance_criteria, reopen_count, continuation_count,
+                created_at, updated_at, closed_at,
+                blocked_from_status, close_reason, memory_refs
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+             )
+             ON CONFLICT(id) DO UPDATE SET
+                title               = excluded.title,
+                description         = excluded.description,
+                design              = excluded.design,
+                issue_type          = excluded.issue_type,
+                status              = excluded.status,
+                priority            = excluded.priority,
+                owner               = excluded.owner,
+                labels              = excluded.labels,
+                acceptance_criteria = excluded.acceptance_criteria,
+                reopen_count        = excluded.reopen_count,
+                continuation_count  = excluded.continuation_count,
+                updated_at          = excluded.updated_at,
+                closed_at           = excluded.closed_at,
+                blocked_from_status = excluded.blocked_from_status,
+                close_reason        = excluded.close_reason,
+                memory_refs         = excluded.memory_refs
+             WHERE excluded.updated_at > tasks.updated_at",
+        )
+        .bind(&task.id)
+        .bind(&task.short_id)
+        .bind(&task.epic_id)
+        .bind(&task.title)
+        .bind(&task.description)
+        .bind(&task.design)
+        .bind(&task.issue_type)
+        .bind(&task.status)
+        .bind(task.priority)
+        .bind(&task.owner)
+        .bind(&task.labels)
+        .bind(&task.acceptance_criteria)
+        .bind(task.reopen_count)
+        .bind(task.continuation_count)
+        .bind(&task.created_at)
+        .bind(&task.updated_at)
+        .bind(&task.closed_at)
+        .bind(&task.blocked_from_status)
+        .bind(&task.close_reason)
+        .bind(&task.memory_refs)
+        .execute(&mut *tx)
+        .await
+        {
+            Ok(result) => result.rows_affected() > 0,
+            Err(sqlx::Error::Database(db_err)) if is_constraint_violation(db_err.as_ref()) => {
+                false
+            }
+            Err(e) => return Err(Error::Database(e)),
+        };
+        tx.commit().await?;
+
+        if changed {
             if let Ok(Some(updated)) = self.get(&task.id).await {
                 let _ = self.events.send(DjinnEvent::TaskUpdated(updated));
             }
         }
-        Ok(changed > 0)
+        Ok(changed)
     }
 
     async fn generate_short_id(&self, seed_id: &str) -> Result<String> {
-        let seed_id = seed_id.to_owned();
-        self.db
-            .call(move |conn| {
-                let seed = uuid::Uuid::parse_str(&seed_id)
-                    .map_err(|e| Error::Internal(e.to_string()))?;
-                let candidate = short_id_from_uuid(&seed);
-                if !short_id_exists(conn, "tasks", &candidate)? {
-                    return Ok(candidate);
-                }
-                for _ in 0..16 {
-                    let candidate = short_id_from_uuid(&uuid::Uuid::now_v7());
-                    if !short_id_exists(conn, "tasks", &candidate)? {
-                        return Ok(candidate);
-                    }
-                }
-                Err(Error::Internal("short_id collision after 16 retries".into()))
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        let seed = uuid::Uuid::parse_str(seed_id).map_err(|e| Error::Internal(e.to_string()))?;
+        let candidate = short_id_from_uuid(&seed);
+        if !short_id_exists(self.db.pool(), "tasks", &candidate).await? {
+            return Ok(candidate);
+        }
+        for _ in 0..16 {
+            let candidate = short_id_from_uuid(&uuid::Uuid::now_v7());
+            if !short_id_exists(self.db.pool(), "tasks", &candidate).await? {
+                return Ok(candidate);
+            }
+        }
+        Err(Error::Internal("short_id collision after 16 retries".into()))
     }
 }
 
@@ -1356,43 +1298,6 @@ const TASK_SELECT_WHERE_ID: &str =
             reopen_count, continuation_count, created_at, updated_at, closed_at,
             blocked_from_status, close_reason, memory_refs
      FROM tasks WHERE id = ?1";
-
-fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
-    Ok(Task {
-        id: row.get(0)?,
-        short_id: row.get(1)?,
-        epic_id: row.get(2)?,
-        title: row.get(3)?,
-        description: row.get(4)?,
-        design: row.get(5)?,
-        issue_type: row.get(6)?,
-        status: row.get(7)?,
-        priority: row.get(8)?,
-        owner: row.get(9)?,
-        labels: row.get(10)?,
-        acceptance_criteria: row.get(11)?,
-        reopen_count: row.get(12)?,
-        continuation_count: row.get(13)?,
-        created_at: row.get(14)?,
-        updated_at: row.get(15)?,
-        closed_at: row.get(16)?,
-        blocked_from_status: row.get(17)?,
-        close_reason: row.get(18)?,
-        memory_refs: row.get(19)?,
-    })
-}
-
-fn row_to_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityEntry> {
-    Ok(ActivityEntry {
-        id: row.get(0)?,
-        task_id: row.get(1)?,
-        actor_id: row.get(2)?,
-        actor_role: row.get(3)?,
-        event_type: row.get(4)?,
-        payload: row.get(5)?,
-        created_at: row.get(6)?,
-    })
-}
 
 fn short_id_from_uuid(id: &uuid::Uuid) -> String {
     let bytes = id.as_bytes();
@@ -1422,47 +1327,47 @@ fn build_where(
     label: &Option<String>,
     text: &Option<String>,
     parent: &Option<String>,
-) -> (String, Vec<rusqlite::types::Value>) {
+) -> (String, Vec<SqlParam>) {
     let mut clauses: Vec<String> = Vec::new();
-    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+    let mut params: Vec<SqlParam> = Vec::new();
 
     if let Some(s) = status {
         clauses.push("status = ?".to_owned());
-        params.push(rusqlite::types::Value::Text(s.clone()));
+        params.push(SqlParam::Text(s.clone()));
     }
 
     if let Some(it) = issue_type {
         if let Some(neg) = it.strip_prefix('!') {
             clauses.push("issue_type != ?".to_owned());
-            params.push(rusqlite::types::Value::Text(neg.to_owned()));
+            params.push(SqlParam::Text(neg.to_owned()));
         } else {
             clauses.push("issue_type = ?".to_owned());
-            params.push(rusqlite::types::Value::Text(it.clone()));
+            params.push(SqlParam::Text(it.clone()));
         }
     }
 
     if let Some(p) = priority {
         clauses.push("priority = ?".to_owned());
-        params.push(rusqlite::types::Value::Integer(p));
+        params.push(SqlParam::Integer(p));
     }
 
     if let Some(lbl) = label {
         clauses.push(
             "EXISTS (SELECT 1 FROM json_each(labels) WHERE value = ?)".to_owned(),
         );
-        params.push(rusqlite::types::Value::Text(lbl.clone()));
+        params.push(SqlParam::Text(lbl.clone()));
     }
 
     if let Some(t) = text {
         clauses.push("(title LIKE ? OR description LIKE ?)".to_owned());
         let pattern = format!("%{t}%");
-        params.push(rusqlite::types::Value::Text(pattern.clone()));
-        params.push(rusqlite::types::Value::Text(pattern));
+        params.push(SqlParam::Text(pattern.clone()));
+        params.push(SqlParam::Text(pattern));
     }
 
     if let Some(p) = parent {
         clauses.push("epic_id = ?".to_owned());
-        params.push(rusqlite::types::Value::Text(p.clone()));
+        params.push(SqlParam::Text(p.clone()));
     }
 
     let where_sql = if clauses.is_empty() {
@@ -1486,13 +1391,19 @@ fn sort_to_sql(sort: &str) -> &'static str {
     }
 }
 
-fn short_id_exists(
-    conn: &rusqlite::Connection,
-    table: &str,
-    short_id: &str,
-) -> rusqlite::Result<bool> {
+fn is_constraint_violation(db_err: &dyn sqlx::error::DatabaseError) -> bool {
+    db_err.is_unique_violation()
+        || db_err.is_foreign_key_violation()
+        || db_err.message().contains("constraint failed")
+}
+
+async fn short_id_exists(pool: &SqlitePool, table: &str, short_id: &str) -> Result<bool> {
     let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE short_id = ?1)");
-    conn.query_row(&sql, [short_id], |r| r.get(0))
+    Ok(sqlx::query_scalar::<_, i64>(&sql)
+        .bind(short_id)
+        .fetch_one(pool)
+        .await?
+        > 0)
 }
 
 #[cfg(test)]
@@ -2108,15 +2019,11 @@ mod tests {
 
         // Backdate t2's updated_at to simulate staleness.
         let t2_id = t2.id.clone();
-        db.write(move |conn| {
-            conn.execute(
-                "UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1",
-                [&t2_id],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
+        sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1")
+            .bind(&t2_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
 
         let report2 = repo.board_health(24).await.unwrap();
         let stale = report2["stale_tasks"].as_array().unwrap();
@@ -2138,15 +2045,11 @@ mod tests {
 
         // Backdate updated_at so the task is considered stale (> 24h).
         let t_id = t.id.clone();
-        db.write(move |conn| {
-            conn.execute(
-                "UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1",
-                [&t_id],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
+        sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1")
+            .bind(&t_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
 
         let result = repo.reconcile(24).await.unwrap();
         assert_eq!(result["healed_tasks"], 1);

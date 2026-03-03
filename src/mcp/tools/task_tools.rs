@@ -3,7 +3,6 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::db::connection::OptionalExt;
 use crate::db::repositories::epic::EpicRepository;
 use crate::db::repositories::task::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository};
 use crate::mcp::server::DjinnMcpServer;
@@ -921,20 +920,15 @@ impl DjinnMcpServer {
 
     /// Resolve an epic UUID or short_id to its UUID.
     pub(crate) async fn resolve_epic_id(&self, id_or_short: &str) -> Option<String> {
-        let id = id_or_short.to_owned();
-        self.state
-            .db()
-            .call(move |conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT id FROM epics WHERE id = ?1 OR short_id = ?1",
-                        [&id],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .optional()?)
-            })
-            .await
-            .ok()
-            .flatten()
+        let db = self.state.db();
+        db.ensure_initialized().await.ok()?;
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM epics WHERE id = ?1 OR short_id = ?1",
+        )
+        .bind(id_or_short)
+        .fetch_optional(db.pool())
+        .await
+        .ok()
+        .flatten()
     }
 }

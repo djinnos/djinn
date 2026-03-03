@@ -255,18 +255,15 @@ mod tests {
     #[tokio::test]
     async fn test_db_has_tables() {
         let db = test_helpers::create_test_db();
+        db.ensure_initialized().await.unwrap();
 
-        db.call(|conn| {
-            let count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='settings'",
-                [],
-                |r| r.get(0),
-            )?;
-            assert_eq!(count, 1, "settings table should exist");
-            Ok(())
-        })
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='settings'",
+        )
+        .fetch_one(db.pool())
         .await
         .unwrap();
+        assert_eq!(count, 1, "settings table should exist");
     }
 
     /// Demonstrates tokio::test(start_paused = true) for time-dependent logic.

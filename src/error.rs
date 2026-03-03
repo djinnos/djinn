@@ -3,7 +3,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("database error: {0}")]
-    Database(#[from] rusqlite::Error),
+    Database(sqlx::Error),
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -13,6 +13,35 @@ pub enum Error {
 
     #[error("invalid transition: {0}")]
     InvalidTransition(String),
+}
+
+impl From<sqlx::Error> for Error {
+    fn from(value: sqlx::Error) -> Self {
+        match value {
+            sqlx::Error::RowNotFound => Self::Internal("query returned no rows".to_owned()),
+            other => Self::Database(other),
+        }
+    }
+}
+
+impl Error {
+    pub fn is_sqlx_constraint_violation(&self) -> bool {
+        let Self::Database(err) = self else {
+            return false;
+        };
+
+        let Some(db_err) = err.as_database_error() else {
+            return false;
+        };
+
+        db_err
+            .code()
+            .map(|code| {
+                let code = code.as_ref();
+                matches!(code, "1555" | "2067" | "787" | "1299" | "275")
+            })
+            .unwrap_or_else(|| db_err.message().to_ascii_lowercase().contains("constraint"))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

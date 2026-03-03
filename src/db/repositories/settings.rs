@@ -1,6 +1,6 @@
 use tokio::sync::broadcast;
 
-use crate::db::connection::{Database, OptionalExt};
+use crate::db::connection::Database;
 use crate::error::Result;
 use crate::events::DjinnEvent;
 use crate::models::settings::Setting;
@@ -16,54 +16,37 @@ impl SettingsRepository {
     }
 
     pub async fn get(&self, key: &str) -> Result<Option<Setting>> {
-        let key = key.to_owned();
-        self.db
-            .call(move |conn| {
-                let mut stmt =
-                    conn.prepare("SELECT key, value, updated_at FROM settings WHERE key = ?1")?;
-                let setting = stmt
-                    .query_row([&key], |row| {
-                        Ok(Setting {
-                            key: row.get(0)?,
-                            value: row.get(1)?,
-                            updated_at: row.get(2)?,
-                        })
-                    })
-                    .optional()?;
-                Ok(setting)
-            })
-            .await
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_as::<_, Setting>(
+                "SELECT key, value, updated_at FROM settings WHERE key = ?1",
+            )
+            .bind(key)
+            .fetch_optional(self.db.pool())
+            .await?,
+        )
     }
 
     /// Upsert a setting. Returns the full entity and emits `SettingUpdated`.
     pub async fn set(&self, key: &str, value: &str) -> Result<Setting> {
-        let key = key.to_owned();
-        let value = value.to_owned();
-        let setting = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO settings (key, value, updated_at)
-                     VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                     ON CONFLICT(key) DO UPDATE SET
-                       value = excluded.value,
-                       updated_at = excluded.updated_at",
-                    [&key, &value],
-                )?;
-                let setting = conn.query_row(
-                    "SELECT key, value, updated_at FROM settings WHERE key = ?1",
-                    [&key],
-                    |row| {
-                        Ok(Setting {
-                            key: row.get(0)?,
-                            value: row.get(1)?,
-                            updated_at: row.get(2)?,
-                        })
-                    },
-                )?;
-                Ok(setting)
-            })
-            .await?;
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "INSERT INTO settings (key, value, updated_at)
+             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT(key) DO UPDATE SET
+               value = excluded.value,
+               updated_at = excluded.updated_at",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(self.db.pool())
+        .await?;
+        let setting = sqlx::query_as::<_, Setting>(
+            "SELECT key, value, updated_at FROM settings WHERE key = ?1",
+        )
+        .bind(key)
+        .fetch_one(self.db.pool())
+        .await?;
 
         // Emit event — ignore send error (no receivers is fine).
         let _ = self.events.send(DjinnEvent::SettingUpdated(setting.clone()));
