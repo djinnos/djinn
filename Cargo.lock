@@ -1662,6 +1662,7 @@ dependencies = [
 name = "djinn-server"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "clap",
  "dirs 6.0.0",
