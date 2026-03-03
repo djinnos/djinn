@@ -1,3 +1,4 @@
+pub mod credential;
 pub mod custom_provider;
 pub mod epic;
 pub mod git_settings;

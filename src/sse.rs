@@ -130,6 +130,27 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             id: None,
             project_id: Some(project_id),
         },
+        DjinnEvent::CredentialCreated(v) => Envelope {
+            entity_type: "credential",
+            action: "created",
+            data: serde_json::to_value(v).ok(),
+            id: None,
+            project_id: None,
+        },
+        DjinnEvent::CredentialUpdated(v) => Envelope {
+            entity_type: "credential",
+            action: "updated",
+            data: serde_json::to_value(v).ok(),
+            id: None,
+            project_id: None,
+        },
+        DjinnEvent::CredentialDeleted { id } => Envelope {
+            entity_type: "credential",
+            action: "deleted",
+            data: None,
+            id: Some(id),
+            project_id: None,
+        },
     }
 }
 

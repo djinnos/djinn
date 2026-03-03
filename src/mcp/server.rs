@@ -28,6 +28,7 @@ impl DjinnMcpServer {
             tool_router: Self::system_tool_router()
                 + Self::memory_tool_router()
                 + Self::provider_tool_router()
+                + Self::credential_tool_router()
                 + Self::sync_tool_router()
                 + Self::task_tool_router(),
         }

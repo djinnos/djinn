@@ -1,3 +1,4 @@
+use crate::models::credential::Credential;
 use crate::models::epic::Epic;
 use crate::models::git_settings::GitSettings;
 use crate::models::note::Note;
@@ -43,4 +44,9 @@ pub enum DjinnEvent {
         project_id: String,
         settings: GitSettings,
     },
+
+    // Credential vault (encrypted_value never included in event payload)
+    CredentialCreated(Credential),
+    CredentialUpdated(Credential),
+    CredentialDeleted { id: String },
 }

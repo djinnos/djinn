@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Goose: in-process agent harness (ADR-008). default-features=false excludes V8/Deno.
+# rusqlite is pinned to 0.32.1 to share libsqlite3-sys ^0.30.1 with goose's sqlx.
+goose = { path = "../../references/goose/crates/goose", default-features = false }
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 jsonwebtoken = "9"
@@ -12,7 +15,9 @@ git2 = "0.20"
 dirs = "6"
 refinery = { version = "0.9", features = ["rusqlite", "int8-versions"] }
 rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"] }
-rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
+ring = "0.17"
+# Pinned to 0.32.1: shares libsqlite3-sys ^0.30.1 with goose's sqlx (0.8.1+).
+rusqlite = { version = "=0.32.1", features = ["bundled", "hooks"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

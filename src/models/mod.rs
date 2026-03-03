@@ -1,3 +1,4 @@
+pub mod credential;
 pub mod epic;
 pub mod git_settings;
 pub mod note;
