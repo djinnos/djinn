@@ -62,7 +62,9 @@ enum CoordinatorMessage {
     /// Resume dispatch and immediately run a dispatch pass.
     Resume,
     /// Return current coordinator status.
-    GetStatus { respond_to: Reply<CoordinatorStatus> },
+    GetStatus {
+        respond_to: Reply<CoordinatorStatus>,
+    },
     /// Run an immediate stuck-task detection pass.
     TriggerStuckScan,
 }
@@ -249,6 +251,15 @@ impl CoordinatorActor {
         };
 
         for task in ready {
+            if !self.health.is_available(DEFAULT_MODEL_ID) {
+                tracing::warn!(
+                    model_id = DEFAULT_MODEL_ID,
+                    task_id = %task.short_id,
+                    "CoordinatorActor: model unavailable by health tracker, skipping dispatch"
+                );
+                continue;
+            }
+
             match self.supervisor.has_session(&task.id).await {
                 Ok(true) => continue, // session already active
                 Ok(false) => {}
@@ -369,14 +380,16 @@ impl CoordinatorHandle {
         health: HealthTracker,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(32);
-        let actor =
-            CoordinatorActor::new(receiver, events_tx, cancel, db, supervisor, health);
+        let actor = CoordinatorActor::new(receiver, events_tx, cancel, db, supervisor, health);
         tokio::spawn(actor.run());
         Self { sender }
     }
 
     async fn send(&self, msg: CoordinatorMessage) -> Result<(), CoordinatorError> {
-        self.sender.send(msg).await.map_err(|_| CoordinatorError::ActorDead)
+        self.sender
+            .send(msg)
+            .await
+            .map_err(|_| CoordinatorError::ActorDead)
     }
 
     /// Trigger an immediate dispatch pass for all ready tasks.
@@ -397,7 +410,8 @@ impl CoordinatorHandle {
     /// Return the current coordinator status snapshot.
     pub async fn get_status(&self) -> Result<CoordinatorStatus, CoordinatorError> {
         let (tx, rx) = oneshot::channel();
-        self.send(CoordinatorMessage::GetStatus { respond_to: tx }).await?;
+        self.send(CoordinatorMessage::GetStatus { respond_to: tx })
+            .await?;
         rx.await.map_err(|_| CoordinatorError::NoResponse)
     }
 
@@ -443,7 +457,10 @@ mod tests {
         db: &Database,
         tx: broadcast::Sender<DjinnEvent>,
     ) -> crate::models::epic::Epic {
-        EpicRepository::new(db.clone(), tx).create("Epic", "", "", "", "").await.unwrap()
+        EpicRepository::new(db.clone(), tx)
+            .create("Epic", "", "", "", "")
+            .await
+            .unwrap()
     }
 
     // ── Status ───────────────────────────────────────────────────────────────
@@ -502,7 +519,9 @@ mod tests {
         let repo = TaskRepository::new(db.clone(), tx.clone());
 
         // Create a ready task (open, no blockers).
-        repo.create(&epic.id, "T1", "", "", "task", 0, "").await.unwrap();
+        repo.create(&epic.id, "T1", "", "", "task", 0, "")
+            .await
+            .unwrap();
 
         let handle = spawn_coordinator(&db, &tx);
         handle.trigger_dispatch().await.unwrap();
@@ -510,7 +529,10 @@ mod tests {
         // Give the actor time to process the message and run dispatch.
         let status = handle.get_status().await.unwrap();
         // Supervisor stub says no session → dispatch is called once.
-        assert_eq!(status.tasks_dispatched, 1, "should have dispatched the ready task");
+        assert_eq!(
+            status.tasks_dispatched, 1,
+            "should have dispatched the ready task"
+        );
     }
 
     // ── Stuck detection ───────────────────────────────────────────────────────
@@ -523,17 +545,26 @@ mod tests {
         let repo = TaskRepository::new(db.clone(), tx.clone());
 
         // Manually put a task in_progress (simulating an orphaned session).
-        let task = repo.create(&epic.id, "Stuck", "", "", "task", 0, "").await.unwrap();
+        let task = repo
+            .create(&epic.id, "Stuck", "", "", "task", 0, "")
+            .await
+            .unwrap();
         repo.set_status(&task.id, "in_progress").await.unwrap();
 
         let handle = spawn_coordinator(&db, &tx);
         handle.trigger_stuck_scan().await.unwrap();
 
         let status = handle.get_status().await.unwrap();
-        assert!(status.sessions_recovered >= 1, "stuck task should have been recovered");
+        assert!(
+            status.sessions_recovered >= 1,
+            "stuck task should have been recovered"
+        );
 
         // The released task should now be back to open.
         let updated = repo.get(&task.id).await.unwrap().unwrap();
-        assert_eq!(updated.status, "open", "released task should be back to open");
+        assert_eq!(
+            updated.status, "open",
+            "released task should be back to open"
+        );
     }
 }

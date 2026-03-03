@@ -20,6 +20,7 @@ use crate::agent::extension;
 use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::{AgentType, GooseSessionHandle, SessionManager, SessionType};
 use crate::db::repositories::credential::CredentialRepository;
+use crate::db::repositories::git_settings::GitSettingsRepository;
 use crate::db::repositories::task::TaskRepository;
 use crate::models::task::{Task, TransitionAction};
 use crate::server::AppState;
@@ -168,8 +169,9 @@ impl AgentSupervisor {
                 }));
             }
             SupervisorMessage::SessionCompleted { task_id, result } => {
+                let model_id = self.session_models.get(&task_id).cloned();
                 let agent_type = self.remove_session(&task_id);
-                self.handle_session_result(&task_id, agent_type, result)
+                self.handle_session_result(&task_id, model_id.as_deref(), agent_type, result)
                     .await;
             }
         }
@@ -214,10 +216,11 @@ impl AgentSupervisor {
             .map_err(|e| SupervisorError::Goose(e.to_string()))?;
 
         let session_name = format!("{} {}", task.short_id, task.title);
-        let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let worktree_path = self.prepare_worktree(&project_dir, &task).await?;
         let session = self
             .session_manager
-            .create_session(working_dir, session_name, SessionType::SubAgent)
+            .create_session(worktree_path.clone(), session_name, SessionType::SubAgent)
             .await
             .map_err(|e| SupervisorError::Goose(e.to_string()))?;
 
@@ -229,7 +232,10 @@ impl AgentSupervisor {
 
         let provider = providers::create(&provider_id, goose_model, extensions.clone())
             .await
-            .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+            .map_err(|e| {
+                self.app_state.health_tracker().record_failure(&model_id);
+                SupervisorError::Goose(e.to_string())
+            })?;
 
         let agent = Arc::new(GooseAgent::with_config(GooseAgentConfig::new(
             self.session_manager.clone(),
@@ -243,7 +249,12 @@ impl AgentSupervisor {
         agent
             .update_provider(provider, &session.id)
             .await
-            .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+            .map_err(|e| {
+                self.app_state.health_tracker().record_failure(&model_id);
+                SupervisorError::Goose(e.to_string())
+            })?;
+
+        self.app_state.health_tracker().record_success(&model_id);
 
         for ext in extensions {
             agent
@@ -342,6 +353,7 @@ impl AgentSupervisor {
                 cancel: session_cancel,
                 session_id: session.id,
                 task_id: task_id.clone(),
+                worktree_path: Some(worktree_path),
             },
         );
         self.session_models.insert(task_id.clone(), model_id);
@@ -377,6 +389,7 @@ impl AgentSupervisor {
                 cancel: session_cancel,
                 session_id: format!("mock-session-{task_id}"),
                 task_id: task_id.clone(),
+                worktree_path: None,
             },
         );
         self.session_models.insert(task_id.clone(), model_id);
@@ -415,12 +428,20 @@ impl AgentSupervisor {
     async fn handle_session_result(
         &self,
         task_id: &str,
+        model_id: Option<&str>,
         agent_type: Option<AgentType>,
         result: Result<(), String>,
     ) {
         let agent_type = agent_type.unwrap_or(AgentType::Worker);
         let repo =
             TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+
+        if let Some(model_id) = model_id {
+            match &result {
+                Ok(()) => self.app_state.health_tracker().record_success(model_id),
+                Err(_) => self.app_state.health_tracker().record_failure(model_id),
+            }
+        }
 
         let transition = match (agent_type, result) {
             (AgentType::Worker, Ok(())) => Some((TransitionAction::SubmitTaskReview, None)),
@@ -540,6 +561,58 @@ impl AgentSupervisor {
 
     fn extensions_for(&self, agent_type: AgentType) -> Vec<goose::config::ExtensionConfig> {
         vec![extension::config(agent_type)]
+    }
+
+    async fn prepare_worktree(
+        &self,
+        project_dir: &PathBuf,
+        task: &Task,
+    ) -> Result<PathBuf, SupervisorError> {
+        let branch = format!("task/{}", task.short_id);
+        let git = self
+            .app_state
+            .git_actor(project_dir)
+            .await
+            .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+
+        match git.create_worktree(&task.short_id, &branch).await {
+            Ok(path) => Ok(path),
+            Err(_) => {
+                let target_branch = self.default_target_branch().await;
+                git.create_branch(&task.short_id, &target_branch)
+                    .await
+                    .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+                git.create_worktree(&task.short_id, &branch)
+                    .await
+                    .map_err(|e| SupervisorError::Goose(e.to_string()))
+            }
+        }
+    }
+
+    async fn default_target_branch(&self) -> String {
+        let repo = GitSettingsRepository::new(
+            self.app_state.db().clone(),
+            self.app_state.events().clone(),
+        );
+        let project_path = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .display()
+            .to_string();
+
+        let project_id = sqlx::query_scalar::<_, String>("SELECT id FROM projects WHERE path = ?1")
+            .bind(project_path)
+            .fetch_optional(self.app_state.db().pool())
+            .await
+            .ok()
+            .flatten();
+
+        if let Some(project_id) = project_id
+            && let Ok(settings) = repo.get(&project_id).await
+        {
+            return settings.target_branch;
+        }
+
+        "main".to_string()
     }
 
     async fn shutdown(&mut self) {

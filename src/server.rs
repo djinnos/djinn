@@ -2,14 +2,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::routing::get;
-use axum::Router;
 use crate::sse;
+use axum::Router;
+use axum::routing::get;
 use serde::Serialize;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
+use crate::actors::coordinator::CoordinatorHandle;
 use crate::actors::git::{GitActorHandle, GitError};
+use crate::actors::supervisor::AgentSupervisorHandle;
+use crate::agent::init_session_manager;
 use crate::auth::JwksCache;
 use crate::db::connection::Database;
 use crate::events::DjinnEvent;
@@ -40,6 +43,10 @@ struct Inner {
     pub health_tracker: HealthTracker,
     /// djinn/ namespace git sync manager.
     pub sync: SyncManager,
+    /// Long-running coordinator actor handle.
+    pub coordinator: Mutex<Option<CoordinatorHandle>>,
+    /// Long-running agent supervisor actor handle.
+    pub supervisor: Mutex<Option<AgentSupervisorHandle>>,
 }
 
 impl AppState {
@@ -77,6 +84,8 @@ impl AppState {
                 catalog: CatalogService::new(),
                 health_tracker: HealthTracker::new(),
                 sync,
+                coordinator: Mutex::new(None),
+                supervisor: Mutex::new(None),
             }),
         }
     }
@@ -119,6 +128,48 @@ impl AppState {
 
     pub fn sync_manager(&self) -> &SyncManager {
         &self.inner.sync
+    }
+
+    pub async fn coordinator(&self) -> Option<CoordinatorHandle> {
+        self.inner.coordinator.lock().await.clone()
+    }
+
+    pub async fn supervisor(&self) -> Option<AgentSupervisorHandle> {
+        self.inner.supervisor.lock().await.clone()
+    }
+
+    /// Spawn long-running agent actors once and keep their handles in AppState.
+    pub async fn initialize_agents(&self) {
+        if self.supervisor().await.is_some() {
+            return;
+        }
+
+        let sessions_dir = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".djinn")
+            .join("sessions");
+        if let Err(e) = std::fs::create_dir_all(&sessions_dir) {
+            tracing::warn!(error = %e, path = %sessions_dir.display(), "failed to create sessions directory");
+            return;
+        }
+
+        let session_manager = init_session_manager(sessions_dir);
+        let supervisor =
+            AgentSupervisorHandle::spawn(self.clone(), session_manager, self.cancel().clone());
+        let coordinator = CoordinatorHandle::spawn(
+            self.events().clone(),
+            self.cancel().clone(),
+            self.db().clone(),
+            supervisor.clone(),
+            self.health_tracker().clone(),
+        );
+
+        *self.inner.supervisor.lock().await = Some(supervisor.clone());
+        *self.inner.coordinator.lock().await = Some(coordinator.clone());
+
+        if let Err(e) = coordinator.trigger_dispatch().await {
+            tracing::warn!(error = %e, "initial coordinator dispatch trigger failed");
+        }
     }
 
     /// Load custom providers from DB into the catalog and trigger a background
@@ -193,12 +244,13 @@ pub fn router(state: AppState) -> Router {
     // Apply JWT auth middleware to /mcp only. The middleware is a no-op when
     // auth is not configured (AppState::jwks() returns None).
     // Use .layer() because fallback_service is not a named route so route_layer() is a no-op.
-    let mcp_router = Router::new()
-        .fallback_service(mcp_service)
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            crate::auth::middleware::require_auth,
-        ));
+    let mcp_router =
+        Router::new()
+            .fallback_service(mcp_service)
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::auth::middleware::require_auth,
+            ));
 
     Router::new()
         .route("/health", get(health))

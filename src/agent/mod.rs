@@ -27,6 +27,8 @@ pub struct GooseSessionHandle {
     pub session_id: String,
     /// Djinn task UUID that this session is working on.
     pub task_id: String,
+    /// Optional isolated git worktree used by this session.
+    pub worktree_path: Option<PathBuf>,
 }
 
 // ─── Agent type ───────────────────────────────────────────────────────────────

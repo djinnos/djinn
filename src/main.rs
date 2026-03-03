@@ -55,8 +55,15 @@ async fn main() {
     let db = Database::open(&db_path).expect("failed to open database");
     checkpoint::spawn(db.clone(), cancel.clone());
 
-    let state = build_state(db, cancel.clone(), cli.token.as_deref(), &cli.clerk_jwks_url).await;
+    let state = build_state(
+        db,
+        cancel.clone(),
+        cli.token.as_deref(),
+        &cli.clerk_jwks_url,
+    )
+    .await;
     state.initialize().await;
+    state.initialize_agents().await;
     let router = server::router(state);
 
     server::run(router, cli.port, cancel).await;
@@ -86,7 +93,9 @@ async fn build_state(
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
     };
 
     #[cfg(unix)]
