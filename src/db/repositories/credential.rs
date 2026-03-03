@@ -29,12 +29,11 @@ impl CredentialRepository {
     ) -> Result<Credential> {
         let encrypted = crypto::encrypt(raw_value)?;
         self.db.ensure_initialized().await?;
-        let existing_id: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM credentials WHERE key_name = ?1",
-        )
-        .bind(key_name)
-        .fetch_optional(self.db.pool())
-        .await?;
+        let existing_id: Option<String> =
+            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?1")
+                .bind(key_name)
+                .fetch_optional(self.db.pool())
+                .await?;
         let id = existing_id
             .clone()
             .unwrap_or_else(|| Uuid::now_v7().to_string());
@@ -67,9 +66,13 @@ impl CredentialRepository {
         .await?;
 
         if is_new {
-            let _ = self.events.send(DjinnEvent::CredentialCreated(cred.clone()));
+            let _ = self
+                .events
+                .send(DjinnEvent::CredentialCreated(cred.clone()));
         } else {
-            let _ = self.events.send(DjinnEvent::CredentialUpdated(cred.clone()));
+            let _ = self
+                .events
+                .send(DjinnEvent::CredentialUpdated(cred.clone()));
         }
 
         Ok(cred)
@@ -78,26 +81,23 @@ impl CredentialRepository {
     /// List all credentials. Never returns raw key values.
     pub async fn list(&self) -> Result<Vec<Credential>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_as::<_, Credential>(
-                "SELECT id, provider_id, key_name, created_at, updated_at
+        Ok(sqlx::query_as::<_, Credential>(
+            "SELECT id, provider_id, key_name, created_at, updated_at
                  FROM credentials
                  ORDER BY provider_id, key_name",
-            )
-            .fetch_all(self.db.pool())
-            .await?,
         )
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     /// Delete a credential by `key_name`. Emits `CredentialDeleted` with the ID.
     pub async fn delete(&self, key_name: &str) -> Result<bool> {
         self.db.ensure_initialized().await?;
-        let deleted_id: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM credentials WHERE key_name = ?1",
-        )
-        .bind(key_name)
-        .fetch_optional(self.db.pool())
-        .await?;
+        let deleted_id: Option<String> =
+            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?1")
+                .bind(key_name)
+                .fetch_optional(self.db.pool())
+                .await?;
 
         if let Some(ref id) = deleted_id {
             sqlx::query("DELETE FROM credentials WHERE id = ?1")
@@ -120,12 +120,11 @@ impl CredentialRepository {
     /// Goose provider creation. Never exposed via MCP tools.
     pub async fn get_decrypted(&self, key_name: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
-        let blob: Option<Vec<u8>> = sqlx::query_scalar(
-            "SELECT encrypted_value FROM credentials WHERE key_name = ?1",
-        )
-        .bind(key_name)
-        .fetch_optional(self.db.pool())
-        .await?;
+        let blob: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = ?1")
+                .bind(key_name)
+                .fetch_optional(self.db.pool())
+                .await?;
 
         match blob {
             Some(b) => Ok(Some(crypto::decrypt(&b)?)),
@@ -148,7 +147,10 @@ mod tests {
     #[tokio::test]
     async fn set_and_list() {
         let repo = make_repo();
-        let cred = repo.set("anthropic", "ANTHROPIC_API_KEY", "sk-test").await.unwrap();
+        let cred = repo
+            .set("anthropic", "ANTHROPIC_API_KEY", "sk-test")
+            .await
+            .unwrap();
         assert_eq!(cred.provider_id, "anthropic");
         assert_eq!(cred.key_name, "ANTHROPIC_API_KEY");
 
@@ -163,11 +165,15 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(1024);
         let repo = CredentialRepository::new(db, tx);
 
-        repo.set("anthropic", "ANTHROPIC_API_KEY", "key-v1").await.unwrap();
+        repo.set("anthropic", "ANTHROPIC_API_KEY", "key-v1")
+            .await
+            .unwrap();
         let ev1 = rx.recv().await.unwrap();
         assert!(matches!(ev1, DjinnEvent::CredentialCreated(_)));
 
-        repo.set("anthropic", "ANTHROPIC_API_KEY", "key-v2").await.unwrap();
+        repo.set("anthropic", "ANTHROPIC_API_KEY", "key-v2")
+            .await
+            .unwrap();
         let ev2 = rx.recv().await.unwrap();
         assert!(matches!(ev2, DjinnEvent::CredentialUpdated(_)));
     }
@@ -175,7 +181,9 @@ mod tests {
     #[tokio::test]
     async fn get_decrypted_round_trip() {
         let repo = make_repo();
-        repo.set("openai", "OPENAI_API_KEY", "sk-secret-value").await.unwrap();
+        repo.set("openai", "OPENAI_API_KEY", "sk-secret-value")
+            .await
+            .unwrap();
 
         let decrypted = repo.get_decrypted("OPENAI_API_KEY").await.unwrap();
         assert_eq!(decrypted.as_deref(), Some("sk-secret-value"));
@@ -194,7 +202,10 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(1024);
         let repo = CredentialRepository::new(db, tx);
 
-        let cred = repo.set("anthropic", "ANTHROPIC_API_KEY", "val").await.unwrap();
+        let cred = repo
+            .set("anthropic", "ANTHROPIC_API_KEY", "val")
+            .await
+            .unwrap();
         let _created = rx.recv().await.unwrap(); // consume CredentialCreated
 
         let deleted = repo.delete("ANTHROPIC_API_KEY").await.unwrap();
@@ -217,8 +228,12 @@ mod tests {
     #[tokio::test]
     async fn upsert_keeps_unique_key_name() {
         let repo = make_repo();
-        repo.set("anthropic", "ANTHROPIC_API_KEY", "v1").await.unwrap();
-        repo.set("anthropic", "ANTHROPIC_API_KEY", "v2").await.unwrap();
+        repo.set("anthropic", "ANTHROPIC_API_KEY", "v1")
+            .await
+            .unwrap();
+        repo.set("anthropic", "ANTHROPIC_API_KEY", "v2")
+            .await
+            .unwrap();
 
         let list = repo.list().await.unwrap();
         assert_eq!(list.len(), 1, "upsert must not create duplicate rows");

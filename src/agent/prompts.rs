@@ -76,7 +76,10 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
     out = out.replace("{{project_path}}", &ctx.project_path);
     out = out.replace("{{diff}}", ctx.diff.as_deref().unwrap_or(""));
     out = out.replace("{{commits}}", ctx.commits.as_deref().unwrap_or(""));
-    out = out.replace("{{start_commit}}", ctx.start_commit.as_deref().unwrap_or(""));
+    out = out.replace(
+        "{{start_commit}}",
+        ctx.start_commit.as_deref().unwrap_or(""),
+    );
     out = out.replace("{{end_commit}}", ctx.end_commit.as_deref().unwrap_or(""));
     out = out.replace(
         "{{batch_num}}",
@@ -86,8 +89,14 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
         "{{task_count}}",
         &ctx.task_count.map(|n| n.to_string()).unwrap_or_default(),
     );
-    out = out.replace("{{tasks_summary}}", ctx.tasks_summary.as_deref().unwrap_or(""));
-    out = out.replace("{{common_labels}}", ctx.common_labels.as_deref().unwrap_or(""));
+    out = out.replace(
+        "{{tasks_summary}}",
+        ctx.tasks_summary.as_deref().unwrap_or(""),
+    );
+    out = out.replace(
+        "{{common_labels}}",
+        ctx.common_labels.as_deref().unwrap_or(""),
+    );
 
     out
 }

@@ -280,14 +280,20 @@ mod tests {
     fn embedded_snapshot_parses() {
         let catalog = CatalogService::new();
         let providers = catalog.list_providers();
-        assert!(!providers.is_empty(), "embedded snapshot should have providers");
+        assert!(
+            !providers.is_empty(),
+            "embedded snapshot should have providers"
+        );
     }
 
     #[test]
     fn list_models_for_known_provider() {
         let catalog = CatalogService::new();
         let models = catalog.list_models("anthropic");
-        assert!(!models.is_empty(), "anthropic should have models in snapshot");
+        assert!(
+            !models.is_empty(),
+            "anthropic should have models in snapshot"
+        );
         for m in &models {
             assert_eq!(m.provider_id, "anthropic");
         }
@@ -298,7 +304,9 @@ mod tests {
         let catalog = CatalogService::new();
         // Use any model that should be in the snapshot.
         let providers = catalog.list_providers();
-        let provider = providers.iter().find(|p| !catalog.list_models(&p.id).is_empty());
+        let provider = providers
+            .iter()
+            .find(|p| !catalog.list_models(&p.id).is_empty());
         if let Some(p) = provider {
             let models = catalog.list_models(&p.id);
             let m = &models[0];

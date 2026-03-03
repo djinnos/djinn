@@ -104,12 +104,10 @@ impl NoteRepository {
 
     pub async fn get(&self, id: &str) -> Result<Option<Note>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
-                .bind(id)
-                .fetch_optional(self.db.pool())
-                .await?,
-        )
+        Ok(sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await?)
     }
 
     pub async fn get_by_permalink(
@@ -118,72 +116,57 @@ impl NoteRepository {
         permalink: &str,
     ) -> Result<Option<Note>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_as::<_, Note>(
-                "SELECT id, project_id, permalink, title, file_path,
+        Ok(sqlx::query_as::<_, Note>(
+            "SELECT id, project_id, permalink, title, file_path,
                         note_type, folder, tags, content,
                         created_at, updated_at, last_accessed
                  FROM notes WHERE project_id = ?1 AND permalink = ?2",
-            )
-            .bind(project_id)
-            .bind(permalink)
-            .fetch_optional(self.db.pool())
-            .await?,
         )
+        .bind(project_id)
+        .bind(permalink)
+        .fetch_optional(self.db.pool())
+        .await?)
     }
 
     /// List notes for a project, optionally filtered by folder.
-    pub async fn list(
-        &self,
-        project_id: &str,
-        folder: Option<&str>,
-    ) -> Result<Vec<Note>> {
+    pub async fn list(&self, project_id: &str, folder: Option<&str>) -> Result<Vec<Note>> {
         self.db.ensure_initialized().await?;
         if let Some(folder) = folder {
-            Ok(
-                sqlx::query_as::<_, Note>(
-                    "SELECT id, project_id, permalink, title, file_path,
+            Ok(sqlx::query_as::<_, Note>(
+                "SELECT id, project_id, permalink, title, file_path,
                             note_type, folder, tags, content,
                             created_at, updated_at, last_accessed
                      FROM notes WHERE project_id = ?1 AND folder = ?2
                      ORDER BY folder, title",
-                )
-                .bind(project_id)
-                .bind(folder)
-                .fetch_all(self.db.pool())
-                .await?,
             )
+            .bind(project_id)
+            .bind(folder)
+            .fetch_all(self.db.pool())
+            .await?)
         } else {
-            Ok(
-                sqlx::query_as::<_, Note>(
-                    "SELECT id, project_id, permalink, title, file_path,
+            Ok(sqlx::query_as::<_, Note>(
+                "SELECT id, project_id, permalink, title, file_path,
                             note_type, folder, tags, content,
                             created_at, updated_at, last_accessed
                      FROM notes WHERE project_id = ?1
                      ORDER BY folder, title",
-                )
-                .bind(project_id)
-                .fetch_all(self.db.pool())
-                .await?,
             )
+            .bind(project_id)
+            .fetch_all(self.db.pool())
+            .await?)
         }
     }
 
     /// Update a note's title, content, and tags. The file is overwritten
     /// in-place (file_path and permalink stay fixed after creation).
-    pub async fn update(
-        &self,
-        id: &str,
-        title: &str,
-        content: &str,
-        tags: &str,
-    ) -> Result<Note> {
+    pub async fn update(&self, id: &str, title: &str, content: &str, tags: &str) -> Result<Note> {
         self.db.ensure_initialized().await?;
 
         // Fetch current note to get file_path and note_type.
-        let current = self.get(id).await?.ok_or_else(|| {
-            Error::Internal(format!("note not found: {id}"))
-        })?;
+        let current = self
+            .get(id)
+            .await?
+            .ok_or_else(|| Error::Internal(format!("note not found: {id}")))?;
 
         write_note_file(
             Path::new(&current.file_path),
@@ -237,9 +220,10 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         // Fetch file_path before deleting from DB.
-        let current = self.get(id).await?.ok_or_else(|| {
-            Error::Internal(format!("note not found: {id}"))
-        })?;
+        let current = self
+            .get(id)
+            .await?
+            .ok_or_else(|| Error::Internal(format!("note not found: {id}")))?;
 
         let id_owned = id.to_owned();
         let id_for_event = id.to_owned();
@@ -252,7 +236,9 @@ impl NoteRepository {
         // Best-effort file removal — don't fail if file is already gone.
         let _ = std::fs::remove_file(&current.file_path);
 
-        let _ = self.events.send(DjinnEvent::NoteDeleted { id: id_for_event });
+        let _ = self
+            .events
+            .send(DjinnEvent::NoteDeleted { id: id_for_event });
         Ok(())
     }
 
@@ -311,14 +297,16 @@ impl NoteRepository {
 
         Ok(rows
             .into_iter()
-            .map(|(id, permalink, title, folder, note_type, snippet)| NoteSearchResult {
-                id,
-                permalink,
-                title,
-                folder,
-                note_type,
-                snippet,
-            })
+            .map(
+                |(id, permalink, title, folder, note_type, snippet)| NoteSearchResult {
+                    id,
+                    permalink,
+                    title,
+                    folder,
+                    note_type,
+                    snippet,
+                },
+            )
             .collect())
     }
 
@@ -403,23 +391,21 @@ impl NoteRepository {
 
         Ok(rows
             .into_iter()
-            .map(|(source_id, source_permalink, source_title, raw_text)| BrokenLink {
-                source_id,
-                source_permalink,
-                source_title,
-                raw_text,
-            })
+            .map(
+                |(source_id, source_permalink, source_title, raw_text)| BrokenLink {
+                    source_id,
+                    source_permalink,
+                    source_title,
+                    raw_text,
+                },
+            )
             .collect())
     }
 
     /// Notes with zero inbound wikilinks (potential dead-ends).
     /// Singleton types (`brief`, `roadmap`) are excluded.
     /// Optionally filtered by `folder`.
-    pub async fn orphans(
-        &self,
-        project_id: &str,
-        folder: Option<&str>,
-    ) -> Result<Vec<OrphanNote>> {
+    pub async fn orphans(&self, project_id: &str, folder: Option<&str>) -> Result<Vec<OrphanNote>> {
         self.db.ensure_initialized().await?;
 
         let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
@@ -481,9 +467,10 @@ impl NoteRepository {
     ) -> Result<Note> {
         self.db.ensure_initialized().await?;
 
-        let current = self.get(id).await?.ok_or_else(|| {
-            Error::Internal(format!("note not found: {id}"))
-        })?;
+        let current = self
+            .get(id)
+            .await?
+            .ok_or_else(|| Error::Internal(format!("note not found: {id}")))?;
 
         let new_file_path = file_path_for(project_path, new_note_type, new_title);
         let new_permalink = permalink_for(new_note_type, new_title);
@@ -504,7 +491,13 @@ impl NoteRepository {
             ))
         })?;
         // Rewrite frontmatter to reflect new title/type.
-        write_note_file(&new_file_path, new_title, new_note_type, &current.tags, &current.content)?;
+        write_note_file(
+            &new_file_path,
+            new_title,
+            new_note_type,
+            &current.tags,
+            &current.content,
+        )?;
 
         let mut tx = self.db.pool().begin().await?;
 
@@ -528,14 +521,7 @@ impl NoteRepository {
         .await?;
 
         // Re-resolve previously-broken links that match the new title/permalink.
-        resolve_links_for_note(
-            &mut tx,
-            id,
-            new_title,
-            &new_permalink,
-            &current.project_id,
-        )
-        .await?;
+        resolve_links_for_note(&mut tx, id, new_title, &new_permalink, &current.project_id).await?;
 
         let note: Note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
             .bind(id)
@@ -574,13 +560,11 @@ impl NoteRepository {
                 .to_owned()
         };
 
-        Ok(
-            sqlx::query_as::<_, NoteCompact>(&sql)
-                .bind(project_id)
-                .bind(limit)
-                .fetch_all(self.db.pool())
-                .await?,
-        )
+        Ok(sqlx::query_as::<_, NoteCompact>(&sql)
+            .bind(project_id)
+            .bind(limit)
+            .fetch_all(self.db.pool())
+            .await?)
     }
 
     /// List compact note summaries in a folder with optional depth control.
@@ -608,13 +592,11 @@ impl NoteRepository {
                 .to_owned()
         };
 
-        Ok(
-            sqlx::query_as::<_, NoteCompact>(&sql)
-                .bind(project_id)
-                .bind(folder)
-                .fetch_all(self.db.pool())
-                .await?,
-        )
+        Ok(sqlx::query_as::<_, NoteCompact>(&sql)
+            .bind(project_id)
+            .bind(folder)
+            .fetch_all(self.db.pool())
+            .await?)
     }
 
     /// Find tasks whose `memory_refs` JSON array contains `permalink`.
@@ -653,10 +635,11 @@ impl NoteRepository {
     pub async fn health(&self, project_id: &str) -> Result<HealthReport> {
         self.db.ensure_initialized().await?;
 
-        let total_notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?1")
-            .bind(project_id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let total_notes: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?1")
+                .bind(project_id)
+                .fetch_one(self.db.pool())
+                .await?;
 
         let broken_link_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM note_links l
@@ -724,7 +707,11 @@ fn extract_wikilinks(content: &str) -> Vec<(String, Option<String>)> {
             let target = inner[..pipe].trim();
             let display = inner[pipe + 1..].trim();
             if !target.is_empty() {
-                let display_opt = if display.is_empty() { None } else { Some(display.to_string()) };
+                let display_opt = if display.is_empty() {
+                    None
+                } else {
+                    Some(display.to_string())
+                };
                 results.push((target.to_string(), display_opt));
             }
         } else {
@@ -802,8 +789,7 @@ async fn resolve_links_for_note(
 
 // ── SQL constant ─────────────────────────────────────────────────────────────
 
-const NOTE_SELECT_WHERE_ID: &str =
-    "SELECT id, project_id, permalink, title, file_path,
+const NOTE_SELECT_WHERE_ID: &str = "SELECT id, project_id, permalink, title, file_path,
             note_type, folder, tags, content,
             created_at, updated_at, last_accessed
      FROM notes WHERE id = ?1";
@@ -876,7 +862,13 @@ pub fn slugify(s: &str) -> String {
     let slug: String = s
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     // Collapse repeated dashes and trim leading/trailing.
     slug.split('-')
@@ -896,16 +888,13 @@ fn write_note_file(
     content: &str,
 ) -> Result<()> {
     if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            Error::Internal(format!("create_dir_all {}: {e}", parent.display()))
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| Error::Internal(format!("create_dir_all {}: {e}", parent.display())))?;
     }
-    let file_content = format!(
-        "---\ntitle: {title}\ntype: {note_type}\ntags: {tags}\n---\n\n{content}",
-    );
-    std::fs::write(file_path, file_content).map_err(|e| {
-        Error::Internal(format!("write note file {}: {e}", file_path.display()))
-    })?;
+    let file_content =
+        format!("---\ntitle: {title}\ntype: {note_type}\ntags: {tags}\n---\n\n{content}",);
+    std::fs::write(file_path, file_content)
+        .map_err(|e| Error::Internal(format!("write note file {}: {e}", file_path.display())))?;
     Ok(())
 }
 
@@ -920,7 +909,11 @@ fn build_catalog(notes: &[(String, String, String, String)]) -> String {
     let mut current_folder = String::new();
 
     for (folder, title, permalink, _) in notes {
-        let header = if folder.is_empty() { "root" } else { folder.as_str() };
+        let header = if folder.is_empty() {
+            "root"
+        } else {
+            folder.as_str()
+        };
         if header != current_folder.as_str() {
             out.push('\n');
             out.push_str(&format!("## {header}\n\n"));
@@ -995,7 +988,14 @@ mod tests {
         let repo = NoteRepository::new(db, tx);
 
         let note = repo
-            .create(&project.id, tmp.path(), "Project Brief", "...", "brief", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Project Brief",
+                "...",
+                "brief",
+                "[]",
+            )
             .await
             .unwrap();
 
@@ -1012,7 +1012,14 @@ mod tests {
         let repo = NoteRepository::new(db, tx);
 
         let note = repo
-            .create(&project.id, tmp.path(), "A Pattern", "body", "pattern", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "A Pattern",
+                "body",
+                "pattern",
+                "[]",
+            )
             .await
             .unwrap();
 
@@ -1034,7 +1041,14 @@ mod tests {
         let repo = NoteRepository::new(db, tx);
 
         let note = repo
-            .create(&project.id, tmp.path(), "Original", "old content", "research", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Original",
+                "old content",
+                "research",
+                "[]",
+            )
             .await
             .unwrap();
         let _ = rx.recv().await.unwrap(); // NoteCreated
@@ -1062,7 +1076,14 @@ mod tests {
         let repo = NoteRepository::new(db, tx);
 
         let note = repo
-            .create(&project.id, tmp.path(), "To Delete", "body", "reference", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "To Delete",
+                "body",
+                "reference",
+                "[]",
+            )
             .await
             .unwrap();
         let _ = rx.recv().await.unwrap();
@@ -1125,12 +1146,26 @@ mod tests {
         let project = make_project(&db, tx.clone(), tmp.path()).await;
         let repo = NoteRepository::new(db, tx);
 
-        repo.create(&project.id, tmp.path(), "Design Note", "common term", "design", "[]")
-            .await
-            .unwrap();
-        repo.create(&project.id, tmp.path(), "Research Note", "common term", "research", "[]")
-            .await
-            .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Design Note",
+            "common term",
+            "design",
+            "[]",
+        )
+        .await
+        .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Research Note",
+            "common term",
+            "research",
+            "[]",
+        )
+        .await
+        .unwrap();
 
         let results = repo
             .search(&project.id, "common", Some("design"), None, 10)
@@ -1154,9 +1189,16 @@ mod tests {
         repo.create(&project.id, tmp.path(), "Second ADR", "body", "adr", "[]")
             .await
             .unwrap();
-        repo.create(&project.id, tmp.path(), "A Pattern", "body", "pattern", "[]")
-            .await
-            .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "A Pattern",
+            "body",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
 
         let catalog = repo.catalog(&project.id).await.unwrap();
         assert!(catalog.contains("# Knowledge Base"));
@@ -1178,9 +1220,16 @@ mod tests {
         repo.create(&project.id, tmp.path(), "ADR One", "body", "adr", "[]")
             .await
             .unwrap();
-        repo.create(&project.id, tmp.path(), "Research One", "body", "research", "[]")
-            .await
-            .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Research One",
+            "body",
+            "research",
+            "[]",
+        )
+        .await
+        .unwrap();
 
         let decisions = repo.list(&project.id, Some("decisions")).await.unwrap();
         assert_eq!(decisions.len(), 1);
@@ -1199,9 +1248,16 @@ mod tests {
         let _ = rx.recv().await.unwrap();
         let repo = NoteRepository::new(db, tx);
 
-        repo.create(&project.id, tmp.path(), "Event Note", "body", "design", "[]")
-            .await
-            .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Event Note",
+            "body",
+            "design",
+            "[]",
+        )
+        .await
+        .unwrap();
 
         match rx.recv().await.unwrap() {
             DjinnEvent::NoteCreated(n) => assert_eq!(n.title, "Event Note"),
@@ -1227,7 +1283,14 @@ mod tests {
         let repo = NoteRepository::new(db, tx);
 
         let note = repo
-            .create(&project.id, tmp.path(), "Touch Me", "body", "reference", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Touch Me",
+                "body",
+                "reference",
+                "[]",
+            )
             .await
             .unwrap();
         let _ = rx.recv().await.unwrap(); // NoteCreated
@@ -1280,7 +1343,14 @@ mod tests {
 
         // Create target first.
         let target = repo
-            .create(&project.id, tmp.path(), "Auth Strategy", "body", "adr", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Auth Strategy",
+                "body",
+                "adr",
+                "[]",
+            )
             .await
             .unwrap();
 
@@ -1350,16 +1420,32 @@ mod tests {
         )
         .await
         .unwrap();
-        repo.create(&project.id, tmp.path(), "Isolated", "no links", "pattern", "[]")
-            .await
-            .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Isolated",
+            "no links",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
 
         let orphans = repo.orphans(&project.id, None).await.unwrap();
         // Target has an inbound link; Source and Isolated do not.
         let orphan_titles: Vec<&str> = orphans.iter().map(|o| o.title.as_str()).collect();
-        assert!(!orphan_titles.contains(&target.title.as_str()), "target should not be orphan");
-        assert!(orphan_titles.contains(&"Source"), "Source has no inbound links");
-        assert!(orphan_titles.contains(&"Isolated"), "Isolated has no inbound links");
+        assert!(
+            !orphan_titles.contains(&target.title.as_str()),
+            "target should not be orphan"
+        );
+        assert!(
+            orphan_titles.contains(&"Source"),
+            "Source has no inbound links"
+        );
+        assert!(
+            orphan_titles.contains(&"Isolated"),
+            "Isolated has no inbound links"
+        );
     }
 
     #[tokio::test]

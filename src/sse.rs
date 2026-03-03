@@ -3,8 +3,8 @@ use std::convert::Infallible;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::Serialize;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::db::connection::default_db_path;
 use crate::events::DjinnEvent;
@@ -123,7 +123,10 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             id: Some(id),
             project_id: None,
         },
-        DjinnEvent::GitSettingsUpdated { project_id, settings } => Envelope {
+        DjinnEvent::GitSettingsUpdated {
+            project_id,
+            settings,
+        } => Envelope {
             entity_type: "git_settings",
             action: "updated",
             data: serde_json::to_value(settings).ok(),
@@ -178,9 +181,9 @@ pub async fn events_handler(
         Ok(evt) => {
             let envelope = to_envelope(evt);
             let event_name = format!("{}.{}", envelope.entity_type, envelope.action);
-            serde_json::to_string(&envelope).ok().map(|data| {
-                Ok::<Event, Infallible>(Event::default().event(event_name).data(data))
-            })
+            serde_json::to_string(&envelope)
+                .ok()
+                .map(|data| Ok::<Event, Infallible>(Event::default().event(event_name).data(data)))
         }
         Err(e) => {
             // Receiver lagged — some events were dropped from the buffer.

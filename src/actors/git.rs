@@ -137,7 +137,11 @@ struct GitActor {
 impl GitActor {
     fn new(path: PathBuf, receiver: mpsc::Receiver<GitMessage>) -> Result<Self, GitError> {
         let repo = git2::Repository::open(&path)?;
-        Ok(Self { path, repo, receiver })
+        Ok(Self {
+            path,
+            repo,
+            receiver,
+        })
     }
 
     async fn run(mut self) {
@@ -169,12 +173,21 @@ impl GitActor {
                 let result = Self::run_git_command(path, args).await;
                 let _ = respond_to.send(result);
             }
-            GitMessage::CreateBranch { short_id, target_branch, respond_to } => {
+            GitMessage::CreateBranch {
+                short_id,
+                target_branch,
+                respond_to,
+            } => {
                 let path = self.path.clone();
                 let result = Self::create_branch_impl(path, short_id, target_branch).await;
                 let _ = respond_to.send(result);
             }
-            GitMessage::SquashMerge { branch, target_branch, message, respond_to } => {
+            GitMessage::SquashMerge {
+                branch,
+                target_branch,
+                message,
+                respond_to,
+            } => {
                 let path = self.path.clone();
                 let result = Self::squash_merge_impl(path, branch, target_branch, message).await;
                 let _ = respond_to.send(result);
@@ -184,12 +197,19 @@ impl GitActor {
                 let result = Self::delete_branch_impl(path, branch).await;
                 let _ = respond_to.send(result);
             }
-            GitMessage::CreateWorktree { task_short_id, branch, respond_to } => {
+            GitMessage::CreateWorktree {
+                task_short_id,
+                branch,
+                respond_to,
+            } => {
                 let path = self.path.clone();
                 let result = Self::create_worktree_impl(path, task_short_id, branch).await;
                 let _ = respond_to.send(result);
             }
-            GitMessage::RemoveWorktree { path: wt_path, respond_to } => {
+            GitMessage::RemoveWorktree {
+                path: wt_path,
+                respond_to,
+            } => {
                 let path = self.path.clone();
                 let result = Self::remove_worktree_impl(path, wt_path).await;
                 let _ = respond_to.send(result);
@@ -237,7 +257,11 @@ impl GitActor {
             }
         }
 
-        Ok(StatusSummary { staged, modified, untracked })
+        Ok(StatusSummary {
+            staged,
+            modified,
+            untracked,
+        })
     }
 
     fn head_commit(&self) -> Result<CommitInfo, GitError> {
@@ -267,7 +291,11 @@ impl GitActor {
             return Err(GitError::CommandFailed { code, stderr });
         }
 
-        Ok(CommandOutput { stdout, stderr, code })
+        Ok(CommandOutput {
+            stdout,
+            stderr,
+            code,
+        })
     }
 
     /// Create `task/{short_id}` from `target_branch`, push to origin (GIT-01).
@@ -289,14 +317,24 @@ impl GitActor {
         let remote_ref = format!("origin/{target_branch}");
         let checkout = Self::run_git_command(
             path.clone(),
-            vec!["checkout".into(), "-b".into(), branch_name.clone(), remote_ref],
+            vec![
+                "checkout".into(),
+                "-b".into(),
+                branch_name.clone(),
+                remote_ref,
+            ],
         )
         .await;
 
         if checkout.is_err() {
             Self::run_git_command(
                 path.clone(),
-                vec!["checkout".into(), "-b".into(), branch_name.clone(), target_branch],
+                vec![
+                    "checkout".into(),
+                    "-b".into(),
+                    branch_name.clone(),
+                    target_branch,
+                ],
             )
             .await?;
         }
@@ -325,25 +363,31 @@ impl GitActor {
         Self::run_git_command(path.clone(), vec!["checkout".into(), target_branch]).await?;
 
         // Stage all changes from the task branch as a squash (no commit yet).
-        Self::run_git_command(path.clone(), vec!["merge".into(), "--squash".into(), branch])
-            .await?;
+        Self::run_git_command(
+            path.clone(),
+            vec!["merge".into(), "--squash".into(), branch],
+        )
+        .await?;
 
         // Commit — hooks run here. Any failure → HookFailed (GIT-07).
-        match Self::run_git_command(path.clone(), vec!["commit".into(), "-m".into(), message])
-            .await
+        match Self::run_git_command(path.clone(), vec!["commit".into(), "-m".into(), message]).await
         {
             Ok(_) => {}
             Err(GitError::CommandFailed { code, stderr }) => {
-                return Err(GitError::HookFailed { code, output: stderr });
+                return Err(GitError::HookFailed {
+                    code,
+                    output: stderr,
+                });
             }
             Err(e) => return Err(e),
         }
 
         // Read the resulting commit SHA.
-        let out =
-            Self::run_git_command(path, vec!["rev-parse".into(), "HEAD".into()]).await?;
+        let out = Self::run_git_command(path, vec!["rev-parse".into(), "HEAD".into()]).await?;
 
-        Ok(MergeResult { commit_sha: out.stdout.trim().into() })
+        Ok(MergeResult {
+            commit_sha: out.stdout.trim().into(),
+        })
     }
 
     /// Force-delete `branch` locally; also removes from origin (best effort).
@@ -352,8 +396,11 @@ impl GitActor {
     /// considers task branches "unmerged" even after a successful squash.
     async fn delete_branch_impl(path: PathBuf, branch: String) -> Result<(), GitError> {
         // Force-delete local branch.
-        Self::run_git_command(path.clone(), vec!["branch".into(), "-D".into(), branch.clone()])
-            .await?;
+        Self::run_git_command(
+            path.clone(),
+            vec!["branch".into(), "-D".into(), branch.clone()],
+        )
+        .await?;
 
         // Delete remote branch (best effort — ignore if not pushed or no remote).
         let _ = Self::run_git_command(
@@ -433,7 +480,11 @@ impl GitActor {
             if line.is_empty() {
                 // End of a worktree block — flush.
                 if let (Some(p), Some(h)) = (wt_path.take(), head.take()) {
-                    worktrees.push(WorktreeInfo { path: p, branch: branch.take(), head: h });
+                    worktrees.push(WorktreeInfo {
+                        path: p,
+                        branch: branch.take(),
+                        head: h,
+                    });
                 }
                 continue;
             }
@@ -448,7 +499,11 @@ impl GitActor {
 
         // Flush last block (porcelain output may not end with a blank line).
         if let (Some(p), Some(h)) = (wt_path, head) {
-            worktrees.push(WorktreeInfo { path: p, branch: branch.take(), head: h });
+            worktrees.push(WorktreeInfo {
+                path: p,
+                branch: branch.take(),
+                head: h,
+            });
         }
 
         Ok(worktrees)
@@ -473,41 +528,44 @@ impl GitActorHandle {
     }
 
     /// Send a message and await the reply.
-    async fn request<T>(
-        &self,
-        f: impl FnOnce(Reply<T>) -> GitMessage,
-    ) -> Result<T, GitError> {
+    async fn request<T>(&self, f: impl FnOnce(Reply<T>) -> GitMessage) -> Result<T, GitError> {
         let (tx, rx) = oneshot::channel();
-        self.sender.send(f(tx)).await.map_err(|_| GitError::ActorDead)?;
+        self.sender
+            .send(f(tx))
+            .await
+            .map_err(|_| GitError::ActorDead)?;
         rx.await.map_err(|_| GitError::NoResponse)?
     }
 
     /// Return the short branch name of HEAD (git2 read).
     pub async fn current_branch(&self) -> Result<String, GitError> {
-        self.request(|tx| GitMessage::GetCurrentBranch { respond_to: tx }).await
+        self.request(|tx| GitMessage::GetCurrentBranch { respond_to: tx })
+            .await
     }
 
     /// Return the working-tree status summary (git2 read).
     pub async fn status(&self) -> Result<StatusSummary, GitError> {
-        self.request(|tx| GitMessage::GetStatus { respond_to: tx }).await
+        self.request(|tx| GitMessage::GetStatus { respond_to: tx })
+            .await
     }
 
     /// Return the HEAD commit SHA and message (git2 read).
     pub async fn head_commit(&self) -> Result<CommitInfo, GitError> {
-        self.request(|tx| GitMessage::GetHeadCommit { respond_to: tx }).await
+        self.request(|tx| GitMessage::GetHeadCommit { respond_to: tx })
+            .await
     }
 
     /// Run an arbitrary `git <args>` command in the repo (CLI write).
     pub async fn run_command(&self, args: Vec<String>) -> Result<CommandOutput, GitError> {
-        self.request(|tx| GitMessage::RunCommand { args, respond_to: tx }).await
+        self.request(|tx| GitMessage::RunCommand {
+            args,
+            respond_to: tx,
+        })
+        .await
     }
 
     /// Create `task/{short_id}` from `target_branch` and push to origin (GIT-01).
-    pub async fn create_branch(
-        &self,
-        short_id: &str,
-        target_branch: &str,
-    ) -> Result<(), GitError> {
+    pub async fn create_branch(&self, short_id: &str, target_branch: &str) -> Result<(), GitError> {
         self.request(|tx| GitMessage::CreateBranch {
             short_id: short_id.into(),
             target_branch: target_branch.into(),
@@ -568,7 +626,8 @@ impl GitActorHandle {
 
     /// List all worktrees with structured metadata (GIT-02).
     pub async fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>, GitError> {
-        self.request(|tx| GitMessage::ListWorktrees { respond_to: tx }).await
+        self.request(|tx| GitMessage::ListWorktrees { respond_to: tx })
+            .await
     }
 }
 
@@ -680,7 +739,12 @@ mod tests {
 
         // Wire up local bare remote and push.
         std::process::Command::new("git")
-            .args(["remote", "add", "origin", remote_dir.path().to_str().unwrap()])
+            .args([
+                "remote",
+                "add",
+                "origin",
+                remote_dir.path().to_str().unwrap(),
+            ])
             .current_dir(local_dir.path())
             .output()
             .unwrap();
@@ -838,7 +902,10 @@ mod tests {
             "expected HookFailed, got: {err}"
         );
         if let GitError::HookFailed { output, .. } = err {
-            assert!(output.contains("lint failed"), "hook output should be surfaced");
+            assert!(
+                output.contains("lint failed"),
+                "hook output should be surfaced"
+            );
         }
     }
 
@@ -917,7 +984,9 @@ mod tests {
         );
 
         // Main worktree should be present with branch "main".
-        let main_wt = worktrees.iter().find(|w| w.branch.as_deref() == Some("main"));
+        let main_wt = worktrees
+            .iter()
+            .find(|w| w.branch.as_deref() == Some("main"));
         assert!(main_wt.is_some(), "main worktree should be listed");
 
         // Task worktree should be present at the expected path.

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use jsonwebtoken::jwk::JwkSet;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -60,7 +60,13 @@ impl JwksCache {
     }
 
     async fn fetch(&self) -> Result<JwkSet, AuthError> {
-        let resp = self.http.get(&self.jwks_url).send().await?.json::<JwkSet>().await?;
+        let resp = self
+            .http
+            .get(&self.jwks_url)
+            .send()
+            .await?
+            .json::<JwkSet>()
+            .await?;
         Ok(resp)
     }
 
@@ -83,7 +89,10 @@ impl JwksCache {
         }
         tracing::debug!(url = %self.jwks_url, "fetching JWKS");
         let key_set = self.fetch().await?;
-        *guard = Some(JwksState { key_set: key_set.clone(), fetched_at: Instant::now() });
+        *guard = Some(JwksState {
+            key_set: key_set.clone(),
+            fetched_at: Instant::now(),
+        });
         Ok(key_set)
     }
 

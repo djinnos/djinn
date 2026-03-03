@@ -24,15 +24,17 @@ impl CustomProviderRepository {
 
         let providers = rows
             .into_iter()
-            .map(|(id, name, base_url, env_var, seed_json, created_at)| CustomProvider {
-                id,
-                name,
-                base_url,
-                env_var,
-                seed_models: serde_json::from_str::<Vec<SeedModel>>(&seed_json)
-                    .unwrap_or_default(),
-                created_at,
-            })
+            .map(
+                |(id, name, base_url, env_var, seed_json, created_at)| CustomProvider {
+                    id,
+                    name,
+                    base_url,
+                    env_var,
+                    seed_models: serde_json::from_str::<Vec<SeedModel>>(&seed_json)
+                        .unwrap_or_default(),
+                    created_at,
+                },
+            )
             .collect();
         Ok(providers)
     }
@@ -43,7 +45,8 @@ impl CustomProviderRepository {
         let name = provider.name.clone();
         let base_url = provider.base_url.clone();
         let env_var = provider.env_var.clone();
-        let seed_json = serde_json::to_string(&provider.seed_models).unwrap_or_else(|_| "[]".into());
+        let seed_json =
+            serde_json::to_string(&provider.seed_models).unwrap_or_else(|_| "[]".into());
 
         self.db.ensure_initialized().await?;
         sqlx::query(
@@ -76,17 +79,20 @@ impl CustomProviderRepository {
         .fetch_optional(self.db.pool())
         .await?;
 
-        Ok(row.map(|(id, name, base_url, env_var, seed_json, created_at)| {
-            let seed_models: Vec<SeedModel> = serde_json::from_str(&seed_json).unwrap_or_default();
-            CustomProvider {
-                id,
-                name,
-                base_url,
-                env_var,
-                seed_models,
-                created_at,
-            }
-        }))
+        Ok(
+            row.map(|(id, name, base_url, env_var, seed_json, created_at)| {
+                let seed_models: Vec<SeedModel> =
+                    serde_json::from_str(&seed_json).unwrap_or_default();
+                CustomProvider {
+                    id,
+                    name,
+                    base_url,
+                    env_var,
+                    seed_models,
+                    created_at,
+                }
+            }),
+        )
     }
 }
 

@@ -4,7 +4,7 @@
 /// via SHA-256, providing machine-binding without a user-managed master password.
 ///
 /// Stored format: nonce (12 bytes) || AES-256-GCM ciphertext+tag.
-use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey, NONCE_LEN};
+use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 
 use crate::error::{Error, Result};

@@ -33,10 +33,7 @@ impl DispatchConfig {
         }
     }
 
-    pub fn phase_reviewer(
-        provider_name: impl Into<String>,
-        model_name: impl Into<String>,
-    ) -> Self {
+    pub fn phase_reviewer(provider_name: impl Into<String>, model_name: impl Into<String>) -> Self {
         Self {
             agent_type: AgentType::PhaseReviewer,
             provider_name: provider_name.into(),

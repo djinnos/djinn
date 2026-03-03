@@ -46,7 +46,9 @@ pub struct TaskSyncStatusParams {
 impl DjinnMcpServer {
     /// Enable task sync: creates djinn/tasks branch if needed, exports tasks,
     /// and pushes to remote. Requires a git remote.
-    #[tool(description = "Enable task sync: creates djinn/tasks branch if needed, exports tasks, and pushes to remote. Requires a git remote.")]
+    #[tool(
+        description = "Enable task sync: creates djinn/tasks branch if needed, exports tasks, and pushes to remote. Requires a git remote."
+    )]
     pub async fn task_sync_enable(
         &self,
         Parameters(p): Parameters<TaskSyncEnableParams>,
@@ -86,7 +88,9 @@ impl DjinnMcpServer {
 
     /// Disable task sync for this machine (personal opt-out). Stops push/pull
     /// without deleting the remote branch.
-    #[tool(description = "Disable task sync for this machine (personal opt-out). Stops push/pull without deleting the remote branch.")]
+    #[tool(
+        description = "Disable task sync for this machine (personal opt-out). Stops push/pull without deleting the remote branch."
+    )]
     pub async fn task_sync_disable(
         &self,
         Parameters(p): Parameters<TaskSyncDisableParams>,
@@ -154,7 +158,9 @@ impl DjinnMcpServer {
     }
 
     /// Show full sync health status including backoff state and pending export count.
-    #[tool(description = "Show full sync health status including backoff state and pending export count")]
+    #[tool(
+        description = "Show full sync health status including backoff state and pending export count"
+    )]
     pub async fn task_sync_status(
         &self,
         Parameters(_p): Parameters<TaskSyncStatusParams>,

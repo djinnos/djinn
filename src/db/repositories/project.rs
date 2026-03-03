@@ -17,37 +17,31 @@ impl ProjectRepository {
 
     pub async fn list(&self) -> Result<Vec<Project>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_as::<_, Project>(
-                "SELECT id, name, path, created_at FROM projects ORDER BY name",
-            )
-            .fetch_all(self.db.pool())
-            .await?,
+        Ok(sqlx::query_as::<_, Project>(
+            "SELECT id, name, path, created_at FROM projects ORDER BY name",
         )
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<Project>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_as::<_, Project>(
-                "SELECT id, name, path, created_at FROM projects WHERE id = ?1",
-            )
-            .bind(id)
-            .fetch_optional(self.db.pool())
-            .await?,
+        Ok(sqlx::query_as::<_, Project>(
+            "SELECT id, name, path, created_at FROM projects WHERE id = ?1",
         )
+        .bind(id)
+        .fetch_optional(self.db.pool())
+        .await?)
     }
 
     pub async fn get_by_path(&self, path: &str) -> Result<Option<Project>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_as::<_, Project>(
-                "SELECT id, name, path, created_at FROM projects WHERE path = ?1",
-            )
-            .bind(path)
-            .fetch_optional(self.db.pool())
-            .await?,
+        Ok(sqlx::query_as::<_, Project>(
+            "SELECT id, name, path, created_at FROM projects WHERE path = ?1",
         )
+        .bind(path)
+        .fetch_optional(self.db.pool())
+        .await?)
     }
 
     pub async fn create(&self, name: &str, path: &str) -> Result<Project> {
@@ -66,7 +60,9 @@ impl ProjectRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEvent::ProjectCreated(project.clone()));
+        let _ = self
+            .events
+            .send(DjinnEvent::ProjectCreated(project.clone()));
         Ok(project)
     }
 
@@ -85,7 +81,9 @@ impl ProjectRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEvent::ProjectUpdated(project.clone()));
+        let _ = self
+            .events
+            .send(DjinnEvent::ProjectUpdated(project.clone()));
         Ok(project)
     }
 
@@ -102,7 +100,6 @@ impl ProjectRepository {
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {

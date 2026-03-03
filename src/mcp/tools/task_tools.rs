@@ -4,7 +4,9 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 
 use crate::db::repositories::epic::EpicRepository;
-use crate::db::repositories::task::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository};
+use crate::db::repositories::task::{
+    ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository,
+};
 use crate::mcp::server::DjinnMcpServer;
 use crate::models::task::{Task, TaskStatus, TransitionAction};
 
@@ -279,7 +281,9 @@ pub struct TaskListResponse {
 #[tool_router(router = task_tool_router, vis = "pub")]
 impl DjinnMcpServer {
     /// Create a new work item (task, feature, or bug) under an epic.
-    #[tool(description = "Create a new work item (epic, feature, task, or bug). Parent and blocked_by accept task ID (full UUID or short_id, e.g., 'k7m2').")]
+    #[tool(
+        description = "Create a new work item (epic, feature, task, or bug). Parent and blocked_by accept task ID (full UUID or short_id, e.g., 'k7m2')."
+    )]
     pub async fn task_create(
         &self,
         Parameters(p): Parameters<TaskCreateParams>,
@@ -298,7 +302,15 @@ impl DjinnMcpServer {
         let owner = p.owner.as_deref().unwrap_or("");
 
         let task = match repo
-            .create(&epic_id, &p.title, description, design, issue_type, priority, owner)
+            .create(
+                &epic_id,
+                &p.title,
+                description,
+                design,
+                issue_type,
+                priority,
+                owner,
+            )
             .await
         {
             Ok(t) => t,
@@ -307,7 +319,11 @@ impl DjinnMcpServer {
 
         // Apply labels / ac if provided.
         let has_labels = p.labels.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
-        let has_ac = p.acceptance_criteria.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+        let has_ac = p
+            .acceptance_criteria
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
 
         if has_labels || has_ac {
             let labels_json = p
@@ -322,8 +338,16 @@ impl DjinnMcpServer {
                 .unwrap_or_else(|| task.acceptance_criteria.clone());
 
             let updated = repo
-                .update(&task.id, &task.title, &task.description, &task.design,
-                        task.priority, &task.owner, &labels_json, &ac_json)
+                .update(
+                    &task.id,
+                    &task.title,
+                    &task.description,
+                    &task.design,
+                    task.priority,
+                    &task.owner,
+                    &labels_json,
+                    &ac_json,
+                )
                 .await;
             if let Ok(t) = updated {
                 return Json(task_to_value(&t));
@@ -335,7 +359,9 @@ impl DjinnMcpServer {
 
     /// Update allowed fields of a work item (title, description, acceptance_criteria,
     /// design, priority, owner, labels, parent).
-    #[tool(description = "Update allowed fields of a work item (title, description, acceptance_criteria, design, priority, owner, labels, parent). Accepts task ID (full UUID or short_id, e.g., 'k7m2').")]
+    #[tool(
+        description = "Update allowed fields of a work item (title, description, acceptance_criteria, design, priority, owner, labels, parent). Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
+    )]
     pub async fn task_update(
         &self,
         Parameters(p): Parameters<TaskUpdateParams>,
@@ -350,7 +376,9 @@ impl DjinnMcpServer {
         let epic_id = if let Some(ref par) = p.parent {
             match self.resolve_epic_id(par).await {
                 Some(id) => id,
-                None => return Json(serde_json::json!({ "error": format!("epic not found: {par}") })),
+                None => {
+                    return Json(serde_json::json!({ "error": format!("epic not found: {par}") }));
+                }
             }
         } else {
             task.epic_id.clone()
@@ -365,8 +393,7 @@ impl DjinnMcpServer {
 
         // Merge label changes.
         let labels_json = if p.labels_add.is_some() || p.labels_remove.is_some() {
-            let mut current: Vec<String> =
-                serde_json::from_str(&task.labels).unwrap_or_default();
+            let mut current: Vec<String> = serde_json::from_str(&task.labels).unwrap_or_default();
             if let Some(add) = &p.labels_add {
                 for lbl in add {
                     if !current.contains(lbl) {
@@ -396,7 +423,16 @@ impl DjinnMcpServer {
         }
 
         let updated = match repo
-            .update(&task.id, title, description, design, priority, owner, &labels_json, &ac_json)
+            .update(
+                &task.id,
+                title,
+                description,
+                design,
+                priority,
+                owner,
+                &labels_json,
+                &ac_json,
+            )
             .await
         {
             Ok(t) => t,
@@ -428,7 +464,9 @@ impl DjinnMcpServer {
     }
 
     /// Show details of a work item. Accepts task UUID or short_id.
-    #[tool(description = "Show details of a work item including recent activity and blockers. Accepts task ID (full UUID or short_id, e.g., 'k7m2').")]
+    #[tool(
+        description = "Show details of a work item including recent activity and blockers. Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
+    )]
     pub async fn task_show(
         &self,
         Parameters(p): Parameters<TaskShowParams>,
@@ -442,7 +480,9 @@ impl DjinnMcpServer {
     }
 
     /// List work items with optional filters and offset-based pagination.
-    #[tool(description = "List work items with optional filters and offset-based pagination. Returns {tasks[], total_count, limit, offset, has_more}.")]
+    #[tool(
+        description = "List work items with optional filters and offset-based pagination. Returns {tasks[], total_count, limit, offset, has_more}."
+    )]
     pub async fn task_list(
         &self,
         Parameters(p): Parameters<TaskListParams>,
@@ -536,7 +576,9 @@ impl DjinnMcpServer {
     }
 
     /// Get the parent epic of a work item.
-    #[tool(description = "Get the parent epic of a work item. Accepts task ID (full UUID or short_id, e.g., 'k7m2').")]
+    #[tool(
+        description = "Get the parent epic of a work item. Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
+    )]
     pub async fn task_parent_get(
         &self,
         Parameters(p): Parameters<TaskParentGetParams>,
@@ -561,13 +603,17 @@ impl DjinnMcpServer {
                 "updated_at":  epic.updated_at,
                 "closed_at":   epic.closed_at,
             })),
-            Ok(None) => Json(serde_json::json!({ "error": format!("epic not found: {}", task.epic_id) })),
+            Ok(None) => {
+                Json(serde_json::json!({ "error": format!("epic not found: {}", task.epic_id) }))
+            }
             Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
     /// List direct children (tasks/features/bugs) of an epic.
-    #[tool(description = "List direct children of an epic. Accepts epic ID (full UUID or short_id, e.g., 'k7m2').")]
+    #[tool(
+        description = "List direct children of an epic. Accepts epic ID (full UUID or short_id, e.g., 'k7m2')."
+    )]
     pub async fn task_children_list(
         &self,
         Parameters(p): Parameters<TaskChildrenListParams>,
@@ -587,7 +633,9 @@ impl DjinnMcpServer {
     }
 
     /// Add a blocker relationship between two tasks. Rejects epics and circular dependencies.
-    #[tool(description = "Add a blocker relationship: task 'id' is blocked by task 'blocking_id'. Both accept task ID (full UUID or short_id, e.g., 'k7m2'). Epics cannot participate in blocker relationships — both tasks must be non-epic (task, feature, or bug).")]
+    #[tool(
+        description = "Add a blocker relationship: task 'id' is blocked by task 'blocking_id'. Both accept task ID (full UUID or short_id, e.g., 'k7m2'). Epics cannot participate in blocker relationships — both tasks must be non-epic (task, feature, or bug)."
+    )]
     pub async fn task_blockers_add(
         &self,
         Parameters(p): Parameters<TaskBlockersAddParams>,
@@ -608,7 +656,9 @@ impl DjinnMcpServer {
     }
 
     /// Remove a blocker relationship between two tasks.
-    #[tool(description = "Remove a blocker relationship. Both task IDs accept (full UUID or short_id, e.g., 'k7m2').")]
+    #[tool(
+        description = "Remove a blocker relationship. Both task IDs accept (full UUID or short_id, e.g., 'k7m2')."
+    )]
     pub async fn task_blockers_remove(
         &self,
         Parameters(p): Parameters<TaskBlockersRemoveParams>,
@@ -627,7 +677,9 @@ impl DjinnMcpServer {
     }
 
     /// List tasks that block the given task.
-    #[tool(description = "List tasks that block the given task. Accepts task ID (full UUID or short_id, e.g., 'k7m2').")]
+    #[tool(
+        description = "List tasks that block the given task. Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
+    )]
     pub async fn task_blockers_list(
         &self,
         Parameters(p): Parameters<TaskBlockersListParams>,
@@ -658,7 +710,9 @@ impl DjinnMcpServer {
     }
 
     /// List tasks that are blocked by the given task.
-    #[tool(description = "List task IDs that are blocked by the given task. Accepts task ID (full UUID or short_id, e.g., 'k7m2'). Epics will never appear in blocker relationships.")]
+    #[tool(
+        description = "List task IDs that are blocked by the given task. Accepts task ID (full UUID or short_id, e.g., 'k7m2'). Epics will never appear in blocker relationships."
+    )]
     pub async fn task_blocked_list(
         &self,
         Parameters(p): Parameters<TaskBlockedListParams>,
@@ -687,7 +741,9 @@ impl DjinnMcpServer {
     }
 
     /// List work items ready to start (open status with no blocking dependencies).
-    #[tool(description = "List work items ready to start (open status with no blocking dependencies)")]
+    #[tool(
+        description = "List work items ready to start (open status with no blocking dependencies)"
+    )]
     pub async fn task_ready(
         &self,
         Parameters(p): Parameters<TaskReadyParams>,
@@ -710,7 +766,9 @@ impl DjinnMcpServer {
     }
 
     /// Transition a work item through the state machine.
-    #[tool(description = "Transition a work item to a new status (e.g., open, in_progress, review, approve, close). Accepts task ID (full UUID or short_id, e.g., 'k7m2'). For user_override action, use target_status to specify the destination column.")]
+    #[tool(
+        description = "Transition a work item to a new status (e.g., open, in_progress, review, approve, close). Accepts task ID (full UUID or short_id, e.g., 'k7m2'). For user_override action, use target_status to specify the destination column."
+    )]
     pub async fn task_transition(
         &self,
         Parameters(p): Parameters<TaskTransitionParams>,
@@ -739,14 +797,26 @@ impl DjinnMcpServer {
         let actor_role = p.actor_role.as_deref().unwrap_or("user");
         let reason = p.reason.as_deref();
 
-        match repo.transition(&task.id, action, actor_id, actor_role, reason, target_override).await {
+        match repo
+            .transition(
+                &task.id,
+                action,
+                actor_id,
+                actor_role,
+                reason,
+                target_override,
+            )
+            .await
+        {
             Ok(updated) => Json(task_to_value(&updated)),
             Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
         }
     }
 
     /// Claim the next available work item and transition it to in_progress.
-    #[tool(description = "Claim the next available work item (highest priority, oldest) and transition it to in_progress")]
+    #[tool(
+        description = "Claim the next available work item (highest priority, oldest) and transition it to in_progress"
+    )]
     pub async fn task_claim(
         &self,
         Parameters(p): Parameters<TaskClaimParams>,
@@ -768,7 +838,9 @@ impl DjinnMcpServer {
     }
 
     /// Add a comment to a work item. Creates an activity_log entry with event_type='comment'.
-    #[tool(description = "Add a comment to a work item. Accepts task ID (full UUID or short_id, e.g., 'k7m2').")]
+    #[tool(
+        description = "Add a comment to a work item. Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
+    )]
     pub async fn task_comment_add(
         &self,
         Parameters(p): Parameters<TaskCommentAddParams>,
@@ -802,7 +874,9 @@ impl DjinnMcpServer {
     }
 
     /// Query the activity log with optional filters.
-    #[tool(description = "List task activity log entries filtered by task_id, event_type, and/or time range.")]
+    #[tool(
+        description = "List task activity log entries filtered by task_id, event_type, and/or time range."
+    )]
     pub async fn task_activity_list(
         &self,
         Parameters(p): Parameters<TaskActivityListParams>,
@@ -853,7 +927,9 @@ impl DjinnMcpServer {
     }
 
     /// Board health report: epic progress, stale tasks, and review queue.
-    #[tool(description = "Returns aggregate health report (total notes, broken links, orphan notes, stale notes by folder).")]
+    #[tool(
+        description = "Returns aggregate health report (total notes, broken links, orphan notes, stale notes by folder)."
+    )]
     pub async fn board_health(
         &self,
         Parameters(p): Parameters<BoardHealthParams>,
@@ -867,7 +943,9 @@ impl DjinnMcpServer {
     }
 
     /// Heal stale tasks and recover orphaned states.
-    #[tool(description = "Trigger board reconciliation: heal stale tasks, recover stuck sessions, trigger overdue reviews, disable dead models, and reconcile phases. Returns action counts.")]
+    #[tool(
+        description = "Trigger board reconciliation: heal stale tasks, recover stuck sessions, trigger overdue reviews, disable dead models, and reconcile phases. Returns action counts."
+    )]
     pub async fn board_reconcile(
         &self,
         Parameters(p): Parameters<BoardReconcileParams>,
@@ -882,7 +960,9 @@ impl DjinnMcpServer {
 
     /// List memory note permalinks associated with a task. Accepts task ID
     /// (full UUID or short_id, e.g., 'k7m2').
-    #[tool(description = "List memory note permalinks associated with a task. Accepts task ID (full UUID or short_id, e.g., 'k7m2').")]
+    #[tool(
+        description = "List memory note permalinks associated with a task. Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
+    )]
     pub async fn task_memory_refs(
         &self,
         Parameters(p): Parameters<TaskMemoryRefsParams>,
@@ -922,13 +1002,11 @@ impl DjinnMcpServer {
     pub(crate) async fn resolve_epic_id(&self, id_or_short: &str) -> Option<String> {
         let db = self.state.db();
         db.ensure_initialized().await.ok()?;
-        sqlx::query_scalar::<_, String>(
-            "SELECT id FROM epics WHERE id = ?1 OR short_id = ?1",
-        )
-        .bind(id_or_short)
-        .fetch_optional(db.pool())
-        .await
-        .ok()
-        .flatten()
+        sqlx::query_scalar::<_, String>("SELECT id FROM epics WHERE id = ?1 OR short_id = ?1")
+            .bind(id_or_short)
+            .fetch_optional(db.pool())
+            .await
+            .ok()
+            .flatten()
     }
 }

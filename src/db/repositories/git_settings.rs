@@ -32,24 +32,22 @@ impl GitSettingsRepository {
         let global_key = "git:global:target_branch".to_owned();
         self.db.ensure_initialized().await?;
 
-        if let Some(branch) = sqlx::query_scalar::<_, String>(
-            "SELECT value FROM settings WHERE key = ?1",
-        )
-        .bind(&project_key)
-        .fetch_optional(self.db.pool())
-        .await?
+        if let Some(branch) =
+            sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?1")
+                .bind(&project_key)
+                .fetch_optional(self.db.pool())
+                .await?
         {
             return Ok(GitSettings {
                 target_branch: branch,
             });
         }
 
-        if let Some(branch) = sqlx::query_scalar::<_, String>(
-            "SELECT value FROM settings WHERE key = ?1",
-        )
-        .bind(&global_key)
-        .fetch_optional(self.db.pool())
-        .await?
+        if let Some(branch) =
+            sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?1")
+                .bind(&global_key)
+                .fetch_optional(self.db.pool())
+                .await?
         {
             return Ok(GitSettings {
                 target_branch: branch,
@@ -106,7 +104,6 @@ impl GitSettingsRepository {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,7 +148,9 @@ mod tests {
         let repo = GitSettingsRepository::new(db, tx);
 
         repo.set_global_target_branch("develop").await.unwrap();
-        repo.set_target_branch("proj-123", "feature-base").await.unwrap();
+        repo.set_target_branch("proj-123", "feature-base")
+            .await
+            .unwrap();
 
         // Project-specific override wins.
         let settings = repo.get("proj-123").await.unwrap();

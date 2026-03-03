@@ -22,22 +22,30 @@ pub enum DjinnEvent {
     // Projects
     ProjectCreated(Project),
     ProjectUpdated(Project),
-    ProjectDeleted { id: String },
+    ProjectDeleted {
+        id: String,
+    },
 
     // Epics
     EpicCreated(Epic),
     EpicUpdated(Epic),
-    EpicDeleted { id: String },
+    EpicDeleted {
+        id: String,
+    },
 
     // Tasks
     TaskCreated(Task),
     TaskUpdated(Task),
-    TaskDeleted { id: String },
+    TaskDeleted {
+        id: String,
+    },
 
     // Knowledge-base notes
     NoteCreated(Note),
     NoteUpdated(Note),
-    NoteDeleted { id: String },
+    NoteDeleted {
+        id: String,
+    },
 
     // Git settings
     GitSettingsUpdated {
@@ -48,5 +56,7 @@ pub enum DjinnEvent {
     // Credential vault (encrypted_value never included in event payload)
     CredentialCreated(Credential),
     CredentialUpdated(Credential),
-    CredentialDeleted { id: String },
+    CredentialDeleted {
+        id: String,
+    },
 }

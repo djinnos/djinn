@@ -17,14 +17,12 @@ impl SettingsRepository {
 
     pub async fn get(&self, key: &str) -> Result<Option<Setting>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_as::<_, Setting>(
-                "SELECT key, value, updated_at FROM settings WHERE key = ?1",
-            )
-            .bind(key)
-            .fetch_optional(self.db.pool())
-            .await?,
+        Ok(sqlx::query_as::<_, Setting>(
+            "SELECT key, value, updated_at FROM settings WHERE key = ?1",
         )
+        .bind(key)
+        .fetch_optional(self.db.pool())
+        .await?)
     }
 
     /// Upsert a setting. Returns the full entity and emits `SettingUpdated`.
@@ -49,11 +47,12 @@ impl SettingsRepository {
         .await?;
 
         // Emit event — ignore send error (no receivers is fine).
-        let _ = self.events.send(DjinnEvent::SettingUpdated(setting.clone()));
+        let _ = self
+            .events
+            .send(DjinnEvent::SettingUpdated(setting.clone()));
         Ok(setting)
     }
 }
-
 
 #[cfg(test)]
 mod tests {

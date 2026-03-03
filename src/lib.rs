@@ -1,5 +1,5 @@
-pub mod agent;
 pub mod actors;
+pub mod agent;
 pub mod auth;
 pub mod crypto;
 pub mod db;

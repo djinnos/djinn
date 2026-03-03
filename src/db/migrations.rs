@@ -21,12 +21,11 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .await?;
 
     for migration in embedded::migrations::runner().get_migrations() {
-        let exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM refinery_schema_history WHERE version = ?1",
-        )
-        .bind(migration.version())
-        .fetch_one(pool)
-        .await?;
+        let exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM refinery_schema_history WHERE version = ?1")
+                .bind(migration.version())
+                .fetch_one(pool)
+                .await?;
         if exists > 0 {
             continue;
         }

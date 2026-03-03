@@ -9,6 +9,8 @@ pub struct GitSettings {
 
 impl Default for GitSettings {
     fn default() -> Self {
-        Self { target_branch: "main".into() }
+        Self {
+            target_branch: "main".into(),
+        }
     }
 }

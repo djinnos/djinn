@@ -54,7 +54,9 @@ pub struct CredentialDeleteResponse {
 impl DjinnMcpServer {
     /// Store or update an encrypted API key in the credential vault.
     /// Use this to save provider API keys for agent dispatch.
-    #[tool(description = "Store or update an encrypted API key in the credential vault. Use this to save provider API keys for agent dispatch.")]
+    #[tool(
+        description = "Store or update an encrypted API key in the credential vault. Use this to save provider API keys for agent dispatch."
+    )]
     pub async fn credential_set(
         &self,
         Parameters(input): Parameters<CredentialSetInput>,
@@ -76,12 +78,12 @@ impl DjinnMcpServer {
             });
         }
 
-        let repo = CredentialRepository::new(
-            self.state.db().clone(),
-            self.state.events().clone(),
-        );
+        let repo = CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
 
-        match repo.set(&input.provider_id, &input.key_name, &input.api_key).await {
+        match repo
+            .set(&input.provider_id, &input.key_name, &input.api_key)
+            .await
+        {
             Ok(cred) => Json(CredentialSetResponse {
                 success: true,
                 id: cred.id,
@@ -101,12 +103,11 @@ impl DjinnMcpServer {
     }
 
     /// List all stored credentials. Never returns raw key values.
-    #[tool(description = "List all stored credentials. Never returns raw key values — only metadata (id, provider_id, key_name, timestamps).")]
+    #[tool(
+        description = "List all stored credentials. Never returns raw key values — only metadata (id, provider_id, key_name, timestamps)."
+    )]
     pub async fn credential_list(&self) -> Json<CredentialListResponse> {
-        let repo = CredentialRepository::new(
-            self.state.db().clone(),
-            self.state.events().clone(),
-        );
+        let repo = CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
 
         let credentials = match repo.list().await {
             Ok(creds) => creds
@@ -131,15 +132,14 @@ impl DjinnMcpServer {
     }
 
     /// Delete a stored credential by key_name.
-    #[tool(description = "Delete a stored credential by key_name (e.g. 'ANTHROPIC_API_KEY'). Returns deleted=true if the credential existed.")]
+    #[tool(
+        description = "Delete a stored credential by key_name (e.g. 'ANTHROPIC_API_KEY'). Returns deleted=true if the credential existed."
+    )]
     pub async fn credential_delete(
         &self,
         Parameters(input): Parameters<CredentialDeleteInput>,
     ) -> Json<CredentialDeleteResponse> {
-        let repo = CredentialRepository::new(
-            self.state.db().clone(),
-            self.state.events().clone(),
-        );
+        let repo = CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
 
         match repo.delete(&input.key_name).await {
             Ok(deleted) => Json(CredentialDeleteResponse {

@@ -153,7 +153,9 @@ pub struct ProviderAddCustomResponse {
 impl DjinnMcpServer {
     /// View and manage model health state. Actions: status (view all), reset (reset one model),
     /// reset_all (reset all models), enable (re-enable auto-disabled model).
-    #[tool(description = "View and manage model health state. Actions: status (view all), reset (reset one model), reset_all (reset all models), enable (re-enable auto-disabled model).")]
+    #[tool(
+        description = "View and manage model health state. Actions: status (view all), reset (reset one model), reset_all (reset all models), enable (re-enable auto-disabled model)."
+    )]
     pub async fn model_health(
         &self,
         Parameters(input): Parameters<ModelHealthInput>,
@@ -184,7 +186,9 @@ impl DjinnMcpServer {
                 } else {
                     Json(ModelHealthResponse {
                         action: "reset".into(),
-                        models: vec![serde_json::json!({"error": "model parameter required for reset"})],
+                        models: vec![
+                            serde_json::json!({"error": "model parameter required for reset"}),
+                        ],
                     })
                 }
             }
@@ -206,13 +210,17 @@ impl DjinnMcpServer {
                 } else {
                     Json(ModelHealthResponse {
                         action: "enable".into(),
-                        models: vec![serde_json::json!({"error": "model parameter required for enable"})],
+                        models: vec![
+                            serde_json::json!({"error": "model parameter required for enable"}),
+                        ],
                     })
                 }
             }
             _ => Json(ModelHealthResponse {
                 action: action.to_owned(),
-                models: vec![serde_json::json!({"error": format!("unknown action '{action}'; valid: status, reset, reset_all, enable")})],
+                models: vec![
+                    serde_json::json!({"error": format!("unknown action '{action}'; valid: status, reset, reset_all, enable")}),
+                ],
             }),
         }
     }
@@ -220,7 +228,9 @@ impl DjinnMcpServer {
     /// List all LLM providers from the models.dev catalog. Each entry includes connection
     /// metadata (env vars, base URL, OpenAI-compat flag) and a connected placeholder for
     /// the desktop to merge local credential state.
-    #[tool(description = "List all LLM providers from the models.dev catalog. Each entry includes connection metadata (env vars, base URL, OpenAI-compat flag) and a connected placeholder for the desktop to merge local credential state.")]
+    #[tool(
+        description = "List all LLM providers from the models.dev catalog. Each entry includes connection metadata (env vars, base URL, OpenAI-compat flag) and a connected placeholder for the desktop to merge local credential state."
+    )]
     pub async fn provider_catalog(&self) -> Json<ProviderCatalogResponse> {
         let providers: Vec<serde_json::Value> = self
             .state
@@ -235,7 +245,9 @@ impl DjinnMcpServer {
 
     /// List all models for a provider. Each model includes capabilities
     /// (tool_call, reasoning, attachment), context limits, and per-million-token pricing.
-    #[tool(description = "List all models for a provider. Each model includes capabilities (tool_call, reasoning, attachment), context limits, and per-million-token pricing.")]
+    #[tool(
+        description = "List all models for a provider. Each model includes capabilities (tool_call, reasoning, attachment), context limits, and per-million-token pricing."
+    )]
     pub async fn provider_models(
         &self,
         Parameters(input): Parameters<ProviderModelsInput>,
@@ -257,7 +269,9 @@ impl DjinnMcpServer {
 
     /// Look up a single model by its full 'providerID/modelID' identifier.
     /// Returns the model object (with capabilities and pricing) or null when not found.
-    #[tool(description = "Look up a single model by its full 'providerID/modelID' identifier. Returns the model object (with capabilities and pricing) or null when not found.")]
+    #[tool(
+        description = "Look up a single model by its full 'providerID/modelID' identifier. Returns the model object (with capabilities and pricing) or null when not found."
+    )]
     pub async fn provider_model_lookup(
         &self,
         Parameters(input): Parameters<ProviderModelLookupInput>,
@@ -279,7 +293,9 @@ impl DjinnMcpServer {
 
     /// Test whether an API key is valid for a given provider endpoint. Returns ok=true
     /// when the key is accepted. Does NOT store credentials.
-    #[tool(description = "Test whether an API key is valid for a given provider endpoint. Returns ok=true when the key is accepted. Does NOT store credentials.")]
+    #[tool(
+        description = "Test whether an API key is valid for a given provider endpoint. Returns ok=true when the key is accepted. Does NOT store credentials."
+    )]
     pub async fn provider_validate(
         &self,
         Parameters(input): Parameters<ProviderValidateInput>,
@@ -302,7 +318,9 @@ impl DjinnMcpServer {
 
     /// Register an unlisted OpenAI-compatible provider with a base URL and API key
     /// environment variable. Persists to DB for use by the model picker and env injection.
-    #[tool(description = "Register an unlisted OpenAI-compatible provider with a base URL and API key environment variable. Persists to disk for use by the model picker and env injection.")]
+    #[tool(
+        description = "Register an unlisted OpenAI-compatible provider with a base URL and API key environment variable. Persists to disk for use by the model picker and env injection."
+    )]
     pub async fn provider_add_custom(
         &self,
         Parameters(input): Parameters<ProviderAddCustomInput>,
@@ -329,7 +347,10 @@ impl DjinnMcpServer {
             .seed_models
             .unwrap_or_default()
             .into_iter()
-            .map(|s| SeedModel { id: s.id, name: s.name })
+            .map(|s| SeedModel {
+                id: s.id,
+                name: s.name,
+            })
             .collect();
 
         let provider = CustomProvider {
@@ -376,7 +397,9 @@ impl DjinnMcpServer {
                 pricing: crate::models::provider::Pricing::default(),
             })
             .collect();
-        self.state.catalog().add_custom_provider(catalog_provider, catalog_models);
+        self.state
+            .catalog()
+            .add_custom_provider(catalog_provider, catalog_models);
 
         tracing::info!(id = %input.id, "registered custom provider");
         Json(ProviderAddCustomResponse {

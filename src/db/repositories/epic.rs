@@ -17,43 +17,37 @@ impl EpicRepository {
 
     pub async fn list(&self) -> Result<Vec<Epic>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_as::<_, Epic>(
-                "SELECT id, short_id, title, description, emoji, color, status,
+        Ok(sqlx::query_as::<_, Epic>(
+            "SELECT id, short_id, title, description, emoji, color, status,
                         owner, created_at, updated_at, closed_at
                  FROM epics ORDER BY created_at",
-            )
-            .fetch_all(self.db.pool())
-            .await?,
         )
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<Epic>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_as::<_, Epic>(
-                "SELECT id, short_id, title, description, emoji, color, status,
+        Ok(sqlx::query_as::<_, Epic>(
+            "SELECT id, short_id, title, description, emoji, color, status,
                         owner, created_at, updated_at, closed_at
                  FROM epics WHERE id = ?1",
-            )
-            .bind(id)
-            .fetch_optional(self.db.pool())
-            .await?,
         )
+        .bind(id)
+        .fetch_optional(self.db.pool())
+        .await?)
     }
 
     pub async fn get_by_short_id(&self, short_id: &str) -> Result<Option<Epic>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_as::<_, Epic>(
-                "SELECT id, short_id, title, description, emoji, color, status,
+        Ok(sqlx::query_as::<_, Epic>(
+            "SELECT id, short_id, title, description, emoji, color, status,
                         owner, created_at, updated_at, closed_at
                  FROM epics WHERE short_id = ?1",
-            )
-            .bind(short_id)
-            .fetch_optional(self.db.pool())
-            .await?,
         )
+        .bind(short_id)
+        .fetch_optional(self.db.pool())
+        .await?)
     }
 
     pub async fn create(
@@ -181,7 +175,9 @@ impl EpicRepository {
                 return Ok(candidate);
             }
         }
-        Err(Error::Internal("short_id collision after 16 retries".into()))
+        Err(Error::Internal(
+            "short_id collision after 16 retries".into(),
+        ))
     }
 }
 
@@ -226,7 +222,10 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
-        let epic = repo.create("My Epic", "", "🚀", "#8b5cf6", "user@example.com").await.unwrap();
+        let epic = repo
+            .create("My Epic", "", "🚀", "#8b5cf6", "user@example.com")
+            .await
+            .unwrap();
         assert_eq!(epic.title, "My Epic");
         assert_eq!(epic.status, "open");
         assert_eq!(epic.short_id.len(), 4);
@@ -268,7 +267,10 @@ mod tests {
         let epic = repo.create("Old", "", "", "", "").await.unwrap();
         let _ = rx.recv().await.unwrap();
 
-        let updated = repo.update(&epic.id, "New", "desc", "🎯", "#fff", "").await.unwrap();
+        let updated = repo
+            .update(&epic.id, "New", "desc", "🎯", "#fff", "")
+            .await
+            .unwrap();
         assert_eq!(updated.title, "New");
 
         match rx.recv().await.unwrap() {
@@ -313,7 +315,10 @@ mod tests {
         assert_eq!(encode_base36(1_679_615), "zzzz");
         for s in [encode_base36(12345), encode_base36(999999 % 1_679_616)] {
             assert_eq!(s.len(), 4);
-            assert!(s.chars().all(|c| c.is_ascii_alphanumeric() && !c.is_uppercase()));
+            assert!(
+                s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() && !c.is_uppercase())
+            );
         }
     }
 }

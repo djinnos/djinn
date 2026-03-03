@@ -282,6 +282,9 @@ mod tests {
         assert_eq!(h2.disable_ttl_trips, 2);
         // Second trip cooldown should be double the first (i.e. ≥ 10 minutes).
         let secs = h2.cooldown_seconds_remaining.unwrap_or(0);
-        assert!(secs > INITIAL_COOLDOWN.as_secs(), "second trip cooldown should be longer");
+        assert!(
+            secs > INITIAL_COOLDOWN.as_secs(),
+            "second trip cooldown should be longer"
+        );
     }
 }

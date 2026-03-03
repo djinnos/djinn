@@ -109,7 +109,11 @@ pub async fn ensure_worktree(project: &Path) -> Result<PathBuf> {
         // Create an orphan branch with an initial empty commit.
         git(project, &["worktree", "add", "--orphan", &wt_str, BRANCH]).await?;
         // The initial commit makes the branch a proper ref so push works.
-        let _ = git(&wt, &["commit", "--allow-empty", "-m", "djinn: init tasks sync"]).await;
+        let _ = git(
+            &wt,
+            &["commit", "--allow-empty", "-m", "djinn: init tasks sync"],
+        )
+        .await;
     }
 
     Ok(wt)
@@ -135,7 +139,10 @@ pub async fn export(
     // Fetch all tasks from the local DB.
     let repo = TaskRepository::new(db.clone(), events.clone());
     let result = repo
-        .list_filtered(ListQuery { limit: 100_000, ..Default::default() })
+        .list_filtered(ListQuery {
+            limit: 100_000,
+            ..Default::default()
+        })
         .await
         .map_err(TaskSyncError::from)?;
     let tasks = result.tasks;
@@ -162,8 +169,7 @@ pub async fn export(
         let _ = git(&wt, &["fetch", "origin", BRANCH]).await;
 
         // Rebase on top of remote if it exists.
-        let has_remote =
-            git_ok(&wt, &["rev-parse", "--verify", &format!("origin/{BRANCH}")]).await;
+        let has_remote = git_ok(&wt, &["rev-parse", "--verify", &format!("origin/{BRANCH}")]).await;
         if has_remote {
             if let Err(e) = git(&wt, &["rebase", &format!("origin/{BRANCH}")]).await {
                 tracing::warn!(attempt, error = %e, "rebase failed during export; aborting");
@@ -176,7 +182,11 @@ pub async fn export(
         // Try to push.
         match git(&wt, &["push", "origin", BRANCH]).await {
             Ok(_) => {
-                tracing::debug!(channel = "tasks", attempt, "sync export pushed successfully");
+                tracing::debug!(
+                    channel = "tasks",
+                    attempt,
+                    "sync export pushed successfully"
+                );
                 return Ok(count);
             }
             Err(e) if attempt + 1 < max_retries => {
@@ -187,7 +197,9 @@ pub async fn export(
         }
     }
 
-    Err(TaskSyncError::PushRejected { retries: max_retries })
+    Err(TaskSyncError::PushRejected {
+        retries: max_retries,
+    })
 }
 
 // ── Import ────────────────────────────────────────────────────────────────────
@@ -214,8 +226,7 @@ pub async fn import(
     }
 
     // Read all *.jsonl files — collect the best (newest) version of each task.
-    let mut peer_tasks: std::collections::HashMap<String, Task> =
-        std::collections::HashMap::new();
+    let mut peer_tasks: std::collections::HashMap<String, Task> = std::collections::HashMap::new();
 
     let mut dir = tokio::fs::read_dir(&wt).await?;
     while let Some(entry) = dir.next_entry().await? {

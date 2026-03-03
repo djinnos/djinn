@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::db::connection::Database;
@@ -51,9 +51,10 @@ pub struct ChannelDef {
 }
 
 /// All registered sync channels. Extend here to add new channels (SYNC-01).
-pub const REGISTERED_CHANNELS: &[ChannelDef] = &[
-    ChannelDef { name: "tasks", branch: tasks_channel::BRANCH },
-];
+pub const REGISTERED_CHANNELS: &[ChannelDef] = &[ChannelDef {
+    name: "tasks",
+    branch: tasks_channel::BRANCH,
+}];
 
 // ── Per-channel in-memory state ───────────────────────────────────────────────
 
@@ -238,7 +239,9 @@ impl SyncManager {
         };
         match channel {
             "tasks" => tasks_channel::delete_remote_branch(&project).await,
-            _ => Err(TaskSyncError::Database(format!("unknown channel: {channel}"))),
+            _ => Err(TaskSyncError::Database(format!(
+                "unknown channel: {channel}"
+            ))),
         }
     }
 
@@ -304,7 +307,10 @@ impl SyncManager {
                     tasks_channel::export(&project, uid, &self.inner.db, &self.inner.events_tx)
                         .await
                 }
-                _ => Err(TaskSyncError::Database(format!("unknown channel: {}", def.name))),
+                _ => Err(TaskSyncError::Database(format!(
+                    "unknown channel: {}",
+                    def.name
+                ))),
             };
 
             match result {
@@ -380,7 +386,10 @@ impl SyncManager {
                 "tasks" => {
                     tasks_channel::import(&project, &self.inner.db, &self.inner.events_tx).await
                 }
-                _ => Err(TaskSyncError::Database(format!("unknown channel: {}", def.name))),
+                _ => Err(TaskSyncError::Database(format!(
+                    "unknown channel: {}",
+                    def.name
+                ))),
             };
 
             match result {
@@ -435,7 +444,13 @@ impl SyncManager {
 
     /// Get project path from in-memory state (set by `enable()` or `restore()`).
     async fn project_from_memory(&self, channel: &str) -> Option<PathBuf> {
-        self.inner.states.lock().await.get(channel)?.project_path.clone()
+        self.inner
+            .states
+            .lock()
+            .await
+            .get(channel)?
+            .project_path
+            .clone()
     }
 
     /// Get project path from DB settings (for operations that don't need
@@ -475,8 +490,11 @@ fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 
     let mut y = 1970u32;
     loop {
-        let days_in_year: u64 =
-            if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        let days_in_year: u64 = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
         if days < days_in_year {
             break;
         }
@@ -485,8 +503,20 @@ fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     }
 
     let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let month_days: [u32; 12] =
-        [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days: [u32; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut mo = 1u32;
     let mut d = days as u32;
     for &dim in &month_days {

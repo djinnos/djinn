@@ -6,8 +6,7 @@ use rmcp::{
     model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
     tool_handler,
     transport::streamable_http_server::{
-        StreamableHttpService, StreamableHttpServerConfig,
-        session::local::LocalSessionManager,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -35,10 +34,7 @@ impl DjinnMcpServer {
     }
 
     /// Build a `StreamableHttpService` that creates one `DjinnMcpServer` per session.
-    pub fn into_service(
-        state: AppState,
-        cancel: CancellationToken,
-    ) -> StreamableHttpService<Self> {
+    pub fn into_service(state: AppState, cancel: CancellationToken) -> StreamableHttpService<Self> {
         StreamableHttpService::new(
             move || Ok(DjinnMcpServer::new(state.clone())),
             Arc::new(LocalSessionManager::default()),
