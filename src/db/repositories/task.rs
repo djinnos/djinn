@@ -1248,6 +1248,86 @@ impl TaskRepository {
             .await
     }
 
+    /// Upsert a task received from a peer sync (last-writer-wins by updated_at).
+    ///
+    /// Returns `true` if the row was inserted or updated, `false` if:
+    ///   - The task's `epic_id` doesn't exist locally (FK constraint).
+    ///   - The local copy is already newer or equal (LWW check).
+    ///   - Any other constraint violation (UNIQUE on short_id, CHECK, etc.).
+    pub async fn upsert_peer(&self, task: &Task) -> Result<bool> {
+        let t = task.clone();
+        let changed = self
+            .db
+            .write(move |conn| {
+                // Verify epic exists before INSERT (foreign key is enforced).
+                let epic_exists: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM epics WHERE id = ?1",
+                    [&t.epic_id],
+                    |r| r.get(0),
+                )?;
+                if epic_exists == 0 {
+                    return Ok(0i64);
+                }
+
+                let n = match conn.execute(
+                    "INSERT INTO tasks (
+                        id, short_id, epic_id, title, description, design,
+                        issue_type, status, priority, owner, labels,
+                        acceptance_criteria, reopen_count, continuation_count,
+                        created_at, updated_at, closed_at,
+                        blocked_from_status, close_reason, memory_refs
+                     ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                        ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+                     )
+                     ON CONFLICT(id) DO UPDATE SET
+                        title               = excluded.title,
+                        description         = excluded.description,
+                        design              = excluded.design,
+                        issue_type          = excluded.issue_type,
+                        status              = excluded.status,
+                        priority            = excluded.priority,
+                        owner               = excluded.owner,
+                        labels              = excluded.labels,
+                        acceptance_criteria = excluded.acceptance_criteria,
+                        reopen_count        = excluded.reopen_count,
+                        continuation_count  = excluded.continuation_count,
+                        updated_at          = excluded.updated_at,
+                        closed_at           = excluded.closed_at,
+                        blocked_from_status = excluded.blocked_from_status,
+                        close_reason        = excluded.close_reason,
+                        memory_refs         = excluded.memory_refs
+                     WHERE excluded.updated_at > tasks.updated_at",
+                    rusqlite::params![
+                        &t.id, &t.short_id, &t.epic_id, &t.title, &t.description,
+                        &t.design, &t.issue_type, &t.status, t.priority, &t.owner,
+                        &t.labels, &t.acceptance_criteria, t.reopen_count,
+                        t.continuation_count, &t.created_at, &t.updated_at,
+                        &t.closed_at, &t.blocked_from_status, &t.close_reason,
+                        &t.memory_refs
+                    ],
+                ) {
+                    Ok(n) => n as i64,
+                    // Constraint violation (UNIQUE on short_id, CHECK, etc.) → skip.
+                    Err(rusqlite::Error::SqliteFailure(err, _))
+                        if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+                    {
+                        0
+                    }
+                    Err(e) => return Err(Error::Database(e)),
+                };
+                Ok(n)
+            })
+            .await?;
+
+        if changed > 0 {
+            if let Ok(Some(updated)) = self.get(&task.id).await {
+                let _ = self.events.send(DjinnEvent::TaskUpdated(updated));
+            }
+        }
+        Ok(changed > 0)
+    }
+
     async fn generate_short_id(&self, seed_id: &str) -> Result<String> {
         let seed_id = seed_id.to_owned();
         self.db

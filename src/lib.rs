@@ -8,6 +8,7 @@ pub mod models;
 pub mod provider;
 pub mod server;
 pub mod sse;
+pub mod sync;
 
 #[cfg(test)]
 pub mod test_helpers;

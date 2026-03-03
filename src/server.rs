@@ -15,6 +15,7 @@ use crate::db::connection::Database;
 use crate::events::DjinnEvent;
 use crate::mcp;
 use crate::provider::{CatalogService, HealthTracker};
+use crate::sync::SyncManager;
 
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
@@ -37,6 +38,8 @@ struct Inner {
     pub catalog: CatalogService,
     /// Per-model circuit-breaker health tracker.
     pub health_tracker: HealthTracker,
+    /// djinn/ namespace git sync manager.
+    pub sync: SyncManager,
 }
 
 impl AppState {
@@ -62,6 +65,7 @@ impl AppState {
         user_id: Option<String>,
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let sync = SyncManager::new(db.clone(), events.clone());
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -72,6 +76,7 @@ impl AppState {
                 user_id,
                 catalog: CatalogService::new(),
                 health_tracker: HealthTracker::new(),
+                sync,
             }),
         }
     }
@@ -110,6 +115,10 @@ impl AppState {
 
     pub fn health_tracker(&self) -> &HealthTracker {
         &self.inner.health_tracker
+    }
+
+    pub fn sync_manager(&self) -> &SyncManager {
+        &self.inner.sync
     }
 
     /// Load custom providers from DB into the catalog and trigger a background
@@ -158,6 +167,12 @@ impl AppState {
         tokio::spawn(async move {
             catalog.refresh().await;
         });
+
+        // Restore sync state from DB and start background auto-export task.
+        let sync = self.sync_manager().clone();
+        sync.restore().await;
+        let uid = self.user_id().unwrap_or("local").to_string();
+        sync.spawn_background_task(self.cancel().clone(), uid);
     }
 }
 
