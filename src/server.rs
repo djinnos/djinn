@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::sse;
 use axum::Router;
 use axum::routing::get;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::actors::coordinator::CoordinatorHandle;
@@ -15,6 +17,9 @@ use crate::actors::supervisor::AgentSupervisorHandle;
 use crate::agent::init_session_manager;
 use crate::auth::JwksCache;
 use crate::db::connection::Database;
+use crate::db::repositories::note::NoteRepository;
+use crate::db::repositories::project::ProjectRepository;
+use crate::db::repositories::settings::SettingsRepository;
 use crate::events::DjinnEvent;
 use crate::mcp;
 use crate::provider::{CatalogService, HealthTracker};
@@ -224,7 +229,160 @@ impl AppState {
         sync.restore().await;
         let uid = self.user_id().unwrap_or("local").to_string();
         sync.spawn_background_task(self.cancel().clone(), uid);
+
+        self.reindex_all_projects_on_startup().await;
+        self.reload_settings_and_apply().await;
+        self.spawn_settings_file_watcher();
     }
+
+    async fn reindex_all_projects_on_startup(&self) {
+        let project_repo = ProjectRepository::new(self.db().clone(), self.events().clone());
+        let note_repo = NoteRepository::new(self.db().clone(), self.events().clone());
+        let projects = match project_repo.list().await {
+            Ok(projects) => projects,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to list projects for startup reindex");
+                return;
+            }
+        };
+
+        for project in projects {
+            match note_repo
+                .reindex_from_disk(&project.id, Path::new(&project.path))
+                .await
+            {
+                Ok(summary) => tracing::info!(
+                    project = %project.path,
+                    updated = summary.updated,
+                    created = summary.created,
+                    deleted = summary.deleted,
+                    unchanged = summary.unchanged,
+                    "startup memory reindex completed"
+                ),
+                Err(e) => tracing::warn!(
+                    project = %project.path,
+                    error = %e,
+                    "startup memory reindex failed"
+                ),
+            }
+        }
+    }
+
+    async fn reload_settings_and_apply(&self) {
+        let Some(path) = settings_file_path() else {
+            return;
+        };
+        if let Err(e) = self.reload_settings_from_file(&path).await {
+            tracing::warn!(error = %e, path = %path.display(), "settings reload failed");
+        }
+    }
+
+    fn spawn_settings_file_watcher(&self) {
+        let Some(path) = settings_file_path() else {
+            return;
+        };
+
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(error = %e, path = %parent.display(), "failed to create settings directory");
+            return;
+        }
+
+        let cancel = self.cancel().clone();
+        let state = self.clone();
+
+        tokio::spawn(async move {
+            let (tx, mut rx) = mpsc::unbounded_channel::<notify::Result<notify::Event>>();
+
+            let mut watcher: RecommendedWatcher = match notify::recommended_watcher(move |res| {
+                let _ = tx.send(res);
+            }) {
+                Ok(watcher) => watcher,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to start settings watcher");
+                    return;
+                }
+            };
+
+            let watch_target = path
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| path.clone());
+
+            if let Err(e) = watcher.watch(&watch_target, RecursiveMode::NonRecursive) {
+                tracing::warn!(error = %e, path = %watch_target.display(), "failed to watch settings directory");
+                return;
+            }
+
+            tracing::info!(path = %path.display(), "watching settings file");
+
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    maybe_event = rx.recv() => {
+                        let Some(event) = maybe_event else { break };
+                        match event {
+                            Ok(ev) if (ev.kind.is_modify() || ev.kind.is_create())
+                                && ev.paths.iter().any(|p| p == &path) => {
+                                // Editors often emit multiple writes; coalesce briefly.
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                if let Err(e) = state.reload_settings_from_file(&path).await {
+                                    tracing::warn!(error = %e, path = %path.display(), "settings reload on change failed");
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(error = %e, "settings watcher event error"),
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    async fn reload_settings_from_file(&self, path: &Path) -> Result<(), String> {
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("read settings file {}: {e}", path.display()))?;
+        let json: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| format!("parse settings file {}: {e}", path.display()))?;
+
+        let repo = SettingsRepository::new(self.db().clone(), self.events().clone());
+        repo.set("settings.raw", &raw)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if let Some(limit) = read_dispatch_limit(&json)
+            && let Some(coordinator) = self.coordinator().await
+        {
+            let _ = coordinator.update_dispatch_limit(limit).await;
+        }
+
+        Ok(())
+    }
+}
+
+fn settings_file_path() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".djinn").join("settings.json"))
+}
+
+fn read_dispatch_limit(settings: &serde_json::Value) -> Option<usize> {
+    // Supported keys:
+    // { "coordinator": { "dispatch_limit": 50 } }
+    // { "execution": { "dispatch_limit": 50 } }
+    settings
+        .get("coordinator")
+        .and_then(|v| v.get("dispatch_limit"))
+        .or_else(|| {
+            settings
+                .get("execution")
+                .and_then(|v| v.get("dispatch_limit"))
+        })
+        .and_then(serde_json::Value::as_u64)
+        .map(|v| v as usize)
 }
 
 #[derive(Serialize)]

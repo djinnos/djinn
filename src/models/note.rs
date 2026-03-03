@@ -78,6 +78,15 @@ pub struct BuildContextResponse {
     pub related: Vec<NoteCompact>,
 }
 
+/// Result of a filesystem-to-index reconciliation pass.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ReindexSummary {
+    pub updated: i64,
+    pub created: i64,
+    pub deleted: i64,
+    pub unchanged: i64,
+}
+
 // ── Wikilink graph types ──────────────────────────────────────────────────────
 
 /// A knowledge graph node (note with connection metadata).

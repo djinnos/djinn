@@ -71,6 +71,8 @@ enum CoordinatorMessage {
     GetStatus {
         respond_to: Reply<CoordinatorStatus>,
     },
+    /// Update runtime dispatch limit from settings reload.
+    UpdateDispatchLimit { limit: usize },
     /// Run an immediate stuck-task detection pass.
     TriggerStuckScan,
 }
@@ -91,6 +93,7 @@ struct CoordinatorActor {
     health: HealthTracker,
     // State
     paused: bool,
+    dispatch_limit: usize,
     // Metrics
     dispatched: u64,
     recovered: u64,
@@ -121,6 +124,7 @@ impl CoordinatorActor {
             supervisor,
             health,
             paused: false,
+            dispatch_limit: 50,
             dispatched: 0,
             recovered: 0,
         }
@@ -202,6 +206,17 @@ impl CoordinatorActor {
                     self.detect_and_recover_stuck().await;
                 }
             }
+            CoordinatorMessage::UpdateDispatchLimit { limit } => {
+                let limit = limit.max(1);
+                if self.dispatch_limit != limit {
+                    tracing::info!(
+                        old = self.dispatch_limit,
+                        new = limit,
+                        "CoordinatorActor: updated dispatch limit"
+                    );
+                    self.dispatch_limit = limit;
+                }
+            }
         }
     }
 
@@ -251,7 +266,7 @@ impl CoordinatorActor {
         let mut ready = match repo
             .list_ready(ReadyQuery {
                 issue_type: Some("!epic".into()),
-                limit: 50,
+                limit: self.dispatch_limit as i64,
                 ..Default::default()
             })
             .await
@@ -461,6 +476,14 @@ impl CoordinatorHandle {
     /// Trigger an immediate stuck-task detection pass.
     pub async fn trigger_stuck_scan(&self) -> Result<(), CoordinatorError> {
         self.send(CoordinatorMessage::TriggerStuckScan).await
+    }
+
+    /// Update ready-task dispatch limit.
+    pub async fn update_dispatch_limit(&self, limit: usize) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::UpdateDispatchLimit {
+            limit: limit.max(1),
+        })
+        .await
     }
 }
 

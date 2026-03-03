@@ -10,6 +10,7 @@ use crate::db::repositories::note::NoteRepository;
 use crate::mcp::server::DjinnMcpServer;
 use crate::models::note::{
     BrokenLink, BuildContextResponse, GitLogEntry, GraphResponse, Note, NoteCompact, OrphanNote,
+    ReindexSummary,
 };
 
 // ── Param structs ─────────────────────────────────────────────────────────────
@@ -157,6 +158,11 @@ pub struct OrphansParams {
     pub folder: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ReindexParams {
+    pub project: String,
+}
+
 // ── Response wrappers ─────────────────────────────────────────────────────────
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -202,6 +208,14 @@ pub struct DiffResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct TaskRefsResponse {
     pub tasks: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ReindexResponse {
+    pub updated: i64,
+    pub created: i64,
+    pub deleted: i64,
+    pub unchanged: i64,
 }
 
 // ── Tool implementations ──────────────────────────────────────────────────────
@@ -811,6 +825,37 @@ impl DjinnMcpServer {
             .await
             .unwrap_or_default();
         Json(OrphansResponse { orphans })
+    }
+
+    /// Re-index all memory notes for a project from disk on demand.
+    #[tool(
+        description = "Re-index memory notes for a project by scanning note files, comparing checksums to indexed content, and applying create/update/delete changes."
+    )]
+    pub async fn memory_reindex(
+        &self,
+        Parameters(params): Parameters<ReindexParams>,
+    ) -> Json<ReindexResponse> {
+        let Some(project_id) = self.project_id_for_path(&params.project).await else {
+            return Json(ReindexResponse {
+                updated: 0,
+                created: 0,
+                deleted: 0,
+                unchanged: 0,
+            });
+        };
+
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let summary = repo
+            .reindex_from_disk(&project_id, Path::new(&params.project))
+            .await
+            .unwrap_or_else(|_| ReindexSummary::default());
+
+        Json(ReindexResponse {
+            updated: summary.updated,
+            created: summary.created,
+            deleted: summary.deleted,
+            unchanged: summary.unchanged,
+        })
     }
 }
 

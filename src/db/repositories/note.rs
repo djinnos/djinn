@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use sqlx::Sqlite;
@@ -8,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
 use crate::models::note::{
     BrokenLink, GraphEdge, GraphNode, GraphResponse, HealthReport, Note, NoteCompact,
-    NoteSearchResult, OrphanNote, StaleFolder,
+    NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
 };
 
 pub struct NoteRepository {
@@ -684,6 +685,400 @@ impl NoteRepository {
             stale_notes_by_folder,
         })
     }
+
+    /// Reconcile the note index against note files on disk for one project.
+    ///
+    /// Detects updates, creations, and deletions by checksum comparison against
+    /// indexed note fields and emits NoteUpdated/NoteCreated/NoteDeleted events.
+    pub async fn reindex_from_disk(
+        &self,
+        project_id: &str,
+        project_path: &Path,
+    ) -> Result<ReindexSummary> {
+        self.db.ensure_initialized().await?;
+
+        let scanned = scan_project_notes(project_path)?;
+        let mut summary = ReindexSummary::default();
+        let mut seen_permalinks = HashSet::new();
+
+        let existing = self.list(project_id, None).await?;
+        let mut existing_by_permalink: HashMap<String, Note> = existing
+            .into_iter()
+            .map(|note| (note.permalink.clone(), note))
+            .collect();
+
+        for scanned_note in scanned {
+            seen_permalinks.insert(scanned_note.permalink.clone());
+
+            match existing_by_permalink.remove(&scanned_note.permalink) {
+                Some(current) => {
+                    let indexed_checksum = semantic_checksum(
+                        &current.permalink,
+                        &current.title,
+                        &current.note_type,
+                        &current.tags,
+                        &current.content,
+                    );
+
+                    if indexed_checksum == scanned_note.checksum {
+                        summary.unchanged += 1;
+                        continue;
+                    }
+
+                    let updated = self
+                        .update_index_entry(
+                            &current.id,
+                            &scanned_note.file_path,
+                            &scanned_note.permalink,
+                            &scanned_note.title,
+                            &scanned_note.note_type,
+                            &scanned_note.folder,
+                            &scanned_note.tags,
+                            &scanned_note.content,
+                            project_id,
+                        )
+                        .await?;
+                    let _ = self.events.send(DjinnEvent::NoteUpdated(updated));
+                    summary.updated += 1;
+                }
+                None => {
+                    let created = self.insert_index_entry(project_id, &scanned_note).await?;
+                    let _ = self.events.send(DjinnEvent::NoteCreated(created));
+                    summary.created += 1;
+                }
+            }
+        }
+
+        // Any indexed note that no longer exists on disk is deleted.
+        for (_permalink, stale_note) in existing_by_permalink {
+            if seen_permalinks.contains(&stale_note.permalink) {
+                continue;
+            }
+            self.delete(&stale_note.id).await?;
+            summary.deleted += 1;
+        }
+
+        Ok(summary)
+    }
+
+    async fn insert_index_entry(
+        &self,
+        project_id: &str,
+        scanned_note: &ScannedNote,
+    ) -> Result<Note> {
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut tx = self.db.pool().begin().await?;
+
+        sqlx::query(
+            "INSERT INTO notes
+                (id, project_id, permalink, title, file_path,
+                 note_type, folder, tags, content)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(&id)
+        .bind(project_id)
+        .bind(&scanned_note.permalink)
+        .bind(&scanned_note.title)
+        .bind(&scanned_note.file_path)
+        .bind(&scanned_note.note_type)
+        .bind(&scanned_note.folder)
+        .bind(&scanned_note.tags)
+        .bind(&scanned_note.content)
+        .execute(&mut *tx)
+        .await?;
+
+        index_links_for_note(&mut tx, &id, project_id, &scanned_note.content).await?;
+        resolve_links_for_note(
+            &mut tx,
+            &id,
+            &scanned_note.title,
+            &scanned_note.permalink,
+            project_id,
+        )
+        .await?;
+
+        let note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(note)
+    }
+
+    async fn update_index_entry(
+        &self,
+        id: &str,
+        file_path: &str,
+        permalink: &str,
+        title: &str,
+        note_type: &str,
+        folder: &str,
+        tags: &str,
+        content: &str,
+        project_id: &str,
+    ) -> Result<Note> {
+        let mut tx = self.db.pool().begin().await?;
+
+        sqlx::query(
+            "UPDATE notes SET
+                title = ?2,
+                file_path = ?3,
+                note_type = ?4,
+                folder = ?5,
+                tags = ?6,
+                content = ?7,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(title)
+        .bind(file_path)
+        .bind(note_type)
+        .bind(folder)
+        .bind(tags)
+        .bind(content)
+        .execute(&mut *tx)
+        .await?;
+
+        index_links_for_note(&mut tx, id, project_id, content).await?;
+        resolve_links_for_note(&mut tx, id, title, permalink, project_id).await?;
+
+        let note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(note)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ScannedNote {
+    permalink: String,
+    title: String,
+    file_path: String,
+    note_type: String,
+    folder: String,
+    tags: String,
+    content: String,
+    checksum: String,
+}
+
+fn scan_project_notes(project_path: &Path) -> Result<Vec<ScannedNote>> {
+    let memory_root = project_path.join(".djinn").join("memory");
+    let legacy_root = project_path.join(".djinn");
+
+    let mut notes = vec![];
+    let mut seen = HashSet::new();
+
+    if memory_root.exists() {
+        scan_note_tree(&memory_root, &memory_root, &mut notes, &mut seen)?;
+        return Ok(notes);
+    }
+
+    if legacy_root.exists() {
+        scan_note_tree(&legacy_root, &legacy_root, &mut notes, &mut seen)?;
+    }
+
+    Ok(notes)
+}
+
+fn scan_note_tree(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<ScannedNote>,
+    seen_paths: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            return Err(Error::Internal(format!("read_dir {}: {e}", dir.display())));
+        }
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|e| Error::Internal(format!("read_dir entry error: {e}")))?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|v| v.to_str())
+                && matches!(name, "logs" | "tasks" | "worktrees")
+            {
+                continue;
+            }
+            scan_note_tree(root, &path, out, seen_paths)?;
+            continue;
+        }
+
+        if path.extension().and_then(|v| v.to_str()) != Some("md") {
+            continue;
+        }
+        if !seen_paths.insert(path.clone()) {
+            continue;
+        }
+
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| Error::Internal(format!("read note file {}: {e}", path.display())))?;
+
+        if let Some(scanned) = parse_scanned_note(root, &path, &raw) {
+            out.push(scanned);
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_scanned_note(root: &Path, file_path: &Path, raw: &str) -> Option<ScannedNote> {
+    let rel = file_path.strip_prefix(root).ok()?;
+    let mut permalink = rel.to_string_lossy().replace('\\', "/");
+    if !permalink.ends_with(".md") {
+        return None;
+    }
+    permalink.truncate(permalink.len().saturating_sub(3));
+    if permalink.is_empty() {
+        return None;
+    }
+
+    // Catalog is generated content; don't index it as a regular note.
+    if permalink == "catalog" {
+        return None;
+    }
+
+    let folder = permalink
+        .rsplit_once('/')
+        .map(|(parent, _)| parent.to_string())
+        .unwrap_or_default();
+
+    let (title, note_type, tags, content) = parse_note_file(raw, &permalink);
+    let checksum = semantic_checksum(&permalink, &title, &note_type, &tags, &content);
+
+    Some(ScannedNote {
+        permalink,
+        title,
+        file_path: file_path.to_string_lossy().to_string(),
+        note_type,
+        folder,
+        tags,
+        content,
+        checksum,
+    })
+}
+
+fn parse_note_file(raw: &str, permalink: &str) -> (String, String, String, String) {
+    let mut title = title_from_permalink(permalink);
+    let mut note_type = infer_note_type(permalink);
+    let mut tags = "[]".to_string();
+    let mut content = raw.to_string();
+
+    if let Some((frontmatter, body)) = split_frontmatter(raw) {
+        content = body;
+        for line in frontmatter.lines() {
+            let line = line.trim();
+            if let Some(value) = line.strip_prefix("title:") {
+                let value = value.trim();
+                if !value.is_empty() {
+                    title = value.to_string();
+                }
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("type:") {
+                let value = value.trim();
+                if !value.is_empty() {
+                    note_type = value.to_string();
+                }
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("tags:") {
+                let value = value.trim();
+                if value.starts_with('[') && value.ends_with(']') {
+                    tags = value.to_string();
+                }
+            }
+        }
+    } else if let Some(first_heading) = raw
+        .lines()
+        .find(|line| line.starts_with("# "))
+        .map(|line| line.trim_start_matches("# ").trim())
+        && !first_heading.is_empty()
+    {
+        title = first_heading.to_string();
+    }
+
+    (title, note_type, tags, content)
+}
+
+fn split_frontmatter(raw: &str) -> Option<(String, String)> {
+    if !raw.starts_with("---\n") {
+        return None;
+    }
+    let rest = &raw[4..];
+    let end = rest.find("\n---\n")?;
+    let frontmatter = rest[..end].to_string();
+    let body = rest[end + 5..].to_string();
+    Some((frontmatter, body))
+}
+
+fn infer_note_type(permalink: &str) -> String {
+    if permalink == "brief" {
+        return "brief".to_string();
+    }
+    if permalink == "roadmap" {
+        return "roadmap".to_string();
+    }
+
+    let folder = permalink.split('/').next().unwrap_or_default();
+    match folder {
+        "decisions" => "adr",
+        "patterns" => "pattern",
+        "research" => "research",
+        "requirements" => "requirement",
+        "reference" => "reference",
+        "design" => "design",
+        _ => "reference",
+    }
+    .to_string()
+}
+
+fn title_from_permalink(permalink: &str) -> String {
+    let slug = permalink.rsplit('/').next().unwrap_or(permalink);
+    slug.split('-')
+        .filter(|part| !part.is_empty())
+        .map(capitalize_first)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn semantic_checksum(
+    permalink: &str,
+    title: &str,
+    note_type: &str,
+    tags: &str,
+    content: &str,
+) -> String {
+    let payload = serde_json::json!({
+        "permalink": permalink,
+        "title": title,
+        "note_type": note_type,
+        "tags": tags,
+        "content": content,
+    });
+    let serialized = serde_json::to_string(&payload).unwrap_or_default();
+    let digest = ring::digest::digest(&ring::digest::SHA256, serialized.as_bytes());
+    let mut out = String::with_capacity(digest.as_ref().len() * 2);
+    for b in digest.as_ref() {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 // ── Wikilink helpers ──────────────────────────────────────────────────────────
@@ -1475,5 +1870,60 @@ mod tests {
             .unwrap();
         assert_eq!(repo.broken_links(&project.id, None).await.unwrap().len(), 0);
         assert_eq!(repo.graph(&project.id).await.unwrap().edges.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reindex_from_disk_detects_created_updated_and_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let repo = NoteRepository::new(db, tx);
+
+        let memory_dir = tmp.path().join(".djinn").join("memory").join("decisions");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+
+        let existing_path = memory_dir.join("existing.md");
+        std::fs::write(
+            &existing_path,
+            "---\ntitle: Existing\ntype: adr\ntags: []\n---\n\noriginal content",
+        )
+        .unwrap();
+
+        let first = repo
+            .reindex_from_disk(&project.id, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(first.created, 1);
+        assert_eq!(first.updated, 0);
+        assert_eq!(first.deleted, 0);
+
+        // Modify existing + add one new file.
+        std::fs::write(
+            &existing_path,
+            "---\ntitle: Existing\ntype: adr\ntags: []\n---\n\nupdated content",
+        )
+        .unwrap();
+        std::fs::write(
+            memory_dir.join("new-note.md"),
+            "---\ntitle: New Note\ntype: adr\ntags: []\n---\n\nhello",
+        )
+        .unwrap();
+
+        let second = repo
+            .reindex_from_disk(&project.id, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(second.created, 1);
+        assert_eq!(second.updated, 1);
+        assert_eq!(second.deleted, 0);
+
+        // Delete one file from disk.
+        std::fs::remove_file(memory_dir.join("new-note.md")).unwrap();
+        let third = repo
+            .reindex_from_disk(&project.id, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(third.deleted, 1);
     }
 }
