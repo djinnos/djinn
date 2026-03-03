@@ -22,6 +22,11 @@ pub enum GitError {
     #[error("git command failed (exit {code}): {stderr}")]
     CommandFailed { code: i32, stderr: String },
 
+    /// A git hook (pre-commit, commit-msg, etc.) rejected the commit (GIT-07).
+    /// `output` contains the hook's stdout/stderr for surfacing in the activity log.
+    #[error("git hook failed (exit {code}): {output}")]
+    HookFailed { code: i32, output: String },
+
     #[error("i/o: {0}")]
     Io(#[from] std::io::Error),
 
@@ -54,14 +59,11 @@ pub struct CommandOutput {
     pub code: i32,
 }
 
-/// Metadata for a managed worktree under `.djinn/worktrees/{task_short_id}`.
+/// Result of a successful squash-merge (GIT-03).
 #[derive(Debug, Clone)]
-pub struct WorktreeInfo {
-    pub path: PathBuf,
-    pub task_short_id: String,
-    pub head_sha: String,
-    /// Short branch name (e.g. `task/abc1`), empty if detached.
-    pub branch: String,
+pub struct MergeResult {
+    /// SHA of the squash commit on the target branch.
+    pub commit_sha: String,
 }
 
 // ─── Messages ─────────────────────────────────────────────────────────────────
@@ -80,26 +82,24 @@ enum GitMessage {
         args: Vec<String>,
         respond_to: Reply<CommandOutput>,
     },
-    /// Create an isolated worktree at `.djinn/worktrees/{task_short_id}` on
-    /// the given branch. Prunes stale metadata first (GIT-02, GIT-06).
-    CreateWorktree {
-        task_short_id: String,
-        branch: String,
-        respond_to: Reply<PathBuf>,
-    },
-    /// Remove the worktree for `task_short_id`. Uses double `--force` to
-    /// handle locked/dirty worktrees, then prunes metadata (GIT-06).
-    RemoveWorktree {
-        task_short_id: String,
+    /// Create `task/{short_id}` from `target_branch` and push to origin (GIT-01).
+    CreateBranch {
+        short_id: String,
+        target_branch: String,
         respond_to: Reply<()>,
     },
-    /// List all managed worktrees under `.djinn/worktrees/` (GIT-06).
-    ListWorktrees { respond_to: Reply<Vec<WorktreeInfo>> },
-    /// Remove worktrees whose `task_short_id` is not in `active_session_ids`.
-    /// Returns the short IDs of pruned worktrees (GIT-06).
-    PruneOrphans {
-        active_session_ids: Vec<String>,
-        respond_to: Reply<Vec<String>>,
+    /// Squash-merge `branch` into `target_branch` with `message` (GIT-03).
+    /// Returns `Err(HookFailed)` if a git hook rejects the commit.
+    SquashMerge {
+        branch: String,
+        target_branch: String,
+        message: String,
+        respond_to: Reply<MergeResult>,
+    },
+    /// Force-delete `branch` locally and from origin (post-merge cleanup).
+    DeleteBranch {
+        branch: String,
+        respond_to: Reply<()>,
     },
 }
 
@@ -146,24 +146,19 @@ impl GitActor {
                 let result = Self::run_git_command(path, args).await;
                 let _ = respond_to.send(result);
             }
-            GitMessage::CreateWorktree { task_short_id, branch, respond_to } => {
+            GitMessage::CreateBranch { short_id, target_branch, respond_to } => {
                 let path = self.path.clone();
-                let result = Self::create_worktree(path, task_short_id, branch).await;
+                let result = Self::create_branch_impl(path, short_id, target_branch).await;
                 let _ = respond_to.send(result);
             }
-            GitMessage::RemoveWorktree { task_short_id, respond_to } => {
+            GitMessage::SquashMerge { branch, target_branch, message, respond_to } => {
                 let path = self.path.clone();
-                let result = Self::remove_worktree(path, task_short_id).await;
+                let result = Self::squash_merge_impl(path, branch, target_branch, message).await;
                 let _ = respond_to.send(result);
             }
-            GitMessage::ListWorktrees { respond_to } => {
+            GitMessage::DeleteBranch { branch, respond_to } => {
                 let path = self.path.clone();
-                let result = Self::list_worktrees(path).await;
-                let _ = respond_to.send(result);
-            }
-            GitMessage::PruneOrphans { active_session_ids, respond_to } => {
-                let path = self.path.clone();
-                let result = Self::prune_orphans(path, active_session_ids).await;
+                let result = Self::delete_branch_impl(path, branch).await;
                 let _ = respond_to.send(result);
             }
         }
@@ -237,164 +232,100 @@ impl GitActor {
         Ok(CommandOutput { stdout, stderr, code })
     }
 
-    // ── Worktree lifecycle ────────────────────────────────────────────────────
-
-    /// Create `.djinn/worktrees/{task_short_id}` checked out to `branch`.
-    ///
-    /// Runs `git worktree prune` first to clear any stale metadata entries
-    /// from previous unclean shutdowns. The branch must already exist.
-    async fn create_worktree(
+    /// Create `task/{short_id}` from `target_branch`, push to origin (GIT-01).
+    async fn create_branch_impl(
         path: PathBuf,
-        task_short_id: String,
-        branch: String,
-    ) -> Result<PathBuf, GitError> {
-        // Prune stale metadata so git doesn't complain about ghosts.
-        let _ =
-            Self::run_git_command(path.clone(), vec!["worktree".into(), "prune".into()]).await;
+        short_id: String,
+        target_branch: String,
+    ) -> Result<(), GitError> {
+        let branch_name = format!("task/{short_id}");
 
-        let worktrees_dir = path.join(".djinn").join("worktrees");
-        tokio::fs::create_dir_all(&worktrees_dir).await?;
+        // Fetch latest from remote (best effort — local-only repos just skip this).
+        let _ = Self::run_git_command(
+            path.clone(),
+            vec!["fetch".into(), "origin".into(), target_branch.clone()],
+        )
+        .await;
 
-        let worktree_path = worktrees_dir.join(&task_short_id);
+        // Prefer remote tracking ref; fall back to local branch.
+        let remote_ref = format!("origin/{target_branch}");
+        let checkout = Self::run_git_command(
+            path.clone(),
+            vec!["checkout".into(), "-b".into(), branch_name.clone(), remote_ref],
+        )
+        .await;
 
+        if checkout.is_err() {
+            Self::run_git_command(
+                path.clone(),
+                vec!["checkout".into(), "-b".into(), branch_name.clone(), target_branch],
+            )
+            .await?;
+        }
+
+        // Push new branch to remote (GIT-01 requires it on the remote).
         Self::run_git_command(
             path,
-            vec![
-                "worktree".into(),
-                "add".into(),
-                worktree_path.to_string_lossy().into_owned(),
-                branch,
-            ],
+            vec!["push".into(), "-u".into(), "origin".into(), branch_name],
         )
         .await?;
-
-        Ok(worktree_path)
-    }
-
-    /// Remove the worktree for `task_short_id` and prune metadata.
-    ///
-    /// Uses double `--force` to handle locked or dirty worktrees, matching
-    /// the Go server's behaviour for crash-recovery cleanup.
-    async fn remove_worktree(path: PathBuf, task_short_id: String) -> Result<(), GitError> {
-        let worktree_path = path.join(".djinn").join("worktrees").join(&task_short_id);
-
-        Self::run_git_command(
-            path.clone(),
-            vec![
-                "worktree".into(),
-                "remove".into(),
-                "--force".into(),
-                "--force".into(),
-                worktree_path.to_string_lossy().into_owned(),
-            ],
-        )
-        .await?;
-
-        // Clean up git's internal metadata after removal.
-        let _ =
-            Self::run_git_command(path, vec!["worktree".into(), "prune".into()]).await;
 
         Ok(())
     }
 
-    /// List managed worktrees by parsing `git worktree list --porcelain` and
-    /// filtering to entries under `.djinn/worktrees/`.
-    async fn list_worktrees(path: PathBuf) -> Result<Vec<WorktreeInfo>, GitError> {
-        let output = Self::run_git_command(
-            path.clone(),
-            vec!["worktree".into(), "list".into(), "--porcelain".into()],
-        )
-        .await?;
-
-        let worktrees_dir = path.join(".djinn").join("worktrees");
-        Ok(parse_worktree_list_output(&output.stdout, &worktrees_dir))
-    }
-
-    /// Remove all worktrees whose short ID is not in `active_session_ids`.
+    /// Squash-merge `branch` into `target_branch` with `message` (GIT-03).
     ///
-    /// Returns the short IDs of pruned worktrees. Errors on individual
-    /// removals are logged and skipped so one bad worktree doesn't block
-    /// the rest.
-    async fn prune_orphans(
+    /// Hook awareness (GIT-07): any non-zero exit from `git commit` is wrapped
+    /// in `GitError::HookFailed` so the coordinator can log it to the activity log.
+    async fn squash_merge_impl(
         path: PathBuf,
-        active_session_ids: Vec<String>,
-    ) -> Result<Vec<String>, GitError> {
-        let worktrees = Self::list_worktrees(path.clone()).await?;
-        let mut pruned = Vec::new();
-
-        for wt in worktrees {
-            if active_session_ids.contains(&wt.task_short_id) {
-                continue;
-            }
-            match Self::remove_worktree(path.clone(), wt.task_short_id.clone()).await {
-                Ok(()) => {
-                    tracing::info!(short_id = %wt.task_short_id, "pruned orphan worktree");
-                    pruned.push(wt.task_short_id);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        short_id = %wt.task_short_id,
-                        error = %e,
-                        "failed to prune orphan worktree"
-                    );
-                }
-            }
-        }
-
-        Ok(pruned)
-    }
-}
-
-// ─── Porcelain parser ─────────────────────────────────────────────────────────
-
-/// Parse `git worktree list --porcelain` output and return only worktrees
-/// rooted under `worktrees_dir`.
-fn parse_worktree_list_output(output: &str, worktrees_dir: &Path) -> Vec<WorktreeInfo> {
-    struct Wt {
-        path: PathBuf,
-        head_sha: String,
         branch: String,
-    }
+        target_branch: String,
+        message: String,
+    ) -> Result<MergeResult, GitError> {
+        // Switch to target branch.
+        Self::run_git_command(path.clone(), vec!["checkout".into(), target_branch]).await?;
 
-    let mut all: Vec<Wt> = Vec::new();
-    let mut cur_path: Option<PathBuf> = None;
-    let mut cur_head = String::new();
-    let mut cur_branch = String::new();
+        // Stage all changes from the task branch as a squash (no commit yet).
+        Self::run_git_command(path.clone(), vec!["merge".into(), "--squash".into(), branch])
+            .await?;
 
-    for line in output.lines() {
-        if let Some(p) = line.strip_prefix("worktree ") {
-            if let Some(path) = cur_path.take() {
-                all.push(Wt {
-                    path,
-                    head_sha: std::mem::take(&mut cur_head),
-                    branch: std::mem::take(&mut cur_branch),
-                });
+        // Commit — hooks run here. Any failure → HookFailed (GIT-07).
+        match Self::run_git_command(path.clone(), vec!["commit".into(), "-m".into(), message])
+            .await
+        {
+            Ok(_) => {}
+            Err(GitError::CommandFailed { code, stderr }) => {
+                return Err(GitError::HookFailed { code, output: stderr });
             }
-            cur_path = Some(PathBuf::from(p));
-        } else if let Some(sha) = line.strip_prefix("HEAD ") {
-            cur_head = sha.to_string();
-        } else if let Some(b) = line.strip_prefix("branch ") {
-            cur_branch = b.strip_prefix("refs/heads/").unwrap_or(b).to_string();
+            Err(e) => return Err(e),
         }
-    }
-    if let Some(path) = cur_path {
-        all.push(Wt { path, head_sha: cur_head, branch: cur_branch });
+
+        // Read the resulting commit SHA.
+        let out =
+            Self::run_git_command(path, vec!["rev-parse".into(), "HEAD".into()]).await?;
+
+        Ok(MergeResult { commit_sha: out.stdout.trim().into() })
     }
 
-    all.into_iter()
-        .filter_map(|wt| {
-            if !wt.path.starts_with(worktrees_dir) {
-                return None;
-            }
-            let short_id = wt.path.file_name()?.to_str()?.to_string();
-            Some(WorktreeInfo {
-                task_short_id: short_id,
-                path: wt.path,
-                head_sha: wt.head_sha,
-                branch: wt.branch,
-            })
-        })
-        .collect()
+    /// Force-delete `branch` locally; also removes from origin (best effort).
+    ///
+    /// Uses `-D` because squash merges don't produce a merge commit, so git
+    /// considers task branches "unmerged" even after a successful squash.
+    async fn delete_branch_impl(path: PathBuf, branch: String) -> Result<(), GitError> {
+        // Force-delete local branch.
+        Self::run_git_command(path.clone(), vec!["branch".into(), "-D".into(), branch.clone()])
+            .await?;
+
+        // Delete remote branch (best effort — ignore if not pushed or no remote).
+        let _ = Self::run_git_command(
+            path,
+            vec!["push".into(), "origin".into(), "--delete".into(), branch],
+        )
+        .await;
+
+        Ok(())
+    }
 }
 
 // ─── Handle ──────────────────────────────────────────────────────────────────
@@ -444,36 +375,45 @@ impl GitActorHandle {
         self.request(|tx| GitMessage::RunCommand { args, respond_to: tx }).await
     }
 
-    /// Create `.djinn/worktrees/{task_short_id}` checked out to `branch`.
+    /// Create `task/{short_id}` from `target_branch` and push to origin (GIT-01).
+    pub async fn create_branch(
+        &self,
+        short_id: &str,
+        target_branch: &str,
+    ) -> Result<(), GitError> {
+        self.request(|tx| GitMessage::CreateBranch {
+            short_id: short_id.into(),
+            target_branch: target_branch.into(),
+            respond_to: tx,
+        })
+        .await
+    }
+
+    /// Squash-merge `branch` into `target_branch` with `message` (GIT-03).
     ///
-    /// The branch must already exist in the repo. Prunes stale worktree
-    /// metadata before creating (GIT-02, GIT-06).
-    pub async fn create_worktree(
+    /// Returns `Err(GitError::HookFailed)` if a git hook rejects the commit (GIT-07).
+    pub async fn squash_merge(
         &self,
-        task_short_id: String,
-        branch: String,
-    ) -> Result<PathBuf, GitError> {
-        self.request(|tx| GitMessage::CreateWorktree { task_short_id, branch, respond_to: tx })
-            .await
+        branch: &str,
+        target_branch: &str,
+        message: &str,
+    ) -> Result<MergeResult, GitError> {
+        self.request(|tx| GitMessage::SquashMerge {
+            branch: branch.into(),
+            target_branch: target_branch.into(),
+            message: message.into(),
+            respond_to: tx,
+        })
+        .await
     }
 
-    /// Remove the worktree for `task_short_id` (GIT-06).
-    pub async fn remove_worktree(&self, task_short_id: String) -> Result<(), GitError> {
-        self.request(|tx| GitMessage::RemoveWorktree { task_short_id, respond_to: tx }).await
-    }
-
-    /// List all managed worktrees under `.djinn/worktrees/` (GIT-06).
-    pub async fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>, GitError> {
-        self.request(|tx| GitMessage::ListWorktrees { respond_to: tx }).await
-    }
-
-    /// Remove worktrees whose short ID is absent from `active_session_ids`.
-    /// Returns pruned short IDs (GIT-06).
-    pub async fn prune_orphans(
-        &self,
-        active_session_ids: Vec<String>,
-    ) -> Result<Vec<String>, GitError> {
-        self.request(|tx| GitMessage::PruneOrphans { active_session_ids, respond_to: tx }).await
+    /// Force-delete `branch` locally and from origin (GIT-03 post-merge cleanup).
+    pub async fn delete_branch(&self, branch: &str) -> Result<(), GitError> {
+        self.request(|tx| GitMessage::DeleteBranch {
+            branch: branch.into(),
+            respond_to: tx,
+        })
+        .await
     }
 }
 
@@ -497,11 +437,11 @@ pub fn get_or_spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     /// Spin up a GitActorHandle on the server's own repo and verify basic reads.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reads_from_server_repo() {
-        // Use the workspace root (two levels up from the crate root src/)
         let repo_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let handle = GitActorHandle::spawn(repo_path).expect("failed to spawn actor");
 
@@ -512,7 +452,6 @@ mod tests {
         assert_eq!(commit.sha.len(), 40, "SHA should be 40 hex chars");
 
         let status = handle.status().await.expect("status");
-        // Just verify the call succeeded and returns a valid struct
         drop(status);
     }
 
@@ -529,134 +468,222 @@ mod tests {
         assert!(!out.stdout.is_empty(), "git log should produce output");
     }
 
-    // ── Worktree tests (use a throw-away temp repo) ───────────────────────────
+    // ── Branch management tests ───────────────────────────────────────────────
 
-    fn git(args: &[&str], dir: &Path) {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap_or_else(|_| panic!("git {args:?} failed to run"));
-        assert!(status.success(), "git {args:?} exited non-zero");
+    /// Create a local repo with an initial commit on `main` and a local bare remote.
+    /// Both TempDirs must be kept alive for the test duration.
+    fn setup_git_repo() -> (TempDir, TempDir) {
+        let remote_dir = tempfile::tempdir().unwrap();
+        let local_dir = tempfile::tempdir().unwrap();
+
+        // Init bare remote.
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(remote_dir.path())
+            .output()
+            .unwrap();
+
+        // Init local repo.
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(local_dir.path())
+            .output()
+            .unwrap();
+
+        // Set identity and disable GPG signing (required for `git commit` in CI).
+        for (k, v) in [
+            ("user.email", "test@test.com"),
+            ("user.name", "Test User"),
+            ("commit.gpgsign", "false"),
+        ] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(local_dir.path())
+                .output()
+                .unwrap();
+        }
+
+        // Initial commit.
+        std::fs::write(local_dir.path().join("README.md"), "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(local_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(local_dir.path())
+            .output()
+            .unwrap();
+
+        // Rename default branch to `main`.
+        std::process::Command::new("git")
+            .args(["branch", "-m", "main"])
+            .current_dir(local_dir.path())
+            .output()
+            .unwrap();
+
+        // Wire up local bare remote and push.
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", remote_dir.path().to_str().unwrap()])
+            .current_dir(local_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(local_dir.path())
+            .output()
+            .unwrap();
+
+        (local_dir, remote_dir)
     }
 
-    /// Bootstrap a minimal git repo in a temp directory and return a handle.
-    fn setup_temp_repo() -> (tempfile::TempDir, GitActorHandle) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path();
-
-        git(&["init"], path);
-        git(&["config", "user.email", "test@djinn.test"], path);
-        git(&["config", "user.name", "Djinn Test"], path);
-        git(&["commit", "--allow-empty", "-m", "init"], path);
-
-        let handle = GitActorHandle::spawn(path.to_path_buf()).expect("spawn GitActor");
-        (dir, handle)
-    }
-
+    /// `create_branch` creates `task/{short_id}` from `main` and pushes to origin (GIT-01).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn worktree_create_and_remove() {
-        let (dir, handle) = setup_temp_repo();
-        let path = dir.path();
+    async fn create_branch_creates_and_pushes() {
+        let (local, _remote) = setup_git_repo();
+        let handle = GitActorHandle::spawn(local.path().to_path_buf()).unwrap();
 
-        // Create the branch the worktree will check out.
-        git(&["branch", "task/abc1"], path);
+        handle.create_branch("abc1", "main").await.unwrap();
 
-        // Create the worktree.
-        let wt_path = handle
-            .create_worktree("abc1".into(), "task/abc1".into())
+        // Branch exists locally.
+        let out = handle
+            .run_command(vec!["branch".into(), "--list".into(), "task/abc1".into()])
             .await
-            .expect("create_worktree");
+            .unwrap();
+        assert!(out.stdout.contains("task/abc1"));
 
-        assert_eq!(wt_path, path.join(".djinn").join("worktrees").join("abc1"));
-        assert!(wt_path.is_dir(), "worktree directory should exist");
-
-        // It shows up in the list with correct metadata.
-        let worktrees = handle.list_worktrees().await.expect("list_worktrees");
-        assert_eq!(worktrees.len(), 1);
-        assert_eq!(worktrees[0].task_short_id, "abc1");
-        assert_eq!(worktrees[0].branch, "task/abc1");
-        assert_eq!(worktrees[0].path, wt_path);
-
-        // Remove the worktree.
-        handle.remove_worktree("abc1".into()).await.expect("remove_worktree");
-        assert!(!wt_path.exists(), "worktree directory should be gone");
-
-        // List is now empty.
-        let worktrees = handle.list_worktrees().await.expect("list after remove");
-        assert!(worktrees.is_empty());
+        // HEAD is on the new branch.
+        let branch = handle.current_branch().await.unwrap();
+        assert_eq!(branch, "task/abc1");
     }
 
+    /// `squash_merge` produces a single commit on the target branch (GIT-03).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn worktree_prune_orphans() {
-        let (dir, handle) = setup_temp_repo();
-        let path = dir.path();
+    async fn squash_merge_produces_single_commit() {
+        let (local, _remote) = setup_git_repo();
+        let path = local.path();
 
-        git(&["branch", "task/abc1"], path);
-        git(&["branch", "task/abc2"], path);
+        // Set up a feature branch with two commits (setup outside the actor).
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "task/xyz1", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
 
-        handle
-            .create_worktree("abc1".into(), "task/abc1".into())
+        for (file, content, msg) in [
+            ("feat.txt", "feature content", "feat: add file"),
+            ("feat.txt", "updated content", "feat: update file"),
+        ] {
+            std::fs::write(path.join(file), content).unwrap();
+            std::process::Command::new("git")
+                .args(["add", "."])
+                .current_dir(path)
+                .output()
+                .unwrap();
+            std::process::Command::new("git")
+                .args(["commit", "-m", msg])
+                .current_dir(path)
+                .output()
+                .unwrap();
+        }
+
+        // Squash-merge via actor.
+        let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
+        let result = handle
+            .squash_merge("task/xyz1", "main", "feat: squashed feature")
             .await
-            .expect("create abc1");
-        handle
-            .create_worktree("abc2".into(), "task/abc2".into())
+            .unwrap();
+
+        assert_eq!(result.commit_sha.len(), 40, "commit SHA should be 40 chars");
+
+        // `main` should have exactly 2 commits: init + squash.
+        let log = handle
+            .run_command(vec!["log".into(), "--oneline".into(), "main".into()])
             .await
-            .expect("create abc2");
-
-        // Declare only abc1 as active — abc2 should be pruned.
-        let pruned =
-            handle.prune_orphans(vec!["abc1".into()]).await.expect("prune_orphans");
-        assert_eq!(pruned, vec!["abc2".to_string()]);
-
-        let remaining = handle.list_worktrees().await.expect("list after prune");
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].task_short_id, "abc1");
-
-        // abc2 directory is gone.
-        let abc2_path = path.join(".djinn").join("worktrees").join("abc2");
-        assert!(!abc2_path.exists());
+            .unwrap();
+        let lines: Vec<&str> = log.stdout.lines().collect();
+        assert_eq!(lines.len(), 2, "main should have init + squash commit");
+        assert!(lines[0].contains("squashed feature"));
     }
 
+    /// `delete_branch` removes the local branch (GIT-03 post-merge cleanup).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn list_worktrees_empty_when_none_exist() {
-        let (_dir, handle) = setup_temp_repo();
-        let worktrees = handle.list_worktrees().await.expect("list_worktrees");
-        assert!(worktrees.is_empty(), "fresh repo has no managed worktrees");
+    async fn delete_branch_removes_local() {
+        let (local, _remote) = setup_git_repo();
+        let path = local.path();
+
+        // Create a branch manually and return to main.
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "task/del1", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
+        handle.delete_branch("task/del1").await.unwrap();
+
+        // Branch should no longer exist locally.
+        let out = handle
+            .run_command(vec!["branch".into(), "--list".into(), "task/del1".into()])
+            .await
+            .unwrap();
+        assert!(out.stdout.trim().is_empty(), "branch should be deleted");
     }
 
-    #[test]
-    fn parse_worktree_list_output_filters_correctly() {
-        let output = "\
-worktree /repo
-HEAD abc123def456abc123def456abc123def456abc1
-branch refs/heads/main
+    /// `squash_merge` returns `HookFailed` when a git hook rejects the commit (GIT-07).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn squash_merge_surfaces_hook_failure() {
+        let (local, _remote) = setup_git_repo();
+        let path = local.path();
 
-worktree /repo/.djinn/worktrees/abc1
-HEAD def456abc123def456abc123def456abc123def4
-branch refs/heads/task/abc1
+        // Install a pre-commit hook that always fails.
+        let hooks_dir = path.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join("pre-commit");
+        std::fs::write(&hook_path, "#!/bin/sh\necho 'lint failed'\nexit 1\n").unwrap();
 
-worktree /repo/.djinn/worktrees/xyz9
-HEAD 111111abc123def456abc123def456abc123def4
-detached
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
-";
-        let worktrees_dir = PathBuf::from("/repo/.djinn/worktrees");
-        let result = parse_worktree_list_output(output, &worktrees_dir);
+        // Create a feature branch with a commit (committed before hook was installed).
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "task/hook1", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::fs::write(path.join("x.txt"), "x").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "add x", "--no-verify"])
+            .current_dir(path)
+            .output()
+            .unwrap();
 
-        assert_eq!(result.len(), 2);
+        let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
+        let err = handle
+            .squash_merge("task/hook1", "main", "feat: trigger hook")
+            .await
+            .unwrap_err();
 
-        let abc1 = result.iter().find(|w| w.task_short_id == "abc1").unwrap();
-        assert_eq!(abc1.branch, "task/abc1");
-        assert_eq!(abc1.head_sha, "def456abc123def456abc123def456abc123def4");
-
-        // Detached worktrees have an empty branch string.
-        let xyz9 = result.iter().find(|w| w.task_short_id == "xyz9").unwrap();
-        assert_eq!(xyz9.branch, "");
-
-        // Main worktree is excluded.
-        assert!(result.iter().all(|w| w.task_short_id != "main"));
+        assert!(
+            matches!(err, GitError::HookFailed { .. }),
+            "expected HookFailed, got: {err}"
+        );
+        if let GitError::HookFailed { output, .. } = err {
+            assert!(output.contains("lint failed"), "hook output should be surfaced");
+        }
     }
 }
