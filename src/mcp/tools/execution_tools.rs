@@ -58,8 +58,11 @@ impl DjinnMcpServer {
     #[tool(description = "Enable coordinator dispatch for ready tasks")]
     pub async fn execution_start(
         &self,
-        Parameters(_p): Parameters<ExecutionStartParams>,
+        Parameters(p): Parameters<ExecutionStartParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         let Some(coordinator) = self.state.coordinator().await else {
             return json_error("coordinator actor not initialized");
         };
@@ -130,8 +133,11 @@ impl DjinnMcpServer {
     #[tool(description = "Resume the task executor")]
     pub async fn execution_resume(
         &self,
-        Parameters(_p): Parameters<ExecutionResumeParams>,
+        Parameters(p): Parameters<ExecutionResumeParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         let Some(coordinator) = self.state.coordinator().await else {
             return json_error("coordinator actor not initialized");
         };
@@ -152,8 +158,11 @@ impl DjinnMcpServer {
     )]
     pub async fn execution_status(
         &self,
-        Parameters(_p): Parameters<ExecutionStatusParams>,
+        Parameters(p): Parameters<ExecutionStatusParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         let Some(coordinator) = self.state.coordinator().await else {
             return json_error("coordinator actor not initialized");
         };
@@ -218,6 +227,9 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<ExecutionKillTaskParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         let Some(supervisor) = self.state.supervisor().await else {
             return json_error("supervisor actor not initialized");
         };
@@ -238,6 +250,9 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<SessionForTaskParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         let Some(supervisor) = self.state.supervisor().await else {
             return json_error("supervisor actor not initialized");
         };

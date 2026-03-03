@@ -714,12 +714,12 @@ impl DjinnMcpServer {
         };
 
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
-        let tasks: Vec<serde_json::Value> = repo
+        let tasks: Vec<AnyJson> = repo
             .task_refs(&p.permalink)
             .await
             .unwrap_or_default()
             .into_iter()
-            .map(serde_json::Value::from)
+            .map(AnyJson::from)
             .collect();
         json_object(serde_json::json!({ "tasks": tasks }))
     }

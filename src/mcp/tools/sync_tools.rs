@@ -54,12 +54,12 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskSyncEnableParams>,
     ) -> Json<ObjectJson> {
-        let project = PathBuf::from(&p.project);
-        if !project.exists() {
+        if self.project_id_for_path(&p.project).await.is_none() {
             return json_object(serde_json::json!({
-                "error": format!("project path not found: {}", p.project)
+                "error": format!("project not found: {}", p.project)
             }));
         }
+        let project = PathBuf::from(&p.project);
 
         let mgr = self.state.sync_manager();
         if let Err(e) = mgr.enable("tasks", &project).await {
@@ -121,8 +121,11 @@ impl DjinnMcpServer {
     #[tool(description = "Export task state to git sync branch")]
     pub async fn task_sync_export(
         &self,
-        Parameters(_p): Parameters<TaskSyncExportParams>,
+        Parameters(p): Parameters<TaskSyncExportParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         let mgr = self.state.sync_manager();
         let uid = self.state.sync_user_id();
         let results = mgr.export_all(Some(uid)).await;
@@ -142,8 +145,11 @@ impl DjinnMcpServer {
     #[tool(description = "Import task state from git sync branch")]
     pub async fn task_sync_import(
         &self,
-        Parameters(_p): Parameters<TaskSyncImportParams>,
+        Parameters(p): Parameters<TaskSyncImportParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         let mgr = self.state.sync_manager();
         let results = mgr.import_all().await;
 
@@ -164,8 +170,11 @@ impl DjinnMcpServer {
     )]
     pub async fn task_sync_status(
         &self,
-        Parameters(_p): Parameters<TaskSyncStatusParams>,
+        Parameters(p): Parameters<TaskSyncStatusParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         let channels = self.state.sync_manager().status().await;
         json_object(serde_json::json!({ "channels": channels }))
     }

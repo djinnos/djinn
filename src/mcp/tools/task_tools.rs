@@ -718,6 +718,9 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskBlockersListParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
             return json_object(not_found(&p.id));
@@ -751,6 +754,9 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskBlockedListParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
             return json_object(not_found(&p.id));
@@ -782,6 +788,9 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskReadyParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         if let Some(ref o) = p.owner {
             if let Err(e) = validate_owner(o) {
                 return json_object(serde_json::json!({ "error": e }));
@@ -878,6 +887,9 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskClaimParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         if let Some(ref o) = p.owner {
             if let Err(e) = validate_owner(o) {
                 return json_object(serde_json::json!({ "error": e }));
@@ -1007,6 +1019,9 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<BoardHealthParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         let stale_hours = p.stale_threshold_hours.unwrap_or(24).max(1);
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.board_health(stale_hours).await {
@@ -1023,6 +1038,9 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<BoardReconcileParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         let stale_hours = p.stale_threshold_hours.unwrap_or(24).max(1);
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.reconcile(stale_hours).await {
@@ -1039,6 +1057,9 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskMemoryRefsParams>,
     ) -> Json<ObjectJson> {
+        if let Err(e) = self.validate_optional_project(&p.project).await {
+            return e;
+        }
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
             return json_object(not_found(&p.id));
