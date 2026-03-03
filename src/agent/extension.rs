@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::AgentType;
 use crate::db::repositories::note::NoteRepository;
+use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
 use crate::models::task::{Task, TaskStatus, TransitionAction};
 use crate::server::AppState;
@@ -183,9 +184,25 @@ async fn call_task_show(
 ) -> Result<serde_json::Value, String> {
     let p: TaskShowParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db().clone(), state.events().clone());
+    let session_repo = SessionRepository::new(state.db().clone(), state.events().clone());
 
     match repo.resolve(&p.id).await {
-        Ok(Some(task)) => Ok(task_to_value(&task)),
+        Ok(Some(task)) => {
+            let mut value = task_to_value(&task);
+            if let Some(map) = value.as_object_mut() {
+                let session_count = session_repo.count_for_task(&task.id).await.unwrap_or(0);
+                let active_session = session_repo.active_for_task(&task.id).await.ok().flatten();
+                map.insert(
+                    "session_count".to_string(),
+                    serde_json::json!(session_count),
+                );
+                map.insert(
+                    "active_session".to_string(),
+                    serde_json::json!(active_session),
+                );
+            }
+            Ok(value)
+        }
         Ok(None) => Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) })),
         Err(e) => Err(e.to_string()),
     }

@@ -93,6 +93,71 @@ impl SessionRepository {
             .send(DjinnEvent::SessionUpdated(session.clone()));
         Ok(session)
     }
+
+    pub async fn get(&self, id: &str) -> Result<Option<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, SessionRecord>(
+            "SELECT id, task_id, model_id, agent_type, started_at, ended_at,
+                    status, tokens_in, tokens_out, worktree_path
+             FROM sessions
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    pub async fn list_for_task(&self, task_id: &str) -> Result<Vec<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, SessionRecord>(
+            "SELECT id, task_id, model_id, agent_type, started_at, ended_at,
+                    status, tokens_in, tokens_out, worktree_path
+             FROM sessions
+             WHERE task_id = ?1
+             ORDER BY started_at DESC",
+        )
+        .bind(task_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    pub async fn list_active(&self) -> Result<Vec<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, SessionRecord>(
+            "SELECT id, task_id, model_id, agent_type, started_at, ended_at,
+                    status, tokens_in, tokens_out, worktree_path
+             FROM sessions
+             WHERE status = 'running'
+             ORDER BY started_at DESC",
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    pub async fn active_for_task(&self, task_id: &str) -> Result<Option<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, SessionRecord>(
+            "SELECT id, task_id, model_id, agent_type, started_at, ended_at,
+                    status, tokens_in, tokens_out, worktree_path
+             FROM sessions
+             WHERE task_id = ?1 AND status = 'running'
+             ORDER BY started_at DESC
+             LIMIT 1",
+        )
+        .bind(task_id)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    pub async fn count_for_task(&self, task_id: &str) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sessions WHERE task_id = ?1")
+                .bind(task_id)
+                .fetch_one(self.db.pool())
+                .await?,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -160,5 +225,44 @@ mod tests {
             }
         }
         assert!(updated_seen, "expected SessionUpdated event");
+    }
+
+    #[tokio::test]
+    async fn list_and_active_queries() {
+        let db = test_helpers::create_test_db();
+        let (tx, _) = broadcast::channel(1024);
+        let task_id = create_task(tx.clone(), db.clone()).await;
+        let repo = SessionRepository::new(db, tx);
+
+        let first = repo
+            .create(&task_id, "openai/gpt-5", "worker", None)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let second = repo
+            .create(&task_id, "openai/gpt-5", "worker", None)
+            .await
+            .unwrap();
+
+        let listed = repo.list_for_task(&task_id).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, second.id);
+        assert_eq!(listed[1].id, first.id);
+
+        let count = repo.count_for_task(&task_id).await.unwrap();
+        assert_eq!(count, 2);
+
+        let active = repo.list_active().await.unwrap();
+        assert_eq!(active.len(), 2);
+
+        let active_task = repo.active_for_task(&task_id).await.unwrap();
+        assert_eq!(active_task.unwrap().id, second.id);
+
+        let _ = repo
+            .update(&second.id, SessionStatus::Completed, 1, 1)
+            .await
+            .unwrap();
+        let active_task = repo.active_for_task(&task_id).await.unwrap();
+        assert_eq!(active_task.unwrap().id, first.id);
     }
 }

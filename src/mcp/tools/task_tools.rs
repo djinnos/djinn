@@ -4,6 +4,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 
 use crate::db::repositories::epic::EpicRepository;
+use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::{
     ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository,
 };
@@ -473,8 +474,25 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<TaskShowParams>,
     ) -> Json<serde_json::Value> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let session_repo =
+            SessionRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.resolve(&p.id).await {
-            Ok(Some(t)) => Json(task_to_value(&t)),
+            Ok(Some(t)) => {
+                let mut value = task_to_value(&t);
+                if let Some(map) = value.as_object_mut() {
+                    let session_count = session_repo.count_for_task(&t.id).await.unwrap_or(0);
+                    let active_session = session_repo.active_for_task(&t.id).await.ok().flatten();
+                    map.insert(
+                        "session_count".to_string(),
+                        serde_json::json!(session_count),
+                    );
+                    map.insert(
+                        "active_session".to_string(),
+                        serde_json::json!(active_session),
+                    );
+                }
+                Json(value)
+            }
             Ok(None) => Json(not_found(&p.id)),
             Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
         }
