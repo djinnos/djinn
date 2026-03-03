@@ -1,6 +1,6 @@
 -- Canonical schema — ground truth. Matches result of running all migrations.
 -- Updated manually after each migration is added.
--- Last updated: V20260303000010__sessions.sql
+-- Last updated: V20260303000011__task_merge_commit_sha.sql
 
 CREATE TABLE settings (
     key        TEXT NOT NULL PRIMARY KEY,
@@ -54,7 +54,8 @@ CREATE TABLE tasks (
     continuation_count  INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    closed_at           TEXT
+    closed_at           TEXT,
+    merge_commit_sha    TEXT
 );
 
 CREATE INDEX tasks_epic_id ON tasks(epic_id);
