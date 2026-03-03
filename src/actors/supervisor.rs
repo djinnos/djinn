@@ -83,6 +83,10 @@ enum SupervisorMessage {
         task_id: String,
         respond_to: Reply<()>,
     },
+    InterruptAll {
+        reason: String,
+        respond_to: Reply<()>,
+    },
     GetStatus {
         respond_to: Reply<SupervisorStatus>,
     },
@@ -170,6 +174,10 @@ impl AgentSupervisor {
                     active_sessions: self.sessions.len(),
                     capacity: self.capacity.clone(),
                 }));
+            }
+            SupervisorMessage::InterruptAll { reason, respond_to } => {
+                self.interrupt_all_sessions(&reason).await;
+                let _ = respond_to.send(Ok(()));
             }
             SupervisorMessage::SessionCompleted { task_id, result } => {
                 if self.interrupted_sessions.remove(&task_id) {
@@ -590,22 +598,26 @@ impl AgentSupervisor {
         task: &Task,
         agent_type: AgentType,
     ) -> Result<(), SupervisorError> {
-        if task.status == "open" && agent_type == AgentType::Worker {
+        let action = match (agent_type, task.status.as_str()) {
+            (AgentType::Worker, "open") => Some(TransitionAction::Start),
+            (AgentType::TaskReviewer, "needs_task_review") => {
+                Some(TransitionAction::TaskReviewStart)
+            }
+            (AgentType::PhaseReviewer, "needs_phase_review") => {
+                Some(TransitionAction::PhaseReviewStart)
+            }
+            _ => None,
+        };
+
+        if let Some(action) = action {
             let repo =
                 TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
-            repo.transition(
-                &task.id,
-                TransitionAction::Start,
-                "agent-supervisor",
-                "system",
-                None,
-                None,
-            )
-            .await
-            .map_err(|e| SupervisorError::TaskTransitionFailed {
-                task_id: task.id.clone(),
-                reason: e.to_string(),
-            })?;
+            repo.transition(&task.id, action, "agent-supervisor", "system", None, None)
+                .await
+                .map_err(|e| SupervisorError::TaskTransitionFailed {
+                    task_id: task.id.clone(),
+                    reason: e.to_string(),
+                })?;
         }
         Ok(())
     }
@@ -729,6 +741,11 @@ impl AgentSupervisor {
     }
 
     async fn shutdown(&mut self) {
+        self.interrupt_all_sessions("session interrupted by supervisor shutdown")
+            .await;
+    }
+
+    async fn interrupt_all_sessions(&mut self, reason: &str) {
         struct PendingSession {
             task_id: String,
             join: tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -772,12 +789,8 @@ impl AgentSupervisor {
             if let Some(worktree_path) = item.worktree_path.as_ref() {
                 self.commit_wip_if_needed(&item.task_id, worktree_path).await;
             }
-            self.transition_interrupted(
-                &item.task_id,
-                item.agent_type,
-                "session interrupted by supervisor shutdown",
-            )
-            .await;
+            self.transition_interrupted(&item.task_id, item.agent_type, reason)
+                .await;
         }
     }
 }
@@ -842,6 +855,14 @@ impl AgentSupervisorHandle {
         self.request(|tx| SupervisorMessage::GetStatus { respond_to: tx })
             .await
     }
+
+    pub async fn interrupt_all(&self, reason: &str) -> Result<(), SupervisorError> {
+        self.request(|tx| SupervisorMessage::InterruptAll {
+            reason: reason.to_owned(),
+            respond_to: tx,
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -902,5 +923,22 @@ mod tests {
         let model = status.capacity.get("test/mock").unwrap();
         assert_eq!(model.active, 1);
         assert_eq!(model.max, 1);
+    }
+
+    #[tokio::test]
+    async fn interrupt_all_cancels_active_mock_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let supervisor = spawn_supervisor(&temp);
+
+        supervisor.dispatch("task-1", "test/mock").await.unwrap();
+        assert!(supervisor.has_session("task-1").await.unwrap());
+
+        supervisor
+            .interrupt_all("session interrupted by test")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        assert!(!supervisor.has_session("task-1").await.unwrap());
     }
 }

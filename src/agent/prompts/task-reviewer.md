@@ -64,19 +64,15 @@ For each criterion, find evidence in the diff above:
 
 **Rule:** If Blue Team has ANY reasonable defense → DROP the finding
 
-### Step 4: Update Acceptance Criteria and Decide
+### Step 4: Update Acceptance Criteria and Transition the Task
 
-**MANDATORY: You MUST call `task_update` with acceptance_criteria BEFORE emitting REVIEW_RESULT.** Skipping this step is a review failure.
+1. **MANDATORY**: Call `task_update(id="{{task_id}}", acceptance_criteria=[...])` with every criterion set to `met: true` or `met: false`.
+2. If any criterion is unmet, add a `task_comment_add` with concrete missing evidence and then call:
+   - `task_transition(id="{{task_id}}", action="task_review_reject", reason="<what is missing>")`
+3. If all criteria are met, call:
+   - `task_transition(id="{{task_id}}", action="task_review_approve")`
 
-Call `task_update(id="{{task_id}}", acceptance_criteria=[...], project="{{project_path}}")` with every criterion set to `met: true` or `met: false`.
-
-**Adding new criteria:** If you found issues NOT covered by the original criteria (e.g., code doesn't compile, wrong file location), add them as new entries with `met: false`.
-
-**Then, and ONLY after the task_update call succeeds**, emit your verdict:
-
-| All MET | → VERIFY |
-| Any NOT MET | → REOPEN |
-| No meaningful changes required | → CANCEL |
+Do not stop after analysis. You must perform the transition tool call.
 
 ## Anti-Loop Reminder
 
@@ -91,19 +87,8 @@ Call `task_update(id="{{task_id}}", acceptance_criteria=[...], project="{{projec
 
 ## Output
 
-**VERIFIED:**
-```
-REVIEW_RESULT: VERIFIED
-```
+After calling tools, provide a short review note with:
 
-**REOPEN:**
 ```
-REOPEN_REASON: {criterion} not met. Missing: {what}
-REVIEW_RESULT: REOPEN
-```
-
-**CANCEL:**
-```
-CANCEL_REASON: {why this task should be canceled}
-REVIEW_RESULT: CANCEL
+REVIEW_ACTION: APPROVED|REJECTED
 ```

@@ -10,6 +10,7 @@
 //   3. broadcast::Receiver<DjinnEvent> — react to open-task events.
 //   4. 30-second Interval tick — stuck detection safety net (AGENT-08).
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -168,6 +169,13 @@ impl CoordinatorActor {
                 if !self.paused {
                     tracing::info!("CoordinatorActor: paused");
                     self.paused = true;
+                    if let Err(e) = self
+                        .supervisor
+                        .interrupt_all("session interrupted by coordinator pause")
+                        .await
+                    {
+                        tracing::warn!(error = %e, "CoordinatorActor: failed to interrupt active sessions on pause");
+                    }
                 }
             }
             CoordinatorMessage::Resume => {
@@ -235,7 +243,7 @@ impl CoordinatorActor {
     /// those that don't already have an active session.
     async fn dispatch_ready_tasks(&mut self) {
         let repo = self.task_repo();
-        let ready = match repo
+        let mut ready = match repo
             .list_ready(ReadyQuery {
                 issue_type: Some("!epic".into()),
                 limit: 50,
@@ -249,6 +257,23 @@ impl CoordinatorActor {
                 return;
             }
         };
+
+        for status in ["needs_task_review", "needs_phase_review"] {
+            match repo.list_by_status(status).await {
+                Ok(mut tasks) => ready.append(&mut tasks),
+                Err(e) => {
+                    tracing::warn!(error = %e, status, "CoordinatorActor: list_by_status failed");
+                }
+            }
+        }
+
+        let mut seen = HashSet::new();
+        ready.retain(|t| seen.insert(t.id.clone()));
+        ready.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+        });
 
         for task in ready {
             if !self.health.is_available(DEFAULT_MODEL_ID) {
@@ -532,6 +557,48 @@ mod tests {
         assert_eq!(
             status.tasks_dispatched, 1,
             "should have dispatched the ready task"
+        );
+    }
+
+    #[tokio::test]
+    async fn trigger_dispatch_increments_counter_for_review_tasks() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db.clone(), tx.clone());
+
+        let task = repo
+            .create(&epic.id, "Review me", "", "", "task", 0, "")
+            .await
+            .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::Start,
+            "test",
+            "system",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::SubmitTaskReview,
+            "test",
+            "system",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let handle = spawn_coordinator(&db, &tx);
+        handle.trigger_dispatch().await.unwrap();
+
+        let status = handle.get_status().await.unwrap();
+        assert_eq!(
+            status.tasks_dispatched, 1,
+            "should dispatch task waiting for review"
         );
     }
 

@@ -39,19 +39,23 @@ Check how changes from different tasks interact:
 - Shared state handled correctly?
 - API contracts consistent?
 
-### Step 4: Create Fix Tasks (if needed)
+### Step 4: Record Findings and Transition
 
-If issues are found, create fix tasks using `task_create`:
+If issues are found:
+1. Add a detailed comment with `task_comment_add(id="{{task_id}}", body="...")`
+2. Reject phase review with:
 
+```text
+task_transition(id="{{task_id}}", action="phase_review_reject", reason="<summary of issues>")
 ```
-task_create(
-    title="Fix: {description of issue}",
-    issue_type="task",
-    project="{{project_path}}",
-    description="{what needs to be fixed and why}",
-    labels=[{{common_labels}}]
-)
+
+If the batch is clean:
+
+```text
+task_transition(id="{{task_id}}", action="phase_review_approve")
 ```
+
+Do not stop after analysis. You must perform the transition tool call.
 
 ## Output
 
@@ -70,5 +74,5 @@ Also include:
 ```
 BATCH_NUMBER: {{batch_num}}
 TASKS_REVIEWED: {{task_count}}
-FIX_TASKS_CREATED: <number>
+FIX_TASKS_CREATED: 0
 ```
