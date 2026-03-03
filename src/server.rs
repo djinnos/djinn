@@ -1,12 +1,19 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
 use serde::Serialize;
+use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 
+use crate::actors::git::{GitActorHandle, GitError};
 use crate::db::connection::Database;
+use crate::events::DjinnEvent;
 use crate::mcp;
+
+const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 /// Shared application state, cheaply cloneable via `Arc`.
 #[derive(Clone)]
@@ -17,12 +24,20 @@ pub struct AppState {
 struct Inner {
     pub db: Database,
     pub cancel: CancellationToken,
+    pub events: broadcast::Sender<DjinnEvent>,
+    pub git_actors: Mutex<HashMap<PathBuf, GitActorHandle>>,
 }
 
 impl AppState {
     pub fn new(db: Database, cancel: CancellationToken) -> Self {
+        let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
-            inner: Arc::new(Inner { db, cancel }),
+            inner: Arc::new(Inner {
+                db,
+                cancel,
+                events,
+                git_actors: Mutex::new(HashMap::new()),
+            }),
         }
     }
 
@@ -32,6 +47,16 @@ impl AppState {
 
     pub fn cancel(&self) -> &CancellationToken {
         &self.inner.cancel
+    }
+
+    pub fn events(&self) -> &broadcast::Sender<DjinnEvent> {
+        &self.inner.events
+    }
+
+    /// Get or spawn a `GitActorHandle` for the given project path (GIT-04).
+    pub async fn git_actor(&self, path: &Path) -> Result<GitActorHandle, GitError> {
+        let mut map = self.inner.git_actors.lock().await;
+        crate::actors::git::get_or_spawn(&mut map, path)
     }
 }
 

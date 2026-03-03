@@ -1,1 +1,2 @@
-// Repository pattern — private Connection, write ops emit full-entity events.
+pub mod project;
+pub mod settings;
