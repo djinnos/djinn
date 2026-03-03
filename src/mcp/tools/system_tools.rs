@@ -1,12 +1,23 @@
-use rmcp::{tool, tool_router};
+use rmcp::{Json, tool, tool_router};
+use schemars::JsonSchema;
+use serde::Serialize;
 
 use crate::mcp::server::DjinnMcpServer;
 
+#[derive(Serialize, JsonSchema)]
+pub struct PingResponse {
+    pub status: &'static str,
+    pub version: &'static str,
+}
+
 #[tool_router(router = system_tool_router, vis = "pub")]
 impl DjinnMcpServer {
-    /// Ping the server to check if it's alive. Returns "pong".
+    /// Ping the server. Returns {status: ok, version}.
     #[tool(description = "Ping the server to check if it's alive")]
-    pub async fn system_ping(&self) -> String {
-        "pong".to_string()
+    pub async fn system_ping(&self) -> Json<PingResponse> {
+        Json(PingResponse {
+            status: "ok",
+            version: env!("CARGO_PKG_VERSION"),
+        })
     }
 }
