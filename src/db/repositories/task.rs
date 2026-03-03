@@ -2297,6 +2297,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_merge_commit_sha_persists_value() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let task = open_task(&repo, &epic.id).await;
+        let updated = repo
+            .set_merge_commit_sha(&task.id, "0123456789abcdef0123456789abcdef01234567")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            updated.merge_commit_sha.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+    }
+
+    #[tokio::test]
     async fn board_health_report() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
