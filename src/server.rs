@@ -63,3 +63,61 @@ pub async fn run(router: Router, port: u16, cancel: CancellationToken) {
 
     tracing::info!("server shut down");
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    use crate::test_helpers;
+
+    /// Integration test: hit /health via tower::ServiceExt::oneshot().
+    #[tokio::test]
+    async fn health_returns_ok() {
+        let app = test_helpers::create_test_app();
+
+        let req = axum::http::Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), 200);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    /// Unit test: verify the in-memory test DB has migrations applied.
+    #[tokio::test]
+    async fn test_db_has_tables() {
+        let db = test_helpers::create_test_db();
+
+        db.call(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='settings'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(count, 1, "settings table should exist");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Demonstrates tokio::test(start_paused = true) for time-dependent logic.
+    /// With start_paused, tokio::time::sleep completes instantly (time is virtual).
+    #[tokio::test(start_paused = true)]
+    async fn time_paused_pattern() {
+        let before = tokio::time::Instant::now();
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let elapsed = before.elapsed();
+
+        // With start_paused, the 60s sleep advances virtual time instantly.
+        assert_eq!(elapsed.as_secs(), 60);
+    }
+}

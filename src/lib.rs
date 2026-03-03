@@ -4,3 +4,6 @@ pub mod error;
 pub mod mcp;
 pub mod models;
 pub mod server;
+
+#[cfg(test)]
+pub mod test_helpers;
