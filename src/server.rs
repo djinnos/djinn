@@ -6,6 +6,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::connection::Database;
+use crate::mcp;
 
 /// Shared application state, cheaply cloneable via `Arc`.
 #[derive(Clone)]
@@ -45,7 +46,13 @@ async fn health() -> axum::Json<HealthResponse> {
 
 /// Build the application router.
 pub fn router(state: AppState) -> Router {
-    Router::new().route("/health", get(health)).with_state(state)
+    let mcp_service =
+        mcp::server::DjinnMcpServer::into_service(state.clone(), state.cancel().clone());
+
+    Router::new()
+        .route("/health", get(health))
+        .nest_service("/mcp", mcp_service)
+        .with_state(state)
 }
 
 /// Run the server, blocking until shutdown signal.
