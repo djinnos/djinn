@@ -27,7 +27,7 @@ Use a **`djinn/` git branch namespace** as the universal sync transport. Each ca
 
 ### Channel: `djinn/tasks`
 
-The v1 implementation. Per-user JSONL files (`{clerk_user_id}.jsonl`) on the `djinn/tasks` branch. Conflict resolution: last-writer-wins on `updated_at`. On push failure (concurrent push from another machine), fetch + rebase and retry with backoff.
+The v1 implementation. Per-user JSONL files (`{user_id}.jsonl`) on the `djinn/tasks` branch. Conflict resolution: last-writer-wins on `updated_at`. On push failure (concurrent push from another machine), fetch + rebase and retry with backoff.
 
 ### Future channels (not in v1)
 

@@ -15,7 +15,6 @@ use crate::actors::coordinator::CoordinatorHandle;
 use crate::actors::git::{GitActorHandle, GitError};
 use crate::actors::supervisor::AgentSupervisorHandle;
 use crate::agent::init_session_manager;
-use crate::auth::JwksCache;
 use crate::db::connection::Database;
 use crate::db::repositories::note::NoteRepository;
 use crate::db::repositories::project::ProjectRepository;
@@ -38,10 +37,6 @@ struct Inner {
     pub cancel: CancellationToken,
     pub events: broadcast::Sender<DjinnEvent>,
     pub git_actors: Mutex<HashMap<PathBuf, GitActorHandle>>,
-    /// Clerk JWKS cache. `None` means auth is disabled (e.g. in tests).
-    pub jwks: Option<JwksCache>,
-    /// Clerk user ID from the startup token (AUTH-03).
-    pub user_id: Option<String>,
     /// models.dev catalog + custom providers (in-memory, refreshed on startup).
     pub catalog: CatalogService,
     /// Per-model circuit-breaker health tracker.
@@ -55,27 +50,11 @@ struct Inner {
 }
 
 impl AppState {
-    /// Create an AppState without authentication (for tests / dev mode).
     pub fn new(db: Database, cancel: CancellationToken) -> Self {
-        Self::new_inner(db, cancel, None, None)
+        Self::new_inner(db, cancel)
     }
 
-    /// Create an AppState with Clerk JWT auth enabled.
-    pub fn new_with_auth(
-        db: Database,
-        cancel: CancellationToken,
-        jwks: JwksCache,
-        user_id: String,
-    ) -> Self {
-        Self::new_inner(db, cancel, Some(jwks), Some(user_id))
-    }
-
-    fn new_inner(
-        db: Database,
-        cancel: CancellationToken,
-        jwks: Option<JwksCache>,
-        user_id: Option<String>,
-    ) -> Self {
+    fn new_inner(db: Database, cancel: CancellationToken) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let sync = SyncManager::new(db.clone(), events.clone());
         Self {
@@ -84,8 +63,6 @@ impl AppState {
                 cancel,
                 events,
                 git_actors: Mutex::new(HashMap::new()),
-                jwks,
-                user_id,
                 catalog: CatalogService::new(),
                 health_tracker: HealthTracker::new(),
                 sync,
@@ -107,14 +84,8 @@ impl AppState {
         &self.inner.events
     }
 
-    /// JWKS cache for Clerk JWT validation, or `None` if auth is disabled.
-    pub fn jwks(&self) -> Option<&JwksCache> {
-        self.inner.jwks.as_ref()
-    }
-
-    /// Clerk user ID established at startup, or `None` if auth is disabled.
-    pub fn user_id(&self) -> Option<&str> {
-        self.inner.user_id.as_deref()
+    pub fn sync_user_id(&self) -> &str {
+        "local"
     }
 
     /// Get or spawn a `GitActorHandle` for the given project path (GIT-04).
@@ -227,8 +198,7 @@ impl AppState {
         // Restore sync state from DB and start background auto-export task.
         let sync = self.sync_manager().clone();
         sync.restore().await;
-        let uid = self.user_id().unwrap_or("local").to_string();
-        sync.spawn_background_task(self.cancel().clone(), uid);
+        sync.spawn_background_task(self.cancel().clone(), self.sync_user_id().to_string());
 
         self.reindex_all_projects_on_startup().await;
         self.reload_settings_and_apply().await;
@@ -399,16 +369,7 @@ pub fn router(state: AppState) -> Router {
     let mcp_service =
         mcp::server::DjinnMcpServer::into_service(state.clone(), state.cancel().clone());
 
-    // Apply JWT auth middleware to /mcp only. The middleware is a no-op when
-    // auth is not configured (AppState::jwks() returns None).
-    // Use .layer() because fallback_service is not a named route so route_layer() is a no-op.
-    let mcp_router =
-        Router::new()
-            .fallback_service(mcp_service)
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                crate::auth::middleware::require_auth,
-            ));
+    let mcp_router = Router::new().fallback_service(mcp_service);
 
     Router::new()
         .route("/health", get(health))

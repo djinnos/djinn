@@ -37,9 +37,9 @@ _Updated: 2026-03-03 (post-audit)_
 
 ## Phase 1: Foundation — Database, Schema, and Core Server ✅
 
-**Goal**: A running Axum server with the DB layer, migrations, repository pattern, and Clerk JWT authentication. Nothing user-visible yet, but the foundation everything else is built on.
+**Goal**: A running Axum server with the DB layer, migrations, and repository pattern. Nothing user-visible yet, but the foundation everything else is built on.
 
-**Progress**: COMPLETE. All 5 features closed: Axum server + rmcp (`cueu`), Clerk JWT auth (`168f`), rusqlite+WAL (`642n`), refinery migrations (`3x7d`), repository pattern + broadcast events (`u0rv`).
+**Progress**: COMPLETE. Core foundation features closed: Axum server + rmcp (`cueu`), rusqlite+WAL (`642n`), refinery migrations (`3x7d`), repository pattern + broadcast events (`u0rv`).
 
 **Requirements addressed**:
 - DB-01 (rusqlite + WAL)
@@ -52,20 +52,15 @@ _Updated: 2026-03-03 (post-audit)_
 - MCP-01 (Streamable HTTP transport)
 - MCP-02 (per-session instances)
 - MCP-05 (tool organization by domain)
-- AUTH-01 (Clerk JWT validation on startup/session)
-- AUTH-02 (JWKS key caching)
-- AUTH-03 (Clerk user ID extraction)
-- AUTH-04 (desktop passes Clerk token)
 - CFG-01 (settings in DB)
 - CFG-02 (project registry)
 
 **Success criteria**:
-1. Server starts with a valid Clerk JWT, rejects invalid/expired tokens
+1. Server starts cleanly without auth token requirements
 2. DB created at `~/.djinn/djinn.db` with WAL mode, refinery migrations applied
 3. MCP transport accepts connections and serves a `system_ping` tool
 4. Repository pattern enforced: `Connection` private, all writes emit events via broadcast channel
 5. Settings and projects stored in DB with CRUD operations
-6. JWKS cached with 1-hour TTL; re-fetched on key rotation
 
 **Depends on**: Nothing (first phase)
 
@@ -275,7 +270,7 @@ _Updated: 2026-03-03 (post-audit)_
 
 **Goal**: Close gaps found in the Go server comparison audit. Covers execution control, project tools, operational logging, conflict resolution, structured output parsing, merge tracking, and file watchers. **See ADR-009 for simplified execution model.**
 
-**Progress**: 0/7 items. Epic `1hcn` created.
+**Progress**: 0/8 items. Epic `1hcn` created.
 
 **Features/Tasks**:
 - `cu4v` — Simplified execution control MCP tools (P0) — 6 tools per ADR-009
@@ -285,6 +280,7 @@ _Updated: 2026-03-03 (post-audit)_
 - `lypu` — Structured agent output parsing (P1) — worker DONE/BLOCKED, reviewer VERIFIED/REOPEN verdict extraction
 - `1i5q` — Store merge_commit_sha on task after squash-merge (P2) — GIT-09
 - `ewbt` — File watchers for KB and settings changes (P2) — notify crate, re-index on external edits
+- `stdio-bridge` — `djinn-server --mcp-connect` stdio↔HTTP MCP bridge mode (P2) — plugin compatibility via daemon-discovered upstream URL
 
 **Requirements addressed**:
 - GIT-09 (merge_commit_sha on task)
@@ -326,7 +322,7 @@ Phase 8 depends on Phase 5 (supervisor writes sessions). Phase 9 is independent 
 
 Updated post-audit. ADR-009 eliminates phases (26 tools → 6). ADR-010 adds session tracking. New requirement AGENT-19 (session persistence).
 
-- Phase 1: DB-01..07, MCP-01/02/05, AUTH-01..04, CFG-01/02 (17 reqs) ✅
+- Phase 1: DB-01..07, MCP-01/02/05, CFG-01/02 (13 reqs) ✅
 - Phase 2: TASK-01..14 (14 reqs) ✅
 - Phase 3: MEM-01..10 (10 reqs) ✅
 - Phase 4: GIT-01..08, CFG-03 (9 reqs) ✅
@@ -347,7 +343,6 @@ Total: 94 (88 prior + AGENT-19 + 5 gap-identified coverage gaps) ✓
 - [[Research Summary]] — synthesis informing phase sequencing
 - [[Database Layer — rusqlite over libsql/Turso]] — ADR-002 driving DB and desktop integration phases
 - [[Migrations — refinery with timestamp-based naming]] — ADR-003 driving migration approach in Phase 1
-- [[Authentication — Clerk JWT Validation]] — ADR-004 driving auth in Phase 1
 - [[Server Lifecycle — Desktop-Managed Daemon with Graceful Restart]] — ADR-005 driving lifecycle in Phase 7
 - [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — ADR-008 driving Phases 5-7
 - [[Agent Harness Scope]] — scope boundaries for Goose integration
@@ -368,7 +363,6 @@ Total: 94 (88 prior + AGENT-19 + 5 gap-identified coverage gaps) ✓
 | GIT-* | Architecture Research §4 (git2 + CLI), Pitfalls Research §6 |
 | SYNC-* | Brief (scope section) |
 | OBS-* | Brief, Features Research (89% need tracing) |
-| AUTH-* | ADR-004 (Clerk JWT Validation) |
 | LIFE-* | ADR-005 (Server Lifecycle) |
 | TEST-* | Research Summary, Stack Research |
 | CFG-* | Brief (scope section) |

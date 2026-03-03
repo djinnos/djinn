@@ -24,7 +24,7 @@ The desktop manages the server lifecycle as a daemon. On update, the desktop per
 ```
 Desktop launches:
   1. Extract server binary from app resources
-  2. Pass Clerk JWT and config (port, DB path) as CLI args or env vars
+  2. Pass config (port, DB path) as CLI args or env vars
   3. Spawn server as child process (stdio piped for health monitoring)
   4. Wait for health check (server responds to system_ping)
   5. Connect MCP session
@@ -77,7 +77,6 @@ The desktop is the supervisor:
 - Monitors server process (exit codes, health checks)
 - Restarts server if it crashes unexpectedly
 - Handles update sequencing (shutdown old → start new)
-- Passes fresh Clerk tokens on restart
 
 ### Platform considerations
 
@@ -107,5 +106,4 @@ The desktop is the supervisor:
 ## Relations
 - [[Project Brief]] — server lifecycle not previously specified
 - [[V1 Requirements]] — adds LIFE-* requirements
-- [[Authentication — Clerk JWT Validation]] — ADR-004, tokens passed on spawn
 - [[Database Layer — rusqlite over libsql/Turso]] — ADR-002, state survival via DB

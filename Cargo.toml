@@ -9,12 +9,11 @@ goose = { path = "../../references/goose/crates/goose", default-features = false
 anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
-jsonwebtoken = "9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 git2 = "0.20"
 dirs = "6"
 refinery = { version = "0.9", features = ["int8-versions"] }
-rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "0.17", features = ["server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 ring = "0.17"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros"] }
 schemars = "1"

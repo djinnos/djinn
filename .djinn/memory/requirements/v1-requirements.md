@@ -19,6 +19,7 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 | MCP-03 | ~~MCP-connect bridge mode (stdio↔HTTP proxy) injecting project/task context into agent sessions~~ — DROPPED per ADR-008 (replaced by direct function calls via Goose extension) | ~~v1~~ | Brief: Core MCP Server |
 | MCP-04 | SSE change feed: repository-emitted full-entity events streamed to desktop via SSE endpoint. Desktop updates UI directly from event payload — no follow-up reads. Covers creates, updates, deletes across all entity types. | v1 | ADR-002, Research Summary |
 | MCP-05 | Tool registration organized by domain (task, memory, execution, system modules) | v1 | Architecture Research §6 |
+| MCP-06 | `djinn-server --mcp-connect` stdio↔HTTP bridge mode for plugin compatibility. Forwards `tools/list` and `tools/call` over Streamable HTTP and discovers upstream URL from `~/.djinn/daemon.json` when not explicitly configured. | v1 | Compatibility requirement (desktop/plugin integrations) |
 
 ## Category: DB (Database Layer)
 
@@ -132,21 +133,11 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 | OBS-02 | File-based operational log at `~/.djinn/` with levels and rotation (crashes, coordinator decisions) | v1 | Brief |
 | OBS-03 | Step-level agent tracing | v2 | Features Research (89% of prod teams require it) |
 
-## Category: AUTH (Authentication via Clerk)
-
-| ID | Requirement | Classification | Source |
-|---|---|---|---|
-| AUTH-01 | Validate Clerk JWT on startup and per MCP session. Server won't start without a valid token. RS256 signature verified against Clerk JWKS. | v1 | ADR-004 |
-| AUTH-02 | JWKS key caching (1-hour TTL, invalidate on signature failure, re-fetch on rotation) | v1 | ADR-004 |
-| AUTH-03 | Extract Clerk user ID (sub claim) as server identity for the session | v1 | ADR-004 |
-| AUTH-04 | Desktop passes fresh Clerk token on server spawn and per MCP connection | v1 | ADR-004 |
-| AUTH-05 | Headless mode with CLI token paste | v2 | ADR-004 |
-
 ## Category: LIFE (Server Lifecycle)
 
 | ID | Requirement | Classification | Source |
 |---|---|---|---|
-| LIFE-01 | Desktop spawns server as child process OR server runs standalone (VPS/WSL) — passes Clerk JWT + config via CLI args/env (revised per ADR-008 for standalone support) | v1 | ADR-005, ADR-008 |
+| LIFE-01 | Desktop spawns server as child process OR server runs standalone (VPS/WSL) — config passed via CLI args/env (revised per ADR-008 for standalone support) | v1 | ADR-005, ADR-008 |
 | LIFE-02 | Graceful shutdown on SIGTERM: stop new connections, stop dispatch, CancellationToken → Goose agents stop → WIP-commit (30s timeout), WAL checkpoint, clean exit (revised per ADR-008 — CancellationToken, not SIGTERM/SIGKILL to agents) | v1 | ADR-005, ADR-008 |
 | LIFE-03 | Graceful restart for updates: desktop signals SIGTERM → waits for exit → starts new binary → new server reads state from DB and resumes | v1 | ADR-005 |
 | LIFE-04 | Board reconciliation on startup: detect interrupted agents (in_progress tasks with no running session), heal stale tasks, re-dispatch | v1 | ADR-005 |
@@ -205,7 +196,6 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 | GIT-* | Architecture Research §4 (git2 + CLI), Pitfalls Research §6 |
 | SYNC-* | Brief (scope section), ADR-007 |
 | OBS-* | Brief, Features Research (89% need tracing) |
-| LIC-* | Pitfalls Research §7 (licensing pitfalls) |
 | CFG-* | Brief (scope section) |
 | WSL-* | Architecture Research §7 (WSL considerations), ADR-002 |
 
@@ -215,7 +205,6 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 - [[Research Summary]] — synthesis driving requirement priorities
 - [[Database Layer — rusqlite over libsql/Turso]] — ADR-002 driving DB requirements
 - [[Migrations — refinery with timestamp-based naming]] — ADR-003 driving migration requirements
-- [[Authentication — Clerk JWT Validation]] — ADR-004 driving AUTH requirements
 - [[Server Lifecycle — Desktop-Managed Daemon with Graceful Restart]] — ADR-005 driving LIFE requirements
 - [[Roadmap]] — phased delivery plan consuming these requirements
 - [[Stack Research]] — crate versions and API patterns

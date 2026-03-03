@@ -66,7 +66,7 @@ impl DjinnMcpServer {
         }
 
         // Trigger an initial export.
-        let uid = self.state.user_id().unwrap_or("local");
+        let uid = self.state.sync_user_id();
         let results = mgr.export_all(Some(uid)).await;
 
         match results.into_iter().find(|r| r.channel == "tasks") {
@@ -123,7 +123,7 @@ impl DjinnMcpServer {
         Parameters(_p): Parameters<TaskSyncExportParams>,
     ) -> Json<serde_json::Value> {
         let mgr = self.state.sync_manager();
-        let uid = self.state.user_id().unwrap_or("local");
+        let uid = self.state.sync_user_id();
         let results = mgr.export_all(Some(uid)).await;
 
         if results.is_empty() {

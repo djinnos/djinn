@@ -1515,8 +1515,8 @@ mod tests {
         repo.create(
             &project.id,
             tmp.path(),
-            "Authentication Strategy",
-            "Using Clerk JWT for all MCP connections.",
+            "Connection Strategy",
+            "Use direct MCP connections for local operation.",
             "adr",
             "[]",
         )
@@ -1741,7 +1741,7 @@ mod tests {
             .create(
                 &project.id,
                 tmp.path(),
-                "Auth Strategy",
+                "Connection Strategy",
                 "body",
                 "adr",
                 "[]",
@@ -1754,7 +1754,7 @@ mod tests {
             &project.id,
             tmp.path(),
             "Overview",
-            "See [[Auth Strategy]] for auth details.",
+            "See [[Connection Strategy]] for details.",
             "research",
             "[]",
         )
@@ -1764,7 +1764,7 @@ mod tests {
         let graph = repo.graph(&project.id).await.unwrap();
         assert_eq!(graph.edges.len(), 1);
         assert_eq!(graph.edges[0].target_id, target.id);
-        assert_eq!(graph.edges[0].raw_text, "Auth Strategy");
+        assert_eq!(graph.edges[0].raw_text, "Connection Strategy");
     }
 
     #[tokio::test]

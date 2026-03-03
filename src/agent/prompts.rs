@@ -250,7 +250,7 @@ mod tests {
             batch_num: Some(2),
             task_count: Some(5),
             common_labels: Some("wave:1".into()),
-            tasks_summary: Some("abc1234 lnfo: Add widget\ndef5678 rvmf: Fix auth".into()),
+            tasks_summary: Some("abc1234 lnfo: Add widget\ndef5678 rvmf: Fix regression".into()),
             ..make_ctx()
         };
         let prompt = render_prompt(AgentType::PhaseReviewer, &task, &ctx);

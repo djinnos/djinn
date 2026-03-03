@@ -29,7 +29,7 @@ The current Go server has accumulated significant complexity:
 
 ## Success Metrics
 
-- Server starts and serves MCP tools with a valid license token
+- Server starts and serves MCP tools without external auth dependencies
 - Desktop reads task/memory state from a local Turso embedded replica with no CDC pipeline
 - Agents can be dispatched to tasks, work in worktrees, and merge directly to main upstream
 - Epic review gates epic completion by checking for missing tasks and reviewing aggregate code quality
@@ -43,7 +43,6 @@ The current Go server has accumulated significant complexity:
 - **Database:** libSQL/Turso (decided — [[Embedded Database Survey]])
 - **Stack:** Axum + Tokio + Serde + Clap (decided — [[Rust Agentic Ecosystem Survey]])
 - **Agent harness:** Goose library (in-process async tasks) — see [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
-- **Licensing:** Server is closed source. Requires a license token to run. Desktop (open source later) authenticates via Clerk.
 - **Git integration:** Task branches merge directly to main upstream. No stacked branches. Local repo untouched.
 - **Hierarchy:** Epics are separate entities (not tasks). Tasks live under epics. No subepics, no subtasks. Flat.
 - **Observability:** Structured activity in DB for task lifecycle. File-based operational log at `~/.djinn/` for system events/crashes.
@@ -54,7 +53,6 @@ The current Go server has accumulated significant complexity:
 **Core MCP Server:**
 - MCP server (Streamable HTTP) with task, memory, execution, and system tools
 - ~~MCP-connect bridge mode~~ — DROPPED per ADR-008 (replaced by direct function calls via Goose extension)
-- License validation on startup (token-based, server won't run without it)
 
 **Database:**
 - Single libSQL database at `~/.djinn/` — tasks, epics, memory notes, projects, settings, activity, model health

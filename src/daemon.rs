@@ -11,7 +11,6 @@ pub struct DaemonInfo {
     pub pid: u32,
     pub port: u16,
     pub started_at: String,
-    pub clerk_token: Option<String>,
 }
 
 pub struct DaemonLock {
@@ -39,7 +38,7 @@ pub fn daemon_file_path() -> Result<PathBuf, String> {
     Ok(home.join(".djinn").join("daemon.json"))
 }
 
-pub fn acquire(port: u16, clerk_token: Option<String>) -> Result<DaemonLock, String> {
+pub fn acquire(port: u16) -> Result<DaemonLock, String> {
     let path = daemon_file_path()?;
     let current_pid = std::process::id();
 
@@ -72,7 +71,6 @@ pub fn acquire(port: u16, clerk_token: Option<String>) -> Result<DaemonLock, Str
         pid: current_pid,
         port,
         started_at,
-        clerk_token,
     };
     write_daemon_info(&path, &info)?;
 
@@ -174,7 +172,6 @@ mod tests {
             pid: 123,
             port: 8372,
             started_at: "2026-03-03T18:00:00Z".to_string(),
-            clerk_token: Some("token-123".to_string()),
         };
 
         write_daemon_info(&path, &info).unwrap();
@@ -182,7 +179,6 @@ mod tests {
 
         assert_eq!(parsed.pid, 123);
         assert_eq!(parsed.port, 8372);
-        assert_eq!(parsed.clerk_token.as_deref(), Some("token-123"));
 
         #[cfg(unix)]
         {
