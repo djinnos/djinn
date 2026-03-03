@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod db;
 pub mod error;
 pub mod events;
+pub mod logging;
 pub mod mcp;
 pub mod models;
 pub mod provider;

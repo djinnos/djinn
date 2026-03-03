@@ -3,11 +3,15 @@ use std::path::PathBuf;
 use clap::Parser;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use djinn_server::auth::JwksCache;
 use djinn_server::db::checkpoint;
 use djinn_server::db::connection::{self, Database};
+use djinn_server::logging;
 use djinn_server::server::{self, AppState};
 
 /// Default Clerk JWKS endpoint (can be overridden via DJINN_CLERK_JWKS_URL).
@@ -35,9 +39,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    let _log_guards = init_logging();
 
     let cli = Cli::parse();
     let cancel = CancellationToken::new();
@@ -67,6 +69,37 @@ async fn main() {
     let router = server::router(state);
 
     server::run(router, cli.port, cancel).await;
+}
+
+fn init_logging() -> (WorkerGuard, WorkerGuard) {
+    logging::setup_log_dir_and_retention();
+
+    let file_appender =
+        tracing_appender::rolling::daily(logging::logs_dir(), logging::file_prefix());
+    let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
+    let (stderr_writer, stderr_guard) = tracing_appender::non_blocking(std::io::stderr());
+
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let format = tracing_subscriber::fmt::format()
+        .compact()
+        .with_target(true);
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .event_format(format.clone())
+        .with_ansi(false)
+        .with_writer(file_writer);
+
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .event_format(format)
+        .with_writer(stderr_writer);
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(file_layer)
+        .with(stderr_layer)
+        .init();
+
+    (file_guard, stderr_guard)
 }
 
 /// Build AppState, validating the startup token if provided (AUTH-01, AUTH-03, AUTH-04).
