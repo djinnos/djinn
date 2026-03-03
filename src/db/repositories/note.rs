@@ -6,7 +6,8 @@ use crate::db::connection::{Database, OptionalExt};
 use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
 use crate::models::note::{
-    BrokenLink, GraphEdge, GraphNode, GraphResponse, Note, NoteSearchResult, OrphanNote,
+    BrokenLink, GraphEdge, GraphNode, GraphResponse, HealthReport, Note, NoteCompact,
+    NoteSearchResult, OrphanNote, StaleFolder,
 };
 
 pub struct NoteRepository {
@@ -445,6 +446,233 @@ impl NoteRepository {
 
         Ok(build_catalog(&notes))
     }
+
+    /// Move a note to a new location (rename file, update permalink and folder).
+    ///
+    /// The new position is described by `new_note_type` + `new_title`. If the type
+    /// changes the file moves to the new type's folder. The content and tags are
+    /// preserved unchanged.
+    pub async fn move_note(
+        &self,
+        id: &str,
+        project_path: &Path,
+        new_title: &str,
+        new_note_type: &str,
+    ) -> Result<Note> {
+        let current = self.get(id).await?.ok_or_else(|| {
+            Error::Internal(format!("note not found: {id}"))
+        })?;
+
+        let new_file_path = file_path_for(project_path, new_note_type, new_title);
+        let new_permalink = permalink_for(new_note_type, new_title);
+        let new_folder = folder_for_type(new_note_type).to_owned();
+        let new_file_path_str = new_file_path.to_string_lossy().to_string();
+
+        // Create destination directory and rename the file.
+        if let Some(parent) = new_file_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Error::Internal(format!("create_dir_all {}: {e}", parent.display()))
+            })?;
+        }
+        std::fs::rename(&current.file_path, &new_file_path).map_err(|e| {
+            Error::Internal(format!(
+                "rename {} → {}: {e}",
+                current.file_path,
+                new_file_path.display()
+            ))
+        })?;
+        // Rewrite frontmatter to reflect new title/type.
+        write_note_file(&new_file_path, new_title, new_note_type, &current.tags, &current.content)?;
+
+        let id = id.to_owned();
+        let new_title = new_title.to_owned();
+        let new_note_type = new_note_type.to_owned();
+        let project_id = current.project_id.clone();
+
+        let note: Note = self
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE notes SET
+                        title      = ?2,
+                        file_path  = ?3,
+                        note_type  = ?4,
+                        folder     = ?5,
+                        permalink  = ?6,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE id = ?1",
+                    rusqlite::params![
+                        &id,
+                        &new_title,
+                        &new_file_path_str,
+                        &new_note_type,
+                        &new_folder,
+                        &new_permalink,
+                    ],
+                )?;
+                // Re-resolve previously-broken links that match the new title/permalink.
+                resolve_links_for_note(conn, &id, &new_title, &new_permalink, &project_id)?;
+                Ok(conn.query_row(NOTE_SELECT_WHERE_ID, [&id], row_to_note)?)
+            })
+            .await?;
+
+        let _ = self.events.send(DjinnEvent::NoteUpdated(note.clone()));
+        Ok(note)
+    }
+
+    /// List recently updated notes for a project, ordered by `updated_at` descending.
+    ///
+    /// `hours` limits to notes updated within the last N hours (0 = no limit).
+    pub async fn recent(
+        &self,
+        project_id: &str,
+        hours: i64,
+        limit: i64,
+    ) -> Result<Vec<NoteCompact>> {
+        let project_id = project_id.to_owned();
+        self.db
+            .call(move |conn| {
+                let sql = if hours > 0 {
+                    format!(
+                        "SELECT id, permalink, title, note_type, folder, updated_at
+                         FROM notes
+                         WHERE project_id = ?1
+                           AND updated_at >= datetime('now', '-{hours} hours')
+                         ORDER BY updated_at DESC LIMIT ?2"
+                    )
+                } else {
+                    "SELECT id, permalink, title, note_type, folder, updated_at
+                     FROM notes WHERE project_id = ?1
+                     ORDER BY updated_at DESC LIMIT ?2"
+                        .to_owned()
+                };
+                let mut stmt = conn.prepare(&sql)?;
+                let notes = stmt
+                    .query_map(rusqlite::params![&project_id, limit], row_to_compact)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(notes)
+            })
+            .await
+    }
+
+    /// List compact note summaries in a folder with optional depth control.
+    ///
+    /// `depth`: 1 = exact folder only; 0 = all descendants.
+    pub async fn list_compact(
+        &self,
+        project_id: &str,
+        folder: &str,
+        depth: i64,
+    ) -> Result<Vec<NoteCompact>> {
+        let project_id = project_id.to_owned();
+        let folder = folder.to_owned();
+        self.db
+            .call(move |conn| {
+                let sql = if depth == 1 {
+                    "SELECT id, permalink, title, note_type, folder, updated_at
+                     FROM notes WHERE project_id = ?1 AND folder = ?2
+                     ORDER BY folder, title"
+                        .to_owned()
+                } else {
+                    // depth=0 or depth>1: return all descendants
+                    "SELECT id, permalink, title, note_type, folder, updated_at
+                     FROM notes WHERE project_id = ?1
+                       AND (folder = ?2 OR folder LIKE ?2 || '/%')
+                     ORDER BY folder, title"
+                        .to_owned()
+                };
+                let mut stmt = conn.prepare(&sql)?;
+                let notes = stmt
+                    .query_map(rusqlite::params![&project_id, &folder], row_to_compact)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(notes)
+            })
+            .await
+    }
+
+    /// Find tasks whose `memory_refs` JSON array contains `permalink`.
+    ///
+    /// Returns minimal task info: `(id, short_id, title, status)`.
+    pub async fn task_refs(&self, permalink: &str) -> Result<Vec<serde_json::Value>> {
+        let pattern = format!("%\"{permalink}\"%");
+        self.db
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, short_id, title, status FROM tasks
+                     WHERE memory_refs LIKE ?1
+                     ORDER BY priority, created_at",
+                )?;
+                let rows = stmt
+                    .query_map([&pattern], |r| {
+                        Ok(serde_json::json!({
+                            "id":       r.get::<_, String>(0)?,
+                            "short_id": r.get::<_, String>(1)?,
+                            "title":    r.get::<_, String>(2)?,
+                            "status":   r.get::<_, String>(3)?,
+                        }))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+    }
+
+    /// Aggregate health report for a project's knowledge base.
+    ///
+    /// Stale threshold: notes not updated in more than 30 days.
+    pub async fn health(&self, project_id: &str) -> Result<HealthReport> {
+        let project_id = project_id.to_owned();
+        self.db
+            .call(move |conn| {
+                let total_notes: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM notes WHERE project_id = ?1",
+                    [&project_id],
+                    |r| r.get(0),
+                )?;
+
+                let broken_link_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM note_links l
+                     JOIN notes src ON src.id = l.source_id AND src.project_id = ?1
+                     WHERE l.target_id IS NULL",
+                    [&project_id],
+                    |r| r.get(0),
+                )?;
+
+                let orphan_note_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM notes n
+                     WHERE n.project_id = ?1
+                       AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
+                       AND NOT EXISTS (
+                           SELECT 1 FROM note_links l WHERE l.target_id = n.id
+                       )",
+                    [&project_id],
+                    |r| r.get(0),
+                )?;
+
+                let mut stmt = conn.prepare(
+                    "SELECT folder, COUNT(*) FROM notes
+                     WHERE project_id = ?1
+                       AND updated_at < datetime('now', '-30 days')
+                     GROUP BY folder ORDER BY folder",
+                )?;
+                let stale_notes_by_folder = stmt
+                    .query_map([&project_id], |r| {
+                        Ok(StaleFolder {
+                            folder: r.get(0)?,
+                            count: r.get(1)?,
+                        })
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+
+                Ok(HealthReport {
+                    total_notes,
+                    broken_link_count,
+                    orphan_note_count,
+                    stale_notes_by_folder,
+                })
+            })
+            .await
+    }
 }
 
 // ── Wikilink helpers ──────────────────────────────────────────────────────────
@@ -546,6 +774,17 @@ const NOTE_SELECT_WHERE_ID: &str =
      FROM notes WHERE id = ?1";
 
 // ── Row mapper ───────────────────────────────────────────────────────────────
+
+fn row_to_compact(row: &rusqlite::Row<'_>) -> rusqlite::Result<NoteCompact> {
+    Ok(NoteCompact {
+        id: row.get(0)?,
+        permalink: row.get(1)?,
+        title: row.get(2)?,
+        note_type: row.get(3)?,
+        folder: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
 
 fn row_to_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<Note> {
     Ok(Note {

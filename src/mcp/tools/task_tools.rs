@@ -222,6 +222,14 @@ pub struct BoardReconcileParams {
     pub project: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TaskMemoryRefsParams {
+    /// Task UUID or short_id.
+    pub id: String,
+    /// Absolute project path (accepted for API compatibility).
+    pub project: Option<String>,
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct TaskListResponse {
     pub tasks: Vec<serde_json::Value>,
@@ -352,13 +360,36 @@ impl DjinnMcpServer {
             }
         }
 
-        match repo
+        let updated = match repo
             .update(&task.id, title, description, design, priority, owner, &labels_json, &ac_json)
             .await
         {
-            Ok(t) => Json(task_to_value(&t)),
-            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+            Ok(t) => t,
+            Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+        };
+
+        // Apply memory_refs changes if requested.
+        if p.memory_refs_add.is_some() || p.memory_refs_remove.is_some() {
+            let mut refs: Vec<String> =
+                serde_json::from_str(&updated.memory_refs).unwrap_or_default();
+            if let Some(add) = &p.memory_refs_add {
+                for r in add {
+                    if !refs.contains(r) {
+                        refs.push(r.clone());
+                    }
+                }
+            }
+            if let Some(remove) = &p.memory_refs_remove {
+                refs.retain(|r| !remove.contains(r));
+            }
+            let refs_json = serde_json::to_string(&refs).unwrap_or_else(|_| "[]".into());
+            match repo.update_memory_refs(&updated.id, &refs_json).await {
+                Ok(t) => return Json(task_to_value(&t)),
+                Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+            }
         }
+
+        Json(task_to_value(&updated))
     }
 
     /// Show details of a work item. Accepts task UUID or short_id.
@@ -754,6 +785,22 @@ impl DjinnMcpServer {
             Ok(result) => Json(result),
             Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
         }
+    }
+
+    /// List memory note permalinks associated with a task. Accepts task ID
+    /// (full UUID or short_id, e.g., 'k7m2').
+    #[tool(description = "List memory note permalinks associated with a task. Accepts task ID (full UUID or short_id, e.g., 'k7m2').")]
+    pub async fn task_memory_refs(
+        &self,
+        Parameters(p): Parameters<TaskMemoryRefsParams>,
+    ) -> Json<serde_json::Value> {
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(not_found(&p.id));
+        };
+        let refs: serde_json::Value =
+            serde_json::from_str(&task.memory_refs).unwrap_or(serde_json::json!([]));
+        Json(serde_json::json!({ "id": task.id, "short_id": task.short_id, "memory_refs": refs }))
     }
 }
 

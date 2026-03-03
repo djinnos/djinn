@@ -26,6 +26,8 @@ pub struct Task {
     pub closed_at: Option<String>,
     pub blocked_from_status: Option<String>,
     pub close_reason: Option<String>,
+    /// JSON array of memory note permalinks associated with this task.
+    pub memory_refs: String,
 }
 
 /// A single entry in the task activity log (audit trail + comments).
