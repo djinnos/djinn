@@ -18,6 +18,9 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::extension;
+use crate::agent::output_parser::{
+    ParsedAgentOutput, PhaseReviewVerdict, ReviewerVerdict, WorkerSignal,
+};
 use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::{AgentType, GooseSessionHandle, SessionManager, SessionType};
 use crate::db::repositories::credential::CredentialRepository;
@@ -93,6 +96,7 @@ enum SupervisorMessage {
     SessionCompleted {
         task_id: String,
         result: Result<(), String>,
+        output: ParsedAgentOutput,
     },
 }
 
@@ -179,13 +183,17 @@ impl AgentSupervisor {
                 self.interrupt_all_sessions(&reason).await;
                 let _ = respond_to.send(Ok(()));
             }
-            SupervisorMessage::SessionCompleted { task_id, result } => {
+            SupervisorMessage::SessionCompleted {
+                task_id,
+                result,
+                output,
+            } => {
                 if self.interrupted_sessions.remove(&task_id) {
                     return;
                 }
                 let model_id = self.session_models.get(&task_id).cloned();
                 let agent_type = self.remove_session(&task_id);
-                self.handle_session_result(&task_id, model_id.as_deref(), agent_type, result)
+                self.handle_session_result(&task_id, model_id.as_deref(), agent_type, result, output)
                     .await;
             }
         }
@@ -307,45 +315,72 @@ impl AgentSupervisor {
         let session_id = session.id.clone();
         let sender = self.sender.clone();
         let app_state = self.app_state.clone();
+        let run_agent_type = agent_type;
 
         let join = tokio::spawn(async move {
             let kickoff = GooseMessage::user().with_text(
                 "Start by understanding the task context and execute it fully before stopping.",
             );
-            let session_cfg = GooseSessionConfig {
-                id: session_id,
-                schedule_id: None,
-                max_turns: Some(300),
-                retry_config: None,
-            };
-
+            let mut output = ParsedAgentOutput::default();
             let run_result: anyhow::Result<()> = async {
-                let mut stream = agent
-                    .reply(kickoff, session_cfg, Some(session_cancel_for_reply.clone()))
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                let mut prompts = vec![kickoff];
+                let mut nudged_reviewer = false;
 
-                let mut interrupted: Option<&'static str> = None;
-                loop {
-                    tokio::select! {
-                        _ = session_cancel_for_reply.cancelled() => {
-                            interrupted = Some("session cancelled");
-                            break;
+                while let Some(next_message) = prompts.pop() {
+                    let mut stream = agent
+                        .reply(
+                            next_message,
+                            GooseSessionConfig {
+                                id: session_id.clone(),
+                                schedule_id: None,
+                                max_turns: Some(300),
+                                retry_config: None,
+                            },
+                            Some(session_cancel_for_reply.clone()),
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                    let mut interrupted: Option<&'static str> = None;
+                    loop {
+                        tokio::select! {
+                            _ = session_cancel_for_reply.cancelled() => {
+                                interrupted = Some("session cancelled");
+                                break;
+                            }
+                            _ = global_cancel.cancelled() => {
+                                interrupted = Some("supervisor shutting down");
+                                break;
+                            }
+                            evt = stream.next() => {
+                                let Some(evt) = evt else { break; };
+                                let evt = evt.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                                output.ingest_event(&evt);
+                                extension::handle_event(&app_state, &agent, &evt).await;
+                            }
                         }
-                        _ = global_cancel.cancelled() => {
-                            interrupted = Some("supervisor shutting down");
-                            break;
-                        }
-                        evt = stream.next() => {
-                            let Some(evt) = evt else { break; };
-                            let evt = evt.map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                            extension::handle_event(&app_state, &agent, &evt).await;
-                        }
+                    }
+
+                    if let Some(reason) = interrupted {
+                        return Err(anyhow::anyhow!(reason));
+                    }
+
+                    if run_agent_type == AgentType::TaskReviewer
+                        && output.reviewer_verdict.is_none()
+                        && !nudged_reviewer
+                    {
+                        nudged_reviewer = true;
+                        prompts.push(GooseMessage::user().with_text(
+                            "You must emit a final verdict marker now: REVIEW_RESULT: VERIFIED | REOPEN | CANCEL. If REOPEN or CANCEL, also emit FEEDBACK: <what is missing>. Do not continue analysis.",
+                        ));
+                        continue;
                     }
                 }
 
-                if let Some(reason) = interrupted {
-                    return Err(anyhow::anyhow!(reason));
+                if run_agent_type == AgentType::TaskReviewer && output.reviewer_verdict.is_none() {
+                    return Err(anyhow::anyhow!(
+                        "task reviewer ended without REVIEW_RESULT marker"
+                    ));
                 }
 
                 Ok(())
@@ -356,10 +391,12 @@ impl AgentSupervisor {
                 Ok(()) => SupervisorMessage::SessionCompleted {
                     task_id: task_id_for_join,
                     result: Ok(()),
+                    output,
                 },
                 Err(e) => SupervisorMessage::SessionCompleted {
                     task_id: task_id_for_join,
                     result: Err(e.to_string()),
+                    output,
                 },
             };
             let _ = sender.send(msg).await;
@@ -398,6 +435,7 @@ impl AgentSupervisor {
                 .send(SupervisorMessage::SessionCompleted {
                     task_id: task_id_for_join,
                     result: Ok(()),
+                    output: ParsedAgentOutput::default(),
                 })
                 .await;
             Ok(())
@@ -552,6 +590,7 @@ impl AgentSupervisor {
         model_id: Option<&str>,
         agent_type: Option<AgentType>,
         result: Result<(), String>,
+        output: ParsedAgentOutput,
     ) {
         let agent_type = agent_type.unwrap_or(AgentType::Worker);
         let repo =
@@ -564,19 +603,29 @@ impl AgentSupervisor {
             }
         }
 
-        let transition = match (agent_type, result) {
-            (AgentType::Worker, Ok(())) => Some((TransitionAction::SubmitTaskReview, None)),
-            (AgentType::TaskReviewer, Ok(())) => Some((TransitionAction::TaskReviewApprove, None)),
-            (AgentType::PhaseReviewer, Ok(())) => {
-                Some((TransitionAction::PhaseReviewApprove, None))
+        if let Some(feedback) = output.reviewer_feedback.as_deref() {
+            let payload = serde_json::json!({ "body": feedback }).to_string();
+            if let Err(e) = repo
+                .log_activity(
+                    Some(task_id),
+                    "agent-supervisor",
+                    "task_reviewer",
+                    "comment",
+                    &payload,
+                )
+                .await
+            {
+                tracing::warn!(task_id = %task_id, error = %e, "failed to store reviewer feedback comment");
             }
-            (AgentType::Worker, Err(reason)) => Some((TransitionAction::Release, Some(reason))),
-            (AgentType::TaskReviewer, Err(reason)) => {
-                Some((TransitionAction::ReleaseTaskReview, Some(reason)))
-            }
-            (AgentType::PhaseReviewer, Err(reason)) => {
-                Some((TransitionAction::ReleasePhaseReview, Some(reason)))
-            }
+        }
+
+        let transition = match result {
+            Ok(()) => self.success_transition(agent_type, &output),
+            Err(reason) => match agent_type {
+                AgentType::Worker => Some((TransitionAction::Release, Some(reason))),
+                AgentType::TaskReviewer => Some((TransitionAction::ReleaseTaskReview, Some(reason))),
+                AgentType::PhaseReviewer => Some((TransitionAction::ReleasePhaseReview, Some(reason))),
+            },
         };
 
         if let Some((action, reason)) = transition {
@@ -590,6 +639,83 @@ impl AgentSupervisor {
                     None,
                 )
                 .await;
+        }
+    }
+
+    fn success_transition(
+        &self,
+        agent_type: AgentType,
+        output: &ParsedAgentOutput,
+    ) -> Option<(TransitionAction, Option<String>)> {
+        match agent_type {
+            AgentType::Worker => match output.worker_signal {
+                Some(WorkerSignal::Done) => Some((TransitionAction::SubmitTaskReview, None)),
+                Some(WorkerSignal::Blocked) => Some((
+                    TransitionAction::Block,
+                    Some(
+                        output
+                            .worker_reason
+                            .clone()
+                            .unwrap_or_else(|| "worker reported BLOCKED".to_string()),
+                    ),
+                )),
+                Some(WorkerSignal::Progress) => Some((
+                    TransitionAction::Release,
+                    Some("worker session ended with PROGRESS signal".to_string()),
+                )),
+                None => {
+                    tracing::warn!("worker session completed without structured result marker");
+                    Some((
+                        TransitionAction::Release,
+                        Some("worker session completed without DONE/BLOCKED marker".to_string()),
+                    ))
+                }
+            },
+            AgentType::TaskReviewer => match output.reviewer_verdict {
+                Some(ReviewerVerdict::Verified) => Some((TransitionAction::TaskReviewApprove, None)),
+                Some(ReviewerVerdict::Reopen) => Some((
+                    TransitionAction::TaskReviewReject,
+                    Some(
+                        output
+                            .reviewer_feedback
+                            .clone()
+                            .unwrap_or_else(|| "reviewer requested REOPEN".to_string()),
+                    ),
+                )),
+                Some(ReviewerVerdict::Cancel) => Some((
+                    TransitionAction::ReleaseTaskReview,
+                    Some(
+                        output
+                            .reviewer_feedback
+                            .clone()
+                            .unwrap_or_else(|| "reviewer returned CANCEL".to_string()),
+                    ),
+                )),
+                None => {
+                    tracing::warn!("task reviewer session completed without REVIEW_RESULT marker");
+                    Some((
+                        TransitionAction::ReleaseTaskReview,
+                        Some("reviewer session completed without REVIEW_RESULT marker".to_string()),
+                    ))
+                }
+            },
+            AgentType::PhaseReviewer => match output.phase_verdict {
+                Some(PhaseReviewVerdict::Clean) => Some((TransitionAction::PhaseReviewApprove, None)),
+                Some(PhaseReviewVerdict::IssuesFound) => Some((
+                    TransitionAction::PhaseReviewReject,
+                    Some("phase reviewer reported ARCHITECT_BATCH_RESULT: ISSUES_FOUND".to_string()),
+                )),
+                None => {
+                    tracing::warn!("phase reviewer session completed without ARCHITECT_BATCH_RESULT marker");
+                    Some((
+                        TransitionAction::ReleasePhaseReview,
+                        Some(
+                            "phase reviewer completed without ARCHITECT_BATCH_RESULT marker"
+                                .to_string(),
+                        ),
+                    ))
+                }
+            },
         }
     }
 

@@ -32,7 +32,9 @@ You have access to Djinn tools via the `djinn` extension. Use them during implem
 4. **Verify** — run the project's build and test commands to confirm your changes work
 5. **Add progress note** — comment on the task with what you implemented
 6. **Commit** — stage only the files you changed, commit with a clear message
-7. **Submit for review** — call `task_transition(id="{{task_id}}", action="submit_task_review", project="{{project_path}}")`
+7. **Emit completion marker** — end with exactly one of:
+   - `WORKER_RESULT: DONE`
+   - `WORKER_RESULT: BLOCKED: <concrete reason>`
 
 ## Rules
 
@@ -43,3 +45,4 @@ You have access to Djinn tools via the `djinn` extension. Use them during implem
 - **Never run destructive git commands.** No `git stash`, `git checkout .`, `git reset --hard`, `git clean`.
 - **Verify before committing.** Run build/test commands to confirm your changes work.
 - **Install dependencies if needed.** You are in a fresh worktree — check for lockfiles and install before building.
+- **Always emit a result marker.** The supervisor reads your final `WORKER_RESULT` line to transition task state.

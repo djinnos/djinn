@@ -39,23 +39,21 @@ Check how changes from different tasks interact:
 - Shared state handled correctly?
 - API contracts consistent?
 
-### Step 4: Record Findings and Transition
+### Step 4: Record Findings and Emit Verdict
 
-If issues are found:
-1. Add a detailed comment with `task_comment_add(id="{{task_id}}", body="...")`
-2. Reject phase review with:
+If issues are found, include a concise reason in your review notes and emit:
 
 ```text
-task_transition(id="{{task_id}}", action="phase_review_reject", reason="<summary of issues>")
+ARCHITECT_BATCH_RESULT: ISSUES_FOUND
 ```
 
-If the batch is clean:
+If the batch is clean, emit:
 
 ```text
-task_transition(id="{{task_id}}", action="phase_review_approve")
+ARCHITECT_BATCH_RESULT: CLEAN
 ```
 
-Do not stop after analysis. You must perform the transition tool call.
+Do not stop after analysis. You must emit one `ARCHITECT_BATCH_RESULT` marker.
 
 ## Output
 

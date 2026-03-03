@@ -64,15 +64,14 @@ For each criterion, find evidence in the diff above:
 
 **Rule:** If Blue Team has ANY reasonable defense → DROP the finding
 
-### Step 4: Update Acceptance Criteria and Transition the Task
+### Step 4: Update Acceptance Criteria and Emit Verdict
 
 1. **MANDATORY**: Call `task_update(id="{{task_id}}", acceptance_criteria=[...])` with every criterion set to `met: true` or `met: false`.
-2. If any criterion is unmet, add a `task_comment_add` with concrete missing evidence and then call:
-   - `task_transition(id="{{task_id}}", action="task_review_reject", reason="<what is missing>")`
-3. If all criteria are met, call:
-   - `task_transition(id="{{task_id}}", action="task_review_approve")`
+2. If any criterion is unmet, produce `REVIEW_RESULT: REOPEN` and include `FEEDBACK: <what is missing>`.
+3. If all criteria are met, produce `REVIEW_RESULT: VERIFIED`.
+4. If review cannot continue safely (missing diff/context), produce `REVIEW_RESULT: CANCEL` with `FEEDBACK: <reason>`.
 
-Do not stop after analysis. You must perform the transition tool call.
+Do not stop after analysis. You must emit a `REVIEW_RESULT` marker.
 
 ## Anti-Loop Reminder
 
@@ -90,5 +89,6 @@ Do not stop after analysis. You must perform the transition tool call.
 After calling tools, provide a short review note with:
 
 ```
-REVIEW_ACTION: APPROVED|REJECTED
+REVIEW_RESULT: VERIFIED|REOPEN|CANCEL
+FEEDBACK: <optional, required for REOPEN/CANCEL>
 ```

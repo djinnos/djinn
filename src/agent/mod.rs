@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod extension;
+pub mod output_parser;
 pub mod prompts;
 
 use std::{path::PathBuf, sync::Arc};
