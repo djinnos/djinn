@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::repositories::credential::CredentialRepository;
 use crate::mcp::server::DjinnMcpServer;
+use crate::mcp::tools::AnyJson;
 
 // ── credential_set ────────────────────────────────────────────────────────────
 
@@ -29,7 +30,7 @@ pub struct CredentialSetResponse {
 
 #[derive(Serialize, JsonSchema)]
 pub struct CredentialListResponse {
-    pub credentials: Vec<serde_json::Value>,
+    pub credentials: Vec<AnyJson>,
 }
 
 // ── credential_delete ─────────────────────────────────────────────────────────
@@ -113,13 +114,13 @@ impl DjinnMcpServer {
             Ok(creds) => creds
                 .iter()
                 .map(|c| {
-                    serde_json::json!({
+                    AnyJson::from(serde_json::json!({
                         "id":          c.id,
                         "provider_id": c.provider_id,
                         "key_name":    c.key_name,
                         "created_at":  c.created_at,
                         "updated_at":  c.updated_at,
-                    })
+                    }))
                 })
                 .collect(),
             Err(e) => {

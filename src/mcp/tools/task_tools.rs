@@ -9,7 +9,7 @@ use crate::db::repositories::task::{
     ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository,
 };
 use crate::mcp::server::DjinnMcpServer;
-use crate::mcp::tools::{ObjectJson, json_object};
+use crate::mcp::tools::{AnyJson, ObjectJson, json_object};
 use crate::models::task::{Task, TaskStatus, TransitionAction};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -64,7 +64,7 @@ pub struct TaskCreateParams {
     pub priority: Option<i64>,
     pub owner: Option<String>,
     pub labels: Option<Vec<String>>,
-    pub acceptance_criteria: Option<Vec<serde_json::Value>>,
+    pub acceptance_criteria: Option<Vec<AnyJson>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -81,7 +81,7 @@ pub struct TaskUpdateParams {
     /// Labels to remove.
     pub labels_remove: Option<Vec<String>>,
     /// Full replacement for acceptance_criteria.
-    pub acceptance_criteria: Option<Vec<serde_json::Value>>,
+    pub acceptance_criteria: Option<Vec<AnyJson>>,
     /// New parent epic UUID or short_id.
     pub parent: Option<String>,
     /// Memory note permalinks to add to this task.
@@ -272,7 +272,7 @@ pub struct TaskClaimParams {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct TaskListResponse {
-    pub tasks: Vec<serde_json::Value>,
+    pub tasks: Vec<AnyJson>,
     pub total_count: i64,
     pub limit: i64,
     pub offset: i64,
@@ -544,7 +544,7 @@ impl DjinnMcpServer {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.list_filtered(query).await {
             Ok(result) => {
-                let tasks = result.tasks.iter().map(task_to_value).collect();
+                let tasks = result.tasks.iter().map(|t| AnyJson::from(task_to_value(t))).collect();
                 Json(TaskListResponse {
                     has_more: offset + limit < result.total_count,
                     tasks,
@@ -645,7 +645,7 @@ impl DjinnMcpServer {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.list_by_epic(&epic_id).await {
             Ok(tasks) => {
-                let items: Vec<serde_json::Value> = tasks.iter().map(task_to_value).collect();
+                let items: Vec<_> = tasks.iter().map(task_to_value).collect();
                 json_object(serde_json::json!({ "tasks": items, "total_count": items.len() }))
             }
             Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
@@ -710,7 +710,7 @@ impl DjinnMcpServer {
         };
         match repo.list_blockers(&task.id).await {
             Ok(refs) => {
-                let blockers: Vec<serde_json::Value> = refs
+                let blockers: Vec<_> = refs
                     .iter()
                     .map(|b| {
                         let resolved = matches!(b.status.as_str(), "approved" | "closed");
@@ -743,7 +743,7 @@ impl DjinnMcpServer {
         };
         match repo.list_blocked_by(&task.id).await {
             Ok(refs) => {
-                let tasks: Vec<serde_json::Value> = refs
+                let tasks: Vec<_> = refs
                     .iter()
                     .map(|b| {
                         serde_json::json!({
@@ -778,7 +778,7 @@ impl DjinnMcpServer {
         };
         match repo.list_ready(query).await {
             Ok(tasks) => {
-                let items: Vec<serde_json::Value> = tasks.iter().map(task_to_value).collect();
+                let items: Vec<_> = tasks.iter().map(task_to_value).collect();
                 json_object(serde_json::json!({ "tasks": items }))
             }
             Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
@@ -925,7 +925,7 @@ impl DjinnMcpServer {
 
         match repo.query_activity(q).await {
             Ok(entries) => {
-                let items: Vec<serde_json::Value> = entries
+                let items: Vec<_> = entries
                     .iter()
                     .map(|e| {
                         serde_json::json!({

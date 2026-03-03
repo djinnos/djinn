@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::repositories::custom_provider::CustomProviderRepository;
 use crate::mcp::server::DjinnMcpServer;
+use crate::mcp::tools::AnyJson;
 use crate::models::provider::{CustomProvider, Model, Provider, SeedModel};
 use crate::provider::validate::{self, ValidationRequest};
 
@@ -56,14 +57,14 @@ pub struct ModelHealthInput {
 #[derive(Serialize, JsonSchema)]
 pub struct ModelHealthResponse {
     pub action: String,
-    pub models: Vec<serde_json::Value>,
+    pub models: Vec<AnyJson>,
 }
 
 // ── provider_catalog ──────────────────────────────────────────────────────────
 
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderCatalogResponse {
-    pub providers: Vec<serde_json::Value>,
+    pub providers: Vec<AnyJson>,
     pub total: usize,
 }
 
@@ -78,7 +79,7 @@ pub struct ProviderModelsInput {
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderModelsResponse {
     pub provider_id: String,
-    pub models: Vec<serde_json::Value>,
+    pub models: Vec<AnyJson>,
     pub total: usize,
 }
 
@@ -94,7 +95,7 @@ pub struct ProviderModelLookupInput {
 pub struct ProviderModelLookupResponse {
     pub model_id: String,
     pub found: bool,
-    pub model: Option<serde_json::Value>,
+    pub model: Option<AnyJson>,
 }
 
 // ── provider_validate ─────────────────────────────────────────────────────────
@@ -166,9 +167,9 @@ impl DjinnMcpServer {
         match action {
             "status" => {
                 let all = tracker.all_health();
-                let models: Vec<serde_json::Value> = all
+                let models: Vec<AnyJson> = all
                     .iter()
-                    .map(|h| serde_json::to_value(h).unwrap_or_default())
+                    .map(|h| AnyJson::from(serde_json::to_value(h).unwrap_or_default()))
                     .collect();
                 Json(ModelHealthResponse {
                     action: "status".into(),
@@ -181,13 +182,13 @@ impl DjinnMcpServer {
                     let h = tracker.model_health(model_id);
                     Json(ModelHealthResponse {
                         action: "reset".into(),
-                        models: vec![serde_json::to_value(&h).unwrap_or_default()],
+                        models: vec![AnyJson::from(serde_json::to_value(&h).unwrap_or_default())],
                     })
                 } else {
                     Json(ModelHealthResponse {
                         action: "reset".into(),
                         models: vec![
-                            serde_json::json!({"error": "model parameter required for reset"}),
+                            AnyJson::from(serde_json::json!({"error": "model parameter required for reset"})),
                         ],
                     })
                 }
@@ -205,13 +206,13 @@ impl DjinnMcpServer {
                     let h = tracker.model_health(model_id);
                     Json(ModelHealthResponse {
                         action: "enable".into(),
-                        models: vec![serde_json::to_value(&h).unwrap_or_default()],
+                        models: vec![AnyJson::from(serde_json::to_value(&h).unwrap_or_default())],
                     })
                 } else {
                     Json(ModelHealthResponse {
                         action: "enable".into(),
                         models: vec![
-                            serde_json::json!({"error": "model parameter required for enable"}),
+                            AnyJson::from(serde_json::json!({"error": "model parameter required for enable"})),
                         ],
                     })
                 }
@@ -219,7 +220,7 @@ impl DjinnMcpServer {
             _ => Json(ModelHealthResponse {
                 action: action.to_owned(),
                 models: vec![
-                    serde_json::json!({"error": format!("unknown action '{action}'; valid: status, reset, reset_all, enable")}),
+                    AnyJson::from(serde_json::json!({"error": format!("unknown action '{action}'; valid: status, reset, reset_all, enable")})),
                 ],
             }),
         }
@@ -232,12 +233,12 @@ impl DjinnMcpServer {
         description = "List all LLM providers from the models.dev catalog. Each entry includes connection metadata (env vars, base URL, OpenAI-compat flag) and a connected placeholder for the desktop to merge local credential state."
     )]
     pub async fn provider_catalog(&self) -> Json<ProviderCatalogResponse> {
-        let providers: Vec<serde_json::Value> = self
+        let providers: Vec<AnyJson> = self
             .state
             .catalog()
             .list_providers()
             .iter()
-            .map(provider_to_json)
+            .map(|p| AnyJson::from(provider_to_json(p)))
             .collect();
         let total = providers.len();
         Json(ProviderCatalogResponse { providers, total })
@@ -252,12 +253,12 @@ impl DjinnMcpServer {
         &self,
         Parameters(input): Parameters<ProviderModelsInput>,
     ) -> Json<ProviderModelsResponse> {
-        let models: Vec<serde_json::Value> = self
+        let models: Vec<AnyJson> = self
             .state
             .catalog()
             .list_models(&input.provider_id)
             .iter()
-            .map(model_to_json)
+            .map(|m| AnyJson::from(model_to_json(m)))
             .collect();
         let total = models.len();
         Json(ProviderModelsResponse {
@@ -281,7 +282,7 @@ impl DjinnMcpServer {
             Some(m) => Json(ProviderModelLookupResponse {
                 model_id,
                 found: true,
-                model: Some(model_to_json(&m)),
+                model: Some(AnyJson::from(model_to_json(&m))),
             }),
             None => Json(ProviderModelLookupResponse {
                 model_id,

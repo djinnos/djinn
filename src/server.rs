@@ -457,6 +457,16 @@ mod tests {
 
     #[test]
     fn mcp_tools_do_not_use_untyped_json_output() {
+        // Bare serde_json::Value generates `true` as its JSON Schema, which
+        // strict MCP clients (e.g. Claude Code) reject — breaking the entire
+        // tool list.  Use AnyJson or ObjectJson wrappers instead.
+        const FORBIDDEN: &[&str] = &[
+            "Json<serde_json::Value>",
+            "Vec<serde_json::Value>",
+            "Option<serde_json::Value>",
+            "Option<Vec<serde_json::Value>>",
+        ];
+
         fn visit(dir: &Path, offenders: &mut Vec<String>) {
             let entries = std::fs::read_dir(dir).expect("read tools directory");
             for entry in entries {
@@ -469,9 +479,15 @@ mod tests {
                 if path.extension().and_then(|e| e.to_str()) != Some("rs") {
                     continue;
                 }
+                // Skip the json_object.rs helper (it wraps Value on purpose).
+                if path.file_name().map(|n| n == "json_object.rs").unwrap_or(false) {
+                    continue;
+                }
                 let content = std::fs::read_to_string(&path).expect("read rust file");
-                if content.contains("Json<serde_json::Value>") {
-                    offenders.push(path.display().to_string());
+                for pat in FORBIDDEN {
+                    if content.contains(pat) {
+                        offenders.push(format!("{}  (contains `{}`)", path.display(), pat));
+                    }
                 }
             }
         }
@@ -482,8 +498,8 @@ mod tests {
 
         assert!(
             offenders.is_empty(),
-            "Found forbidden Json<serde_json::Value> output in: {:?}",
-            offenders
+            "Found bare serde_json::Value in MCP tool structs (use AnyJson/ObjectJson instead):\n  {}",
+            offenders.join("\n  ")
         );
     }
 

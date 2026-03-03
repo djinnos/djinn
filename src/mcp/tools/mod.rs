@@ -8,4 +8,4 @@ pub mod sync_tools;
 pub mod system_tools;
 pub mod task_tools;
 
-pub use json_object::{ObjectJson, json_object};
+pub use json_object::{AnyJson, ObjectJson, json_object};

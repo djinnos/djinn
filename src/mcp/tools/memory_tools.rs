@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::repositories::note::NoteRepository;
 use crate::mcp::server::DjinnMcpServer;
-use crate::mcp::tools::{ObjectJson, json_object};
+use crate::mcp::tools::{AnyJson, ObjectJson, json_object};
 use crate::models::note::{
     BrokenLink, BuildContextResponse, GitLogEntry, GraphResponse, Note, NoteCompact, OrphanNote,
     ReindexSummary,
@@ -173,7 +173,7 @@ pub struct NoteListResponse {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SearchResponse {
-    pub results: Vec<serde_json::Value>,
+    pub results: Vec<AnyJson>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -208,7 +208,7 @@ pub struct DiffResponse {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct TaskRefsResponse {
-    pub tasks: Vec<serde_json::Value>,
+    pub tasks: Vec<AnyJson>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -433,14 +433,14 @@ impl DjinnMcpServer {
         let items = results
             .into_iter()
             .map(|r| {
-                serde_json::json!({
+                AnyJson::from(serde_json::json!({
                     "id":        r.id,
                     "permalink": r.permalink,
                     "title":     r.title,
                     "folder":    r.folder,
                     "note_type": r.note_type,
                     "snippet":   r.snippet,
-                })
+                }))
             })
             .collect();
 
@@ -764,7 +764,8 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<TaskRefsParams>,
     ) -> Json<TaskRefsResponse> {
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
-        let tasks = repo.task_refs(&p.permalink).await.unwrap_or_default();
+        let tasks = repo.task_refs(&p.permalink).await.unwrap_or_default()
+            .into_iter().map(AnyJson::from).collect();
         Json(TaskRefsResponse { tasks })
     }
 
