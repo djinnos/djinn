@@ -1,3 +1,5 @@
 /target
-.djinn/*
-!.djinn/memory/
+.djinn/logs/
+.djinn/tasks/
+.djinn/worktrees/
+.djinn/*.db
