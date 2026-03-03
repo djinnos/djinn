@@ -25,6 +25,7 @@ use crate::provider::health::HealthTracker;
 
 /// Interval between stuck-detection passes (AGENT-08).
 const STUCK_INTERVAL: Duration = Duration::from_secs(30);
+const DEFAULT_MODEL_ID: &str = "default";
 
 // ─── Error ────────────────────────────────────────────────────────────────────
 
@@ -263,7 +264,7 @@ impl CoordinatorActor {
             }
 
             tracing::info!(task_id = %task.short_id, "CoordinatorActor: dispatching task");
-            match self.supervisor.dispatch(&task.id).await {
+            match self.supervisor.dispatch(&task.id, DEFAULT_MODEL_ID).await {
                 Ok(()) => self.dispatched += 1,
                 Err(e) => {
                     tracing::warn!(
@@ -411,14 +412,26 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::agent::init_session_manager;
     use crate::db::repositories::epic::EpicRepository;
     use crate::db::repositories::task::TaskRepository;
     use crate::provider::health::HealthTracker;
+    use crate::server::AppState;
     use crate::test_helpers;
 
     fn spawn_coordinator(db: &Database, tx: &broadcast::Sender<DjinnEvent>) -> CoordinatorHandle {
         let cancel = CancellationToken::new();
-        let supervisor = AgentSupervisorHandle::spawn();
+        let app_state = AppState::new(db.clone(), cancel.clone());
+        let sessions_dir = std::env::temp_dir().join(format!(
+            "djinn-test-sessions-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session_manager = init_session_manager(sessions_dir);
+        let supervisor = AgentSupervisorHandle::spawn(app_state, session_manager, cancel.clone());
         let health = HealthTracker::new();
         CoordinatorHandle::spawn(tx.clone(), cancel, db.clone(), supervisor, health)
     }
