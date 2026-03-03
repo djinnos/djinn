@@ -1,8 +1,9 @@
 // AgentSupervisor — 1x global, manages in-process Goose session lifecycle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use goose::agents::{
     Agent as GooseAgent, AgentConfig as GooseAgentConfig, GoosePlatform,
@@ -97,6 +98,7 @@ struct AgentSupervisor {
     capacity: HashMap<String, ModelCapacity>,
     session_models: HashMap<String, String>,
     session_agent_types: HashMap<String, AgentType>,
+    interrupted_sessions: HashSet<String>,
     session_manager: Arc<SessionManager>,
     app_state: AppState,
     cancel: CancellationToken,
@@ -117,6 +119,7 @@ impl AgentSupervisor {
             capacity: HashMap::new(),
             session_models: HashMap::new(),
             session_agent_types: HashMap::new(),
+            interrupted_sessions: HashSet::new(),
             session_manager,
             app_state,
             cancel,
@@ -160,7 +163,7 @@ impl AgentSupervisor {
                 task_id,
                 respond_to,
             } => {
-                let _ = respond_to.send(self.kill_session(task_id));
+                let _ = respond_to.send(self.kill_session(task_id).await);
             }
             SupervisorMessage::GetStatus { respond_to } => {
                 let _ = respond_to.send(Ok(SupervisorStatus {
@@ -169,6 +172,9 @@ impl AgentSupervisor {
                 }));
             }
             SupervisorMessage::SessionCompleted { task_id, result } => {
+                if self.interrupted_sessions.remove(&task_id) {
+                    return;
+                }
                 let model_id = self.session_models.get(&task_id).cloned();
                 let agent_type = self.remove_session(&task_id);
                 self.handle_session_result(&task_id, model_id.as_deref(), agent_type, result)
@@ -311,12 +317,15 @@ impl AgentSupervisor {
                     .await
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
+                let mut interrupted: Option<&'static str> = None;
                 loop {
                     tokio::select! {
                         _ = session_cancel_for_reply.cancelled() => {
+                            interrupted = Some("session cancelled");
                             break;
                         }
                         _ = global_cancel.cancelled() => {
+                            interrupted = Some("supervisor shutting down");
                             break;
                         }
                         evt = stream.next() => {
@@ -325,6 +334,10 @@ impl AgentSupervisor {
                             extension::handle_event(&app_state, &agent, &evt).await;
                         }
                     }
+                }
+
+                if let Some(reason) = interrupted {
+                    return Err(anyhow::anyhow!(reason));
                 }
 
                 Ok(())
@@ -396,13 +409,38 @@ impl AgentSupervisor {
         self.session_agent_types.insert(task_id, AgentType::Worker);
     }
 
-    fn kill_session(&mut self, task_id: String) -> Result<(), SupervisorError> {
-        if let Some(handle) = self.sessions.remove(&task_id) {
-            handle.cancel.cancel();
-            self.decrement_capacity(&task_id);
-            self.session_models.remove(&task_id);
-            self.session_agent_types.remove(&task_id);
+    async fn kill_session(&mut self, task_id: String) -> Result<(), SupervisorError> {
+        let Some(mut handle) = self.sessions.remove(&task_id) else {
+            return Ok(());
+        };
+
+        self.interrupted_sessions.insert(task_id.clone());
+
+        let model_id = self.session_models.remove(&task_id);
+        let agent_type = self
+            .session_agent_types
+            .remove(&task_id)
+            .unwrap_or(AgentType::Worker);
+
+        handle.cancel.cancel();
+
+        match tokio::time::timeout(Duration::from_secs(30), &mut handle.join).await {
+            Ok(_) => {}
+            Err(_) => {
+                tracing::warn!(task_id = %task_id, "session join timed out during kill; aborting");
+                handle.join.abort();
+                let _ = handle.join.await;
+            }
         }
+
+        self.decrement_capacity_for_model(model_id.as_deref());
+
+        if let Some(worktree_path) = handle.worktree_path.as_ref() {
+            self.commit_wip_if_needed(&task_id, worktree_path).await;
+        }
+        self.transition_interrupted(&task_id, agent_type, "session interrupted by supervisor kill")
+            .await;
+
         Ok(())
     }
 
@@ -422,6 +460,81 @@ impl AgentSupervisor {
             && model_capacity.active > 0
         {
             model_capacity.active -= 1;
+        }
+    }
+
+    fn decrement_capacity_for_model(&mut self, model_id: Option<&str>) {
+        if let Some(model_id) = model_id
+            && let Some(model_capacity) = self.capacity.get_mut(model_id)
+            && model_capacity.active > 0
+        {
+            model_capacity.active -= 1;
+        }
+    }
+
+    async fn commit_wip_if_needed(&self, task_id: &str, worktree_path: &PathBuf) {
+        let git = match self.app_state.git_actor(worktree_path).await {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "failed to open git actor for worktree");
+                return;
+            }
+        };
+
+        let status = match git
+            .run_command(vec!["status".into(), "--porcelain".into()])
+            .await
+        {
+            Ok(out) => out,
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "failed to read worktree status");
+                return;
+            }
+        };
+
+        if status.stdout.trim().is_empty() {
+            return;
+        }
+
+        if let Err(e) = git.run_command(vec!["add".into(), "-A".into()]).await {
+            tracing::warn!(task_id = %task_id, error = %e, "failed to stage interrupted session changes");
+            return;
+        }
+
+        let message = format!("WIP: interrupted session {task_id}");
+        if let Err(e) = git
+            .run_command(vec![
+                "commit".into(),
+                "--no-verify".into(),
+                "-m".into(),
+                message,
+            ])
+            .await
+        {
+            tracing::warn!(task_id = %task_id, error = %e, "failed to commit interrupted session changes");
+        }
+    }
+
+    async fn transition_interrupted(&self, task_id: &str, agent_type: AgentType, reason: &str) {
+        let action = match agent_type {
+            AgentType::Worker => TransitionAction::Release,
+            AgentType::TaskReviewer => TransitionAction::ReleaseTaskReview,
+            AgentType::PhaseReviewer => TransitionAction::ReleasePhaseReview,
+        };
+
+        let repo = TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        if let Err(e) = repo
+            .transition(
+                task_id,
+                action,
+                "agent-supervisor",
+                "system",
+                Some(reason),
+                None,
+            )
+            .await
+        {
+            tracing::warn!(task_id = %task_id, error = %e, "failed to transition interrupted task");
         }
     }
 
@@ -616,13 +729,55 @@ impl AgentSupervisor {
     }
 
     async fn shutdown(&mut self) {
-        let mut drained = std::mem::take(&mut self.sessions);
-        for (task_id, handle) in drained.drain() {
+        struct PendingSession {
+            task_id: String,
+            join: tokio::task::JoinHandle<anyhow::Result<()>>,
+            worktree_path: Option<PathBuf>,
+            model_id: Option<String>,
+            agent_type: AgentType,
+        }
+
+        let mut pending = Vec::new();
+        for (task_id, mut handle) in std::mem::take(&mut self.sessions) {
             handle.cancel.cancel();
-            let _ = handle.join.await;
-            self.decrement_capacity(&task_id);
-            self.session_models.remove(&task_id);
-            self.session_agent_types.remove(&task_id);
+            self.interrupted_sessions.insert(task_id.clone());
+            pending.push(PendingSession {
+                model_id: self.session_models.remove(&task_id),
+                agent_type: self
+                    .session_agent_types
+                    .remove(&task_id)
+                    .unwrap_or(AgentType::Worker),
+                task_id,
+                join: handle.join,
+                worktree_path: handle.worktree_path.take(),
+            });
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        for item in &mut pending {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                item.join.abort();
+                continue;
+            }
+
+            if tokio::time::timeout(remaining, &mut item.join).await.is_err() {
+                tracing::warn!(task_id = %item.task_id, "session join timed out during shutdown; aborting");
+                item.join.abort();
+            }
+        }
+
+        for item in pending {
+            self.decrement_capacity_for_model(item.model_id.as_deref());
+            if let Some(worktree_path) = item.worktree_path.as_ref() {
+                self.commit_wip_if_needed(&item.task_id, worktree_path).await;
+            }
+            self.transition_interrupted(
+                &item.task_id,
+                item.agent_type,
+                "session interrupted by supervisor shutdown",
+            )
+            .await;
         }
     }
 }
