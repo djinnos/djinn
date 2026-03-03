@@ -13,7 +13,7 @@ jsonwebtoken = "9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 git2 = "0.20"
 dirs = "6"
-refinery = "0.9"
+refinery = { version = "0.9", features = ["int8-versions"] }
 rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"] }
 ring = "0.17"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros"] }

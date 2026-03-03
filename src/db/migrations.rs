@@ -1,58 +1,15 @@
-use sqlx::{Executor, SqlitePool};
+use sqlx::SqlitePool;
 
 use crate::error::Result;
 
-struct Migration {
-    version: i64,
-    name: &'static str,
-    sql: &'static str,
+mod embedded {
+    use refinery::embed_migrations;
+
+    embed_migrations!("migrations");
 }
 
-const MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 20260302000001,
-        name: "initial_schema",
-        sql: include_str!("../../migrations/V20260302000001__initial_schema.sql"),
-    },
-    Migration {
-        version: 20260303000001,
-        name: "task_board",
-        sql: include_str!("../../migrations/V20260303000001__task_board.sql"),
-    },
-    Migration {
-        version: 20260303000002,
-        name: "notes",
-        sql: include_str!("../../migrations/V20260303000002__notes.sql"),
-    },
-    Migration {
-        version: 20260303000003,
-        name: "task_state_fields",
-        sql: include_str!("../../migrations/V20260303000003__task_state_fields.sql"),
-    },
-    Migration {
-        version: 20260303000006,
-        name: "model_health",
-        sql: include_str!("../../migrations/V20260303000006__model_health.sql"),
-    },
-    Migration {
-        version: 20260303000007,
-        name: "note_links",
-        sql: include_str!("../../migrations/V20260303000007__note_links.sql"),
-    },
-    Migration {
-        version: 20260303000008,
-        name: "task_memory_refs",
-        sql: include_str!("../../migrations/V20260303000008__task_memory_refs.sql"),
-    },
-    Migration {
-        version: 20260303000009,
-        name: "credentials",
-        sql: include_str!("../../migrations/V20260303000009__credentials.sql"),
-    },
-];
-
 pub async fn run(pool: &SqlitePool) -> Result<()> {
-    pool.execute(
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS refinery_schema_history (
              version INTEGER PRIMARY KEY,
              name TEXT NOT NULL,
@@ -60,27 +17,31 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
              checksum TEXT NOT NULL
          )",
     )
+    .execute(pool)
     .await?;
 
-    for migration in MIGRATIONS {
+    for migration in embedded::migrations::runner().get_migrations() {
         let exists: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM refinery_schema_history WHERE version = ?1",
         )
-        .bind(migration.version)
+        .bind(migration.version())
         .fetch_one(pool)
         .await?;
         if exists > 0 {
             continue;
         }
 
-        sqlx::raw_sql(migration.sql).execute(pool).await?;
+        if let Some(sql) = migration.sql() {
+            sqlx::raw_sql(sql).execute(pool).await?;
+        }
+
         sqlx::query(
             "INSERT INTO refinery_schema_history (version, name, applied_on, checksum)
              VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?3)",
         )
-        .bind(migration.version)
-        .bind(migration.name)
-        .bind("")
+        .bind(migration.version())
+        .bind(migration.name())
+        .bind(migration.checksum().to_string())
         .execute(pool)
         .await?;
     }

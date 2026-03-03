@@ -7,7 +7,6 @@ use serde::Deserialize;
 use crate::models::provider::{Model, Pricing, Provider};
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
-const DEFAULT_TTL: Duration = Duration::from_secs(3600); // 1 hour
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Build-time embedded snapshot of models.dev/api.json.
@@ -101,7 +100,6 @@ impl Default for CatalogData {
 #[derive(Clone)]
 pub struct CatalogService {
     inner: Arc<RwLock<CatalogData>>,
-    ttl: Duration,
 }
 
 impl CatalogService {
@@ -109,7 +107,6 @@ impl CatalogService {
     pub fn new() -> Self {
         let svc = Self {
             inner: Arc::new(RwLock::new(CatalogData::default())),
-            ttl: DEFAULT_TTL,
         };
         svc.seed_from_embedded();
         svc
