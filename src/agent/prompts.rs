@@ -25,19 +25,22 @@ pub struct TaskContext {
     /// Absolute path to the project root (passed to Djinn tools as `project`).
     pub project_path: String,
 
-    // ── Task / epic reviewer fields ───────────────────────────────────────────
-    /// Formatted git diff for the task's commit range.
+    // ── Task reviewer fields ──────────────────────────────────────────────────
+    /// Formatted git diff for the task branch (start_commit..end_commit).
     pub diff: Option<String>,
-    /// Formatted `git log --oneline` output for the commit range.
+    /// Formatted `git log --oneline` output for the task branch.
     pub commits: Option<String>,
+    /// Merge-base of the task branch with the target branch (task reviewer).
     pub start_commit: Option<String>,
+    /// HEAD of the task branch (task reviewer).
     pub end_commit: Option<String>,
 
     // ── Epic reviewer batch fields ────────────────────────────────────────────
     pub batch_num: Option<u32>,
     pub task_count: Option<u32>,
-    pub commit_count: Option<u32>,
-    /// Human-readable summary listing each task in the batch.
+    /// Each line: "<merge_sha> <short_id>: <title>" — agent runs `git show <sha>` per entry.
+    /// SHAs are per-task squash-merge commits; no contiguous range exists since other
+    /// epics' commits may be interleaved on the same branch.
     pub tasks_summary: Option<String>,
     pub common_labels: Option<String>,
 }
@@ -82,10 +85,6 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
     out = out.replace(
         "{{task_count}}",
         &ctx.task_count.map(|n| n.to_string()).unwrap_or_default(),
-    );
-    out = out.replace(
-        "{{commit_count}}",
-        &ctx.commit_count.map(|n| n.to_string()).unwrap_or_default(),
     );
     out = out.replace("{{tasks_summary}}", ctx.tasks_summary.as_deref().unwrap_or(""));
     out = out.replace("{{common_labels}}", ctx.common_labels.as_deref().unwrap_or(""));
@@ -172,7 +171,6 @@ mod tests {
             end_commit: None,
             batch_num: None,
             task_count: None,
-            commit_count: None,
             tasks_summary: None,
             common_labels: None,
         }
@@ -219,18 +217,15 @@ mod tests {
         let ctx = TaskContext {
             batch_num: Some(2),
             task_count: Some(5),
-            commit_count: Some(12),
-            start_commit: Some("aaa0000".into()),
-            end_commit: Some("bbb9999".into()),
             common_labels: Some("wave:1".into()),
-            tasks_summary: Some("- task-123: Add widget".into()),
+            tasks_summary: Some("abc1234 lnfo: Add widget\ndef5678 rvmf: Fix auth".into()),
             ..make_ctx()
         };
         let prompt = render_prompt(AgentType::PhaseReviewer, &task, &ctx);
 
         assert!(prompt.contains("Batch: 2") || prompt.contains("**Batch:** 2"));
-        assert!(prompt.contains("aaa0000..bbb9999"));
-        assert!(prompt.contains("- task-123: Add widget"));
+        assert!(prompt.contains("abc1234 lnfo: Add widget"));
+        assert!(prompt.contains("git show <sha>"));
         assert!(!prompt.contains("{{"));
     }
 

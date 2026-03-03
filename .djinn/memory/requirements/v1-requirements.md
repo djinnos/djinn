@@ -96,7 +96,7 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 | ID | Requirement | Classification | Source |
 |---|---|---|---|
 | REVIEW-01 | Task review: acceptance criteria verification + code nitpicks on individual task diffs | v1 | Brief |
-| REVIEW-02 | Epic review: completeness check (missing tasks?) + aggregate code quality (patterns, duplicates, architectural drift) | v1 | Brief |
+| REVIEW-02 | Epic review: completeness check (missing tasks?) + aggregate code quality (patterns, duplicates, architectural drift). Reviewer receives a per-task list of `merge_commit_sha` values (see GIT-09) and inspects each via `git show <sha>` — no contiguous range, since tasks from other epics may be interleaved on the same branch. | v1 | Brief, GIT-09 |
 | REVIEW-03 | Review rejection returns task to agent with feedback for rework | v1 | Brief (task state machine) |
 | REVIEW-04 | Specialist review agents (correctness/security/performance/standards) | v2 | Features Research |
 
@@ -112,6 +112,7 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 | GIT-06 | Worktree lifecycle: create, cleanup, orphan detection, `git worktree prune` before create | v1 | Brief, Pitfalls Research §6 |
 | GIT-07 | Git hook awareness: capture pre-commit/commit-msg failures, re-dispatch agent to fix | v1 | Brief |
 | GIT-08 | Target branch configurable per project | v1 | Brief |
+| GIT-09 | Store `merge_commit_sha` on Task after squash-merge completes. Used by the epic reviewer to identify each task's individual contribution — a contiguous commit range is not usable because commits from other epics may be interleaved on the same target branch. Epic reviewer receives a per-task SHA list and runs `git show <sha>` per task. | v1 | REVIEW-02, ADR-008 |
 
 ## Category: SYNC (djinn/ Namespace Sync)
 

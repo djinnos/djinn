@@ -4,24 +4,25 @@ You have access to Djinn tools via the `djinn` extension.
 
 **Batch:** {{batch_num}}
 **Tasks:** {{task_count}}
-**Commits:** {{commit_count}}
-**Commit range:** {{start_commit}}..{{end_commit}}
 **Common labels:** {{common_labels}}
 
 ## Tasks in This Batch
 
 {{tasks_summary}}
 
+Each entry above includes the task's merge commit SHA. Use `git show <sha>` to inspect what each task contributed independently.
+
 ## Review Process
 
-### Step 1: Fetch Code Changes
+### Step 1: Fetch Each Task's Changes
 
-Run these commands to see what was changed:
+For each task in the batch, inspect its squash-merge commit:
 
 ```bash
-git diff {{start_commit}}..{{end_commit}}
-git log --oneline {{start_commit}}..{{end_commit}}
+git show <sha>
 ```
+
+Every task has its own isolated commit — there is no contiguous range because commits from other epics may be interleaved on the same branch.
 
 ### Step 2: Architectural Review
 
@@ -69,6 +70,5 @@ Also include:
 ```
 BATCH_NUMBER: {{batch_num}}
 TASKS_REVIEWED: {{task_count}}
-COMMITS_REVIEWED: {{commit_count}}
 FIX_TASKS_CREATED: <number>
 ```
