@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::connection::OptionalExt;
 use crate::db::repositories::epic::EpicRepository;
-use crate::db::repositories::task::{CountQuery, ListQuery, ReadyQuery, TaskRepository};
+use crate::db::repositories::task::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository};
 use crate::mcp::server::DjinnMcpServer;
 use crate::models::task::Task;
 
@@ -16,6 +16,8 @@ fn task_to_value(t: &Task) -> serde_json::Value {
         serde_json::from_str(&t.labels).unwrap_or(serde_json::json!([]));
     let ac: serde_json::Value =
         serde_json::from_str(&t.acceptance_criteria).unwrap_or(serde_json::json!([]));
+    let memory_refs: serde_json::Value =
+        serde_json::from_str(&t.memory_refs).unwrap_or(serde_json::json!([]));
     serde_json::json!({
         "id":                   t.id,
         "short_id":             t.short_id,
@@ -28,6 +30,7 @@ fn task_to_value(t: &Task) -> serde_json::Value {
         "priority":             t.priority,
         "owner":                t.owner,
         "labels":               labels,
+        "memory_refs":          memory_refs,
         "acceptance_criteria":  ac,
         "reopen_count":         t.reopen_count,
         "continuation_count":   t.continuation_count,
@@ -77,6 +80,10 @@ pub struct TaskUpdateParams {
     pub acceptance_criteria: Option<Vec<serde_json::Value>>,
     /// New parent epic UUID or short_id.
     pub parent: Option<String>,
+    /// Memory note permalinks to add to this task.
+    pub memory_refs_add: Option<Vec<String>>,
+    /// Memory note permalinks to remove from this task.
+    pub memory_refs_remove: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -182,6 +189,36 @@ pub struct TaskReadyParams {
     pub priority_max: Option<i64>,
     pub limit: Option<i64>,
     /// Absolute project path (optional).
+    pub project: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TaskActivityListParams {
+    /// Task UUID or short_id (optional — omit to query all tasks).
+    pub id: Option<String>,
+    /// Filter by event_type (e.g. "status_changed", "comment").
+    pub event_type: Option<String>,
+    /// ISO-8601 lower bound on created_at.
+    pub from_time: Option<String>,
+    /// ISO-8601 upper bound on created_at.
+    pub to_time: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct BoardHealthParams {
+    /// Hours before an in_progress task is considered stale (default: 24).
+    pub stale_threshold_hours: Option<i64>,
+    /// Project path — accepted for API compatibility, currently unused.
+    pub project: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct BoardReconcileParams {
+    /// Hours before an in_progress task is considered stale (default: 24).
+    pub stale_threshold_hours: Option<i64>,
+    /// Project path — accepted for API compatibility, currently unused.
     pub project: Option<String>,
 }
 
@@ -636,6 +673,85 @@ impl DjinnMcpServer {
                                   .unwrap_or(serde_json::json!({})),
                 "created_at": entry.created_at,
             })),
+            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        }
+    }
+
+    /// Query the activity log with optional filters.
+    #[tool(description = "List task activity log entries filtered by task_id, event_type, and/or time range.")]
+    pub async fn task_activity_list(
+        &self,
+        Parameters(p): Parameters<TaskActivityListParams>,
+    ) -> Json<serde_json::Value> {
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+
+        // If an id was supplied, resolve it to a full UUID.
+        let task_id = if let Some(ref id) = p.id {
+            match repo.resolve(id).await {
+                Ok(Some(t)) => Some(t.id),
+                Ok(None) => return Json(not_found(id)),
+                Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+            }
+        } else {
+            None
+        };
+
+        let q = ActivityQuery {
+            task_id,
+            event_type: p.event_type,
+            from_time: p.from_time,
+            to_time: p.to_time,
+            limit: p.limit.unwrap_or(50).clamp(1, 200),
+            offset: p.offset.unwrap_or(0).max(0),
+        };
+
+        match repo.query_activity(q).await {
+            Ok(entries) => {
+                let items: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "id":         e.id,
+                            "task_id":    e.task_id,
+                            "actor_id":   e.actor_id,
+                            "actor_role": e.actor_role,
+                            "event_type": e.event_type,
+                            "payload":    serde_json::from_str::<serde_json::Value>(&e.payload)
+                                              .unwrap_or(serde_json::json!({})),
+                            "created_at": e.created_at,
+                        })
+                    })
+                    .collect();
+                Json(serde_json::json!({ "entries": items, "count": items.len() }))
+            }
+            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        }
+    }
+
+    /// Board health report: epic progress, stale tasks, and review queue.
+    #[tool(description = "Returns aggregate health report (total notes, broken links, orphan notes, stale notes by folder).")]
+    pub async fn board_health(
+        &self,
+        Parameters(p): Parameters<BoardHealthParams>,
+    ) -> Json<serde_json::Value> {
+        let stale_hours = p.stale_threshold_hours.unwrap_or(24).max(1);
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        match repo.board_health(stale_hours).await {
+            Ok(report) => Json(report),
+            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        }
+    }
+
+    /// Heal stale tasks and recover orphaned states.
+    #[tool(description = "Trigger board reconciliation: heal stale tasks, recover stuck sessions, trigger overdue reviews, disable dead models, and reconcile phases. Returns action counts.")]
+    pub async fn board_reconcile(
+        &self,
+        Parameters(p): Parameters<BoardReconcileParams>,
+    ) -> Json<serde_json::Value> {
+        let stale_hours = p.stale_threshold_hours.unwrap_or(24).max(1);
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        match repo.reconcile(stale_hours).await {
+            Ok(result) => Json(result),
             Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
         }
     }

@@ -55,6 +55,29 @@ pub struct CountQuery {
     pub group_by: Option<String>,
 }
 
+/// Filters for [`TaskRepository::query_activity`].
+pub struct ActivityQuery {
+    pub task_id: Option<String>,
+    pub event_type: Option<String>,
+    pub from_time: Option<String>,
+    pub to_time: Option<String>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+impl Default for ActivityQuery {
+    fn default() -> Self {
+        Self {
+            task_id: None,
+            event_type: None,
+            from_time: None,
+            to_time: None,
+            limit: 50,
+            offset: 0,
+        }
+    }
+}
+
 /// Minimal task reference returned by blocker listing queries.
 #[derive(Debug)]
 pub struct BlockerRef {
@@ -717,6 +740,237 @@ impl TaskRepository {
             .await
     }
 
+    /// Query activity log with optional filters: task_id, event_type, time range, pagination.
+    pub async fn query_activity(&self, q: ActivityQuery) -> Result<Vec<ActivityEntry>> {
+        self.db
+            .call(move |conn| {
+                let mut clauses: Vec<String> = Vec::new();
+                let mut params: Vec<rusqlite::types::Value> = Vec::new();
+
+                if let Some(ref tid) = q.task_id {
+                    clauses.push("task_id = ?".to_owned());
+                    params.push(rusqlite::types::Value::Text(tid.clone()));
+                }
+                if let Some(ref et) = q.event_type {
+                    clauses.push("event_type = ?".to_owned());
+                    params.push(rusqlite::types::Value::Text(et.clone()));
+                }
+                if let Some(ref ft) = q.from_time {
+                    clauses.push("created_at >= ?".to_owned());
+                    params.push(rusqlite::types::Value::Text(ft.clone()));
+                }
+                if let Some(ref tt) = q.to_time {
+                    clauses.push("created_at <= ?".to_owned());
+                    params.push(rusqlite::types::Value::Text(tt.clone()));
+                }
+
+                let where_sql = if clauses.is_empty() {
+                    "1=1".to_owned()
+                } else {
+                    clauses.join(" AND ")
+                };
+
+                let mut list_params = params;
+                list_params.push(rusqlite::types::Value::Integer(q.limit));
+                list_params.push(rusqlite::types::Value::Integer(q.offset));
+
+                let sql = format!(
+                    "SELECT id, task_id, actor_id, actor_role, event_type, payload, created_at
+                     FROM activity_log WHERE {where_sql}
+                     ORDER BY created_at DESC LIMIT ? OFFSET ?"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let entries = stmt
+                    .query_map(rusqlite::params_from_iter(list_params.iter()), row_to_activity)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(entries)
+            })
+            .await
+    }
+
+    /// Aggregate board health report: epic stats, stale in_progress tasks, review queue.
+    pub async fn board_health(&self, stale_hours: i64) -> Result<serde_json::Value> {
+        self.db
+            .call(move |conn| {
+                // Per-epic task counts and % complete.
+                let epic_stats: Vec<serde_json::Value> = {
+                    let mut stmt = conn.prepare(
+                        "SELECT e.id, e.short_id, e.title,
+                                COUNT(t.id) AS total,
+                                SUM(CASE WHEN t.status = 'closed' THEN 1 ELSE 0 END) AS closed,
+                                SUM(CASE WHEN t.status IN (
+                                    'needs_task_review','in_task_review',
+                                    'needs_phase_review','in_phase_review'
+                                ) THEN 1 ELSE 0 END) AS in_review,
+                                MIN(CASE WHEN t.status IN (
+                                    'needs_task_review','in_task_review',
+                                    'needs_phase_review','in_phase_review'
+                                ) THEN t.updated_at ELSE NULL END) AS oldest_review_at
+                         FROM epics e
+                         LEFT JOIN tasks t ON t.epic_id = e.id
+                         GROUP BY e.id
+                         ORDER BY e.title",
+                    )?;
+                    stmt.query_map([], |row| {
+                        let total: i64 = row.get(3)?;
+                        let closed: i64 = row.get::<_, Option<i64>>(4)?.unwrap_or(0);
+                        let in_review: i64 = row.get::<_, Option<i64>>(5)?.unwrap_or(0);
+                        let oldest_review_at: Option<String> = row.get(6)?;
+                        let pct = if total > 0 {
+                            (closed as f64 / total as f64 * 1000.0).round() / 10.0
+                        } else {
+                            0.0
+                        };
+                        Ok(serde_json::json!({
+                            "epic_id":          row.get::<_, String>(0)?,
+                            "short_id":         row.get::<_, String>(1)?,
+                            "title":            row.get::<_, String>(2)?,
+                            "total":            total,
+                            "closed":           closed,
+                            "in_review":        in_review,
+                            "pct_complete":     pct,
+                            "oldest_review_at": oldest_review_at,
+                        }))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect()
+                };
+
+                // Stale tasks: in_progress longer than the threshold.
+                let stale_tasks: Vec<serde_json::Value> = {
+                    let sql = format!(
+                        "SELECT t.id, t.short_id, t.title, t.status, t.updated_at, t.owner,
+                                e.short_id AS epic_short_id
+                         FROM tasks t
+                         JOIN epics e ON t.epic_id = e.id
+                         WHERE t.status = 'in_progress'
+                           AND t.updated_at < datetime('now', '-{stale_hours} hours')
+                         ORDER BY t.updated_at ASC"
+                    );
+                    let mut stmt = conn.prepare(&sql)?;
+                    stmt.query_map([], |row| {
+                        Ok(serde_json::json!({
+                            "id":            row.get::<_, String>(0)?,
+                            "short_id":      row.get::<_, String>(1)?,
+                            "title":         row.get::<_, String>(2)?,
+                            "status":        row.get::<_, String>(3)?,
+                            "updated_at":    row.get::<_, String>(4)?,
+                            "owner":         row.get::<_, String>(5)?,
+                            "epic_short_id": row.get::<_, String>(6)?,
+                        }))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect()
+                };
+
+                // Review queue: tasks waiting in any review status.
+                let review_queue: Vec<serde_json::Value> = {
+                    let mut stmt = conn.prepare(
+                        "SELECT t.id, t.short_id, t.title, t.status, t.updated_at,
+                                e.short_id AS epic_short_id
+                         FROM tasks t
+                         JOIN epics e ON t.epic_id = e.id
+                         WHERE t.status IN (
+                             'needs_task_review','in_task_review',
+                             'needs_phase_review','in_phase_review'
+                         )
+                         ORDER BY t.updated_at ASC",
+                    )?;
+                    stmt.query_map([], |row| {
+                        Ok(serde_json::json!({
+                            "id":            row.get::<_, String>(0)?,
+                            "short_id":      row.get::<_, String>(1)?,
+                            "title":         row.get::<_, String>(2)?,
+                            "status":        row.get::<_, String>(3)?,
+                            "updated_at":    row.get::<_, String>(4)?,
+                            "epic_short_id": row.get::<_, String>(5)?,
+                        }))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect()
+                };
+
+                Ok(serde_json::json!({
+                    "epic_stats":            epic_stats,
+                    "stale_tasks":           stale_tasks,
+                    "review_queue":          review_queue,
+                    "stale_threshold_hours": stale_hours,
+                }))
+            })
+            .await
+    }
+
+    /// Heal stale tasks: move `in_progress` tasks older than `stale_hours` back to `open`.
+    /// Logs a `status_changed` activity entry for each healed task and emits `TaskUpdated` events.
+    pub async fn reconcile(&self, stale_hours: i64) -> Result<serde_json::Value> {
+        let events_tx = self.events.clone();
+
+        let healed: Vec<Task> = self
+            .db
+            .write(move |conn| {
+                let sql = format!(
+                    "SELECT id, short_id, epic_id, title, description, design, issue_type,
+                            status, priority, owner, labels, acceptance_criteria,
+                            reopen_count, continuation_count, created_at, updated_at, closed_at,
+                            blocked_from_status, close_reason, memory_refs
+                     FROM tasks
+                     WHERE status = 'in_progress'
+                       AND updated_at < datetime('now', '-{stale_hours} hours')"
+                );
+                let stale: Vec<Task> = {
+                    let mut stmt = conn.prepare(&sql)?;
+                    stmt.query_map([], row_to_task)?
+                        .collect::<std::result::Result<Vec<_>, _>>()?
+                };
+
+                let mut healed: Vec<Task> = Vec::new();
+                for task in stale {
+                    conn.execute(
+                        "UPDATE tasks
+                         SET status = 'open',
+                             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                         WHERE id = ?1",
+                        [&task.id],
+                    )?;
+
+                    let activity_id = uuid::Uuid::now_v7().to_string();
+                    let payload = serde_json::json!({
+                        "from":   "in_progress",
+                        "to":     "open",
+                        "reason": "reconcile_stale",
+                    })
+                    .to_string();
+                    conn.execute(
+                        "INSERT INTO activity_log
+                            (id, task_id, actor_id, actor_role, event_type, payload)
+                         VALUES (?1, ?2, 'system', 'system', 'status_changed', ?3)",
+                        rusqlite::params![&activity_id, &task.id, &payload],
+                    )?;
+
+                    let updated: Task = conn.query_row(
+                        TASK_SELECT_WHERE_ID,
+                        [&task.id],
+                        row_to_task,
+                    )?;
+                    healed.push(updated);
+                }
+                Ok(healed)
+            })
+            .await?;
+
+        for task in &healed {
+            let _ = events_tx.send(DjinnEvent::TaskUpdated(task.clone()));
+        }
+
+        let healed_short_ids: Vec<&str> = healed.iter().map(|t| t.short_id.as_str()).collect();
+        Ok(serde_json::json!({
+            "healed_tasks":      healed.len(),
+            "healed_task_ids":   healed_short_ids,
+            "recovered_tasks":   0,
+            "reviews_triggered": 0,
+        }))
+    }
+
     /// Resolve a task by UUID or short_id.
     pub async fn resolve(&self, id_or_short: &str) -> Result<Option<Task>> {
         let id = id_or_short.to_owned();
@@ -832,6 +1086,54 @@ impl TaskRepository {
                         Ok(serde_json::json!({ "total_count": total }))
                     }
                 }
+            })
+            .await
+    }
+
+    // ── Memory refs ──────────────────────────────────────────────────────────
+
+    /// Replace the `memory_refs` JSON array on a task.
+    pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Task> {
+        let id = id.to_owned();
+        let memory_refs_json = memory_refs_json.to_owned();
+
+        let task: Task = self
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE tasks SET memory_refs = ?2,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE id = ?1",
+                    rusqlite::params![&id, &memory_refs_json],
+                )?;
+                Ok(conn.query_row(TASK_SELECT_WHERE_ID, [&id], row_to_task)?)
+            })
+            .await?;
+
+        let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
+        Ok(task)
+    }
+
+    /// Find tasks whose `memory_refs` JSON array contains the given permalink.
+    ///
+    /// Uses a LIKE query on the JSON text — fast enough for the expected table
+    /// sizes and avoids requiring a json_each virtual table scan.
+    pub async fn list_by_memory_ref(&self, permalink: &str) -> Result<Vec<Task>> {
+        let pattern = format!("%\"{permalink}\"%");
+        self.db
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, short_id, epic_id, title, description, design, issue_type,
+                            status, priority, owner, labels, acceptance_criteria,
+                            reopen_count, continuation_count, created_at, updated_at, closed_at,
+                            blocked_from_status, close_reason, memory_refs
+                     FROM tasks WHERE memory_refs LIKE ?1
+                     ORDER BY priority, created_at",
+                )?;
+                let tasks = stmt
+                    .query_map([&pattern], row_to_task)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(tasks)
             })
             .await
     }
@@ -1551,5 +1853,124 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_str(&entries[0].payload).unwrap();
         assert_eq!(payload["from_status"], "open");
         assert_eq!(payload["to_status"], "in_progress");
+    }
+
+    #[tokio::test]
+    async fn query_activity_filters() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let t1 = open_task(&repo, &epic.id).await;
+        let t2 = open_task(&repo, &epic.id).await;
+
+        // Log a comment on t1 and a status_changed on t2.
+        repo.log_activity(Some(&t1.id), "u1", "user", "comment", r#"{"body":"hello"}"#)
+            .await
+            .unwrap();
+        repo.log_activity(Some(&t2.id), "sys", "system", "status_changed", r#"{"from":"open"}"#)
+            .await
+            .unwrap();
+
+        // Filter by task_id.
+        let results = repo
+            .query_activity(ActivityQuery { task_id: Some(t1.id.clone()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].event_type, "comment");
+
+        // Filter by event_type across all tasks.
+        let results = repo
+            .query_activity(ActivityQuery {
+                event_type: Some("status_changed".to_owned()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].task_id.as_deref(), Some(t2.id.as_str()));
+
+        // No filters — returns both.
+        let all = repo.query_activity(ActivityQuery::default()).await.unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn board_health_report() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db.clone(), tx.clone());
+
+        // Create tasks: one open, one in_progress.
+        let _t1 = open_task(&repo, &epic.id).await;
+        let t2 = open_task(&repo, &epic.id).await;
+        repo.transition(&t2.id, TransitionAction::Start, "", "system", None, None)
+            .await
+            .unwrap();
+
+        let report = repo.board_health(24).await.unwrap();
+        let epic_stats = report["epic_stats"].as_array().unwrap();
+        assert_eq!(epic_stats.len(), 1);
+        assert_eq!(epic_stats[0]["total"], 2);
+
+        // Backdate t2's updated_at to simulate staleness.
+        let t2_id = t2.id.clone();
+        db.write(move |conn| {
+            conn.execute(
+                "UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1",
+                [&t2_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let report2 = repo.board_health(24).await.unwrap();
+        let stale = report2["stale_tasks"].as_array().unwrap();
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0]["short_id"], t2.short_id.as_str());
+    }
+
+    #[tokio::test]
+    async fn reconcile_heals_stale_tasks() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db.clone(), tx);
+
+        let t = open_task(&repo, &epic.id).await;
+        repo.transition(&t.id, TransitionAction::Start, "", "system", None, None)
+            .await
+            .unwrap();
+
+        // Backdate updated_at so the task is considered stale (> 24h).
+        let t_id = t.id.clone();
+        db.write(move |conn| {
+            conn.execute(
+                "UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1",
+                [&t_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let result = repo.reconcile(24).await.unwrap();
+        assert_eq!(result["healed_tasks"], 1);
+
+        // Task should now be open again.
+        let updated = repo.resolve(&t.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, "open");
+
+        // Activity log should have a reconcile_stale entry.
+        let entries = repo.list_activity(&t.id).await.unwrap();
+        let reconcile_entry = entries.iter().find(|e| {
+            let p: serde_json::Value = serde_json::from_str(&e.payload).unwrap_or_default();
+            p["reason"] == "reconcile_stale"
+        });
+        assert!(reconcile_entry.is_some(), "expected reconcile_stale activity entry");
     }
 }

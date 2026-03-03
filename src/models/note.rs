@@ -101,7 +101,7 @@ pub struct GraphEdge {
 }
 
 /// Full knowledge graph: all nodes and all resolved edges.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct GraphResponse {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
