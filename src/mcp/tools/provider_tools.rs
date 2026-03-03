@@ -95,7 +95,7 @@ pub struct ProviderModelLookupInput {
 pub struct ProviderModelLookupResponse {
     pub model_id: String,
     pub found: bool,
-    pub model: Option<AnyJson>,
+    pub model: AnyJson,
 }
 
 // ── provider_validate ─────────────────────────────────────────────────────────
@@ -282,12 +282,12 @@ impl DjinnMcpServer {
             Some(m) => Json(ProviderModelLookupResponse {
                 model_id,
                 found: true,
-                model: Some(AnyJson::from(model_to_json(&m))),
+                model: AnyJson::from(model_to_json(&m)),
             }),
             None => Json(ProviderModelLookupResponse {
                 model_id,
                 found: false,
-                model: None,
+                model: AnyJson::from(serde_json::Value::Null),
             }),
         }
     }

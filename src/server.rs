@@ -497,6 +497,7 @@ mod tests {
             path: &str,
             value: &Value,
             bad: &mut Vec<String>,
+            bad_nullable: &mut Vec<String>,
         ) {
             match value {
                 Value::Object(map) => {
@@ -508,15 +509,37 @@ mod tests {
                         }
                     }
 
+                    if matches!(map.get("nullable"), Some(Value::Bool(true)))
+                        && !matches!(map.get("type"), Some(Value::String(_)))
+                    {
+                        bad_nullable.push(format!(
+                            "{tool_name} {schema_kind} {path} has nullable=true without a type"
+                        ));
+                    }
+
                     for (k, v) in map {
                         let next_path = format!("{path}/{k}");
-                        collect_bad_formats(tool_name, schema_kind, &next_path, v, bad);
+                        collect_bad_formats(
+                            tool_name,
+                            schema_kind,
+                            &next_path,
+                            v,
+                            bad,
+                            bad_nullable,
+                        );
                     }
                 }
                 Value::Array(items) => {
                     for (idx, item) in items.iter().enumerate() {
                         let next_path = format!("{path}[{idx}]");
-                        collect_bad_formats(tool_name, schema_kind, &next_path, item, bad);
+                        collect_bad_formats(
+                            tool_name,
+                            schema_kind,
+                            &next_path,
+                            item,
+                            bad,
+                            bad_nullable,
+                        );
                     }
                 }
                 _ => {}
@@ -604,6 +627,7 @@ mod tests {
             .expect("tools/list result missing tools array");
 
         let mut bad_formats = Vec::new();
+        let mut bad_nullable = Vec::new();
         for tool in tools {
             let name = tool
                 .get("name")
@@ -612,7 +636,14 @@ mod tests {
 
             for (schema_kind, key) in &[("input", "inputSchema"), ("output", "outputSchema")] {
                 if let Some(schema) = tool.get(*key) {
-                    collect_bad_formats(name, schema_kind, "$", schema, &mut bad_formats);
+                    collect_bad_formats(
+                        name,
+                        schema_kind,
+                        "$",
+                        schema,
+                        &mut bad_formats,
+                        &mut bad_nullable,
+                    );
                 }
             }
         }
@@ -621,6 +652,12 @@ mod tests {
             bad_formats.is_empty(),
             "Found nonstandard uint schema formats (prefer i64-compatible fields):\n  {}",
             bad_formats.join("\n  ")
+        );
+
+        assert!(
+            bad_nullable.is_empty(),
+            "Found nullable schema branches without explicit type (breaks strict clients):\n  {}",
+            bad_nullable.join("\n  ")
         );
     }
 
