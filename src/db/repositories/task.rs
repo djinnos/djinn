@@ -3,7 +3,7 @@ use tokio::sync::broadcast;
 use crate::db::connection::{Database, OptionalExt};
 use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
-use crate::models::task::{ActivityEntry, Task};
+use crate::models::task::{ActivityEntry, Task, TaskStatus, TransitionAction, compute_transition};
 
 pub struct TaskRepository {
     db: Database,
@@ -22,7 +22,8 @@ impl TaskRepository {
                 let mut stmt = conn.prepare(
                     "SELECT id, short_id, epic_id, title, description, design, issue_type,
                             status, priority, owner, labels, acceptance_criteria,
-                            reopen_count, continuation_count, created_at, updated_at, closed_at
+                            reopen_count, continuation_count, created_at, updated_at, closed_at,
+                            blocked_from_status, close_reason
                      FROM tasks WHERE epic_id = ?1 ORDER BY priority, created_at",
                 )?;
                 let tasks = stmt
@@ -40,7 +41,8 @@ impl TaskRepository {
                 let mut stmt = conn.prepare(
                     "SELECT id, short_id, epic_id, title, description, design, issue_type,
                             status, priority, owner, labels, acceptance_criteria,
-                            reopen_count, continuation_count, created_at, updated_at, closed_at
+                            reopen_count, continuation_count, created_at, updated_at, closed_at,
+                            blocked_from_status, close_reason
                      FROM tasks WHERE status = ?1 ORDER BY priority, created_at",
                 )?;
                 let tasks = stmt
@@ -70,7 +72,8 @@ impl TaskRepository {
                     .query_row(
                         "SELECT id, short_id, epic_id, title, description, design, issue_type,
                                 status, priority, owner, labels, acceptance_criteria,
-                                reopen_count, continuation_count, created_at, updated_at, closed_at
+                                reopen_count, continuation_count, created_at, updated_at, closed_at,
+                                blocked_from_status, close_reason
                          FROM tasks WHERE short_id = ?1",
                         [&short_id],
                         row_to_task,
@@ -162,7 +165,141 @@ impl TaskRepository {
         Ok(task)
     }
 
-    /// Transition a task to a new status.
+    /// Transition a task through the state machine.
+    ///
+    /// Validates the action against the current status, applies all side effects
+    /// (reopen_count, continuation_count, closed_at, blocked_from_status, close_reason),
+    /// writes an activity_log entry, and emits a `TaskUpdated` event — all atomically.
+    pub async fn transition(
+        &self,
+        id: &str,
+        action: TransitionAction,
+        actor_id: &str,
+        actor_role: &str,
+        reason: Option<&str>,
+        target_override: Option<TaskStatus>,
+    ) -> Result<Task> {
+        // Check reason requirement before touching the DB.
+        if action.requires_reason() && reason.map(str::is_empty).unwrap_or(true) {
+            return Err(Error::InvalidTransition(format!(
+                "{action:?} requires a non-empty reason"
+            )));
+        }
+
+        let id = id.to_owned();
+        let actor_id = actor_id.to_owned();
+        let actor_role = actor_role.to_owned();
+        let reason_str = reason.unwrap_or("").to_owned();
+
+        let task: Task = self
+            .db
+            .write(move |conn| {
+                // Load current task.
+                let current = conn.query_row(TASK_SELECT_WHERE_ID, [&id], row_to_task)?;
+                let from = TaskStatus::parse(&current.status)?;
+
+                // Validate and compute side effects.
+                let apply = compute_transition(&action, &from, target_override.as_ref())?;
+
+                // For Start: block if any unresolved blockers exist.
+                if action == TransitionAction::Start {
+                    let count: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM blockers WHERE task_id = ?1",
+                        [&id],
+                        |r| r.get(0),
+                    )?;
+                    if count > 0 {
+                        return Err(Error::InvalidTransition(
+                            "task has unresolved blockers".into(),
+                        ));
+                    }
+                }
+
+                // Resolve final target status.
+                // Unblock (to_status = None) restores blocked_from_status, defaulting to Open.
+                let to_status = match apply.to_status {
+                    Some(s) => s,
+                    None => current
+                        .blocked_from_status
+                        .as_deref()
+                        .and_then(|s| TaskStatus::parse(s).ok())
+                        .unwrap_or(TaskStatus::Open),
+                };
+                let to_str = to_status.as_str();
+                let from_str = from.as_str();
+
+                // Apply all side effects atomically.
+                conn.execute(
+                    "UPDATE tasks SET
+                        status = ?2,
+                        reopen_count = reopen_count + ?3,
+                        continuation_count = CASE WHEN ?4 THEN 0 ELSE continuation_count END,
+                        closed_at = CASE
+                            WHEN ?5 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                            WHEN ?6 THEN NULL
+                            ELSE closed_at
+                        END,
+                        blocked_from_status = CASE
+                            WHEN ?7 THEN ?10
+                            WHEN ?8 THEN NULL
+                            ELSE blocked_from_status
+                        END,
+                        close_reason = CASE
+                            WHEN ?11 IS NOT NULL THEN ?11
+                            WHEN ?9 THEN NULL
+                            ELSE close_reason
+                        END,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE id = ?1",
+                    rusqlite::params![
+                        &id,                                               // ?1
+                        to_str,                                            // ?2
+                        if apply.increment_reopen { 1i64 } else { 0 },    // ?3
+                        apply.reset_continuation,                          // ?4
+                        apply.set_closed_at,                               // ?5
+                        apply.clear_closed_at,                             // ?6
+                        apply.save_blocked_from,                           // ?7
+                        apply.clear_blocked_from,                          // ?8
+                        apply.clear_close_reason,                          // ?9
+                        from_str,                                          // ?10 (save_blocked_from value)
+                        apply.close_reason,                                // ?11
+                    ],
+                )?;
+
+                // Append activity log entry.
+                let activity_id = uuid::Uuid::now_v7().to_string();
+                let payload = serde_json::json!({
+                    "from_status": from_str,
+                    "to_status": to_str,
+                    "reason": if reason_str.is_empty() { None } else { Some(reason_str.as_str()) },
+                })
+                .to_string();
+
+                conn.execute(
+                    "INSERT INTO activity_log
+                        (id, task_id, actor_id, actor_role, event_type, payload)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        &activity_id,
+                        &id,
+                        &actor_id,
+                        &actor_role,
+                        apply.activity_type,
+                        &payload,
+                    ],
+                )?;
+
+                Ok(conn.query_row(TASK_SELECT_WHERE_ID, [&id], row_to_task)?)
+            })
+            .await?;
+
+        let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
+        Ok(task)
+    }
+
+    /// Raw status update, bypassing state machine validation.
+    ///
+    /// Only used for tests and admin tooling. Production code should use `transition`.
     pub async fn set_status(&self, id: &str, status: &str) -> Result<Task> {
         let id = id.to_owned();
         let status = status.to_owned();
@@ -333,7 +470,8 @@ impl TaskRepository {
 const TASK_SELECT_WHERE_ID: &str =
     "SELECT id, short_id, epic_id, title, description, design, issue_type,
             status, priority, owner, labels, acceptance_criteria,
-            reopen_count, continuation_count, created_at, updated_at, closed_at
+            reopen_count, continuation_count, created_at, updated_at, closed_at,
+            blocked_from_status, close_reason
      FROM tasks WHERE id = ?1";
 
 fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
@@ -355,6 +493,8 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         created_at: row.get(14)?,
         updated_at: row.get(15)?,
         closed_at: row.get(16)?,
+        blocked_from_status: row.get(17)?,
+        close_reason: row.get(18)?,
     })
 }
 
@@ -399,6 +539,7 @@ fn short_id_exists(
 mod tests {
     use super::*;
     use crate::db::repositories::epic::EpicRepository;
+    use crate::models::task::{TaskStatus, TransitionAction};
     use crate::test_helpers;
 
     async fn make_epic(db: &Database, tx: broadcast::Sender<DjinnEvent>) -> crate::models::epic::Epic {
@@ -407,6 +548,12 @@ mod tests {
             .await
             .unwrap()
     }
+
+    async fn open_task(repo: &TaskRepository, epic_id: &str) -> Task {
+        repo.create(epic_id, "T", "", "", "task", 0, "").await.unwrap()
+    }
+
+    // ── Existing tests ────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn create_and_get_task() {
@@ -557,5 +704,301 @@ mod tests {
             DjinnEvent::TaskDeleted { id } => assert_eq!(id, task.id),
             _ => panic!("expected TaskDeleted"),
         }
+    }
+
+    // ── State machine tests ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn status_enum_roundtrips() {
+        let statuses = [
+            "draft", "open", "in_progress", "needs_task_review", "in_task_review",
+            "needs_phase_review", "in_phase_review", "approved", "closed", "blocked",
+        ];
+        for s in statuses {
+            let parsed = TaskStatus::parse(s).unwrap();
+            assert_eq!(parsed.as_str(), s, "round-trip failed for {s}");
+        }
+        assert!(TaskStatus::parse("unknown").is_err());
+    }
+
+    #[tokio::test]
+    async fn full_happy_path() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        // Tasks are created as "open".
+        let task = open_task(&repo, &epic.id).await;
+        assert_eq!(task.status, "open");
+
+        // start
+        let t = repo.transition(&task.id, TransitionAction::Start, "", "system", None, None).await.unwrap();
+        assert_eq!(t.status, "in_progress");
+
+        // submit_task_review
+        let t = repo.transition(&t.id, TransitionAction::SubmitTaskReview, "", "system", None, None).await.unwrap();
+        assert_eq!(t.status, "needs_task_review");
+
+        // task_review_start
+        let t = repo.transition(&t.id, TransitionAction::TaskReviewStart, "", "task_reviewer", None, None).await.unwrap();
+        assert_eq!(t.status, "in_task_review");
+
+        // task_review_approve
+        let t = repo.transition(&t.id, TransitionAction::TaskReviewApprove, "", "task_reviewer", None, None).await.unwrap();
+        assert_eq!(t.status, "needs_phase_review");
+
+        // phase_review_start
+        let t = repo.transition(&t.id, TransitionAction::PhaseReviewStart, "", "phase_reviewer", None, None).await.unwrap();
+        assert_eq!(t.status, "in_phase_review");
+
+        // phase_review_approve
+        let t = repo.transition(&t.id, TransitionAction::PhaseReviewApprove, "", "phase_reviewer", None, None).await.unwrap();
+        assert_eq!(t.status, "approved");
+
+        // close
+        let t = repo.transition(&t.id, TransitionAction::Close, "", "system", None, None).await.unwrap();
+        assert_eq!(t.status, "closed");
+        assert!(t.closed_at.is_some());
+        assert_eq!(t.close_reason.as_deref(), Some("completed"));
+    }
+
+    #[tokio::test]
+    async fn invalid_transition_returns_error() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let task = open_task(&repo, &epic.id).await;
+
+        // Can't submit_task_review from open (must be in_progress).
+        let err = repo
+            .transition(&task.id, TransitionAction::SubmitTaskReview, "", "system", None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)), "expected InvalidTransition, got {err:?}");
+
+        // Can't accept from open (must be draft).
+        let err = repo
+            .transition(&task.id, TransitionAction::Accept, "", "system", None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)));
+    }
+
+    #[tokio::test]
+    async fn task_review_reject_increments_reopen() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let task = open_task(&repo, &epic.id).await;
+        let t = repo.transition(&task.id, TransitionAction::Start, "", "system", None, None).await.unwrap();
+        let t = repo.transition(&t.id, TransitionAction::SubmitTaskReview, "", "system", None, None).await.unwrap();
+        let t = repo.transition(&t.id, TransitionAction::TaskReviewStart, "", "task_reviewer", None, None).await.unwrap();
+
+        let t = repo.transition(
+            &t.id, TransitionAction::TaskReviewReject,
+            "reviewer@example.com", "task_reviewer",
+            Some("needs more tests"), None,
+        ).await.unwrap();
+
+        assert_eq!(t.status, "open");
+        assert_eq!(t.reopen_count, 1);
+        assert_eq!(t.continuation_count, 0);
+    }
+
+    #[tokio::test]
+    async fn task_review_reject_conflict_does_not_increment_reopen() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let task = open_task(&repo, &epic.id).await;
+        let t = repo.transition(&task.id, TransitionAction::Start, "", "system", None, None).await.unwrap();
+        let t = repo.transition(&t.id, TransitionAction::SubmitTaskReview, "", "system", None, None).await.unwrap();
+        let t = repo.transition(&t.id, TransitionAction::TaskReviewStart, "", "task_reviewer", None, None).await.unwrap();
+
+        let t = repo.transition(
+            &t.id, TransitionAction::TaskReviewRejectConflict,
+            "reviewer@example.com", "task_reviewer",
+            Some("merge conflict"), None,
+        ).await.unwrap();
+
+        assert_eq!(t.status, "open");
+        assert_eq!(t.reopen_count, 0); // conflict doesn't count against budget
+        assert_eq!(t.continuation_count, 0);
+    }
+
+    #[tokio::test]
+    async fn block_saves_and_unblock_restores_status() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let task = open_task(&repo, &epic.id).await;
+        // Move to in_progress first.
+        let t = repo.transition(&task.id, TransitionAction::Start, "", "system", None, None).await.unwrap();
+        assert_eq!(t.status, "in_progress");
+
+        // Block it — should store in_progress as blocked_from_status.
+        let t = repo.transition(
+            &t.id, TransitionAction::Block,
+            "user", "user", Some("waiting on external API"), None,
+        ).await.unwrap();
+        assert_eq!(t.status, "blocked");
+        assert_eq!(t.blocked_from_status.as_deref(), Some("in_progress"));
+
+        // Check activity log event type.
+        let entries = repo.list_activity(&t.id).await.unwrap();
+        assert_eq!(entries.last().unwrap().event_type, "blocked");
+
+        // Unblock — should restore to in_progress.
+        let t = repo.transition(&t.id, TransitionAction::Unblock, "user", "user", None, None).await.unwrap();
+        assert_eq!(t.status, "in_progress");
+        assert!(t.blocked_from_status.is_none());
+
+        let entries = repo.list_activity(&t.id).await.unwrap();
+        assert_eq!(entries.last().unwrap().event_type, "unblocked");
+    }
+
+    #[tokio::test]
+    async fn force_close_from_any_state() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let task = open_task(&repo, &epic.id).await;
+        let t = repo.transition(&task.id, TransitionAction::Start, "", "system", None, None).await.unwrap();
+
+        let t = repo.transition(
+            &t.id, TransitionAction::ForceClose,
+            "admin", "user", Some("cancelled"), None,
+        ).await.unwrap();
+
+        assert_eq!(t.status, "closed");
+        assert!(t.closed_at.is_some());
+        assert_eq!(t.close_reason.as_deref(), Some("force_closed"));
+    }
+
+    #[tokio::test]
+    async fn reopen_clears_closed_at_and_increments_reopen() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let task = open_task(&repo, &epic.id).await;
+        // Force-close it directly.
+        let t = repo.transition(
+            &task.id, TransitionAction::ForceClose,
+            "admin", "user", Some("testing"), None,
+        ).await.unwrap();
+        assert!(t.closed_at.is_some());
+        assert_eq!(t.close_reason.as_deref(), Some("force_closed"));
+
+        // Reopen.
+        let t = repo.transition(
+            &t.id, TransitionAction::Reopen,
+            "user", "user", Some("still needed"), None,
+        ).await.unwrap();
+        assert_eq!(t.status, "open");
+        assert!(t.closed_at.is_none());
+        assert!(t.close_reason.is_none());
+        assert_eq!(t.reopen_count, 1);
+    }
+
+    #[tokio::test]
+    async fn start_blocked_by_unresolved_blockers() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let t1 = open_task(&repo, &epic.id).await;
+        let t2 = open_task(&repo, &epic.id).await;
+        repo.add_blocker(&t2.id, &t1.id).await.unwrap(); // t2 blocked by t1
+
+        let err = repo
+            .transition(&t2.id, TransitionAction::Start, "", "system", None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)));
+
+        // After removing the blocker, start succeeds.
+        repo.remove_blocker(&t2.id, &t1.id).await.unwrap();
+        let t = repo
+            .transition(&t2.id, TransitionAction::Start, "", "system", None, None)
+            .await
+            .unwrap();
+        assert_eq!(t.status, "in_progress");
+    }
+
+    #[tokio::test]
+    async fn user_override_to_closed() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let task = open_task(&repo, &epic.id).await;
+        let t = repo.transition(
+            &task.id, TransitionAction::UserOverride,
+            "admin", "user", None, Some(TaskStatus::Closed),
+        ).await.unwrap();
+
+        assert_eq!(t.status, "closed");
+        assert!(t.closed_at.is_some());
+        assert_eq!(t.close_reason.as_deref(), Some("force_closed"));
+    }
+
+    #[tokio::test]
+    async fn requires_reason_enforced() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let task = open_task(&repo, &epic.id).await;
+        // ForceClose requires a reason.
+        let err = repo
+            .transition(&task.id, TransitionAction::ForceClose, "", "user", None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)));
+
+        // With a reason it works.
+        let t = repo
+            .transition(&task.id, TransitionAction::ForceClose, "", "user", Some("testing"), None)
+            .await
+            .unwrap();
+        assert_eq!(t.status, "closed");
+    }
+
+    #[tokio::test]
+    async fn transition_writes_activity_log() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let task = open_task(&repo, &epic.id).await;
+        repo.transition(&task.id, TransitionAction::Start, "agent-1", "system", None, None)
+            .await
+            .unwrap();
+
+        let entries = repo.list_activity(&task.id).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event_type, "status_changed");
+        assert_eq!(entries[0].actor_id, "agent-1");
+
+        let payload: serde_json::Value = serde_json::from_str(&entries[0].payload).unwrap();
+        assert_eq!(payload["from_status"], "open");
+        assert_eq!(payload["to_status"], "in_progress");
     }
 }
