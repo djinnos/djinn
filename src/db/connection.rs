@@ -3,6 +3,7 @@ use std::path::Path;
 use rusqlite::Connection;
 use tokio::sync::Mutex;
 
+use crate::db::migrations;
 use crate::error::Result;
 
 /// Wraps a rusqlite `Connection` behind a tokio `Mutex` for async access.
@@ -21,8 +22,9 @@ impl Database {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         apply_pragmas(&conn)?;
+        migrations::run(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -30,8 +32,9 @@ impl Database {
 
     /// Open an in-memory database for tests.
     pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
+        let mut conn = Connection::open_in_memory()?;
         apply_pragmas(&conn)?;
+        migrations::run(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })

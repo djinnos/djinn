@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
-refinery = { version = "0.9", features = ["rusqlite"] }
+refinery = { version = "0.9", features = ["rusqlite", "int8-versions"] }
 rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
