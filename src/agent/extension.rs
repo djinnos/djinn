@@ -30,7 +30,10 @@ pub fn config(agent_type: AgentType) -> ExtensionConfig {
         "memory_search".to_string(),
     ];
 
-    if matches!(agent_type, AgentType::Worker | AgentType::TaskReviewer) {
+    if matches!(
+        agent_type,
+        AgentType::Worker | AgentType::ConflictResolver | AgentType::TaskReviewer
+    ) {
         tool_values
             .push(serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"));
         available_tools.push("task_update".to_string());

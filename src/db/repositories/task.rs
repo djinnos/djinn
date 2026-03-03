@@ -1821,7 +1821,7 @@ mod tests {
             .unwrap();
         assert_eq!(t.status, "in_task_review");
 
-        // task_review_approve
+        // task_review_approve closes task directly (no phase review path).
         let t = repo
             .transition(
                 &t.id,
@@ -1831,41 +1831,6 @@ mod tests {
                 None,
                 None,
             )
-            .await
-            .unwrap();
-        assert_eq!(t.status, "needs_phase_review");
-
-        // phase_review_start
-        let t = repo
-            .transition(
-                &t.id,
-                TransitionAction::PhaseReviewStart,
-                "",
-                "phase_reviewer",
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(t.status, "in_phase_review");
-
-        // phase_review_approve
-        let t = repo
-            .transition(
-                &t.id,
-                TransitionAction::PhaseReviewApprove,
-                "",
-                "phase_reviewer",
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(t.status, "approved");
-
-        // close
-        let t = repo
-            .transition(&t.id, TransitionAction::Close, "", "system", None, None)
             .await
             .unwrap();
         assert_eq!(t.status, "closed");

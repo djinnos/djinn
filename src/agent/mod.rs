@@ -41,6 +41,8 @@ pub struct GooseSessionHandle {
 pub enum AgentType {
     /// Background worker that implements a task (writes code, etc.).
     Worker,
+    /// Resolves a merge conflict after reviewer-approved merge failed.
+    ConflictResolver,
     /// Reviews a single task's diff and approves or rejects it.
     TaskReviewer,
     /// Reviews a completed phase's aggregate diff.
@@ -51,6 +53,7 @@ impl AgentType {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Worker => "worker",
+            Self::ConflictResolver => "conflict_resolver",
             Self::TaskReviewer => "task_reviewer",
             Self::PhaseReviewer => "phase_reviewer",
         }

@@ -14,11 +14,13 @@ use goose::config::{Config as GooseConfig, GooseMode, PermissionManager};
 use goose::conversation::message::Message as GooseMessage;
 use goose::model::ModelConfig;
 use goose::providers;
+use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::actors::git::GitError;
 use crate::agent::extension;
 use crate::agent::output_parser::{
     ParsedAgentOutput, PhaseReviewVerdict, ReviewerVerdict, WorkerSignal,
@@ -32,6 +34,15 @@ use crate::db::repositories::task::TaskRepository;
 use crate::models::session::SessionStatus;
 use crate::models::task::{Task, TransitionAction};
 use crate::server::AppState;
+
+const MERGE_CONFLICT_PREFIX: &str = "merge_conflict:";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MergeConflictMetadata {
+    conflicting_files: Vec<String>,
+    base_branch: String,
+    merge_target: String,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SupervisorError {
@@ -265,7 +276,8 @@ impl AgentSupervisor {
         }
 
         let task = self.load_task(&task_id).await?;
-        let agent_type = self.agent_type_for_task(&task);
+        let conflict_ctx = self.conflict_context_for_dispatch(&task.id).await;
+        let agent_type = self.agent_type_for_task(&task, conflict_ctx.is_some());
         self.transition_start(&task, agent_type).await?;
 
         let (provider_id, model_name) = Self::parse_model_id(&model_id)?;
@@ -334,6 +346,13 @@ impl AgentSupervisor {
                 .map_err(|e| SupervisorError::Goose(e.to_string()))?;
         }
 
+        let conflict_files = conflict_ctx.as_ref().map(|m| {
+            m.conflicting_files
+                .iter()
+                .map(|f| format!("- {f}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
         let prompt = render_prompt(
             agent_type,
             &task,
@@ -350,6 +369,9 @@ impl AgentSupervisor {
                 task_count: None,
                 tasks_summary: None,
                 common_labels: None,
+                conflict_files,
+                merge_base_branch: conflict_ctx.as_ref().map(|m| m.base_branch.clone()),
+                merge_target_branch: conflict_ctx.as_ref().map(|m| m.merge_target.clone()),
             },
         );
         agent.override_system_prompt(prompt).await;
@@ -665,7 +687,7 @@ impl AgentSupervisor {
 
     async fn transition_interrupted(&self, task_id: &str, agent_type: AgentType, reason: &str) {
         let action = match agent_type {
-            AgentType::Worker => TransitionAction::Release,
+            AgentType::Worker | AgentType::ConflictResolver => TransitionAction::Release,
             AgentType::TaskReviewer => TransitionAction::ReleaseTaskReview,
             AgentType::PhaseReviewer => TransitionAction::ReleasePhaseReview,
         };
@@ -736,9 +758,11 @@ impl AgentSupervisor {
         }
 
         let transition = match result {
-            Ok(()) => self.success_transition(agent_type, &output),
+            Ok(()) => self.success_transition(task_id, agent_type, &output).await,
             Err(reason) => match agent_type {
-                AgentType::Worker => Some((TransitionAction::Release, Some(reason))),
+                AgentType::Worker | AgentType::ConflictResolver => {
+                    Some((TransitionAction::Release, Some(reason)))
+                }
                 AgentType::TaskReviewer => {
                     Some((TransitionAction::ReleaseTaskReview, Some(reason)))
                 }
@@ -762,13 +786,14 @@ impl AgentSupervisor {
         }
     }
 
-    fn success_transition(
+    async fn success_transition(
         &self,
+        task_id: &str,
         agent_type: AgentType,
         output: &ParsedAgentOutput,
     ) -> Option<(TransitionAction, Option<String>)> {
         match agent_type {
-            AgentType::Worker => match output.worker_signal {
+            AgentType::Worker | AgentType::ConflictResolver => match output.worker_signal {
                 Some(WorkerSignal::Done) => Some((TransitionAction::SubmitTaskReview, None)),
                 Some(WorkerSignal::Blocked) => Some((
                     TransitionAction::Block,
@@ -792,9 +817,7 @@ impl AgentSupervisor {
                 }
             },
             AgentType::TaskReviewer => match output.reviewer_verdict {
-                Some(ReviewerVerdict::Verified) => {
-                    Some((TransitionAction::TaskReviewApprove, None))
-                }
+                Some(ReviewerVerdict::Verified) => self.merge_after_task_review(task_id).await,
                 Some(ReviewerVerdict::Reopen) => Some((
                     TransitionAction::TaskReviewReject,
                     Some(
@@ -868,7 +891,8 @@ impl AgentSupervisor {
             .or(session.output_tokens)
             .unwrap_or(0) as i64;
 
-        if tokens_in == 0 && tokens_out == 0
+        if tokens_in == 0
+            && tokens_out == 0
             && let Some(tokens) = Self::tokens_from_goose_sqlite(goose_session_id).await
         {
             return tokens;
@@ -910,7 +934,10 @@ impl AgentSupervisor {
         candidates
     }
 
-    async fn tokens_from_goose_sqlite_at(db_path: &Path, goose_session_id: &str) -> Option<(i64, i64)> {
+    async fn tokens_from_goose_sqlite_at(
+        db_path: &Path,
+        goose_session_id: &str,
+    ) -> Option<(i64, i64)> {
         if !db_path.exists() {
             return None;
         }
@@ -962,7 +989,9 @@ impl AgentSupervisor {
         agent_type: AgentType,
     ) -> Result<(), SupervisorError> {
         let action = match (agent_type, task.status.as_str()) {
-            (AgentType::Worker, "open") => Some(TransitionAction::Start),
+            (AgentType::Worker, "open") | (AgentType::ConflictResolver, "open") => {
+                Some(TransitionAction::Start)
+            }
             (AgentType::TaskReviewer, "needs_task_review") => {
                 Some(TransitionAction::TaskReviewStart)
             }
@@ -997,10 +1026,122 @@ impl AgentSupervisor {
         })
     }
 
-    fn agent_type_for_task(&self, task: &Task) -> AgentType {
+    async fn conflict_context_for_dispatch(&self, task_id: &str) -> Option<MergeConflictMetadata> {
+        let repo =
+            TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let activity = repo.list_activity(task_id).await.ok()?;
+        let last_status = activity
+            .iter()
+            .rev()
+            .find(|e| e.event_type == "status_changed")?;
+        let payload: serde_json::Value = serde_json::from_str(&last_status.payload).ok()?;
+        let from_status = payload
+            .get("from_status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let to_status = payload
+            .get("to_status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if from_status != "in_task_review" || to_status != "open" {
+            return None;
+        }
+        let reason = payload
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        Self::parse_conflict_metadata(reason)
+    }
+
+    fn parse_conflict_metadata(reason: &str) -> Option<MergeConflictMetadata> {
+        let raw = reason.strip_prefix(MERGE_CONFLICT_PREFIX)?;
+        serde_json::from_str(raw).ok()
+    }
+
+    async fn merge_after_task_review(
+        &self,
+        task_id: &str,
+    ) -> Option<(TransitionAction, Option<String>)> {
+        let repo =
+            TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let task = match repo.get(task_id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => {
+                return Some((
+                    TransitionAction::ReleaseTaskReview,
+                    Some("task missing during post-review merge".to_string()),
+                ));
+            }
+            Err(e) => {
+                return Some((
+                    TransitionAction::ReleaseTaskReview,
+                    Some(format!("failed to load task for merge: {e}")),
+                ));
+            }
+        };
+
+        let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let git = match self.app_state.git_actor(&project_dir).await {
+            Ok(git) => git,
+            Err(e) => {
+                return Some((
+                    TransitionAction::ReleaseTaskReview,
+                    Some(format!("failed to open git actor for merge: {e}")),
+                ));
+            }
+        };
+
+        let base_branch = format!("task/{}", task.short_id);
+        let merge_target = self.default_target_branch().await;
+        let message = format!("{}: {}", task.short_id, task.title);
+
+        match git
+            .squash_merge(&base_branch, &merge_target, &message)
+            .await
+        {
+            Ok(result) => {
+                if let Err(e) = repo.set_merge_commit_sha(task_id, &result.commit_sha).await {
+                    return Some((
+                        TransitionAction::ReleaseTaskReview,
+                        Some(format!("merged but failed to store merge SHA: {e}")),
+                    ));
+                }
+                Some((TransitionAction::TaskReviewApprove, None))
+            }
+            Err(GitError::MergeConflict { files, .. }) => {
+                let metadata = MergeConflictMetadata {
+                    conflicting_files: files,
+                    base_branch,
+                    merge_target,
+                };
+                let reason = match serde_json::to_string(&metadata) {
+                    Ok(v) => format!("{MERGE_CONFLICT_PREFIX}{v}"),
+                    Err(_) => format!("{MERGE_CONFLICT_PREFIX}{{}}"),
+                };
+                let payload = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+                let _ = repo
+                    .log_activity(
+                        Some(task_id),
+                        "agent-supervisor",
+                        "system",
+                        "merge_conflict",
+                        &payload,
+                    )
+                    .await;
+                Some((TransitionAction::TaskReviewRejectConflict, Some(reason)))
+            }
+            Err(e) => Some((
+                TransitionAction::ReleaseTaskReview,
+                Some(format!("post-review squash merge failed: {e}")),
+            )),
+        }
+    }
+
+    fn agent_type_for_task(&self, task: &Task, has_conflict_context: bool) -> AgentType {
         match task.status.as_str() {
             "needs_task_review" | "in_task_review" => AgentType::TaskReviewer,
             "needs_phase_review" | "in_phase_review" => AgentType::PhaseReviewer,
+            "open" if has_conflict_context => AgentType::ConflictResolver,
             _ => AgentType::Worker,
         }
     }

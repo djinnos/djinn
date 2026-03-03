@@ -12,6 +12,7 @@ use crate::models::task::Task;
 // ─── Embedded templates ────────────────────────────────────────────────────────
 
 const DEV_TEMPLATE: &str = include_str!("prompts/dev.md");
+const CONFLICT_RESOLVER_TEMPLATE: &str = include_str!("prompts/conflict-resolver.md");
 const TASK_REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.md");
 const EPIC_REVIEWER_TEMPLATE: &str = include_str!("prompts/epic-reviewer-batch.md");
 
@@ -43,6 +44,11 @@ pub struct TaskContext {
     /// epics' commits may be interleaved on the same branch.
     pub tasks_summary: Option<String>,
     pub common_labels: Option<String>,
+
+    // -- Conflict resolver fields --------------------------------------------
+    pub conflict_files: Option<String>,
+    pub merge_base_branch: Option<String>,
+    pub merge_target_branch: Option<String>,
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -53,6 +59,7 @@ pub struct TaskContext {
 pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> String {
     let template = match agent_type {
         AgentType::Worker => DEV_TEMPLATE,
+        AgentType::ConflictResolver => CONFLICT_RESOLVER_TEMPLATE,
         AgentType::TaskReviewer => TASK_REVIEWER_TEMPLATE,
         AgentType::PhaseReviewer => EPIC_REVIEWER_TEMPLATE,
     };
@@ -96,6 +103,18 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
     out = out.replace(
         "{{common_labels}}",
         ctx.common_labels.as_deref().unwrap_or(""),
+    );
+    out = out.replace(
+        "{{conflict_files}}",
+        ctx.conflict_files.as_deref().unwrap_or(""),
+    );
+    out = out.replace(
+        "{{merge_base_branch}}",
+        ctx.merge_base_branch.as_deref().unwrap_or(""),
+    );
+    out = out.replace(
+        "{{merge_target_branch}}",
+        ctx.merge_target_branch.as_deref().unwrap_or(""),
     );
 
     out
@@ -183,6 +202,9 @@ mod tests {
             task_count: None,
             tasks_summary: None,
             common_labels: None,
+            conflict_files: None,
+            merge_base_branch: None,
+            merge_target_branch: None,
         }
     }
 

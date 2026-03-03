@@ -27,6 +27,13 @@ pub enum GitError {
     #[error("git hook failed (exit {code}): {output}")]
     HookFailed { code: i32, output: String },
 
+    /// Squash merge encountered file-level conflicts.
+    #[error("merge conflict while squashing into {target_branch}: {files:?}")]
+    MergeConflict {
+        target_branch: String,
+        files: Vec<String>,
+    },
+
     #[error("i/o: {0}")]
     Io(#[from] std::io::Error),
 
@@ -360,14 +367,25 @@ impl GitActor {
         message: String,
     ) -> Result<MergeResult, GitError> {
         // Switch to target branch.
-        Self::run_git_command(path.clone(), vec!["checkout".into(), target_branch]).await?;
+        Self::run_git_command(path.clone(), vec!["checkout".into(), target_branch.clone()]).await?;
 
         // Stage all changes from the task branch as a squash (no commit yet).
-        Self::run_git_command(
+        if let Err(err) = Self::run_git_command(
             path.clone(),
             vec!["merge".into(), "--squash".into(), branch],
         )
-        .await?;
+        .await
+        {
+            if matches!(err, GitError::CommandFailed { .. }) {
+                let files = Self::unmerged_files(path.clone()).await.unwrap_or_default();
+                let _ = Self::run_git_command(path, vec!["merge".into(), "--abort".into()]).await;
+                return Err(GitError::MergeConflict {
+                    target_branch,
+                    files,
+                });
+            }
+            return Err(err);
+        }
 
         // Commit — hooks run here. Any failure → HookFailed (GIT-07).
         match Self::run_git_command(path.clone(), vec!["commit".into(), "-m".into(), message]).await
@@ -388,6 +406,25 @@ impl GitActor {
         Ok(MergeResult {
             commit_sha: out.stdout.trim().into(),
         })
+    }
+
+    async fn unmerged_files(path: PathBuf) -> Result<Vec<String>, GitError> {
+        let out = Self::run_git_command(
+            path,
+            vec![
+                "diff".into(),
+                "--name-only".into(),
+                "--diff-filter=U".into(),
+            ],
+        )
+        .await?;
+        Ok(out
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
     }
 
     /// Force-delete `branch` locally; also removes from origin (best effort).
@@ -906,6 +943,66 @@ mod tests {
                 output.contains("lint failed"),
                 "hook output should be surfaced"
             );
+        }
+    }
+
+    /// `squash_merge` returns `MergeConflict` and conflicting files when conflicts occur.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn squash_merge_surfaces_merge_conflict_files() {
+        let (local, _remote) = setup_git_repo();
+        let path = local.path();
+
+        // Branch A changes the same line.
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "task/conflict1", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::fs::write(path.join("shared.txt"), "from-task\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "task change"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        // Main changes the same line differently.
+        std::process::Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::fs::write(path.join("shared.txt"), "from-main\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "main change"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
+        let err = handle
+            .squash_merge("task/conflict1", "main", "feat: conflict")
+            .await
+            .unwrap_err();
+
+        match err {
+            GitError::MergeConflict {
+                target_branch,
+                files,
+            } => {
+                assert_eq!(target_branch, "main");
+                assert!(files.iter().any(|f| f == "shared.txt"));
+            }
+            other => panic!("expected MergeConflict, got: {other}"),
         }
     }
 
