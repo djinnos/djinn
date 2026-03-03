@@ -9,6 +9,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use djinn_server::auth::JwksCache;
+use djinn_server::daemon;
 use djinn_server::db::checkpoint;
 use djinn_server::db::connection::{self, Database};
 use djinn_server::logging;
@@ -43,6 +44,10 @@ async fn main() {
 
     let cli = Cli::parse();
     let cancel = CancellationToken::new();
+    let _daemon_lock = daemon::acquire(cli.port, cli.token.clone()).unwrap_or_else(|e| {
+        tracing::error!(error = %e, "failed to acquire daemon lockfile");
+        std::process::exit(1);
+    });
 
     // Spawn shutdown signal handler.
     let shutdown_cancel = cancel.clone();
