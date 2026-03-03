@@ -4,17 +4,21 @@
 //!   - Per-project: `git:{project_id}:target_branch`
 //!   - Global default: `git:global:target_branch`  (falls back to "main")
 
+use tokio::sync::broadcast;
+
 use crate::db::connection::{Database, OptionalExt};
 use crate::error::Result;
+use crate::events::DjinnEvent;
 use crate::models::git_settings::GitSettings;
 
 pub struct GitSettingsRepository {
     db: Database,
+    events: broadcast::Sender<DjinnEvent>,
 }
 
 impl GitSettingsRepository {
-    pub fn new(db: Database) -> Self {
-        Self { db }
+    pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
+        Self { db, events }
     }
 
     /// Load git settings for a project.
@@ -63,6 +67,7 @@ impl GitSettingsRepository {
     pub async fn set_target_branch(&self, project_id: &str, branch: &str) -> Result<()> {
         let key = format!("git:{project_id}:target_branch");
         let branch = branch.to_owned();
+        let project_id = project_id.to_owned();
         self.db
             .write(move |conn| {
                 conn.execute(
@@ -73,9 +78,15 @@ impl GitSettingsRepository {
                        updated_at = excluded.updated_at",
                     [&key, &branch],
                 )?;
-                Ok(())
+                Ok((project_id, branch))
             })
             .await
+            .map(|(pid, branch)| {
+                let _ = self.events.send(DjinnEvent::GitSettingsUpdated {
+                    project_id: pid,
+                    settings: GitSettings { target_branch: branch },
+                });
+            })
     }
 
     /// Set the global default target branch (CFG-03).
@@ -91,9 +102,15 @@ impl GitSettingsRepository {
                        updated_at = excluded.updated_at",
                     [&branch],
                 )?;
-                Ok(())
+                Ok(branch)
             })
             .await
+            .map(|branch| {
+                let _ = self.events.send(DjinnEvent::GitSettingsUpdated {
+                    project_id: "global".into(),
+                    settings: GitSettings { target_branch: branch },
+                });
+            })
     }
 }
 
@@ -106,7 +123,8 @@ mod tests {
     #[tokio::test]
     async fn defaults_to_main_when_no_settings() {
         let db = test_helpers::create_test_db();
-        let repo = GitSettingsRepository::new(db);
+        let (tx, _rx) = broadcast::channel(1024);
+        let repo = GitSettingsRepository::new(db, tx);
 
         let settings = repo.get("some-project-id").await.unwrap();
         assert_eq!(settings.target_branch, "main");
@@ -115,7 +133,8 @@ mod tests {
     #[tokio::test]
     async fn project_override_takes_precedence() {
         let db = test_helpers::create_test_db();
-        let repo = GitSettingsRepository::new(db);
+        let (tx, _rx) = broadcast::channel(1024);
+        let repo = GitSettingsRepository::new(db, tx);
 
         repo.set_target_branch("proj-123", "develop").await.unwrap();
         let settings = repo.get("proj-123").await.unwrap();
@@ -125,7 +144,8 @@ mod tests {
     #[tokio::test]
     async fn global_default_applies_when_no_project_override() {
         let db = test_helpers::create_test_db();
-        let repo = GitSettingsRepository::new(db);
+        let (tx, _rx) = broadcast::channel(1024);
+        let repo = GitSettingsRepository::new(db, tx);
 
         repo.set_global_target_branch("develop").await.unwrap();
         let settings = repo.get("some-other-project").await.unwrap();
@@ -135,7 +155,8 @@ mod tests {
     #[tokio::test]
     async fn project_override_supersedes_global() {
         let db = test_helpers::create_test_db();
-        let repo = GitSettingsRepository::new(db);
+        let (tx, _rx) = broadcast::channel(1024);
+        let repo = GitSettingsRepository::new(db, tx);
 
         repo.set_global_target_branch("develop").await.unwrap();
         repo.set_target_branch("proj-123", "feature-base").await.unwrap();
@@ -152,7 +173,8 @@ mod tests {
     #[tokio::test]
     async fn set_target_branch_upserts() {
         let db = test_helpers::create_test_db();
-        let repo = GitSettingsRepository::new(db);
+        let (tx, _rx) = broadcast::channel(1024);
+        let repo = GitSettingsRepository::new(db, tx);
 
         repo.set_target_branch("proj", "v1").await.unwrap();
         repo.set_target_branch("proj", "v2").await.unwrap();

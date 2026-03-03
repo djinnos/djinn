@@ -66,6 +66,14 @@ pub struct MergeResult {
     pub commit_sha: String,
 }
 
+/// A single worktree entry parsed from `git worktree list --porcelain` (GIT-02).
+#[derive(Debug, Clone)]
+pub struct WorktreeInfo {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub head: String,
+}
+
 // ─── Messages ─────────────────────────────────────────────────────────────────
 
 type Reply<T> = oneshot::Sender<Result<T, GitError>>;
@@ -100,6 +108,21 @@ enum GitMessage {
     DeleteBranch {
         branch: String,
         respond_to: Reply<()>,
+    },
+    /// Create a worktree at `.djinn/worktrees/{task_short_id}/` on `branch` (GIT-02).
+    CreateWorktree {
+        task_short_id: String,
+        branch: String,
+        respond_to: Reply<PathBuf>,
+    },
+    /// Remove a worktree by path and prune stale entries (GIT-06).
+    RemoveWorktree {
+        path: PathBuf,
+        respond_to: Reply<()>,
+    },
+    /// List all worktrees with structured metadata (GIT-02).
+    ListWorktrees {
+        respond_to: Reply<Vec<WorktreeInfo>>,
     },
 }
 
@@ -159,6 +182,21 @@ impl GitActor {
             GitMessage::DeleteBranch { branch, respond_to } => {
                 let path = self.path.clone();
                 let result = Self::delete_branch_impl(path, branch).await;
+                let _ = respond_to.send(result);
+            }
+            GitMessage::CreateWorktree { task_short_id, branch, respond_to } => {
+                let path = self.path.clone();
+                let result = Self::create_worktree_impl(path, task_short_id, branch).await;
+                let _ = respond_to.send(result);
+            }
+            GitMessage::RemoveWorktree { path: wt_path, respond_to } => {
+                let path = self.path.clone();
+                let result = Self::remove_worktree_impl(path, wt_path).await;
+                let _ = respond_to.send(result);
+            }
+            GitMessage::ListWorktrees { respond_to } => {
+                let path = self.path.clone();
+                let result = Self::list_worktrees_impl(path).await;
                 let _ = respond_to.send(result);
             }
         }
@@ -326,6 +364,95 @@ impl GitActor {
 
         Ok(())
     }
+
+    /// Create a worktree at `{repo}/.djinn/worktrees/{task_short_id}/` on `branch` (GIT-02).
+    ///
+    /// Prunes stale worktree metadata first (GIT-06) so leftover entries from
+    /// crashed sessions don't block the new checkout.
+    async fn create_worktree_impl(
+        path: PathBuf,
+        task_short_id: String,
+        branch: String,
+    ) -> Result<PathBuf, GitError> {
+        // GIT-06: prune stale worktree bookkeeping before creating.
+        let _ = Self::run_git_command(path.clone(), vec!["worktree".into(), "prune".into()]).await;
+
+        let wt_path = path.join(".djinn").join("worktrees").join(&task_short_id);
+
+        Self::run_git_command(
+            path,
+            vec![
+                "worktree".into(),
+                "add".into(),
+                wt_path.to_str().unwrap_or_default().into(),
+                branch,
+            ],
+        )
+        .await?;
+
+        Ok(wt_path)
+    }
+
+    /// Remove a worktree by path and prune stale entries (GIT-06).
+    async fn remove_worktree_impl(path: PathBuf, wt_path: PathBuf) -> Result<(), GitError> {
+        Self::run_git_command(
+            path.clone(),
+            vec![
+                "worktree".into(),
+                "remove".into(),
+                "--force".into(),
+                wt_path.to_str().unwrap_or_default().into(),
+            ],
+        )
+        .await?;
+
+        // GIT-06: prune after removal to clean up any remaining metadata.
+        let _ = Self::run_git_command(path, vec!["worktree".into(), "prune".into()]).await;
+
+        Ok(())
+    }
+
+    /// List all worktrees with structured metadata (GIT-02).
+    ///
+    /// Parses `git worktree list --porcelain` which emits blocks separated by
+    /// blank lines, each containing `worktree <path>`, `HEAD <sha>`, and
+    /// optionally `branch refs/heads/<name>`.
+    async fn list_worktrees_impl(path: PathBuf) -> Result<Vec<WorktreeInfo>, GitError> {
+        let out = Self::run_git_command(
+            path,
+            vec!["worktree".into(), "list".into(), "--porcelain".into()],
+        )
+        .await?;
+
+        let mut worktrees = Vec::new();
+        let mut wt_path: Option<PathBuf> = None;
+        let mut head: Option<String> = None;
+        let mut branch: Option<String> = None;
+
+        for line in out.stdout.lines() {
+            if line.is_empty() {
+                // End of a worktree block — flush.
+                if let (Some(p), Some(h)) = (wt_path.take(), head.take()) {
+                    worktrees.push(WorktreeInfo { path: p, branch: branch.take(), head: h });
+                }
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("worktree ") {
+                wt_path = Some(PathBuf::from(rest));
+            } else if let Some(rest) = line.strip_prefix("HEAD ") {
+                head = Some(rest.to_string());
+            } else if let Some(rest) = line.strip_prefix("branch refs/heads/") {
+                branch = Some(rest.to_string());
+            }
+        }
+
+        // Flush last block (porcelain output may not end with a blank line).
+        if let (Some(p), Some(h)) = (wt_path, head) {
+            worktrees.push(WorktreeInfo { path: p, branch: branch.take(), head: h });
+        }
+
+        Ok(worktrees)
+    }
 }
 
 // ─── Handle ──────────────────────────────────────────────────────────────────
@@ -414,6 +541,34 @@ impl GitActorHandle {
             respond_to: tx,
         })
         .await
+    }
+
+    /// Create a worktree at `.djinn/worktrees/{task_short_id}/` on `branch` (GIT-02).
+    pub async fn create_worktree(
+        &self,
+        task_short_id: &str,
+        branch: &str,
+    ) -> Result<PathBuf, GitError> {
+        self.request(|tx| GitMessage::CreateWorktree {
+            task_short_id: task_short_id.into(),
+            branch: branch.into(),
+            respond_to: tx,
+        })
+        .await
+    }
+
+    /// Remove a worktree by path and prune stale entries (GIT-06).
+    pub async fn remove_worktree(&self, path: &Path) -> Result<(), GitError> {
+        self.request(|tx| GitMessage::RemoveWorktree {
+            path: path.to_path_buf(),
+            respond_to: tx,
+        })
+        .await
+    }
+
+    /// List all worktrees with structured metadata (GIT-02).
+    pub async fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>, GitError> {
+        self.request(|tx| GitMessage::ListWorktrees { respond_to: tx }).await
     }
 }
 
@@ -685,5 +840,91 @@ mod tests {
         if let GitError::HookFailed { output, .. } = err {
             assert!(output.contains("lint failed"), "hook output should be surfaced");
         }
+    }
+
+    // ── Worktree lifecycle tests (GIT-02, GIT-06) ────────────────────────────
+
+    /// `create_worktree` creates the `.djinn/worktrees/{id}/` directory on the given branch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_worktree_creates_directory() {
+        let (local, _remote) = setup_git_repo();
+        let path = local.path();
+
+        // Create a task branch for the worktree to check out.
+        std::process::Command::new("git")
+            .args(["branch", "task/wt1", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
+        let wt_path = handle.create_worktree("wt1", "task/wt1").await.unwrap();
+
+        // Directory must exist.
+        assert!(wt_path.exists(), "worktree directory should exist");
+        assert!(wt_path.ends_with(".djinn/worktrees/wt1"));
+
+        // The worktree should be on the correct branch.
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(branch, "task/wt1");
+    }
+
+    /// `remove_worktree` deletes the worktree directory and prunes metadata.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remove_worktree_cleans_up() {
+        let (local, _remote) = setup_git_repo();
+        let path = local.path();
+
+        std::process::Command::new("git")
+            .args(["branch", "task/wt2", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
+        let wt_path = handle.create_worktree("wt2", "task/wt2").await.unwrap();
+        assert!(wt_path.exists(), "precondition: worktree should exist");
+
+        handle.remove_worktree(&wt_path).await.unwrap();
+        assert!(!wt_path.exists(), "worktree directory should be removed");
+    }
+
+    /// `list_worktrees` returns both the main worktree and any task worktrees.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_worktrees_includes_main_and_task() {
+        let (local, _remote) = setup_git_repo();
+        let path = local.path();
+
+        std::process::Command::new("git")
+            .args(["branch", "task/wt3", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
+        let wt_path = handle.create_worktree("wt3", "task/wt3").await.unwrap();
+
+        let worktrees = handle.list_worktrees().await.unwrap();
+        assert!(
+            worktrees.len() >= 2,
+            "should have at least main + task worktree, got {}",
+            worktrees.len()
+        );
+
+        // Main worktree should be present with branch "main".
+        let main_wt = worktrees.iter().find(|w| w.branch.as_deref() == Some("main"));
+        assert!(main_wt.is_some(), "main worktree should be listed");
+
+        // Task worktree should be present at the expected path.
+        let task_wt = worktrees.iter().find(|w| w.path == wt_path);
+        assert!(task_wt.is_some(), "task worktree should be listed");
+        let task_wt = task_wt.unwrap();
+        assert_eq!(task_wt.branch.as_deref(), Some("task/wt3"));
+        assert_eq!(task_wt.head.len(), 40, "HEAD should be a 40-char SHA");
     }
 }

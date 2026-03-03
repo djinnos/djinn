@@ -58,6 +58,29 @@ impl ProjectRepository {
             .await
     }
 
+    pub async fn get_by_path(&self, path: &str) -> Result<Option<Project>> {
+        let path = path.to_owned();
+        self.db
+            .call(move |conn| {
+                let project = conn
+                    .query_row(
+                        "SELECT id, name, path, created_at FROM projects WHERE path = ?1",
+                        [&path],
+                        |row| {
+                            Ok(Project {
+                                id: row.get(0)?,
+                                name: row.get(1)?,
+                                path: row.get(2)?,
+                                created_at: row.get(3)?,
+                            })
+                        },
+                    )
+                    .optional()?;
+                Ok(project)
+            })
+            .await
+    }
+
     pub async fn create(&self, name: &str, path: &str) -> Result<Project> {
         let id = uuid::Uuid::now_v7().to_string();
         let name = name.to_owned();
@@ -224,5 +247,20 @@ mod tests {
         // Ordered by name.
         assert_eq!(projects[0].name, "alpha");
         assert_eq!(projects[1].name, "beta");
+    }
+
+    #[tokio::test]
+    async fn get_by_path_returns_project() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(1024);
+        let repo = ProjectRepository::new(db, tx);
+
+        let project = repo.create("lookup", "/lookup/path").await.unwrap();
+        let found = repo.get_by_path("/lookup/path").await.unwrap().unwrap();
+        assert_eq!(found.id, project.id);
+        assert_eq!(found.path, "/lookup/path");
+
+        // Missing path returns None.
+        assert!(repo.get_by_path("/nonexistent").await.unwrap().is_none());
     }
 }

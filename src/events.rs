@@ -1,4 +1,5 @@
 use crate::models::epic::Epic;
+use crate::models::git_settings::GitSettings;
 use crate::models::note::Note;
 use crate::models::project::Project;
 use crate::models::settings::Setting;
@@ -12,7 +13,7 @@ use crate::models::task::Task;
 /// Conventions:
 ///   - `Created` / `Updated` variants carry the full entity clone.
 ///   - `Deleted` variants carry only the `id` string.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub enum DjinnEvent {
     // Settings
     SettingUpdated(Setting),
@@ -36,4 +37,10 @@ pub enum DjinnEvent {
     NoteCreated(Note),
     NoteUpdated(Note),
     NoteDeleted { id: String },
+
+    // Git settings
+    GitSettingsUpdated {
+        project_id: String,
+        settings: GitSettings,
+    },
 }
