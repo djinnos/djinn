@@ -1,6 +1,7 @@
 // AgentSupervisor — 1x global, manages in-process Goose session lifecycle.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,6 +14,7 @@ use goose::config::{Config as GooseConfig, GooseMode, PermissionManager};
 use goose::conversation::message::Message as GooseMessage;
 use goose::model::ModelConfig;
 use goose::providers;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -851,6 +853,9 @@ impl AgentSupervisor {
             .get_session(goose_session_id, false)
             .await;
         let Ok(session) = session else {
+            if let Some(tokens) = Self::tokens_from_goose_sqlite(goose_session_id).await {
+                return tokens;
+            }
             return (0, 0);
         };
 
@@ -862,7 +867,75 @@ impl AgentSupervisor {
             .accumulated_output_tokens
             .or(session.output_tokens)
             .unwrap_or(0) as i64;
+
+        if tokens_in == 0 && tokens_out == 0
+            && let Some(tokens) = Self::tokens_from_goose_sqlite(goose_session_id).await
+        {
+            return tokens;
+        }
+
         (tokens_in, tokens_out)
+    }
+
+    async fn tokens_from_goose_sqlite(goose_session_id: &str) -> Option<(i64, i64)> {
+        for db_path in Self::goose_session_db_candidates() {
+            let Some(tokens) = Self::tokens_from_goose_sqlite_at(&db_path, goose_session_id).await
+            else {
+                continue;
+            };
+            return Some(tokens);
+        }
+
+        None
+    }
+
+    fn goose_session_db_candidates() -> Vec<PathBuf> {
+        let mut candidates = Vec::new();
+
+        if let Ok(root) = std::env::var("GOOSE_PATH_ROOT") {
+            let root = PathBuf::from(root);
+            candidates.push(root.join("data").join("sessions").join("sessions.db"));
+        }
+
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join(".djinn").join("sessions").join("sessions.db"));
+            candidates.push(
+                home.join(".djinn")
+                    .join("sessions")
+                    .join("sessions")
+                    .join("sessions.db"),
+            );
+        }
+
+        candidates
+    }
+
+    async fn tokens_from_goose_sqlite_at(db_path: &Path, goose_session_id: &str) -> Option<(i64, i64)> {
+        if !db_path.exists() {
+            return None;
+        }
+
+        let options = SqliteConnectOptions::new()
+            .filename(db_path)
+            .read_only(true)
+            .create_if_missing(false)
+            .busy_timeout(Duration::from_secs(1));
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .ok()?;
+
+        let row = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT COALESCE(accumulated_input_tokens, input_tokens, 0), COALESCE(accumulated_output_tokens, output_tokens, 0) FROM sessions WHERE id = ?1",
+        )
+        .bind(goose_session_id)
+        .fetch_optional(&pool)
+        .await
+        .ok()??;
+
+        Some(row)
     }
 
     async fn update_session_record(
@@ -1184,6 +1257,9 @@ impl AgentSupervisorHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use tempfile::TempDir;
 
     use super::*;
@@ -1257,5 +1333,48 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
         assert!(!supervisor.has_session("task-1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn sqlite_fallback_reads_accumulated_token_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("sessions.db");
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, input_tokens INTEGER, output_tokens INTEGER, accumulated_input_tokens INTEGER, accumulated_output_tokens INTEGER)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO sessions (id, input_tokens, output_tokens, accumulated_input_tokens, accumulated_output_tokens) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind("session-123")
+        .bind(3_i64)
+        .bind(5_i64)
+        .bind(13_i64)
+        .bind(21_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let tokens = AgentSupervisor::tokens_from_goose_sqlite_at(
+            PathBuf::from(&db_path).as_path(),
+            "session-123",
+        )
+        .await;
+
+        assert_eq!(tokens, Some((13, 21)));
     }
 }
