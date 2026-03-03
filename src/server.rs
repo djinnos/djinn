@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
+use crate::sse;
 use serde::Serialize;
 use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::actors::git::{GitActorHandle, GitError};
+use crate::auth::JwksCache;
 use crate::db::connection::Database;
 use crate::events::DjinnEvent;
 use crate::mcp;
@@ -26,10 +28,34 @@ struct Inner {
     pub cancel: CancellationToken,
     pub events: broadcast::Sender<DjinnEvent>,
     pub git_actors: Mutex<HashMap<PathBuf, GitActorHandle>>,
+    /// Clerk JWKS cache. `None` means auth is disabled (e.g. in tests).
+    pub jwks: Option<JwksCache>,
+    /// Clerk user ID from the startup token (AUTH-03).
+    pub user_id: Option<String>,
 }
 
 impl AppState {
+    /// Create an AppState without authentication (for tests / dev mode).
     pub fn new(db: Database, cancel: CancellationToken) -> Self {
+        Self::new_inner(db, cancel, None, None)
+    }
+
+    /// Create an AppState with Clerk JWT auth enabled.
+    pub fn new_with_auth(
+        db: Database,
+        cancel: CancellationToken,
+        jwks: JwksCache,
+        user_id: String,
+    ) -> Self {
+        Self::new_inner(db, cancel, Some(jwks), Some(user_id))
+    }
+
+    fn new_inner(
+        db: Database,
+        cancel: CancellationToken,
+        jwks: Option<JwksCache>,
+        user_id: Option<String>,
+    ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             inner: Arc::new(Inner {
@@ -37,6 +63,8 @@ impl AppState {
                 cancel,
                 events,
                 git_actors: Mutex::new(HashMap::new()),
+                jwks,
+                user_id,
             }),
         }
     }
@@ -51,6 +79,16 @@ impl AppState {
 
     pub fn events(&self) -> &broadcast::Sender<DjinnEvent> {
         &self.inner.events
+    }
+
+    /// JWKS cache for Clerk JWT validation, or `None` if auth is disabled.
+    pub fn jwks(&self) -> Option<&JwksCache> {
+        self.inner.jwks.as_ref()
+    }
+
+    /// Clerk user ID established at startup, or `None` if auth is disabled.
+    pub fn user_id(&self) -> Option<&str> {
+        self.inner.user_id.as_deref()
     }
 
     /// Get or spawn a `GitActorHandle` for the given project path (GIT-04).
@@ -74,9 +112,21 @@ pub fn router(state: AppState) -> Router {
     let mcp_service =
         mcp::server::DjinnMcpServer::into_service(state.clone(), state.cancel().clone());
 
+    // Apply JWT auth middleware to /mcp only. The middleware is a no-op when
+    // auth is not configured (AppState::jwks() returns None).
+    // Use .layer() because fallback_service is not a named route so route_layer() is a no-op.
+    let mcp_router = Router::new()
+        .fallback_service(mcp_service)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::middleware::require_auth,
+        ));
+
     Router::new()
         .route("/health", get(health))
-        .nest_service("/mcp", mcp_service)
+        .route("/events", get(sse::events_handler))
+        .route("/db-info", get(sse::db_info_handler))
+        .nest("/mcp", mcp_router)
         .with_state(state)
 }
 
