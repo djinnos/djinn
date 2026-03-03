@@ -5,7 +5,9 @@ use tokio::sync::broadcast;
 use crate::db::connection::{Database, OptionalExt};
 use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
-use crate::models::note::{Note, NoteSearchResult};
+use crate::models::note::{
+    BrokenLink, GraphEdge, GraphNode, GraphResponse, Note, NoteSearchResult, OrphanNote,
+};
 
 pub struct NoteRepository {
     db: Database,
@@ -65,6 +67,8 @@ impl NoteRepository {
                         &note_type, &folder, &tags, &content
                     ],
                 )?;
+                index_links_for_note(conn, &id, &project_id, &content)?;
+                resolve_links_for_note(conn, &id, &title, &permalink, &project_id)?;
                 Ok(conn.query_row(NOTE_SELECT_WHERE_ID, [&id], row_to_note)?)
             })
             .await
@@ -172,6 +176,8 @@ impl NoteRepository {
         let content = content.to_owned();
         let tags = tags.to_owned();
 
+        let permalink = current.permalink.clone();
+
         let note: Note = self
             .db
             .write(move |conn| {
@@ -184,6 +190,8 @@ impl NoteRepository {
                      WHERE id = ?1",
                     rusqlite::params![&id, &title, &content, &tags],
                 )?;
+                index_links_for_note(conn, &id, &current.project_id, &content)?;
+                resolve_links_for_note(conn, &id, &title, &permalink, &current.project_id)?;
                 Ok(conn.query_row(NOTE_SELECT_WHERE_ID, [&id], row_to_note)?)
             })
             .await?;
@@ -286,6 +294,129 @@ impl NoteRepository {
             .await
     }
 
+    // ── Wikilink graph ────────────────────────────────────────────────────────
+
+    /// Full knowledge graph for a project: all notes as nodes and all resolved
+    /// wikilink edges. `connection_count` = inbound + outbound resolved edges.
+    pub async fn graph(&self, project_id: &str) -> Result<GraphResponse> {
+        let project_id = project_id.to_owned();
+        self.db
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT n.id, n.permalink, n.title, n.note_type, n.folder,
+                            (SELECT COUNT(*) FROM note_links WHERE source_id = n.id
+                               AND target_id IS NOT NULL)
+                            + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)
+                              AS connection_count
+                     FROM notes n
+                     WHERE n.project_id = ?1
+                     ORDER BY n.folder, n.title",
+                )?;
+                let nodes = stmt
+                    .query_map([&project_id], |row| {
+                        Ok(GraphNode {
+                            id: row.get(0)?,
+                            permalink: row.get(1)?,
+                            title: row.get(2)?,
+                            note_type: row.get(3)?,
+                            folder: row.get(4)?,
+                            connection_count: row.get(5)?,
+                        })
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+
+                let mut stmt = conn.prepare(
+                    "SELECT l.source_id, l.target_id, l.target_raw
+                     FROM note_links l
+                     JOIN notes src ON src.id = l.source_id AND src.project_id = ?1
+                     WHERE l.target_id IS NOT NULL",
+                )?;
+                let edges = stmt
+                    .query_map([&project_id], |row| {
+                        Ok(GraphEdge {
+                            source_id: row.get(0)?,
+                            target_id: row.get(1)?,
+                            raw_text: row.get(2)?,
+                        })
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+
+                Ok(GraphResponse { nodes, edges })
+            })
+            .await
+    }
+
+    /// All wikilinks in a project whose target note does not exist.
+    /// Optionally filtered to links whose source note is in `folder`.
+    pub async fn broken_links(
+        &self,
+        project_id: &str,
+        folder: Option<&str>,
+    ) -> Result<Vec<BrokenLink>> {
+        let project_id = project_id.to_owned();
+        let folder = folder.map(ToOwned::to_owned);
+        self.db
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT src.id, src.permalink, src.title, l.target_raw
+                     FROM note_links l
+                     JOIN notes src ON src.id = l.source_id AND src.project_id = ?1
+                     WHERE l.target_id IS NULL
+                       AND (?2 IS NULL OR src.folder = ?2)
+                     ORDER BY src.permalink, l.target_raw",
+                )?;
+                Ok(stmt
+                    .query_map(rusqlite::params![&project_id, &folder], |row| {
+                        Ok(BrokenLink {
+                            source_id: row.get(0)?,
+                            source_permalink: row.get(1)?,
+                            source_title: row.get(2)?,
+                            raw_text: row.get(3)?,
+                        })
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?)
+            })
+            .await
+    }
+
+    /// Notes with zero inbound wikilinks (potential dead-ends).
+    /// Singleton types (`brief`, `roadmap`) are excluded.
+    /// Optionally filtered by `folder`.
+    pub async fn orphans(
+        &self,
+        project_id: &str,
+        folder: Option<&str>,
+    ) -> Result<Vec<OrphanNote>> {
+        let project_id = project_id.to_owned();
+        let folder = folder.map(ToOwned::to_owned);
+        self.db
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT n.id, n.permalink, n.title, n.note_type, n.folder
+                     FROM notes n
+                     WHERE n.project_id = ?1
+                       AND n.note_type NOT IN ('brief', 'roadmap')
+                       AND (?2 IS NULL OR n.folder = ?2)
+                       AND NOT EXISTS (
+                           SELECT 1 FROM note_links l WHERE l.target_id = n.id
+                       )
+                     ORDER BY n.folder, n.title",
+                )?;
+                Ok(stmt
+                    .query_map(rusqlite::params![&project_id, &folder], |row| {
+                        Ok(OrphanNote {
+                            id: row.get(0)?,
+                            permalink: row.get(1)?,
+                            title: row.get(2)?,
+                            note_type: row.get(3)?,
+                            folder: row.get(4)?,
+                        })
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?)
+            })
+            .await
+    }
+
     /// Generate a markdown catalog (table of contents) for all notes in a
     /// project, grouped by folder and sorted alphabetically within each.
     pub async fn catalog(&self, project_id: &str) -> Result<String> {
@@ -314,6 +445,96 @@ impl NoteRepository {
 
         Ok(build_catalog(&notes))
     }
+}
+
+// ── Wikilink helpers ──────────────────────────────────────────────────────────
+
+/// Extract `(target_raw, display_text)` pairs from `[[...]]` wikilinks in content.
+///
+/// Handles `[[Target]]` and `[[Target|Display Text]]`.
+/// Empty targets and malformed links are silently skipped.
+fn extract_wikilinks(content: &str) -> Vec<(String, Option<String>)> {
+    let mut results = Vec::new();
+    let mut rest = content;
+    while let Some(open) = rest.find("[[") {
+        rest = &rest[open + 2..];
+        let Some(close) = rest.find("]]") else { break };
+        let inner = rest[..close].trim();
+        rest = &rest[close + 2..];
+        if inner.is_empty() {
+            continue;
+        }
+        if let Some(pipe) = inner.find('|') {
+            let target = inner[..pipe].trim();
+            let display = inner[pipe + 1..].trim();
+            if !target.is_empty() {
+                let display_opt = if display.is_empty() { None } else { Some(display.to_string()) };
+                results.push((target.to_string(), display_opt));
+            }
+        } else {
+            results.push((inner.to_string(), None));
+        }
+    }
+    results
+}
+
+/// Re-index all outbound wikilinks for `source_id` from its current `content`.
+///
+/// Deletes existing link rows for the note then re-inserts them, resolving
+/// each target by title or permalink within the same project.
+fn index_links_for_note(
+    conn: &rusqlite::Connection,
+    source_id: &str,
+    project_id: &str,
+    content: &str,
+) -> Result<()> {
+    conn.execute("DELETE FROM note_links WHERE source_id = ?1", [source_id])?;
+
+    let links = extract_wikilinks(content);
+    if links.is_empty() {
+        return Ok(());
+    }
+
+    let mut stmt = conn.prepare(
+        "INSERT OR IGNORE INTO note_links (id, source_id, target_id, target_raw, display_text)
+         VALUES (?1, ?2,
+                 (SELECT id FROM notes
+                  WHERE project_id = ?3 AND (title = ?4 OR permalink = ?4)
+                  LIMIT 1),
+                 ?4, ?5)",
+    )?;
+
+    for (target_raw, display_text) in links {
+        let id = uuid::Uuid::now_v7().to_string();
+        stmt.execute(rusqlite::params![
+            &id,
+            source_id,
+            project_id,
+            &target_raw,
+            display_text.as_deref(),
+        ])?;
+    }
+    Ok(())
+}
+
+/// After a note is created or its title/permalink changes, resolve any
+/// previously-broken links in the project that now match this note.
+fn resolve_links_for_note(
+    conn: &rusqlite::Connection,
+    note_id: &str,
+    title: &str,
+    permalink: &str,
+    project_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE note_links
+         SET target_id = ?1
+         WHERE target_id IS NULL
+           AND (target_raw = ?2 OR target_raw = ?3)
+           AND source_id IN (SELECT id FROM notes WHERE project_id = ?4)",
+        rusqlite::params![note_id, title, permalink, project_id],
+    )?;
+    Ok(())
 }
 
 // ── SQL constant ─────────────────────────────────────────────────────────────
@@ -771,5 +992,158 @@ mod tests {
 
         // No event should be in the channel.
         assert!(rx.try_recv().is_err());
+    }
+
+    // ── Wikilink graph tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn extract_wikilinks_basic() {
+        let links = extract_wikilinks("See [[Rust Database Choice]] for details.");
+        assert_eq!(links, vec![("Rust Database Choice".to_string(), None)]);
+    }
+
+    #[test]
+    fn extract_wikilinks_with_display() {
+        let links = extract_wikilinks("See [[Rust DB|the ADR]] for details.");
+        assert_eq!(
+            links,
+            vec![("Rust DB".to_string(), Some("the ADR".to_string()))]
+        );
+    }
+
+    #[test]
+    fn extract_wikilinks_multiple() {
+        let links = extract_wikilinks("[[A]] and [[B|Bee]] and [[C]]");
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0], ("A".to_string(), None));
+        assert_eq!(links[1], ("B".to_string(), Some("Bee".to_string())));
+        assert_eq!(links[2], ("C".to_string(), None));
+    }
+
+    #[test]
+    fn extract_wikilinks_empty_and_none() {
+        let links = extract_wikilinks("No links here. [[]] empty.");
+        assert!(links.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wikilink_resolves_on_create() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let repo = NoteRepository::new(db, tx);
+
+        // Create target first.
+        let target = repo
+            .create(&project.id, tmp.path(), "Auth Strategy", "body", "adr", "[]")
+            .await
+            .unwrap();
+
+        // Create source with a wikilink to the target by title.
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Overview",
+            "See [[Auth Strategy]] for auth details.",
+            "research",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let graph = repo.graph(&project.id).await.unwrap();
+        assert_eq!(graph.edges.len(), 1);
+        assert_eq!(graph.edges[0].target_id, target.id);
+        assert_eq!(graph.edges[0].raw_text, "Auth Strategy");
+    }
+
+    #[tokio::test]
+    async fn broken_link_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let repo = NoteRepository::new(db, tx);
+
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Source Note",
+            "Links to [[Missing Note]] which does not exist.",
+            "research",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let broken = repo.broken_links(&project.id, None).await.unwrap();
+        assert_eq!(broken.len(), 1);
+        assert_eq!(broken[0].raw_text, "Missing Note");
+        assert_eq!(broken[0].source_title, "Source Note");
+    }
+
+    #[tokio::test]
+    async fn orphan_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let repo = NoteRepository::new(db, tx);
+
+        // Two notes: source links to target, isolated is orphaned.
+        let target = repo
+            .create(&project.id, tmp.path(), "Target", "body", "adr", "[]")
+            .await
+            .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Source",
+            "See [[Target]].",
+            "research",
+            "[]",
+        )
+        .await
+        .unwrap();
+        repo.create(&project.id, tmp.path(), "Isolated", "no links", "pattern", "[]")
+            .await
+            .unwrap();
+
+        let orphans = repo.orphans(&project.id, None).await.unwrap();
+        // Target has an inbound link; Source and Isolated do not.
+        let orphan_titles: Vec<&str> = orphans.iter().map(|o| o.title.as_str()).collect();
+        assert!(!orphan_titles.contains(&target.title.as_str()), "target should not be orphan");
+        assert!(orphan_titles.contains(&"Source"), "Source has no inbound links");
+        assert!(orphan_titles.contains(&"Isolated"), "Isolated has no inbound links");
+    }
+
+    #[tokio::test]
+    async fn resolve_previously_broken_links_on_create() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let repo = NoteRepository::new(db, tx);
+
+        // Create source first (target doesn't exist yet → broken link).
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Source",
+            "See [[Future Note]].",
+            "research",
+            "[]",
+        )
+        .await
+        .unwrap();
+        assert_eq!(repo.broken_links(&project.id, None).await.unwrap().len(), 1);
+
+        // Now create the target → broken link should be resolved.
+        repo.create(&project.id, tmp.path(), "Future Note", "body", "adr", "[]")
+            .await
+            .unwrap();
+        assert_eq!(repo.broken_links(&project.id, None).await.unwrap().len(), 0);
+        assert_eq!(repo.graph(&project.id).await.unwrap().edges.len(), 1);
     }
 }

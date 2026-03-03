@@ -48,5 +48,6 @@ mod tests {
         assert!(tables.contains(&"blockers".to_string()));
         assert!(tables.contains(&"activity_log".to_string()));
         assert!(tables.contains(&"notes".to_string()));
+        assert!(tables.contains(&"note_links".to_string()));
     }
 }
