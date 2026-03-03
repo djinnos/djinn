@@ -1,8 +1,3 @@
 /target
-.djinn/logs/
-.djinn/memory.db
-.djinn/memory.db-shm
-.djinn/memory.db-wal
-.djinn/settings.json
-.djinn/tasks/
-.djinn/worktrees/
+.djinn/*
+!.djinn/memory/
