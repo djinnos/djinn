@@ -867,19 +867,13 @@ struct ScannedNote {
 }
 
 fn scan_project_notes(project_path: &Path) -> Result<Vec<ScannedNote>> {
-    let memory_root = project_path.join(".djinn").join("memory");
-    let legacy_root = project_path.join(".djinn");
+    let djinn_root = project_path.join(".djinn");
 
     let mut notes = vec![];
     let mut seen = HashSet::new();
 
-    if memory_root.exists() {
-        scan_note_tree(&memory_root, &memory_root, &mut notes, &mut seen)?;
-        return Ok(notes);
-    }
-
-    if legacy_root.exists() {
-        scan_note_tree(&legacy_root, &legacy_root, &mut notes, &mut seen)?;
+    if djinn_root.exists() {
+        scan_note_tree(&djinn_root, &djinn_root, &mut notes, &mut seen)?;
     }
 
     Ok(notes)
@@ -1880,10 +1874,10 @@ mod tests {
         let project = make_project(&db, tx.clone(), tmp.path()).await;
         let repo = NoteRepository::new(db, tx);
 
-        let memory_dir = tmp.path().join(".djinn").join("memory").join("decisions");
-        std::fs::create_dir_all(&memory_dir).unwrap();
+        let decisions_dir = tmp.path().join(".djinn").join("decisions");
+        std::fs::create_dir_all(&decisions_dir).unwrap();
 
-        let existing_path = memory_dir.join("existing.md");
+        let existing_path = decisions_dir.join("existing.md");
         std::fs::write(
             &existing_path,
             "---\ntitle: Existing\ntype: adr\ntags: []\n---\n\noriginal content",
@@ -1905,7 +1899,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            memory_dir.join("new-note.md"),
+            decisions_dir.join("new-note.md"),
             "---\ntitle: New Note\ntype: adr\ntags: []\n---\n\nhello",
         )
         .unwrap();
@@ -1919,7 +1913,7 @@ mod tests {
         assert_eq!(second.deleted, 0);
 
         // Delete one file from disk.
-        std::fs::remove_file(memory_dir.join("new-note.md")).unwrap();
+        std::fs::remove_file(decisions_dir.join("new-note.md")).unwrap();
         let third = repo
             .reindex_from_disk(&project.id, tmp.path())
             .await

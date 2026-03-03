@@ -602,10 +602,10 @@ impl DjinnMcpServer {
         Json(NoteListResponse { notes })
     }
 
-    /// Get git log entries for a docs/ file. Returns chronological history with
+    /// Get git log entries for a .djinn/ file. Returns chronological history with
     /// commit messages, timestamps, authors, and stats.
     #[tool(
-        description = "Get git log entries for a docs/ file. Returns chronological history with commit messages, timestamps, authors, and stats."
+        description = "Get git log entries for a .djinn/ file. Returns chronological history with commit messages, timestamps, authors, and stats."
     )]
     pub async fn memory_history(
         &self,
@@ -635,10 +635,10 @@ impl DjinnMcpServer {
         json_object(serde_json::json!({ "history": history }))
     }
 
-    /// Get unified diff for a specific commit of a docs/ file. No SHA = returns
+    /// Get unified diff for a specific commit of a .djinn/ file. No SHA = returns
     /// diff for most recent change.
     #[tool(
-        description = "Get unified diff for a specific commit of a docs/ file. No SHA = returns diff for most recent change."
+        description = "Get unified diff for a specific commit of a .djinn/ file. No SHA = returns diff for most recent change."
     )]
     pub async fn memory_diff(&self, Parameters(p): Parameters<DiffParams>) -> Json<DiffResponse> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
