@@ -15,7 +15,7 @@ pub struct PingResponse {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct SystemLogsInput {
-    pub lines: Option<usize>,
+    pub lines: Option<i64>,
     pub level: Option<String>,
 }
 
@@ -46,7 +46,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(input): Parameters<SystemLogsInput>,
     ) -> Json<SystemLogsResponse> {
-        let max_lines = input.lines.unwrap_or(200).clamp(1, 2_000);
+        let max_lines = input.lines.unwrap_or(200).clamp(1, 2_000) as usize;
         let level_filter = input.level.as_ref().map(|level| level.to_uppercase());
 
         let Some(path) = logging::latest_log_file_path() else {

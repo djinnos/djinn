@@ -65,7 +65,7 @@ pub struct ModelHealthResponse {
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderCatalogResponse {
     pub providers: Vec<AnyJson>,
-    pub total: usize,
+    pub total: i64,
 }
 
 // ── provider_models ───────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ pub struct ProviderModelsInput {
 pub struct ProviderModelsResponse {
     pub provider_id: String,
     pub models: Vec<AnyJson>,
-    pub total: usize,
+    pub total: i64,
 }
 
 // ── provider_model_lookup ─────────────────────────────────────────────────────
@@ -116,7 +116,7 @@ pub struct ProviderValidateResponse {
     pub error_kind: String,
     pub error: String,
     pub models: Vec<String>,
-    pub http_status: u16,
+    pub http_status: i64,
 }
 
 // ── provider_add_custom ───────────────────────────────────────────────────────
@@ -240,7 +240,7 @@ impl DjinnMcpServer {
             .iter()
             .map(|p| AnyJson::from(provider_to_json(p)))
             .collect();
-        let total = providers.len();
+        let total = i64::try_from(providers.len()).unwrap_or(i64::MAX);
         Json(ProviderCatalogResponse { providers, total })
     }
 
@@ -260,7 +260,7 @@ impl DjinnMcpServer {
             .iter()
             .map(|m| AnyJson::from(model_to_json(m)))
             .collect();
-        let total = models.len();
+        let total = i64::try_from(models.len()).unwrap_or(i64::MAX);
         Json(ProviderModelsResponse {
             provider_id: input.provider_id,
             models,
@@ -313,7 +313,7 @@ impl DjinnMcpServer {
             error_kind: result.error_kind.to_string(),
             error: result.error,
             models: result.models,
-            http_status: result.http_status,
+            http_status: i64::from(result.http_status),
         })
     }
 

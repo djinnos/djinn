@@ -402,6 +402,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::header::{ACCEPT, CONTENT_TYPE};
     use http_body_util::BodyExt;
+    use serde_json::Value;
     use tower::ServiceExt;
 
     use crate::test_helpers;
@@ -453,6 +454,174 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_schemas_avoid_nonstandard_uint_formats() {
+        fn parse_sse_json_events(body: &str) -> Vec<Value> {
+            let mut events = Vec::new();
+            let mut data_lines: Vec<String> = Vec::new();
+
+            for line in body.lines() {
+                if let Some(rest) = line.strip_prefix("data:") {
+                    data_lines.push(rest.trim_start().to_string());
+                    continue;
+                }
+
+                if line.is_empty() && !data_lines.is_empty() {
+                    let payload = data_lines.join("\n").trim().to_string();
+                    if !payload.is_empty()
+                        && let Ok(value) = serde_json::from_str::<Value>(&payload)
+                    {
+                        events.push(value);
+                    }
+                    data_lines.clear();
+                }
+            }
+
+            if !data_lines.is_empty() {
+                let payload = data_lines.join("\n").trim().to_string();
+                if !payload.is_empty()
+                    && let Ok(value) = serde_json::from_str::<Value>(&payload)
+                {
+                    events.push(value);
+                }
+            }
+
+            events
+        }
+
+        fn collect_bad_formats(
+            tool_name: &str,
+            schema_kind: &str,
+            path: &str,
+            value: &Value,
+            bad: &mut Vec<String>,
+        ) {
+            match value {
+                Value::Object(map) => {
+                    if let Some(Value::String(format)) = map.get("format") {
+                        if format == "uint" || format.starts_with("uint") {
+                            bad.push(format!(
+                                "{tool_name} {schema_kind} {path}/format = {format}"
+                            ));
+                        }
+                    }
+
+                    for (k, v) in map {
+                        let next_path = format!("{path}/{k}");
+                        collect_bad_formats(tool_name, schema_kind, &next_path, v, bad);
+                    }
+                }
+                Value::Array(items) => {
+                    for (idx, item) in items.iter().enumerate() {
+                        let next_path = format!("{path}[{idx}]");
+                        collect_bad_formats(tool_name, schema_kind, &next_path, item, bad);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let app = test_helpers::create_test_app();
+
+        let initialize_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "schema-test-client",
+                    "version": "0.0.0"
+                }
+            }
+        });
+
+        let init_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json, text/event-stream")
+            .body(Body::from(initialize_payload.to_string()))
+            .unwrap();
+        let init_resp = app.clone().oneshot(init_req).await.unwrap();
+        assert_eq!(init_resp.status(), 200);
+
+        let session_id = init_resp
+            .headers()
+            .get("mcp-session-id")
+            .cloned()
+            .expect("missing mcp-session-id header on initialize response");
+
+        let init_notify_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        });
+        let init_notify_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header("mcp-session-id", session_id.clone())
+            .body(Body::from(init_notify_payload.to_string()))
+            .unwrap();
+        let init_notify_resp = app.clone().oneshot(init_notify_req).await.unwrap();
+        assert_eq!(init_notify_resp.status(), 202);
+
+        let list_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        });
+        let list_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header("mcp-session-id", session_id)
+            .body(Body::from(list_payload.to_string()))
+            .unwrap();
+
+        let list_resp = app.oneshot(list_req).await.unwrap();
+        assert_eq!(list_resp.status(), 200);
+
+        let body = list_resp.into_body().collect().await.unwrap().to_bytes();
+        let raw = String::from_utf8(body.to_vec()).expect("sse body should be utf-8");
+        let events = parse_sse_json_events(&raw);
+        let result = events
+            .iter()
+            .find(|event| event.get("id") == Some(&Value::from(2)))
+            .and_then(|event| event.get("result"))
+            .expect("tools/list JSON-RPC result missing in SSE stream");
+
+        let tools = result
+            .get("tools")
+            .and_then(Value::as_array)
+            .expect("tools/list result missing tools array");
+
+        let mut bad_formats = Vec::new();
+        for tool in tools {
+            let name = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>");
+
+            for (schema_kind, key) in &[("input", "inputSchema"), ("output", "outputSchema")] {
+                if let Some(schema) = tool.get(*key) {
+                    collect_bad_formats(name, schema_kind, "$", schema, &mut bad_formats);
+                }
+            }
+        }
+
+        assert!(
+            bad_formats.is_empty(),
+            "Found nonstandard uint schema formats (prefer i64-compatible fields):\n  {}",
+            bad_formats.join("\n  ")
+        );
     }
 
     #[test]
