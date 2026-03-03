@@ -4,15 +4,12 @@
 use std::path::Path;
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::db::repositories::note::NoteRepository;
 use crate::mcp::server::DjinnMcpServer;
 use crate::mcp::tools::{AnyJson, ObjectJson, json_object};
-use crate::models::note::{
-    BrokenLink, BuildContextResponse, GitLogEntry, GraphResponse, Note, NoteCompact, OrphanNote,
-    ReindexSummary,
-};
+use crate::models::note::{GitLogEntry, Note, ReindexSummary};
 
 // ── Param structs ─────────────────────────────────────────────────────────────
 
@@ -25,6 +22,7 @@ pub struct WriteParams {
     /// Note type: adr, pattern, research, requirement, reference, design,
     /// session, persona, journey, design_spec, competitive, tech_spike,
     /// brief (singleton), roadmap (singleton).
+    #[serde(rename = "type")]
     #[schemars(rename = "type")]
     pub note_type: String,
     pub tags: Option<Vec<String>>,
@@ -51,6 +49,7 @@ pub struct EditParams {
     pub section: Option<String>,
     /// If provided and different from current type, move the note to the new
     /// type's folder. Allowed values same as memory_write type.
+    #[serde(rename = "type")]
     #[schemars(rename = "type")]
     pub note_type: Option<String>,
 }
@@ -60,6 +59,7 @@ pub struct SearchParams {
     pub project: String,
     pub query: String,
     pub folder: Option<String>,
+    #[serde(rename = "type")]
     #[schemars(rename = "type")]
     pub note_type: Option<String>,
     pub limit: Option<i64>,
@@ -84,6 +84,7 @@ pub struct MoveParams {
     pub project: String,
     pub identifier: String,
     /// New note type to move the note to.
+    #[serde(rename = "type")]
     #[schemars(rename = "type")]
     pub note_type: String,
     /// Optional new title; keep current title if omitted.
@@ -162,61 +163,6 @@ pub struct OrphansParams {
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ReindexParams {
     pub project: String,
-}
-
-// ── Response wrappers ─────────────────────────────────────────────────────────
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct NoteListResponse {
-    pub notes: Vec<NoteCompact>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct SearchResponse {
-    pub results: Vec<AnyJson>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct DeleteResponse {
-    pub ok: bool,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct BrokenLinksResponse {
-    pub broken_links: Vec<BrokenLink>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct OrphansResponse {
-    pub orphans: Vec<OrphanNote>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct CatalogResponse {
-    pub catalog: String,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct HistoryResponse {
-    pub history: Vec<GitLogEntry>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct DiffResponse {
-    pub diff: String,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct TaskRefsResponse {
-    pub tasks: Vec<AnyJson>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct ReindexResponse {
-    pub updated: i64,
-    pub created: i64,
-    pub deleted: i64,
-    pub unchanged: i64,
 }
 
 // ── Tool implementations ──────────────────────────────────────────────────────
@@ -411,9 +357,11 @@ impl DjinnMcpServer {
     pub async fn memory_search(
         &self,
         Parameters(p): Parameters<SearchParams>,
-    ) -> Json<SearchResponse> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(SearchResponse { results: vec![] });
+            return json_object(
+                serde_json::json!({ "error": format!("project not found: {}", p.project) }),
+            );
         };
 
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
@@ -430,7 +378,7 @@ impl DjinnMcpServer {
             .await
             .unwrap_or_default();
 
-        let items = results
+        let items: Vec<AnyJson> = results
             .into_iter()
             .map(|r| {
                 AnyJson::from(serde_json::json!({
@@ -444,7 +392,7 @@ impl DjinnMcpServer {
             })
             .collect();
 
-        Json(SearchResponse { results: items })
+        json_object(serde_json::json!({ "results": items }))
     }
 
     /// List notes in a folder with depth control. Returns compact summaries
@@ -455,9 +403,11 @@ impl DjinnMcpServer {
     pub async fn memory_list(
         &self,
         Parameters(p): Parameters<ListParams>,
-    ) -> Json<NoteListResponse> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(NoteListResponse { notes: vec![] });
+            return json_object(
+                serde_json::json!({ "error": format!("project not found: {}", p.project) }),
+            );
         };
 
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
@@ -468,7 +418,7 @@ impl DjinnMcpServer {
             .await
             .unwrap_or_default();
 
-        Json(NoteListResponse { notes })
+        json_object(serde_json::json!({ "notes": notes }))
     }
 
     /// Delete a note. Removes file and index entry.
@@ -566,16 +516,16 @@ impl DjinnMcpServer {
     pub async fn memory_catalog(
         &self,
         Parameters(p): Parameters<CatalogParams>,
-    ) -> Json<CatalogResponse> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(CatalogResponse {
-                catalog: String::new(),
-            });
+            return json_object(
+                serde_json::json!({ "error": format!("project not found: {}", p.project) }),
+            );
         };
 
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
         let catalog = repo.catalog(&project_id).await.unwrap_or_default();
-        Json(CatalogResponse { catalog })
+        json_object(serde_json::json!({ "catalog": catalog }))
     }
 
     /// List recently updated notes by timeframe (e.g., '7d', '24h', 'today').
@@ -586,9 +536,11 @@ impl DjinnMcpServer {
     pub async fn memory_recent(
         &self,
         Parameters(p): Parameters<RecentParams>,
-    ) -> Json<NoteListResponse> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(NoteListResponse { notes: vec![] });
+            return json_object(
+                serde_json::json!({ "error": format!("project not found: {}", p.project) }),
+            );
         };
 
         let hours = parse_timeframe(p.timeframe.as_deref().unwrap_or("7d"));
@@ -599,7 +551,7 @@ impl DjinnMcpServer {
             .recent(&project_id, hours, limit)
             .await
             .unwrap_or_default();
-        Json(NoteListResponse { notes })
+        json_object(serde_json::json!({ "notes": notes }))
     }
 
     /// Get git log entries for a .djinn/ file. Returns chronological history with
@@ -640,11 +592,11 @@ impl DjinnMcpServer {
     #[tool(
         description = "Get unified diff for a specific commit of a .djinn/ file. No SHA = returns diff for most recent change."
     )]
-    pub async fn memory_diff(&self, Parameters(p): Parameters<DiffParams>) -> Json<DiffResponse> {
+    pub async fn memory_diff(&self, Parameters(p): Parameters<DiffParams>) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(DiffResponse {
-                diff: String::new(),
-            });
+            return json_object(
+                serde_json::json!({ "error": format!("project not found: {}", p.project) }),
+            );
         };
 
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
@@ -655,13 +607,13 @@ impl DjinnMcpServer {
             .ok()
             .flatten()
         else {
-            return Json(DiffResponse {
-                diff: String::new(),
-            });
+            return json_object(
+                serde_json::json!({ "error": format!("note not found: {}", p.permalink) }),
+            );
         };
 
         let diff = git_diff_for_file(&note.file_path, p.sha.as_deref()).await;
-        Json(DiffResponse { diff })
+        json_object(serde_json::json!({ "diff": diff }))
     }
 
     /// Build context from a seed note by traversing links. Returns full content
@@ -672,12 +624,11 @@ impl DjinnMcpServer {
     pub async fn memory_build_context(
         &self,
         Parameters(p): Parameters<BuildContextParams>,
-    ) -> Json<BuildContextResponse> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(BuildContextResponse {
-                primary: vec![],
-                related: vec![],
-            });
+            return json_object(
+                serde_json::json!({ "error": format!("project not found: {}", p.project) }),
+            );
         };
 
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
@@ -694,25 +645,18 @@ impl DjinnMcpServer {
                 .list(&project_id, Some(folder))
                 .await
                 .unwrap_or_default();
-            return Json(BuildContextResponse {
-                primary: all,
-                related: vec![],
-            });
+            return json_object(serde_json::json!({ "primary": all, "related": [] }));
         }
 
         // Single note lookup.
         let Some(seed) = repo.get_by_permalink(&project_id, url).await.ok().flatten() else {
-            return Json(BuildContextResponse {
-                primary: vec![],
-                related: vec![],
-            });
+            return json_object(serde_json::json!({ "primary": [], "related": [] }));
         };
 
         if depth == 0 {
-            return Json(BuildContextResponse {
-                primary: vec![seed],
-                related: vec![],
-            });
+            return json_object(
+                serde_json::json!({ "primary": [note_to_value(&seed)], "related": [] }),
+            );
         }
 
         // Traverse outbound wikilinks up to `depth` levels.
@@ -751,10 +695,10 @@ impl DjinnMcpServer {
             }
         }
 
-        Json(BuildContextResponse {
-            primary: vec![seed],
-            related,
-        })
+        json_object(serde_json::json!({
+            "primary": [note_to_value(&seed)],
+            "related": related,
+        }))
     }
 
     /// List task IDs that reference a memory note permalink (reverse lookup).
@@ -762,11 +706,22 @@ impl DjinnMcpServer {
     pub async fn memory_task_refs(
         &self,
         Parameters(p): Parameters<TaskRefsParams>,
-    ) -> Json<TaskRefsResponse> {
+    ) -> Json<ObjectJson> {
+        let Some(_project_id) = self.project_id_for_path(&p.project).await else {
+            return json_object(
+                serde_json::json!({ "error": format!("project not found: {}", p.project) }),
+            );
+        };
+
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
-        let tasks = repo.task_refs(&p.permalink).await.unwrap_or_default()
-            .into_iter().map(AnyJson::from).collect();
-        Json(TaskRefsResponse { tasks })
+        let tasks: Vec<serde_json::Value> = repo
+            .task_refs(&p.permalink)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect();
+        json_object(serde_json::json!({ "tasks": tasks }))
     }
 
     /// Returns the full knowledge graph for visualization — all notes with
@@ -777,18 +732,15 @@ impl DjinnMcpServer {
     pub async fn memory_graph(
         &self,
         Parameters(params): Parameters<GraphParams>,
-    ) -> Json<GraphResponse> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&params.project).await else {
-            return Json(GraphResponse {
-                nodes: vec![],
-                edges: vec![],
-            });
+            return json_object(
+                serde_json::json!({ "error": format!("project not found: {}", params.project) }),
+            );
         };
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
-        Json(repo.graph(&project_id).await.unwrap_or(GraphResponse {
-            nodes: vec![],
-            edges: vec![],
-        }))
+        let graph = repo.graph(&project_id).await.unwrap_or_default();
+        json_object(serde_json::json!({ "nodes": graph.nodes, "edges": graph.edges }))
     }
 
     /// Lists all broken wikilinks with source context (permalink, title, raw text,
@@ -799,18 +751,18 @@ impl DjinnMcpServer {
     pub async fn memory_broken_links(
         &self,
         Parameters(params): Parameters<BrokenLinksParams>,
-    ) -> Json<BrokenLinksResponse> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&params.project).await else {
-            return Json(BrokenLinksResponse {
-                broken_links: vec![],
-            });
+            return json_object(
+                serde_json::json!({ "error": format!("project not found: {}", params.project) }),
+            );
         };
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
         let broken_links = repo
             .broken_links(&project_id, params.folder.as_deref())
             .await
             .unwrap_or_default();
-        Json(BrokenLinksResponse { broken_links })
+        json_object(serde_json::json!({ "broken_links": broken_links }))
     }
 
     /// Lists notes with zero inbound links. Excludes catalogs and singletons
@@ -821,16 +773,18 @@ impl DjinnMcpServer {
     pub async fn memory_orphans(
         &self,
         Parameters(params): Parameters<OrphansParams>,
-    ) -> Json<OrphansResponse> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&params.project).await else {
-            return Json(OrphansResponse { orphans: vec![] });
+            return json_object(
+                serde_json::json!({ "error": format!("project not found: {}", params.project) }),
+            );
         };
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
         let orphans = repo
             .orphans(&project_id, params.folder.as_deref())
             .await
             .unwrap_or_default();
-        Json(OrphansResponse { orphans })
+        json_object(serde_json::json!({ "orphans": orphans }))
     }
 
     /// Re-index all memory notes for a project from disk on demand.
@@ -840,14 +794,11 @@ impl DjinnMcpServer {
     pub async fn memory_reindex(
         &self,
         Parameters(params): Parameters<ReindexParams>,
-    ) -> Json<ReindexResponse> {
+    ) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&params.project).await else {
-            return Json(ReindexResponse {
-                updated: 0,
-                created: 0,
-                deleted: 0,
-                unchanged: 0,
-            });
+            return json_object(
+                serde_json::json!({ "error": format!("project not found: {}", params.project) }),
+            );
         };
 
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
@@ -856,12 +807,12 @@ impl DjinnMcpServer {
             .await
             .unwrap_or_else(|_| ReindexSummary::default());
 
-        Json(ReindexResponse {
-            updated: summary.updated,
-            created: summary.created,
-            deleted: summary.deleted,
-            unchanged: summary.unchanged,
-        })
+        json_object(serde_json::json!({
+            "updated": summary.updated,
+            "created": summary.created,
+            "deleted": summary.deleted,
+            "unchanged": summary.unchanged,
+        }))
     }
 }
 
@@ -878,6 +829,22 @@ impl DjinnMcpServer {
             .await
             .ok()
             .flatten()
+    }
+
+    /// Validate an optional project path — returns an error JSON if a path is
+    /// provided but not registered. Returns `Ok(())` when `None` or valid.
+    pub(crate) async fn validate_optional_project(
+        &self,
+        project: &Option<String>,
+    ) -> Result<(), Json<ObjectJson>> {
+        if let Some(path) = project {
+            if self.project_id_for_path(path).await.is_none() {
+                return Err(json_object(
+                    serde_json::json!({ "error": format!("project not found: {path}") }),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1078,5 +1045,86 @@ async fn git_diff_for_file(file_path: &str, sha: Option<&str>) -> String {
     match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use schemars::schema_for;
+
+    /// Verify that serde deserialization accepts the same field names as the
+    /// schemars JSON schema exposes. Catches missing `#[serde(rename)]` when
+    /// `#[schemars(rename)]` is present.
+    #[test]
+    fn write_params_deserializes_type_field() {
+        let json = serde_json::json!({
+            "project": "/tmp/test",
+            "title": "Test Note",
+            "content": "hello",
+            "type": "adr"
+        });
+        let params: WriteParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.note_type, "adr");
+    }
+
+    #[test]
+    fn edit_params_deserializes_type_field() {
+        let json = serde_json::json!({
+            "project": "/tmp/test",
+            "identifier": "decisions/test",
+            "operation": "append",
+            "content": "new content",
+            "type": "pattern"
+        });
+        let params: EditParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.note_type, Some("pattern".to_string()));
+    }
+
+    #[test]
+    fn search_params_deserializes_type_field() {
+        let json = serde_json::json!({
+            "project": "/tmp/test",
+            "query": "hello",
+            "type": "research"
+        });
+        let params: SearchParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.note_type, Some("research".to_string()));
+    }
+
+    #[test]
+    fn move_params_deserializes_type_field() {
+        let json = serde_json::json!({
+            "project": "/tmp/test",
+            "identifier": "reference/old",
+            "type": "adr"
+        });
+        let params: MoveParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.note_type, "adr");
+    }
+
+    /// Ensure the JSON schema exposes "type" (not "note_type") for all param
+    /// structs that use the rename. If schemars rename is accidentally removed,
+    /// this test catches it.
+    #[test]
+    fn schema_exposes_type_not_note_type() {
+        fn assert_schema_has_type<T: schemars::JsonSchema>(label: &str) {
+            let schema = schema_for!(T);
+            let value = serde_json::to_value(&schema).unwrap();
+            let props = value["properties"].as_object().expect(label);
+            assert!(
+                props.contains_key("type"),
+                "{label}: schema should expose 'type' property"
+            );
+            assert!(
+                !props.contains_key("note_type"),
+                "{label}: schema should NOT expose 'note_type' property"
+            );
+        }
+
+        assert_schema_has_type::<WriteParams>("WriteParams");
+        assert_schema_has_type::<EditParams>("EditParams");
+        assert_schema_has_type::<SearchParams>("SearchParams");
+        assert_schema_has_type::<MoveParams>("MoveParams");
     }
 }
