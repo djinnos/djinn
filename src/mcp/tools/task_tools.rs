@@ -7,7 +7,7 @@ use crate::db::connection::OptionalExt;
 use crate::db::repositories::epic::EpicRepository;
 use crate::db::repositories::task::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository};
 use crate::mcp::server::DjinnMcpServer;
-use crate::models::task::Task;
+use crate::models::task::{Task, TaskStatus, TransitionAction};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -227,6 +227,42 @@ pub struct TaskMemoryRefsParams {
     /// Task UUID or short_id.
     pub id: String,
     /// Absolute project path (accepted for API compatibility).
+    pub project: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TaskTransitionParams {
+    /// Task UUID or short_id.
+    pub id: String,
+    /// Transition action: accept, start, submit_task_review, task_review_start,
+    /// task_review_reject, task_review_reject_conflict, task_review_approve,
+    /// phase_review_start, phase_review_reject, phase_review_approve, reopen, close,
+    /// release, release_task_review, release_phase_review, block, unblock, force_close,
+    /// user_override.
+    pub action: String,
+    /// Required for: task_review_reject, task_review_reject_conflict, phase_review_reject,
+    /// reopen, release, release_task_review, release_phase_review, block, force_close.
+    pub reason: Option<String>,
+    pub actor_id: Option<String>,
+    pub actor_role: Option<String>,
+    /// Required when action = "user_override". Allowed values: draft, open, needs_task_review,
+    /// needs_phase_review, approved, closed.
+    pub target_status: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TaskClaimParams {
+    /// Filter by issue type. Positive ("task") or negative ("!epic").
+    pub issue_type: Option<String>,
+    /// Filter by label value.
+    pub label: Option<String>,
+    /// Filter by owner email.
+    pub owner: Option<String>,
+    /// Maximum priority to include (0=highest).
+    pub priority_max: Option<i64>,
+    /// Session ID of the claiming agent (recorded as actor_id in the activity log).
+    pub session_id: Option<String>,
+    /// Absolute project path (accepted for API compatibility, currently unused).
     pub project: Option<String>,
 }
 
@@ -670,6 +706,64 @@ impl DjinnMcpServer {
                 let items: Vec<serde_json::Value> = tasks.iter().map(task_to_value).collect();
                 Json(serde_json::json!({ "tasks": items }))
             }
+            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        }
+    }
+
+    /// Transition a work item through the state machine.
+    #[tool(description = "Transition a work item to a new status (e.g., open, in_progress, review, approve, close). Accepts task ID (full UUID or short_id, e.g., 'k7m2'). For user_override action, use target_status to specify the destination column.")]
+    pub async fn task_transition(
+        &self,
+        Parameters(p): Parameters<TaskTransitionParams>,
+    ) -> Json<serde_json::Value> {
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+
+        let Some(task) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(not_found(&p.id));
+        };
+
+        let action = match TransitionAction::parse(&p.action) {
+            Ok(a) => a,
+            Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+        };
+
+        let target_override = if let Some(ref ts) = p.target_status {
+            match TaskStatus::parse(ts) {
+                Ok(s) => Some(s),
+                Err(e) => return Json(serde_json::json!({ "error": e.to_string() })),
+            }
+        } else {
+            None
+        };
+
+        let actor_id = p.actor_id.as_deref().unwrap_or("");
+        let actor_role = p.actor_role.as_deref().unwrap_or("user");
+        let reason = p.reason.as_deref();
+
+        match repo.transition(&task.id, action, actor_id, actor_role, reason, target_override).await {
+            Ok(updated) => Json(task_to_value(&updated)),
+            Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        }
+    }
+
+    /// Claim the next available work item and transition it to in_progress.
+    #[tool(description = "Claim the next available work item (highest priority, oldest) and transition it to in_progress")]
+    pub async fn task_claim(
+        &self,
+        Parameters(p): Parameters<TaskClaimParams>,
+    ) -> Json<serde_json::Value> {
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let query = ReadyQuery {
+            issue_type: p.issue_type,
+            label: p.label,
+            owner: p.owner,
+            priority_max: p.priority_max,
+            limit: 1,
+        };
+        let actor_id = p.session_id.as_deref().unwrap_or("");
+        match repo.claim(query, actor_id, "coordinator").await {
+            Ok(Some(task)) => Json(task_to_value(&task)),
+            Ok(None) => Json(serde_json::json!({ "task": null })),
             Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
         }
     }

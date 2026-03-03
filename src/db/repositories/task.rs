@@ -650,6 +650,116 @@ impl TaskRepository {
             .await
     }
 
+    /// Atomically claim the highest-priority, oldest ready task and transition it
+    /// to `in_progress`.
+    ///
+    /// "Ready" means `status = 'open'` with no unresolved blockers.  All filtering
+    /// and the Start transition happen inside a single write transaction, so two
+    /// concurrent callers can never claim the same task.
+    ///
+    /// Returns `None` when no task matches the query.
+    pub async fn claim(
+        &self,
+        query: ReadyQuery,
+        actor_id: &str,
+        actor_role: &str,
+    ) -> Result<Option<Task>> {
+        let actor_id = actor_id.to_owned();
+        let actor_role = actor_role.to_owned();
+
+        let task: Option<Task> = self
+            .db
+            .write(move |conn| {
+                // Build the same WHERE as list_ready, then LIMIT 1 for the claim.
+                let mut clauses: Vec<String> = vec![
+                    "t.status = 'open'".to_owned(),
+                    "NOT EXISTS (
+                         SELECT 1 FROM blockers b2
+                         JOIN tasks bt ON bt.id = b2.blocking_task_id
+                         WHERE b2.task_id = t.id
+                           AND bt.status NOT IN ('approved', 'closed')
+                     )"
+                    .to_owned(),
+                ];
+                let mut params: Vec<rusqlite::types::Value> = Vec::new();
+
+                if let Some(it) = &query.issue_type {
+                    if let Some(neg) = it.strip_prefix('!') {
+                        clauses.push("t.issue_type != ?".to_owned());
+                        params.push(rusqlite::types::Value::Text(neg.to_owned()));
+                    } else {
+                        clauses.push("t.issue_type = ?".to_owned());
+                        params.push(rusqlite::types::Value::Text(it.clone()));
+                    }
+                }
+                if let Some(lbl) = &query.label {
+                    clauses.push(
+                        "EXISTS (SELECT 1 FROM json_each(t.labels) WHERE value = ?)".to_owned(),
+                    );
+                    params.push(rusqlite::types::Value::Text(lbl.clone()));
+                }
+                if let Some(owner) = &query.owner {
+                    clauses.push("t.owner = ?".to_owned());
+                    params.push(rusqlite::types::Value::Text(owner.clone()));
+                }
+                if let Some(pmax) = query.priority_max {
+                    clauses.push("t.priority <= ?".to_owned());
+                    params.push(rusqlite::types::Value::Integer(pmax));
+                }
+
+                let where_sql = clauses.join(" AND ");
+                let sql = format!(
+                    "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
+                            t.issue_type, t.status, t.priority, t.owner, t.labels,
+                            t.acceptance_criteria, t.reopen_count, t.continuation_count,
+                            t.created_at, t.updated_at, t.closed_at,
+                            t.blocked_from_status, t.close_reason, t.memory_refs
+                     FROM tasks t
+                     WHERE {where_sql}
+                     ORDER BY t.priority ASC, t.created_at ASC
+                     LIMIT 1"
+                );
+
+                let candidate: Option<Task> = conn
+                    .query_row(&sql, rusqlite::params_from_iter(params.iter()), row_to_task)
+                    .optional()?;
+
+                let task = match candidate {
+                    None => return Ok(None),
+                    Some(t) => t,
+                };
+
+                // Apply Start transition: open → in_progress.
+                conn.execute(
+                    "UPDATE tasks SET status = 'in_progress',
+                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE id = ?1",
+                    [&task.id],
+                )?;
+
+                let activity_id = uuid::Uuid::now_v7().to_string();
+                let payload = serde_json::json!({
+                    "from_status": "open",
+                    "to_status":   "in_progress",
+                })
+                .to_string();
+                conn.execute(
+                    "INSERT INTO activity_log
+                        (id, task_id, actor_id, actor_role, event_type, payload)
+                     VALUES (?1, ?2, ?3, ?4, 'status_changed', ?5)",
+                    rusqlite::params![&activity_id, &task.id, &actor_id, &actor_role, &payload],
+                )?;
+
+                Ok(Some(conn.query_row(TASK_SELECT_WHERE_ID, [&task.id], row_to_task)?))
+            })
+            .await?;
+
+        if let Some(ref t) = task {
+            let _ = self.events.send(DjinnEvent::TaskUpdated(t.clone()));
+        }
+        Ok(task)
+    }
+
     /// Emit `TaskUpdated` for tasks that were blocked by `completed_task_id` and
     /// are now fully unblocked (all their remaining blockers are approved/closed).
     async fn emit_unblocked_tasks(&self, completed_task_id: &str) -> Result<()> {
