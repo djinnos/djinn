@@ -25,7 +25,10 @@ use crate::provider::health::HealthTracker;
 
 /// Interval between stuck-detection passes (AGENT-08).
 const STUCK_INTERVAL: Duration = Duration::from_secs(30);
-const DEFAULT_MODEL_ID: &str = "default";
+#[cfg(not(test))]
+const DEFAULT_MODEL_ID: &str = "openai/gpt-4o-mini";
+#[cfg(test)]
+const DEFAULT_MODEL_ID: &str = "test/mock";
 
 // ─── Error ────────────────────────────────────────────────────────────────────
 

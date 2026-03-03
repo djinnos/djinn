@@ -154,3 +154,29 @@ Use `sqlite-vec` extension (asg017/sqlite-vec) loaded at runtime via `Connection
 - [[Stack Research]] — libsql patterns replaced by rusqlite
 - [[Architecture Research]] — sqld sidecar architecture no longer needed
 - [[Pitfalls Research]] — Turso cross-process pitfall resolved by avoiding Turso entirely
+
+
+## Amendment — rusqlite version pin (2026-03-03)
+
+### Context
+
+Adding the `goose` crate as an in-process agent harness (ADR-008) introduced a `libsqlite3-sys` conflict:
+
+- `rusqlite 0.37` requires `libsqlite3-sys ^0.35.0`
+- `goose`'s `sqlx 0.8.x` requires `libsqlite3-sys ^0.30.1`
+- Cargo's `links = "sqlite3"` constraint forbids two versions of `libsqlite3-sys` in one binary
+
+### Resolution
+
+`rusqlite` is pinned at `=0.32.1` in Cargo.toml. This version uses `libsqlite3-sys ^0.30.1` — the same range as sqlx-sqlite 0.8.1+, allowing both to resolve to a single `0.30.x` version.
+
+```toml
+# Pinned to 0.32.1: shares libsqlite3-sys ^0.30.1 with goose's sqlx (0.8.1+).
+rusqlite = { version = "=0.32.1", features = ["bundled", "hooks"] }
+```
+
+The version number shown in the Decision section (`0.38`) was aspirational; the effective version is `0.32.1`. All DB-layer API we use (`Connection`, `params!`, `types::Value`, `hooks::Action`, `ErrorCode`) is identical between 0.32 and 0.37.
+
+### Future path
+
+A tracked task exists to migrate the DB layer from rusqlite to sqlx entirely. This eliminates the pin, gives async-native queries, and unifies the sqlite library with what goose already uses. See task "Migrate DB layer from rusqlite to sqlx" (label: tech-debt, database).

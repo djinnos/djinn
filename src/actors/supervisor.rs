@@ -1,19 +1,29 @@
 // AgentSupervisor — 1x global, manages in-process Goose session lifecycle.
-//
-// Ryhl hand-rolled actor pattern:
-//   - `AgentSupervisorHandle` (mpsc sender) is the public API.
-//   - `AgentSupervisor` (mpsc receiver) runs in a dedicated tokio task.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use goose::agents::{
+    Agent as GooseAgent,
+    AgentConfig as GooseAgentConfig,
+    GoosePlatform,
+    SessionConfig as GooseSessionConfig,
+};
+use goose::config::{Config as GooseConfig, GooseMode, PermissionManager};
+use goose::conversation::message::Message as GooseMessage;
+use goose::model::ModelConfig;
+use goose::providers;
 use tokio::sync::{mpsc, oneshot};
+use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{GooseSessionHandle, SessionManager};
+use crate::agent::prompts::{TaskContext, render_prompt};
+use crate::agent::{AgentType, GooseSessionHandle, SessionManager, SessionType};
+use crate::db::repositories::credential::CredentialRepository;
+use crate::db::repositories::task::TaskRepository;
+use crate::models::task::{Task, TransitionAction};
 use crate::server::AppState;
-
-// ─── Error ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
 pub enum SupervisorError {
@@ -23,6 +33,16 @@ pub enum SupervisorError {
     NoResponse,
     #[error("session already active for task {task_id}")]
     SessionAlreadyActive { task_id: String },
+    #[error("task {task_id} not found")]
+    TaskNotFound { task_id: String },
+    #[error("invalid model id '{model_id}', expected provider/model")]
+    InvalidModelId { model_id: String },
+    #[error("no credential stored for provider {provider_id} (expected key {key_name})")]
+    MissingCredential { provider_id: String, key_name: String },
+    #[error("task transition failed for {task_id}: {reason}")]
+    TaskTransitionFailed { task_id: String, reason: String },
+    #[error("goose session failed: {0}")]
+    Goose(String),
     #[error("model {model_id} at capacity ({active}/{max})")]
     ModelAtCapacity {
         model_id: String,
@@ -30,8 +50,6 @@ pub enum SupervisorError {
         max: u32,
     },
 }
-
-// ─── Status ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct SupervisorStatus {
@@ -45,47 +63,38 @@ pub struct ModelCapacity {
     pub max: u32,
 }
 
-// ─── Messages ─────────────────────────────────────────────────────────────────
-
 type Reply<T> = oneshot::Sender<Result<T, SupervisorError>>;
 
 enum SupervisorMessage {
-    /// Start a new session for `task_id` with `model_id`.
     Dispatch {
         task_id: String,
         model_id: String,
         respond_to: Reply<()>,
     },
-    /// Check whether there is an active session for `task_id`.
     HasSession {
         task_id: String,
         respond_to: Reply<bool>,
     },
-    /// Cancel and remove a running session.
     KillSession {
         task_id: String,
         respond_to: Reply<()>,
     },
-    /// Return current session/capacity snapshot.
     GetStatus {
         respond_to: Reply<SupervisorStatus>,
     },
-    /// Internal message sent by session tasks when they finish.
     SessionCompleted {
         task_id: String,
+        result: Result<(), String>,
     },
 }
-
-// ─── Actor ────────────────────────────────────────────────────────────────────
 
 struct AgentSupervisor {
     receiver: mpsc::Receiver<SupervisorMessage>,
     sessions: HashMap<String, GooseSessionHandle>,
     capacity: HashMap<String, ModelCapacity>,
     session_models: HashMap<String, String>,
-    #[allow(dead_code)]
+    session_agent_types: HashMap<String, AgentType>,
     session_manager: Arc<SessionManager>,
-    #[allow(dead_code)]
     app_state: AppState,
     cancel: CancellationToken,
     sender: mpsc::Sender<SupervisorMessage>,
@@ -104,6 +113,7 @@ impl AgentSupervisor {
             sessions: HashMap::new(),
             capacity: HashMap::new(),
             session_models: HashMap::new(),
+            session_agent_types: HashMap::new(),
             session_manager,
             app_state,
             cancel,
@@ -113,8 +123,17 @@ impl AgentSupervisor {
 
     async fn run(mut self) {
         tracing::info!("AgentSupervisor started");
-        while let Some(msg) = self.receiver.recv().await {
-            self.handle(msg).await;
+        loop {
+            tokio::select! {
+                _ = self.cancel.cancelled() => {
+                    self.shutdown().await;
+                    break;
+                }
+                msg = self.receiver.recv() => {
+                    let Some(msg) = msg else { break; };
+                    self.handle(msg).await;
+                }
+            }
         }
         tracing::info!("AgentSupervisor stopped");
     }
@@ -126,7 +145,7 @@ impl AgentSupervisor {
                 model_id,
                 respond_to,
             } => {
-                let _ = respond_to.send(self.dispatch(task_id, model_id));
+                let _ = respond_to.send(self.dispatch(task_id, model_id).await);
             }
             SupervisorMessage::HasSession { task_id, respond_to } => {
                 let _ = respond_to.send(Ok(self.sessions.contains_key(&task_id)));
@@ -140,28 +159,175 @@ impl AgentSupervisor {
                     capacity: self.capacity.clone(),
                 }));
             }
-            SupervisorMessage::SessionCompleted { task_id } => {
-                self.remove_session(&task_id);
+            SupervisorMessage::SessionCompleted { task_id, result } => {
+                let agent_type = self.remove_session(&task_id);
+                self.handle_session_result(&task_id, agent_type, result).await;
             }
         }
     }
 
-    fn dispatch(&mut self, task_id: String, model_id: String) -> Result<(), SupervisorError> {
+    async fn dispatch(&mut self, task_id: String, model_id: String) -> Result<(), SupervisorError> {
         if self.sessions.contains_key(&task_id) {
             return Err(SupervisorError::SessionAlreadyActive { task_id });
         }
 
-        let entry =
-            self.capacity.entry(model_id.clone()).or_insert(ModelCapacity { active: 0, max: 1 });
-        if entry.active >= entry.max {
+        let (active, max) = {
+            let entry =
+                self.capacity.entry(model_id.clone()).or_insert(ModelCapacity { active: 0, max: 1 });
+            (entry.active, entry.max)
+        };
+        if active >= max {
             return Err(SupervisorError::ModelAtCapacity {
                 model_id,
-                active: entry.active,
-                max: entry.max,
+                active,
+                max,
             });
         }
 
-        entry.active += 1;
+        if model_id == "test/mock" {
+            if let Some(entry) = self.capacity.get_mut(&model_id) {
+                entry.active += 1;
+            }
+            self.spawn_mock_session(task_id, model_id);
+            return Ok(());
+        }
+
+        let task = self.load_task(&task_id).await?;
+        let agent_type = self.agent_type_for_task(&task);
+        self.transition_start(&task, agent_type).await?;
+
+        let (provider_id, model_name) = Self::parse_model_id(&model_id)?;
+        let (key_name, api_key) = self.load_provider_api_key(&provider_id).await?;
+        GooseConfig::global()
+            .set_secret(&key_name, &api_key)
+            .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+
+        let session_name = format!("{} {}", task.short_id, task.title);
+        let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let session = self
+            .session_manager
+            .create_session(working_dir, session_name, SessionType::SubAgent)
+            .await
+            .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+
+        let goose_model = ModelConfig::new(&model_name)
+            .map_err(|e| SupervisorError::Goose(e.to_string()))?
+            .with_canonical_limits(&provider_id);
+
+        let provider = providers::create(&provider_id, goose_model, self.extensions_for(agent_type))
+            .await
+            .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+
+        let agent = Arc::new(GooseAgent::with_config(GooseAgentConfig::new(
+            self.session_manager.clone(),
+            PermissionManager::instance(),
+            None,
+            GooseMode::Auto,
+            true,
+            GoosePlatform::GooseCli,
+        )));
+
+        agent
+            .update_provider(provider, &session.id)
+            .await
+            .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+
+        let prompt = render_prompt(
+            agent_type,
+            &task,
+            &TaskContext {
+                project_path: std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .display()
+                    .to_string(),
+                diff: None,
+                commits: None,
+                start_commit: None,
+                end_commit: None,
+                batch_num: None,
+                task_count: None,
+                tasks_summary: None,
+                common_labels: None,
+            },
+        );
+        agent.override_system_prompt(prompt).await;
+
+        if let Some(entry) = self.capacity.get_mut(&model_id) {
+            entry.active += 1;
+        }
+        let session_cancel = CancellationToken::new();
+        let session_cancel_for_reply = session_cancel.clone();
+        let global_cancel = self.cancel.clone();
+        let task_id_for_join = task_id.clone();
+        let session_id = session.id.clone();
+        let sender = self.sender.clone();
+
+        let join = tokio::spawn(async move {
+            let kickoff = GooseMessage::user().with_text(
+                "Start by understanding the task context and execute it fully before stopping.",
+            );
+            let session_cfg = GooseSessionConfig {
+                id: session_id,
+                schedule_id: None,
+                max_turns: Some(300),
+                retry_config: None,
+            };
+
+            let run_result: anyhow::Result<()> = async {
+                let mut stream = agent
+                    .reply(kickoff, session_cfg, Some(session_cancel_for_reply.clone()))
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                loop {
+                    tokio::select! {
+                        _ = session_cancel_for_reply.cancelled() => {
+                            break;
+                        }
+                        _ = global_cancel.cancelled() => {
+                            break;
+                        }
+                        evt = stream.next() => {
+                            let Some(evt) = evt else { break; };
+                            evt.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                        }
+                    }
+                }
+
+                Ok(())
+            }
+            .await;
+
+            let msg = match &run_result {
+                Ok(()) => SupervisorMessage::SessionCompleted {
+                    task_id: task_id_for_join,
+                    result: Ok(()),
+                },
+                Err(e) => SupervisorMessage::SessionCompleted {
+                    task_id: task_id_for_join,
+                    result: Err(e.to_string()),
+                },
+            };
+            let _ = sender.send(msg).await;
+
+            run_result
+        });
+
+        self.sessions.insert(
+            task_id.clone(),
+            GooseSessionHandle {
+                join,
+                cancel: session_cancel,
+                session_id: session.id,
+                task_id: task_id.clone(),
+            },
+        );
+        self.session_models.insert(task_id.clone(), model_id);
+        self.session_agent_types.insert(task_id, agent_type);
+        Ok(())
+    }
+
+    fn spawn_mock_session(&mut self, task_id: String, model_id: String) {
         let session_cancel = CancellationToken::new();
         let session_cancel_for_join = session_cancel.clone();
         let global_cancel = self.cancel.clone();
@@ -174,7 +340,10 @@ impl AgentSupervisor {
                 _ = global_cancel.cancelled() => {}
             }
             let _ = sender
-                .send(SupervisorMessage::SessionCompleted { task_id: task_id_for_join })
+                .send(SupervisorMessage::SessionCompleted {
+                    task_id: task_id_for_join,
+                    result: Ok(()),
+                })
                 .await;
             Ok(())
         });
@@ -184,12 +353,12 @@ impl AgentSupervisor {
             GooseSessionHandle {
                 join,
                 cancel: session_cancel,
-                session_id: format!("session-{task_id}"),
+                session_id: format!("mock-session-{task_id}"),
                 task_id: task_id.clone(),
             },
         );
-        self.session_models.insert(task_id, model_id);
-        Ok(())
+        self.session_models.insert(task_id.clone(), model_id);
+        self.session_agent_types.insert(task_id, AgentType::Worker);
     }
 
     fn kill_session(&mut self, task_id: String) -> Result<(), SupervisorError> {
@@ -197,15 +366,19 @@ impl AgentSupervisor {
             handle.cancel.cancel();
             self.decrement_capacity(&task_id);
             self.session_models.remove(&task_id);
+            self.session_agent_types.remove(&task_id);
         }
         Ok(())
     }
 
-    fn remove_session(&mut self, task_id: &str) {
+    fn remove_session(&mut self, task_id: &str) -> Option<AgentType> {
+        let agent_type = self.session_agent_types.get(task_id).copied();
         if self.sessions.remove(task_id).is_some() {
             self.decrement_capacity(task_id);
             self.session_models.remove(task_id);
+            self.session_agent_types.remove(task_id);
         }
+        agent_type
     }
 
     fn decrement_capacity(&mut self, task_id: &str) {
@@ -216,18 +389,142 @@ impl AgentSupervisor {
             model_capacity.active -= 1;
         }
     }
+
+    async fn handle_session_result(
+        &self,
+        task_id: &str,
+        agent_type: Option<AgentType>,
+        result: Result<(), String>,
+    ) {
+        let agent_type = agent_type.unwrap_or(AgentType::Worker);
+        let repo = TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+
+        let transition = match (agent_type, result) {
+            (AgentType::Worker, Ok(())) => Some((TransitionAction::SubmitTaskReview, None)),
+            (AgentType::TaskReviewer, Ok(())) => Some((TransitionAction::TaskReviewApprove, None)),
+            (AgentType::PhaseReviewer, Ok(())) => Some((TransitionAction::PhaseReviewApprove, None)),
+            (AgentType::Worker, Err(reason)) => Some((TransitionAction::Release, Some(reason))),
+            (AgentType::TaskReviewer, Err(reason)) => {
+                Some((TransitionAction::ReleaseTaskReview, Some(reason)))
+            }
+            (AgentType::PhaseReviewer, Err(reason)) => {
+                Some((TransitionAction::ReleasePhaseReview, Some(reason)))
+            }
+        };
+
+        if let Some((action, reason)) = transition {
+            let _ = repo
+                .transition(
+                    task_id,
+                    action,
+                    "agent-supervisor",
+                    "system",
+                    reason.as_deref(),
+                    None,
+                )
+                .await;
+        }
+    }
+
+    async fn transition_start(&self, task: &Task, agent_type: AgentType) -> Result<(), SupervisorError> {
+        if task.status == "open" && agent_type == AgentType::Worker {
+            let repo = TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+            repo.transition(
+                &task.id,
+                TransitionAction::Start,
+                "agent-supervisor",
+                "system",
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| SupervisorError::TaskTransitionFailed {
+                task_id: task.id.clone(),
+                reason: e.to_string(),
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn load_task(&self, task_id: &str) -> Result<Task, SupervisorError> {
+        let repo = TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let task = repo.get(task_id).await.map_err(|e| SupervisorError::Goose(e.to_string()))?;
+        task.ok_or_else(|| SupervisorError::TaskNotFound {
+            task_id: task_id.to_owned(),
+        })
+    }
+
+    fn agent_type_for_task(&self, task: &Task) -> AgentType {
+        match task.status.as_str() {
+            "needs_task_review" | "in_task_review" => AgentType::TaskReviewer,
+            "needs_phase_review" | "in_phase_review" => AgentType::PhaseReviewer,
+            _ => AgentType::Worker,
+        }
+    }
+
+    fn parse_model_id(model_id: &str) -> Result<(String, String), SupervisorError> {
+        let Some((provider_id, model_name)) = model_id.split_once('/') else {
+            return Err(SupervisorError::InvalidModelId {
+                model_id: model_id.to_owned(),
+            });
+        };
+        Ok((provider_id.to_owned(), model_name.to_owned()))
+    }
+
+    async fn load_provider_api_key(
+        &self,
+        provider_id: &str,
+    ) -> Result<(String, String), SupervisorError> {
+        let key_name = self
+            .provider_secret_key(provider_id)
+            .unwrap_or_else(|| format!("{}_API_KEY", provider_id.to_ascii_uppercase()));
+
+        let repo = CredentialRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let key = repo
+            .get_decrypted(&key_name)
+            .await
+            .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+
+        match key {
+            Some(v) => Ok((key_name, v)),
+            None => Err(SupervisorError::MissingCredential {
+                provider_id: provider_id.to_owned(),
+                key_name,
+            }),
+        }
+    }
+
+    fn provider_secret_key(&self, provider_id: &str) -> Option<String> {
+        self.app_state
+            .catalog()
+            .list_providers()
+            .into_iter()
+            .find(|p| p.id == provider_id)
+            .and_then(|p| p.env_vars.into_iter().next())
+    }
+
+    fn extensions_for(&self, _agent_type: AgentType) -> Vec<goose::config::ExtensionConfig> {
+        Vec::new()
+    }
+
+    async fn shutdown(&mut self) {
+        let mut drained = std::mem::take(&mut self.sessions);
+        for (task_id, handle) in drained.drain() {
+            handle.cancel.cancel();
+            let _ = handle.join.await;
+            self.decrement_capacity(&task_id);
+            self.session_models.remove(&task_id);
+            self.session_agent_types.remove(&task_id);
+        }
+    }
 }
 
-// ─── Handle ───────────────────────────────────────────────────────────────────
-
-/// Cheap-to-clone handle to the global `AgentSupervisor` actor.
 #[derive(Clone)]
 pub struct AgentSupervisorHandle {
     sender: mpsc::Sender<SupervisorMessage>,
 }
 
 impl AgentSupervisorHandle {
-    /// Spawn the AgentSupervisor and return a handle to it.
     pub fn spawn(
         app_state: AppState,
         session_manager: Arc<SessionManager>,
@@ -235,14 +532,8 @@ impl AgentSupervisorHandle {
     ) -> Self {
         let (sender, receiver) = mpsc::channel(32);
         tokio::spawn(
-            AgentSupervisor::new(
-                receiver,
-                sender.clone(),
-                app_state,
-                session_manager,
-                cancel,
-            )
-            .run(),
+            AgentSupervisor::new(receiver, sender.clone(), app_state, session_manager, cancel)
+                .run(),
         );
         Self { sender }
     }
@@ -256,7 +547,6 @@ impl AgentSupervisorHandle {
         rx.await.map_err(|_| SupervisorError::NoResponse)?
     }
 
-    /// Return `true` if there is an active session for the given task.
     pub async fn has_session(&self, task_id: &str) -> Result<bool, SupervisorError> {
         self.request(|tx| SupervisorMessage::HasSession {
             task_id: task_id.to_owned(),
@@ -265,7 +555,6 @@ impl AgentSupervisorHandle {
         .await
     }
 
-    /// Start a new agent session for the given task.
     pub async fn dispatch(&self, task_id: &str, model_id: &str) -> Result<(), SupervisorError> {
         self.request(|tx| SupervisorMessage::Dispatch {
             task_id: task_id.to_owned(),
@@ -275,7 +564,6 @@ impl AgentSupervisorHandle {
         .await
     }
 
-    /// Cancel a running agent session for the given task.
     pub async fn kill_session(&self, task_id: &str) -> Result<(), SupervisorError> {
         self.request(|tx| SupervisorMessage::KillSession {
             task_id: task_id.to_owned(),
@@ -284,7 +572,6 @@ impl AgentSupervisorHandle {
         .await
     }
 
-    /// Return current session and capacity status snapshot.
     pub async fn get_status(&self) -> Result<SupervisorStatus, SupervisorError> {
         self.request(|tx| SupervisorMessage::GetStatus { respond_to: tx }).await
     }
@@ -312,7 +599,7 @@ mod tests {
         let supervisor = spawn_supervisor(&temp);
 
         assert!(!supervisor.has_session("task-1").await.unwrap());
-        supervisor.dispatch("task-1", "model-a").await.unwrap();
+        supervisor.dispatch("task-1", "test/mock").await.unwrap();
         assert!(supervisor.has_session("task-1").await.unwrap());
 
         supervisor.kill_session("task-1").await.unwrap();
@@ -325,13 +612,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let supervisor = spawn_supervisor(&temp);
 
-        supervisor.dispatch("task-1", "model-a").await.unwrap();
-        let err = supervisor.dispatch("task-2", "model-a").await.unwrap_err();
+        supervisor.dispatch("task-1", "test/mock").await.unwrap();
+        let err = supervisor.dispatch("task-2", "test/mock").await.unwrap_err();
         assert!(matches!(err, SupervisorError::ModelAtCapacity { .. }));
 
         supervisor.kill_session("task-1").await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        supervisor.dispatch("task-2", "model-a").await.unwrap();
+        supervisor.dispatch("task-2", "test/mock").await.unwrap();
     }
 
     #[tokio::test]
@@ -339,10 +626,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let supervisor = spawn_supervisor(&temp);
 
-        supervisor.dispatch("task-1", "model-a").await.unwrap();
+        supervisor.dispatch("task-1", "test/mock").await.unwrap();
         let status = supervisor.get_status().await.unwrap();
         assert_eq!(status.active_sessions, 1);
-        let model = status.capacity.get("model-a").unwrap();
+        let model = status.capacity.get("test/mock").unwrap();
         assert_eq!(model.active, 1);
         assert_eq!(model.max, 1);
     }
