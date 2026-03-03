@@ -12,6 +12,8 @@ Auto-generated index of all documentation.
 Technical decisions, trade-offs, and their rationale. Reference these when making implementation choices or understanding why something was built a certain way.
 
 - [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
+- [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]
+- [[ADR-010: Session Cost Tracking — Per-Task Token Metrics]]
 - [[Authentication — Clerk JWT Validation]]
 - [[Database Layer — rusqlite over libsql/Turso]]
 - [[Language Selection — Compiler as AI Code Reviewer]]
