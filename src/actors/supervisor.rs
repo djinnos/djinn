@@ -64,12 +64,22 @@ pub enum SupervisorError {
 pub struct SupervisorStatus {
     pub active_sessions: usize,
     pub capacity: HashMap<String, ModelCapacity>,
+    pub running_sessions: Vec<RunningSessionInfo>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ModelCapacity {
     pub active: u32,
     pub max: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunningSessionInfo {
+    pub task_id: String,
+    pub model_id: String,
+    pub session_id: String,
+    pub duration_seconds: u64,
+    pub worktree_path: Option<String>,
 }
 
 type Reply<T> = oneshot::Sender<Result<T, SupervisorError>>;
@@ -94,6 +104,10 @@ enum SupervisorMessage {
     },
     GetStatus {
         respond_to: Reply<SupervisorStatus>,
+    },
+    GetSessionForTask {
+        task_id: String,
+        respond_to: Reply<Option<RunningSessionInfo>>,
     },
     SessionCompleted {
         task_id: String,
@@ -188,7 +202,18 @@ impl AgentSupervisor {
                 let _ = respond_to.send(Ok(SupervisorStatus {
                     active_sessions: self.sessions.len(),
                     capacity: self.capacity.clone(),
+                    running_sessions: self.running_sessions_snapshot(),
                 }));
+            }
+            SupervisorMessage::GetSessionForTask {
+                task_id,
+                respond_to,
+            } => {
+                let session = self
+                    .sessions
+                    .get(&task_id)
+                    .map(|handle| self.session_snapshot(&task_id, handle));
+                let _ = respond_to.send(Ok(session));
             }
             SupervisorMessage::InterruptAll { reason, respond_to } => {
                 self.interrupt_all_sessions(&reason).await;
@@ -434,6 +459,7 @@ impl AgentSupervisor {
                 session_id: session.id,
                 task_id: task_id.clone(),
                 worktree_path: Some(worktree_path),
+                started_at: Instant::now(),
             },
         );
         self.session_models.insert(task_id.clone(), model_id);
@@ -473,6 +499,7 @@ impl AgentSupervisor {
                 session_id: format!("mock-session-{task_id}"),
                 task_id: task_id.clone(),
                 worktree_path: None,
+                started_at: Instant::now(),
             },
         );
         self.session_models.insert(task_id.clone(), model_id);
@@ -560,6 +587,34 @@ impl AgentSupervisor {
             && model_capacity.active > 0
         {
             model_capacity.active -= 1;
+        }
+    }
+
+    fn running_sessions_snapshot(&self) -> Vec<RunningSessionInfo> {
+        let mut sessions: Vec<RunningSessionInfo> = self
+            .sessions
+            .iter()
+            .map(|(task_id, handle)| self.session_snapshot(task_id, handle))
+            .collect();
+        sessions.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+        sessions
+    }
+
+    fn session_snapshot(&self, task_id: &str, handle: &GooseSessionHandle) -> RunningSessionInfo {
+        let model_id = self
+            .session_models
+            .get(task_id)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        RunningSessionInfo {
+            task_id: task_id.to_string(),
+            model_id,
+            session_id: handle.session_id.clone(),
+            duration_seconds: handle.started_at.elapsed().as_secs(),
+            worktree_path: handle
+                .worktree_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
         }
     }
 
@@ -1105,6 +1160,17 @@ impl AgentSupervisorHandle {
     pub async fn get_status(&self) -> Result<SupervisorStatus, SupervisorError> {
         self.request(|tx| SupervisorMessage::GetStatus { respond_to: tx })
             .await
+    }
+
+    pub async fn session_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<RunningSessionInfo>, SupervisorError> {
+        self.request(|tx| SupervisorMessage::GetSessionForTask {
+            task_id: task_id.to_owned(),
+            respond_to: tx,
+        })
+        .await
     }
 
     pub async fn interrupt_all(&self, reason: &str) -> Result<(), SupervisorError> {

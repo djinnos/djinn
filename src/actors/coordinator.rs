@@ -59,7 +59,12 @@ enum CoordinatorMessage {
     /// Run an immediate dispatch pass for all ready tasks.
     TriggerDispatch,
     /// Pause dispatch — no new sessions will start until `Resume`.
-    Pause,
+    Pause {
+        /// If true, interrupt all active sessions immediately.
+        interrupt_active: bool,
+        /// Optional interruption reason passed to the supervisor.
+        reason: String,
+    },
     /// Resume dispatch and immediately run a dispatch pass.
     Resume,
     /// Return current coordinator status.
@@ -165,14 +170,14 @@ impl CoordinatorActor {
                     self.dispatch_ready_tasks().await;
                 }
             }
-            CoordinatorMessage::Pause => {
+            CoordinatorMessage::Pause {
+                interrupt_active,
+                reason,
+            } => {
                 if !self.paused {
                     tracing::info!("CoordinatorActor: paused");
                     self.paused = true;
-                    if let Err(e) = self
-                        .supervisor
-                        .interrupt_all("session interrupted by coordinator pause")
-                        .await
+                    if interrupt_active && let Err(e) = self.supervisor.interrupt_all(&reason).await
                     {
                         tracing::warn!(error = %e, "CoordinatorActor: failed to interrupt active sessions on pause");
                     }
@@ -424,7 +429,20 @@ impl CoordinatorHandle {
 
     /// Pause dispatch (no new sessions will start).
     pub async fn pause(&self) -> Result<(), CoordinatorError> {
-        self.send(CoordinatorMessage::Pause).await
+        self.send(CoordinatorMessage::Pause {
+            interrupt_active: false,
+            reason: "session interrupted by coordinator pause".to_string(),
+        })
+        .await
+    }
+
+    /// Pause dispatch and interrupt active sessions immediately.
+    pub async fn pause_immediate(&self, reason: &str) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::Pause {
+            interrupt_active: true,
+            reason: reason.to_owned(),
+        })
+        .await
     }
 
     /// Resume dispatch and immediately run a dispatch pass.

@@ -8,7 +8,7 @@ pub mod extension;
 pub mod output_parser;
 pub mod prompts;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -30,6 +30,8 @@ pub struct GooseSessionHandle {
     pub task_id: String,
     /// Optional isolated git worktree used by this session.
     pub worktree_path: Option<PathBuf>,
+    /// Monotonic launch timestamp used for runtime duration reporting.
+    pub started_at: Instant,
 }
 
 // ─── Agent type ───────────────────────────────────────────────────────────────
