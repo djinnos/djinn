@@ -43,5 +43,9 @@ mod tests {
 
         assert!(tables.contains(&"settings".to_string()));
         assert!(tables.contains(&"projects".to_string()));
+        assert!(tables.contains(&"epics".to_string()));
+        assert!(tables.contains(&"tasks".to_string()));
+        assert!(tables.contains(&"blockers".to_string()));
+        assert!(tables.contains(&"activity_log".to_string()));
     }
 }
