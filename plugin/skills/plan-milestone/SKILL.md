@@ -23,8 +23,10 @@ Parse the milestone number from the router's forwarded arguments. If no number i
 | task_create | Create features and tasks under the milestone's epic |
 | task_update | Add design, acceptance_criteria, and memory_refs to existing tasks |
 | task_blockers_add | Set wave ordering via blocker dependencies between tasks |
-| task_list | Check existing tasks, verify no duplicates, list epics |
-| task_children_list | List children of an epic to see existing features and tasks |
+| task_list | Check existing tasks, verify no duplicates |
+| epic_create | Create domain-structured epics if they don't exist |
+| epic_list | List existing epics to avoid duplicates |
+| epic_tasks | List children of an epic to see existing features and tasks |
 
 ## Do NOT Use
 
@@ -174,12 +176,18 @@ See `cookbook/task-templates.md` for task creation and wave patterns.
 
 Assign wave labels and set blocker dependencies to control execution order.
 
+**Blockers are THE implementation sequence mechanism.** The Djinn coordinator dispatches any open task with no unresolved blockers. If you don't set blockers, tasks run in parallel — even when one logically depends on another. Blockers are not metadata; they are the execution order. Getting them right is as important as getting the task decomposition right.
+
 1. **Wave 1 tasks**: No blockers. These are foundation tasks that can start immediately (schemas, configs, interfaces).
 2. **Wave 2 tasks**: `blocked_by` one or more Wave 1 task IDs. Core logic that depends on foundation.
 3. **Wave 3 tasks**: `blocked_by` one or more Wave 2 task IDs. Integration and validation that depends on core logic.
 4. Use `task_blockers_add()` to add blocker relationships beyond those set at creation time.
 
-**Key principle**: Only block on real technical or logical dependencies. If two tasks CAN run in parallel, do not create an artificial blocker between them. Let the Djinn coordinator parallelize everything that is not explicitly blocked.
+**Two failure modes to avoid:**
+- **Missing blocker**: The coordinator dispatches a task before its dependency ships. The agent fails or produces broken code against APIs/schemas that don't exist yet.
+- **False blocker**: Unnecessary serialization that prevents the coordinator from parallelizing independent work, slowing overall execution.
+
+Only block on real technical or logical dependencies. If two tasks CAN run in parallel, do not create an artificial blocker between them.
 
 See `cookbook/task-templates.md` for wave ordering examples.
 

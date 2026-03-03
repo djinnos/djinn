@@ -4,15 +4,16 @@ How to structure work into epics, features, and tasks in djinn — workflow agno
 
 ## The Core Hierarchy
 
+Epics and tasks use **separate MCP tools** (per ADR-003):
+
 ```
-Epic           → "User Authentication System"        (weeks, strategic initiative)
-  Feature      → "Login UI"                          (2-4h, one deliverable)
-    Task       → "Create JWT middleware"              (1 outcome, implementable)
-    Task       → "Add login form component"
-    Bug        → "Password field clears on error"
-  Feature      → "Registration Flow"
-    Task       → "...
+epic_create()  → Epic: "User Authentication System"   (weeks, strategic container)
+task_create()  → Feature: "Login UI"                   (2-4h, one deliverable)
+task_create()  → Task: "Create JWT middleware"          (1 outcome, implementable)
+task_create()  → Bug: "Password field clears on error" (defect fix)
 ```
+
+Features, tasks, and bugs are **all flat siblings under an epic**. There is no nesting of tasks under features. The `issue_type` field distinguishes them but they share the same parent level.
 
 **Rule of thumb:**
 - If a dev (or agent) can't implement it in one focused session → it's too big, split further
@@ -21,25 +22,14 @@ Epic           → "User Authentication System"        (weeks, strategic initiat
 
 ## Epics
 
-Epics are **strategic containers**. They don't get implemented directly — their child features do.
+Epics are **strategic containers** managed by their own tool namespace. They don't get implemented directly — their child features/tasks do.
 
 ```
-task_create(
+epic_create(
   title="User Authentication System",
-  issue_type="epic",
   emoji="🔐",
-  description="""
-  Complete authentication enabling secure access to all user-specific features.
-  Blocks the entire user-facing product — must ship before any personalization.
-  """,
-  acceptance_criteria=[
-    "Users can register, verify email, and log in",
-    "Sessions persist across browser restarts",
-    "Protected routes reject unauthenticated access",
-    "Password reset works end-to-end"
-  ],
-  priority=0,
-  project="..."
+  color="#8B5CF6",
+  description="Complete authentication enabling secure access to all user-specific features."
 )
 ```
 
@@ -47,16 +37,18 @@ task_create(
 - Describes a user-facing capability, not a technical component
 - Has acceptance criteria that a non-technical stakeholder can verify
 - Contains 2-8 features (if more, consider splitting the epic)
+- Use `epic_tasks(epic_id=...)` to list all children
+- Use `epic_show(id=...)` to see epic details and child counts
 
 ## Features / Stories
 
-Features are the primary unit of delivery. Each feature should be completable in one focused agent session (2-4 hours).
+Features are the primary unit of delivery. Each feature should be completable in one focused agent session (2-4 hours). Features are direct children of epics (same level as tasks and bugs).
 
 ```
 task_create(
   title="Login UI",
   issue_type="feature",
-  parent="epic-id",
+  epic_id="epic-id",
   description="""
   As a user, I want to log in with email/password so I can access my account.
   This is the entry point to the auth system — must handle all edge cases gracefully.
@@ -73,7 +65,6 @@ task_create(
     "Form is accessible (WCAG 2.1 AA)"
   ],
   priority=1,
-  project="..."
 )
 ```
 
@@ -91,7 +82,7 @@ Tasks are implementation steps. One task = one atomic commit.
 task_create(
   title="Implement JWT validation middleware",
   issue_type="task",
-  parent="feature-id",
+  epic_id="epic-id",
   description="""
   JWT validation middleware for protected Express routes.
   Validates RS256 signed tokens, rejects expired tokens with clear error.
@@ -110,7 +101,6 @@ task_create(
   ],
   priority=0,
   labels=["area:auth", "sprint:3"],
-  project="..."
 )
 ```
 
@@ -128,7 +118,7 @@ Bugs are defects found during or after implementation.
 task_create(
   title="Login fails with special chars in password",
   issue_type="bug",
-  parent="feature-id",
+  epic_id="epic-id",
   description="""
   Passwords with '&' or '+' fail auth. Found during edge case testing of login flow.
   Reproducible: test@example.com / pass&word123 → 401 despite valid credentials.
@@ -144,7 +134,6 @@ task_create(
     "Standard passwords still work (no regression)"
   ],
   priority=1,
-  project="..."
 )
 ```
 
@@ -173,6 +162,8 @@ When a feature is L or XL, split it:
 
 ## Dependency Mapping
 
+**Blockers are THE implementation sequence mechanism.** The Djinn coordinator dispatches any open task with no unresolved blockers. If you don't set blockers, tasks run in parallel — even when one logically depends on another. Blockers are not metadata; they are the execution order.
+
 Use blockers to express sequencing requirements:
 
 ```
@@ -180,19 +171,21 @@ Use blockers to express sequencing requirements:
 task_blockers_add(
   id="email-verification-feature-id",
   blocking_id="registration-feature-id",
-  project="..."
 )
 ```
 
 **When to add blockers:**
-- Technical dependency: A must ship before B can be built
+- Technical dependency: A must ship before B can be built (schema before CRUD, CRUD before tools that use it)
 - Logical dependency: B assumes A's UI/API exists
 - Data dependency: B needs data that A creates
+- Build dependency: B imports or links against code that A produces
 
 **When NOT to add blockers:**
-- "Nice to have" sequencing — let execution engine parallelize
+- "Nice to have" sequencing — let the coordinator parallelize
 - Features in completely different areas (auth vs. billing)
 - Personal preference about order
+
+**Critical:** Get blockers right. Missing a blocker means the coordinator may dispatch a task before its dependency ships — the agent will fail or produce broken code. Adding a false blocker means unnecessary serialization that slows execution.
 
 ## Labels for Grouping
 
@@ -260,20 +253,18 @@ Well-written AC enables agent verification and review:
 For strategic planning, create epics first, then flesh out features:
 
 ```
-# Phase 1: Define the epics (strategic layer)
-auth_epic = task_create(title="User Auth", issue_type="epic", ...)
-payments_epic = task_create(title="Payments", issue_type="epic", ...)
-onboarding_epic = task_create(title="Onboarding", issue_type="epic", ...)
+# Phase 1: Create epics via epic_create (separate tool namespace)
+auth_epic = epic_create(title="User Auth", emoji="🔐", color="#8B5CF6")
+payments_epic = epic_create(title="Payments", emoji="💳", color="#22C55E")
+onboarding_epic = epic_create(title="Onboarding", emoji="🚀", color="#F97316")
 
-# Block epics on each other if needed
-task_blockers_add(id=payments_epic, blocking_id=auth_epic, ...)  # Payments needs auth first
+# Phase 2: Create features and tasks under epics (all flat siblings)
+task_create(title="Login UI", issue_type="feature", epic_id=auth_epic, ...)
+task_create(title="Registration", issue_type="feature", epic_id=auth_epic, ...)
+task_create(title="JWT middleware", issue_type="task", epic_id=auth_epic, ...)
 
-# Phase 2: Create features for the first epic
-task_create(title="Login UI", issue_type="feature", parent=auth_epic, ...)
-task_create(title="Registration", issue_type="feature", parent=auth_epic, ...)
-
-# Phase 3: SM/agent breaks features into tasks before execution
-task_create(title="JWT middleware", issue_type="task", parent=login_feature, ...)
+# Use epic_tasks to list all children of an epic
+epic_tasks(epic_id=auth_epic)
 ```
 
 ## Linking Memory to Work

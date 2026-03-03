@@ -9,44 +9,36 @@ Every task has these key fields:
 | Field | Purpose | Notes |
 |-------|---------|-------|
 | `title` | One-line summary | Imperative form: "Add login endpoint" |
-| `issue_type` | epic / feature / task / bug | Determines hierarchy position |
+| `issue_type` | feature / task / bug | Work item type (all flat under epic) |
 | `description` | Context and background | NOT for acceptance criteria |
 | `acceptance_criteria` | What done looks like | Array of strings or {criterion, met} objects |
 | `design` | How to implement | ADR refs, technical approach, architecture notes |
 | `priority` | 0=highest, higher=lower | 0 for blocking/critical work |
-| `parent` | Parent epic/feature ID | Required for features, tasks, bugs |
-| `labels` | Arbitrary tags | Use for sprint:X, epic:Y, area:auth grouping |
+| `epic_id` | Parent epic ID | Required — every task/feature/bug belongs to an epic |
+| `labels` | Arbitrary tags | Use for sprint:X, area:auth grouping |
 | `status` | Current state | See status flow in SKILL.md |
 | `owner` | Assigned agent/user | email format |
-| `blocked_by` | Blocking task ID | Set at creation, or use task_blockers_add |
 
 ## Creating Tasks
 
-### Epic (top-level initiative)
+### Epic (top-level container — separate tool)
 ```
-task_create(
+epic_create(
   title="User Authentication System",
-  issue_type="epic",
-  project="/path/to/project",
-  emoji="🔐",           # Required for epics
-  color="#8b5cf6",      # Optional, auto-assigned if omitted
-  description="Implement complete auth enabling secure access. Blocks all user-specific features.",
-  acceptance_criteria=[
-    "Users can register with email/password",
-    "Users can log in and receive persistent session",
-    "Protected routes reject unauthenticated requests"
-  ],
-  priority=1
+  emoji="🔐",
+  color="#8B5CF6",       # Must be hex format
+  description="Implement complete auth enabling secure access. Blocks all user-specific features."
 )
 ```
 
-### Feature/Story (deliverable, 2-4h scope)
+Epics are managed via their own tools: `epic_create`, `epic_list`, `epic_show`, `epic_tasks`, `epic_update`, `epic_close`, `epic_reopen`, `epic_delete`, `epic_count`.
+
+### Feature (deliverable, 2-4h scope)
 ```
 task_create(
   title="Login UI",
   issue_type="feature",
-  parent="epic-id",
-  project="/path/to/project",
+  epic_id="epic-short-id",
   description="User can log in with email/password. Entry point for auth system.",
   design="LoginForm component. useAuth hook for API. Redirect to dashboard on success.",
   acceptance_criteria=[
@@ -63,8 +55,7 @@ task_create(
 task_create(
   title="Create auth middleware",
   issue_type="task",
-  parent="feature-id",
-  project="/path/to/project",
+  epic_id="epic-short-id",
   description="JWT validation middleware for protected routes.",
   design="Use existing session package. See ADR-005 for token format.",
   acceptance_criteria=[
@@ -82,8 +73,7 @@ task_create(
 task_create(
   title="Login fails with special characters in password",
   issue_type="bug",
-  parent="feature-id",
-  project="/path/to/project",
+  epic_id="epic-short-id",
   description="Passwords containing '&' or '+' fail authentication. Discovered during edge case testing.",
   design="Root cause: URL encoding issue in API call. Fix: encodeURIComponent on password.",
   acceptance_criteria=[
@@ -100,8 +90,7 @@ task_create(
 ### Claim next available task
 ```
 task_claim(
-  project="/path/to/project",
-  issue_type="task",      # Filter to tasks only
+    issue_type="task",      # Filter to tasks only
   label="sprint:3",       # Optional: filter by sprint
   priority_max=2          # Only grab up to priority 2
 )
@@ -115,8 +104,7 @@ task_transition(id="task-id", action="start", project="...")
 ### List ready tasks (no blockers, open status)
 ```
 task_ready(
-  project="/path/to/project",
-  issue_type="!epic",     # Exclude epics
+    issue_type="!epic",     # Exclude epics
   limit=10
 )
 ```
