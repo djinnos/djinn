@@ -14,16 +14,23 @@ For project planning workflows, use the dedicated skills: `new-project`, `discus
 Always orient first:
 
 1. `memory_catalog()` — see what knowledge exists
-2. `task_list(project=..., status="in_progress")` — check active work
-3. `task_ready(project=..., issue_type="!epic")` — see what's next
+2. `task_list(status="in_progress")` — check active work
+3. `task_ready()` — see what's next
 
-## Task Hierarchy
+## Hierarchy
+
+Epics and tasks are managed by **separate MCP tools** (per ADR-003):
 
 ```
-epic (weeks+) → feature (2-4h) → task (1 outcome) / bug (defect)
+epic_create()  → Epic (strategic container, weeks+)
+task_create()  → feature / task / bug  (all flat siblings under an epic)
 ```
 
-Always set `parent`. Always set `issue_type`. Use `acceptance_criteria` (array), not description, for what "done" looks like. Use `design` for how to implement.
+Epics use: `epic_create`, `epic_list`, `epic_show`, `epic_tasks`, `epic_update`, `epic_close`, `epic_reopen`, `epic_delete`, `epic_count`.
+
+Tasks use: `task_create(epic_id=..., issue_type="task"|"feature"|"bug")` — all work items are direct children of an epic. There is no nesting of tasks under features — features, tasks, and bugs are siblings.
+
+Always set `epic_id` (required). Always set `issue_type`. Use `acceptance_criteria` (array), not description, for what "done" looks like. Use `design` for how to implement.
 
 ## Status Transitions
 
@@ -78,4 +85,6 @@ Load when you need detailed patterns:
 | Setting blockers on features that could run in parallel | Only block on real technical or logical dependencies — let the coordinator parallelize the rest |
 | Using `close` on a task that needs review | Use `submit_task_review` → let the review pipeline run. `close` skips review entirely. |
 | Omitting `project` path | Most tools require `project` — use the absolute path to the project directory |
-| Creating tasks without `parent` | Every non-epic needs a parent ID. Tasks without parents are orphaned from the hierarchy. |
+| Creating tasks without `epic_id` | Every task/feature/bug needs an `epic_id`. Tasks without an epic are rejected by the API. |
+| Using `task_create` for epics | Use `epic_create()` — epics have their own tool namespace (ADR-003). |
+| Nesting tasks under features | Features, tasks, and bugs are flat siblings under an epic. There is no parent-child between them. |
