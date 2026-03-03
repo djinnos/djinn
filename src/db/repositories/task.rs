@@ -132,7 +132,7 @@ impl TaskRepository {
             "SELECT id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, memory_refs
+                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE epic_id = ?1 ORDER BY priority, created_at",
         )
         .bind(epic_id)
@@ -146,7 +146,7 @@ impl TaskRepository {
             "SELECT id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, memory_refs
+                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE status = ?1 ORDER BY priority, created_at",
         )
         .bind(status)
@@ -168,7 +168,7 @@ impl TaskRepository {
             "SELECT id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, memory_refs
+                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE short_id = ?1",
         )
         .bind(short_id)
@@ -586,7 +586,7 @@ impl TaskRepository {
                     t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.blocked_from_status, t.close_reason, t.memory_refs
+                    t.blocked_from_status, t.close_reason, t.merge_commit_sha, t.memory_refs
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -660,7 +660,7 @@ impl TaskRepository {
                     t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.blocked_from_status, t.close_reason, t.memory_refs
+                    t.blocked_from_status, t.close_reason, t.merge_commit_sha, t.memory_refs
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -735,7 +735,7 @@ impl TaskRepository {
                     t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.blocked_from_status, t.close_reason, t.memory_refs
+                    t.blocked_from_status, t.close_reason, t.merge_commit_sha, t.memory_refs
              FROM blockers b
              JOIN tasks t ON t.id = b.task_id
              WHERE b.blocking_task_id = ?1
@@ -973,7 +973,7 @@ impl TaskRepository {
             "SELECT id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, memory_refs
+                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
              FROM tasks
              WHERE status = 'in_progress'
                AND updated_at < datetime('now', '-{stale_hours} hours')"
@@ -1038,7 +1038,7 @@ impl TaskRepository {
             "SELECT id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, memory_refs
+                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE id = ?1 OR short_id = ?1",
         )
         .bind(id_or_short)
@@ -1073,7 +1073,7 @@ impl TaskRepository {
             "SELECT id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, memory_refs
+                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
         );
         let mut task_q = sqlx::query_as::<_, Task>(&sql);
@@ -1155,6 +1155,28 @@ impl TaskRepository {
 
     // ── Memory refs ──────────────────────────────────────────────────────────
 
+    /// Store the squash-merge commit SHA for a task after merge completes.
+    pub async fn set_merge_commit_sha(&self, id: &str, sha: &str) -> Result<Task> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE tasks SET merge_commit_sha = ?2,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(sha)
+        .execute(self.db.pool())
+        .await?;
+
+        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(self.db.pool())
+            .await?;
+
+        let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
+        Ok(task)
+    }
+
     /// Replace the `memory_refs` JSON array on a task.
     pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
@@ -1187,7 +1209,7 @@ impl TaskRepository {
             "SELECT id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, memory_refs
+                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE memory_refs LIKE ?1
              ORDER BY priority, created_at",
         )
@@ -1221,10 +1243,10 @@ impl TaskRepository {
                 issue_type, status, priority, owner, labels,
                 acceptance_criteria, reopen_count, continuation_count,
                 created_at, updated_at, closed_at,
-                blocked_from_status, close_reason, memory_refs
+                blocked_from_status, close_reason, merge_commit_sha, memory_refs
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+                ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
              )
              ON CONFLICT(id) DO UPDATE SET
                 title               = excluded.title,
@@ -1242,6 +1264,7 @@ impl TaskRepository {
                 closed_at           = excluded.closed_at,
                 blocked_from_status = excluded.blocked_from_status,
                 close_reason        = excluded.close_reason,
+                merge_commit_sha    = excluded.merge_commit_sha,
                 memory_refs         = excluded.memory_refs
              WHERE excluded.updated_at > tasks.updated_at",
         )
@@ -1264,6 +1287,7 @@ impl TaskRepository {
         .bind(&task.closed_at)
         .bind(&task.blocked_from_status)
         .bind(&task.close_reason)
+        .bind(&task.merge_commit_sha)
         .bind(&task.memory_refs)
         .execute(&mut *tx)
         .await
@@ -1305,7 +1329,7 @@ const TASK_SELECT_WHERE_ID: &str =
     "SELECT id, short_id, epic_id, title, description, design, issue_type,
             status, priority, owner, labels, acceptance_criteria,
             reopen_count, continuation_count, created_at, updated_at, closed_at,
-            blocked_from_status, close_reason, memory_refs
+            blocked_from_status, close_reason, merge_commit_sha, memory_refs
      FROM tasks WHERE id = ?1";
 
 fn short_id_from_uuid(id: &uuid::Uuid) -> String {

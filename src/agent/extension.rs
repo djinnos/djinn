@@ -488,6 +488,7 @@ fn task_to_value(t: &Task) -> serde_json::Value {
         "closed_at": t.closed_at,
         "blocked_from_status": t.blocked_from_status,
         "close_reason": t.close_reason,
+        "merge_commit_sha": t.merge_commit_sha,
     })
 }
 

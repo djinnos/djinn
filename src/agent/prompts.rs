@@ -167,6 +167,7 @@ mod tests {
             closed_at: None,
             blocked_from_status: None,
             close_reason: None,
+            merge_commit_sha: None,
             memory_refs: "[]".into(),
         }
     }
