@@ -1,10 +1,12 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 use djinn_server::db::checkpoint;
-use djinn_server::db::connection::Database;
+use djinn_server::db::connection::{self, Database};
 use djinn_server::server::{self, AppState};
 
 #[derive(Parser)]
@@ -13,6 +15,10 @@ struct Cli {
     /// Port to listen on
     #[arg(short, long, default_value_t = 8372, env = "DJINN_PORT")]
     port: u16,
+
+    /// Database path (default: ~/.djinn/djinn.db)
+    #[arg(long, env = "DJINN_DB_PATH")]
+    db_path: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -32,7 +38,9 @@ async fn main() {
         shutdown_cancel.cancel();
     });
 
-    let db = Database::open_in_memory().expect("failed to open database");
+    let db_path = cli.db_path.unwrap_or_else(connection::default_db_path);
+    tracing::info!(path = %db_path.display(), "opening database");
+    let db = Database::open(&db_path).expect("failed to open database");
     checkpoint::spawn(db.clone(), cancel.clone());
     let state = AppState::new(db, cancel.clone());
     let router = server::router(state);

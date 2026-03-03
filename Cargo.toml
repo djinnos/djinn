@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
+git2 = "0.20"
+dirs = "6"
 refinery = { version = "0.9", features = ["rusqlite", "int8-versions"] }
 rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -21,5 +23,6 @@ uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
+tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
