@@ -67,7 +67,7 @@ Read the planning artifacts needed to decompose this milestone. Execute these su
    - Look for a scope reference note created by the discuss-milestone workflow (titled "Milestone {N} Scope")
    - **If no scope notes found:** Display the warning: "No discussion context found for milestone {N} -- planning with defaults." Proceed with available context. This is normal if discuss-milestone was not run before planning.
 
-6. **Check existing epics on the task board:** `task_list(issue_type="epic", project=PROJECT)`
+6. **Check existing epics on the task board:** `epic_list()`
    - Retrieve all existing epics to avoid creating duplicates (per ADR-001, epics are domain-structured and persist across milestones)
    - Record each epic's ID, title, and domain area for matching in Step 3
 
@@ -141,10 +141,10 @@ If the milestone involves domain areas with no existing research coverage, inves
 
 Determine where on the task board this milestone's work belongs.
 
-1. Check for existing epics: `task_list(issue_type="epic")`
+1. Check for existing epics: `epic_list()`
 2. Match the milestone's domain areas to existing epics
-3. If an epic exists for a domain area, use it. If not, create via `task_create(issue_type="epic", ...)`
-4. List existing features under each epic: `task_children_list(id="{epic_id}")`
+3. If an epic exists for a domain area, use it. If not, create via `epic_create(...)`
+4. List existing features under each epic: `epic_tasks(epic_id="{epic_id}")`
 5. Determine which features need to be created for this milestone
 6. Avoid duplicating features that already exist from prior milestone planning
 
@@ -195,14 +195,14 @@ See `cookbook/task-templates.md` for wave ordering examples.
 
 Verify the task decomposition achieves the milestone's goals. The plan-checker runs INLINE (not as a separate agent) for direct access to all created task IDs from Steps 3-5.
 
-1. **Collect the full task inventory.** After all tasks are created (Steps 3-5), gather the complete list of created task IDs with their details: `{id, title, parent, labels, acceptance_criteria, memory_refs, blocked_by}`. This is the dataset the checker validates against.
+1. **Collect the full task inventory.** After all tasks are created (Steps 3-5), gather the complete list of created task IDs with their details: `{id, title, epic_id, labels, acceptance_criteria, memory_refs}`. This is the dataset the checker validates against.
 
 2. **Run up to 3 validation iterations.** For each iteration, check all four dimensions below. If any dimension finds a gap, auto-fix it immediately and log the fix. After checking all four dimensions, evaluate whether any gaps were found:
 
    **Dimension 1 -- Success criteria coverage:**
    For each milestone success criterion from Step 1's context summary (`success_criteria[]`):
    - Check if any created task's `acceptance_criteria` addresses this criterion
-   - If not covered: create a task to cover it using the same `task_create` pattern as Step 4 -- with `parent` set to the most relevant feature, `labels=["wave:N"]` for appropriate wave, `acceptance_criteria` addressing the criterion, `memory_refs` linking to requirements, and `priority` as integer (0=critical, 1=high, 2=medium, 3=low)
+   - If not covered: create a task to cover it using the same `task_create` pattern as Step 4 -- with `epic_id` set to the most relevant epic, `labels=["wave:N"]` for appropriate wave, `acceptance_criteria` addressing the criterion, `memory_refs` linking to requirements, and `priority` as integer (0=critical, 1=high, 2=medium, 3=low)
    - Log: "Gap found: criterion '{criterion}' not covered -> created task {new_task_id}"
 
    **Dimension 2 -- Requirement coverage:**
@@ -213,14 +213,14 @@ Verify the task decomposition achieves the milestone's goals. The plan-checker r
 
    **Dimension 3 -- Hierarchy integrity:**
    For each created task and feature:
-   - Verify `parent` is set: tasks must have a parent feature, features must have a parent epic
-   - If an item is orphaned: assign it to the most appropriate parent using `task_update(id=item_id, parent=best_match_id)`
-   - Log: "Gap found: orphan task {task_id} -> assigned to feature {feature_id}"
+   - Verify `epic_id` is set: every task/feature/bug must belong to an epic
+   - If an item is orphaned: assign it to the most appropriate epic using `task_update(id=item_id, epic_id=best_match_epic_id)`
+   - Log: "Gap found: orphan task {task_id} -> assigned to epic {epic_id}"
 
    **Dimension 4 -- Wave ordering sanity:**
    - Verify wave:1 tasks have NO blockers. If a wave:1 task has blockers, either reclassify it to a higher wave number or remove the incorrect blockers
    - Verify every wave:N+1 task (N >= 1) is blocked by at least one wave:N task. If not, add a blocker: `task_blockers_add(id=task_id, blocking_id=appropriate_wave_n_task_id, project=PROJECT)`
-   - Verify no dependency cycles exist. For milestone-sized graphs of 8-15 tasks, a simple invariant check is sufficient: wave 1 has no blockers, each subsequent wave references only lower waves. If a cycle is detected, break it by removing the blocker that violates the wave ordering
+   - Verify no dependency cycles exist. For milestone-sized graphs of 8-15 tasks, a simple invariant check is sufficient: wave 1 has no blockers, each subsequent wave references only lower waves. If a cycle is detected, break it by removing the blocker that violates the wave ordering: `task_blockers_remove(id=task_id, blocking_id=offending_id)`
    - Log: "Gap found: wave:{N} task {task_id} missing blocker -> added blocker on {blocking_task_id}"
 
 3. **Evaluate iteration result.** After checking all 4 dimensions: if no gaps were found in this iteration, validation passes -- break out of the loop and proceed to Step 7.

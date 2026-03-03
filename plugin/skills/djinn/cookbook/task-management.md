@@ -80,9 +80,11 @@ task_create(
     "Password 'test&123' authenticates successfully",
     "Password 'test+456' authenticates successfully"
   ],
-  priority=1,
-  blocked_by="other-task-id"   # If it depends on something first
+  priority=1
 )
+# If it depends on something, add a blocker after creation:
+# task_blockers_add(id="this-bug-id", blocking_id="other-task-id")
+
 ```
 
 ## Claiming and Starting Work
@@ -98,13 +100,12 @@ task_claim(
 
 ### Start a specific task
 ```
-task_transition(id="task-id", action="start", project="...")
+task_transition(id="task-id", action="start")
 ```
 
 ### List ready tasks (no blockers, open status)
 ```
 task_ready(
-    issue_type="!epic",     # Exclude epics
   limit=10
 )
 ```
@@ -117,36 +118,31 @@ Always add comments at key moments. This enables any agent or human to resume wi
 # Starting work
 task_comment_add(
   id="task-id",
-  body="[STARTING] Approach: implement JWT middleware using existing session package. ADR-005 applies.",
-  project="..."
+  body="[STARTING] Approach: implement JWT middleware using existing session package. ADR-005 applies."
 )
 
 # Mid-task progress
 task_comment_add(
   id="task-id",
-  body="[PROGRESS] Middleware validates tokens. Next: add user context injection and error responses.",
-  project="..."
+  body="[PROGRESS] Middleware validates tokens. Next: add user context injection and error responses."
 )
 
 # Blocked
 task_comment_add(
   id="task-id",
-  body="[BLOCKED] Waiting for session package update (#123). Token format changed in latest version.",
-  project="..."
+  body="[BLOCKED] Waiting for session package update (#123). Token format changed in latest version."
 )
 
 # Pausing session
 task_comment_add(
   id="task-id",
-  body="[PAUSED] Completed: token validation, error handling. Next: user context injection. Branch: feature/auth-middleware",
-  project="..."
+  body="[PAUSED] Completed: token validation, error handling. Next: user context injection. Branch: feature/auth-middleware"
 )
 
 # Done
 task_comment_add(
   id="task-id",
-  body="[DONE] Implemented JWT middleware with validation, error handling, user context. All tests passing.",
-  project="..."
+  body="[DONE] Implemented JWT middleware with validation, error handling, user context. All tests passing."
 )
 ```
 
@@ -172,12 +168,12 @@ task_comment_add(
 
 ### Quick close (no review)
 ```
-task_transition(id="task-id", action="close", project="...")
+task_transition(id="task-id", action="close")
 ```
 
 ### Request review
 ```
-task_transition(id="task-id", action="submit_task_review", project="...")
+task_transition(id="task-id", action="submit_task_review")
 ```
 
 ### Reopen
@@ -185,8 +181,7 @@ task_transition(id="task-id", action="submit_task_review", project="...")
 task_transition(
   id="task-id",
   action="reopen",
-  reason="Found regression in edge case",
-  project="..."
+  reason="Found regression in edge case"
 )
 ```
 
@@ -195,65 +190,64 @@ task_transition(
 ### Add blocker relationship
 ```
 # Task B is blocked by Task A
-task_blockers_add(id="task-b-id", blocking_id="task-a-id", project="...")
+task_blockers_add(id="task-b-id", blocking_id="task-a-id")
 ```
 
 ### List what blocks a task
 ```
-task_blockers_list(id="task-id", project="...")
+task_blockers_list(id="task-id")
 ```
 
 ### List what a task blocks
 ```
-task_blocked_list(id="task-id", project="...")
+task_blocked_list(id="task-id")
 ```
 
 ### Remove blocker
 ```
-task_blockers_remove(id="task-id", blocking_id="task-a-id", project="...")
+task_blockers_remove(id="task-id", blocking_id="task-a-id")
 ```
 
 ## Querying Tasks
 
 ### Filter by status
 ```
-task_list(project="...", status="in_progress")
-task_list(project="...", status="needs_task_review")
+task_list(status="in_progress")
+task_list(status="needs_task_review")
 ```
 
 ### Filter by type
 ```
-task_list(project="...", issue_type="bug")
-task_list(project="...", issue_type="!epic")  # All non-epics
+task_list(issue_type="bug")
 ```
 
-### Filter by parent (get all children of an epic)
+### Get all children of an epic
 ```
-task_list(project="...", parent="epic-id")
+epic_tasks(epic_id="epic-id")
 ```
 
 ### Text search
 ```
-task_list(project="...", text="authentication")
+task_list(text="authentication")
 ```
 
 ### Count by status
 ```
-task_count(project="...", group_by="status")
+task_count(group_by="status")
 ```
 
 ### Get epic children
 ```
-task_children_list(epic_id="epic-id", project="...")
+epic_tasks(epic_id="epic-id")
 ```
 
 ### Paginate large result sets
 ```
 # Page 1
-task_list(project="...", limit=25, offset=0)
+task_list(limit=25, offset=0)
 
 # Page 2
-task_list(project="...", limit=25, offset=25)
+task_list(limit=25, offset=25)
 ```
 
 ## Updating Tasks
@@ -262,7 +256,6 @@ task_list(project="...", limit=25, offset=25)
 ```
 task_update(
   id="task-id",
-  project="...",
   title="Better title",
   priority=0,
   labels_add=["sprint:4"],
@@ -277,17 +270,16 @@ task_update(
 ### Add/remove labels
 ```
 # Add labels
-task_update(id="task-id", project="...", labels_add=["area:auth", "sprint:3"])
+task_update(id="task-id", labels_add=["area:auth", "sprint:3"])
 
 # Remove labels
-task_update(id="task-id", project="...", labels_remove=["old-label"])
+task_update(id="task-id", labels_remove=["old-label"])
 ```
 
 ### Link to memory note
 ```
 task_update(
   id="task-id",
-  project="...",
   memory_refs_add=["decisions/auth-strategy.md"]
 )
 ```
@@ -296,13 +288,13 @@ task_update(
 
 ```
 # Default: priority ASC (best for "what to work on next")
-task_list(project="...", sort="priority")
+task_list(sort="priority")
 
 # Recently closed (best for "what was just done")
-task_list(project="...", status="closed", sort="closed")
+task_list(status="closed", sort="closed")
 
 # Recently updated
-task_list(project="...", sort="updated_desc")
+task_list(sort="updated_desc")
 ```
 
 ## Multi-Project Queries

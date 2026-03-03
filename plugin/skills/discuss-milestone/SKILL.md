@@ -25,8 +25,8 @@ Facilitate an adaptive discussion about a specific milestone before planning beg
 
 These tools are outside this workflow's scope:
 
-- **Task tools** (task_create, task_update, task_list, task_count, task_ready, task_children_list, task_blockers_add, task_claim, task_transition): Discussion does not modify the task board -- that is plan-milestone's job
-- **Execution tools** (execution_start, execution_pause, execution_status, execution_phase_list, session_for_task): Owned by the Djinn coordinator, not planning workflows
+- **Task tools** (task_create, task_update, task_list, task_count, task_ready, epic_tasks, task_blockers_add, task_claim, task_transition): Discussion does not modify the task board -- that is plan-milestone's job
+- **Execution tools** (execution_start, execution_pause, execution_resume, execution_status, session_for_task): Owned by the Djinn coordinator, not planning workflows
 - **Sync tools** (task_sync_push, task_sync_pull, task_sync_status): Infrastructure concern, not workflow
 - **Settings tools** (settings_get, settings_update): Admin functions, not workflow
 - **Memory destruction tools** (memory_delete, memory_move): Discussion captures context, it does not reorganize the knowledge base
