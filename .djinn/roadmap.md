@@ -4,13 +4,14 @@ type: roadmap
 tags: []
 ---
 
+
 # Roadmap — Djinn Server Rust Rewrite
 
 Phased delivery plan for v1 requirements. Each phase builds on the previous and has testable success criteria. Phases are sequenced by real dependencies — later phases require earlier foundations.
 
 ## Progress Overview
 
-_Updated: 2026-03-03 (post-audit)_
+_Updated: 2026-03-04_
 
 | Phase | Status | Remaining |
 |-------|--------|-----------|
@@ -20,18 +21,22 @@ _Updated: 2026-03-03 (post-audit)_
 | Phase 4: Git Integration | ✅ Complete | — |
 | Phase 5: Coordinator | ✅ Complete | — |
 | Phase 6: Review | ✅ Complete | — |
-| Phase 7: Desktop & Sync | 🟡 75% | `qhb4` |
-| Phase 8: Session Visibility | ⚪ 0% | `yvw6`, `1x2s`, `32j6` |
-| Phase 9: V1 Completion | ⚪ 0% | `cu4v`, `1upo`, `18a0`, `layi`, `lypu`, `1i5q`, `ewbt` |
+| Phase 7: Desktop & Sync | ✅ Complete | — |
+| Phase 8: Session Visibility | ✅ Complete | — |
+| Phase 9: V1 Completion | ✅ Complete | `ewbt` (KB file watcher only — settings watcher done) |
 
-**Original scope: 37/37 items closed (100%) — original phases complete**
-**Post-audit: 44/55 items closed (80%) — 11 new items added from Go server gap analysis**
+**All server phases complete. 55/55 items closed (100%).**
+**Only remaining gap: KB file watcher (P2) — external `.djinn/` note edits require manual `memory_reindex`.**
 
 **ADR-008:** Goose library replaces summon. MCP-connect bridge (`1tst`) and scaffold system (`1nby`) dropped. See [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]].
 
 **ADR-009:** Phases eliminated. No dispatch grouping — tasks dispatch when open + unblocked. Simplified execution tools (6 instead of 26). See [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]].
 
 **ADR-010:** Session cost tracking. Per-task session history with token metrics for desktop visibility. See [[ADR-010: Session Cost Tracking — Per-Task Token Metrics]].
+
+**ADR-012:** Epic review batches. Tasks close immediately after merge; epic review runs as persisted batch orchestration. Structured output nudging with retry budget. See [[ADR-012 Epic Review Batches and Structured Output Nudging]].
+
+**ADR-013:** OS-level shell sandboxing. Landlock (Linux) + Seatbelt (macOS) for kernel-enforced filesystem isolation. Supersedes ADR-011. See [[ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]].
 
 
 ## Phase 1: Foundation — Database, Schema, and Core Server ✅
@@ -209,11 +214,11 @@ _Updated: 2026-03-03 (post-audit)_
 **Depends on**: Phase 5 (coordinator for agent dispatch), Phase 4 (git for diffs)
 
 
-## Phase 7: Desktop Integration and Sync
+## Phase 7: Desktop Integration and Sync ✅
 
 **Goal**: SSE change feed, direct DB reads, task sync via git branch, server lifecycle management. Desktop can consume the full system.
 
-**Progress**: 3/4 features closed. SSE change feed (`ywb0`), djinn/ namespace sync (`2up9`) completed. MCP-connect bridge (`1tst`) dropped per ADR-008. Remaining: Server lifecycle (`qhb4`).
+**Progress**: COMPLETE. SSE change feed (`ywb0`), djinn/ namespace sync (`2up9`), server lifecycle (`qhb4`) all implemented. MCP-connect bridge (`1tst`) dropped per ADR-008. Daemon mode with `daemon.json` discovery, graceful shutdown, `--mcp-connect` stdio bridge, `--ensure-daemon`, settings tools with file watcher.
 
 **Requirements addressed**:
 - MCP-04 (SSE change feed with full entities)
@@ -237,22 +242,17 @@ _Updated: 2026-03-03 (post-audit)_
 1. ~~Desktop connects via SSE; receives full-entity events for all mutations~~ ✓
 2. ~~Desktop reads DB file directly for initial load (local mode)~~ ✓
 3. ~~Task sync exports/imports via djinn/tasks git branch with conflict resolution~~ ✓
-4. Server lifecycle: desktop-spawned daemon, standalone VPS mode, graceful restart, board reconciliation
-5. server.json discovery file written on startup
+4. ~~Server lifecycle: desktop-spawned daemon, standalone VPS mode, graceful restart, board reconciliation~~ ✓
+5. ~~daemon.json discovery file written on startup with pid/port/started_at~~ ✓
 
 **Depends on**: Phase 2 (tasks), Phase 3 (memory), Phase 5 (coordinator events)
 
 
-## Phase 8: Session Visibility & Cost Tracking
+## Phase 8: Session Visibility & Cost Tracking ✅
 
 **Goal**: First-class session tracking with real-time desktop visibility and token/cost metrics. Sessions are viewable entities — users see active sessions in real-time, browse session history per task, and track cost across runs. **See ADR-010.**
 
-**Progress**: 0/3 features. Epic `1ioz` created.
-
-**Features**:
-- `yvw6` — Session schema, repository, and lifecycle events (P0)
-- `1x2s` — Token metrics capture from Goose sessions (P1, blocked by `yvw6`)
-- `32j6` — Session MCP tools and task_show enrichment (P1, blocked by `yvw6`)
+**Progress**: COMPLETE. All 3 features implemented: Session schema + repository (`yvw6`), token metrics capture with dual-path fallback (`1x2s`), session MCP tools + task_show enrichment (`32j6`). Stale session detection and recovery included.
 
 **Requirements addressed**:
 - AGENT-19 (NEW: session persistence with token metrics)
@@ -260,29 +260,29 @@ _Updated: 2026-03-03 (post-audit)_
 - AGENT-15 foundation (v2: compute governance / ACU budgets)
 
 **Success criteria**:
-1. Sessions table tracks every agent session with task_id, model_id, agent_type, tokens_in/out
-2. Supervisor writes session records on dispatch start and completion
-3. SSE events emitted for session lifecycle (started, completed, interrupted, failed)
-4. task_show includes active session and session count
-5. session_list/session_active MCP tools return session data for desktop
+1. ~~Sessions table tracks every agent session with task_id, model_id, agent_type, tokens_in/out~~ ✓
+2. ~~Supervisor writes session records on dispatch start and completion~~ ✓
+3. ~~SSE events emitted for session lifecycle (started, completed, interrupted, failed)~~ ✓
+4. ~~task_show includes active session and session count~~ ✓
+5. ~~session_list/session_active MCP tools return session data for desktop~~ ✓
 
 **Depends on**: Phase 5 (supervisor writes sessions)
 
-## Phase 9: V1 Completion — Audit Gaps
+## Phase 9: V1 Completion — Audit Gaps ✅
 
-**Goal**: Close gaps found in the Go server comparison audit. Covers execution control, project tools, operational logging, conflict resolution, structured output parsing, merge tracking, and file watchers. **See ADR-009 for simplified execution model.**
+**Goal**: Close gaps found in the Go server comparison audit. Covers execution control, project tools, operational logging, conflict resolution, structured output parsing, merge tracking, and file watchers. **See ADR-009 for simplified execution model. ADR-012 for epic review batches and output nudging.**
 
-**Progress**: 0/8 items. Epic `1hcn` created.
+**Progress**: COMPLETE (7.5/8). All items implemented except KB file watcher (settings file watcher done). Epic review batches landed per ADR-012 — tasks close immediately, batch orchestration for epic review, structured output nudging with 2-retry budget.
 
 **Features/Tasks**:
-- `cu4v` — Simplified execution control MCP tools (P0) — 6 tools per ADR-009
-- `1upo` — Project management MCP tools (P0) — projects_add/list/remove
-- `18a0` — Operational logging with file rotation (P1) — tracing-appender + system_logs tool
-- `layi` — Conflict resolution merge flow (P1, blocked by `lypu`) — squash-merge on approval, conflict → reopen → resolve → retry
-- `lypu` — Structured agent output parsing (P1) — worker DONE/BLOCKED, reviewer VERIFIED/REOPEN verdict extraction
-- `1i5q` — Store merge_commit_sha on task after squash-merge (P2) — GIT-09
-- `ewbt` — File watchers for KB and settings changes (P2) — notify crate, re-index on external edits
-- `stdio-bridge` — `djinn-server --mcp-connect` stdio↔HTTP MCP bridge mode (P2) — plugin compatibility via daemon-discovered upstream URL
+- `cu4v` — ~~Simplified execution control MCP tools~~ ✓ — start/pause/resume/status/kill + session_for_task
+- `1upo` — ~~Project management MCP tools~~ ✓ — project_add/list/remove with validation
+- `18a0` — ~~Operational logging with file rotation~~ ✓ — tracing-appender daily rotation + 7-day retention + system_logs tool
+- `layi` — ~~Conflict resolution merge flow~~ ✓ — conflict detection, ConflictResolver agent type, prompt template
+- `lypu` — ~~Structured agent output parsing~~ ✓ — WORKER_RESULT/REVIEW_RESULT/EPIC_REVIEW_RESULT + nudging per ADR-012
+- `1i5q` — ~~Store merge_commit_sha on task~~ ✓ — field on Task model, persisted after squash-merge
+- `ewbt` — File watchers — ⚠️ PARTIAL: settings file watcher done (notify crate, debounce), KB file watcher not yet implemented
+- `stdio-bridge` — ~~`djinn-server --mcp-connect` stdio↔HTTP MCP bridge~~ ✓ — full forwarding to daemon HTTP endpoint
 
 **Requirements addressed**:
 - GIT-09 (merge_commit_sha on task)
@@ -291,38 +291,38 @@ _Updated: 2026-03-03 (post-audit)_
 - REVIEW-01/02/03 (structured output parsing completes review flow)
 
 **Success criteria**:
-1. Desktop can start/pause/resume/kill execution via 6 MCP tools
-2. Desktop can manage projects via 3 MCP tools
-3. Logs written to ~/.djinn/logs/ with rotation; accessible via system_logs tool
-4. Merge conflicts detected and resolved via agent rework loop
-5. Agent verdicts parsed from output stream and drive state transitions
-6. merge_commit_sha stored on task after successful squash-merge
-7. External KB edits detected and re-indexed automatically
+1. ~~Desktop can start/pause/resume/kill execution via 6 MCP tools~~ ✓
+2. ~~Desktop can manage projects via 3 MCP tools~~ ✓
+3. ~~Logs written to ~/.djinn/logs/ with rotation; accessible via system_logs tool~~ ✓
+4. ~~Merge conflicts detected and resolved via agent rework loop~~ ✓
+5. ~~Agent verdicts parsed from output stream and drive state transitions~~ ✓
+6. ~~merge_commit_sha stored on task after successful squash-merge~~ ✓
+7. External KB edits detected and re-indexed automatically — ⚠️ settings only, KB pending
 
 **Depends on**: Phase 5 (coordinator/supervisor for execution tools), Phase 4 (git for conflict resolution)
 
 ## Phase Dependency Graph
 
 ```
-Phase 1-4: Foundation, Task Board, KB, Git ✅ (all complete)
+Phase 1-4: Foundation, Task Board, KB, Git ✅
     ↓
 Phase 5: Coordinator ✅
     ↓
 Phase 6: Review ✅
     ↓
-Phase 7: Desktop & Sync 🟡 (qhb4)
+Phase 7: Desktop & Sync ✅
     ↓
-Phase 8: Session Visibility ⚪ (3 features)
+Phase 8: Session Visibility ✅
     ↓
-Phase 9: V1 Completion ⚪ (8 items)
+Phase 9: V1 Completion ✅ (KB file watcher pending)
 ```
 
-Phase 8 depends on Phase 5 (supervisor writes sessions). Phase 9 is independent — can run in parallel with Phase 7/8 where items don't overlap. Within Phase 9: `layi` (conflict resolution) is blocked by `lypu` (structured output parsing).
+All server phases complete. Only remaining gap: KB file watcher (`ewbt` partial).
 
 
 ## Coverage Check
 
-Updated post-audit. ADR-009 eliminates phases (26 tools → 6). ADR-010 adds session tracking. New requirement AGENT-19 (session persistence).
+Updated 2026-03-04. All phases complete. ADR-012 adds epic review batches. ADR-013 adds OS-level sandboxing (future work, not a V1 requirement).
 
 - Phase 1: DB-01..07, MCP-01/02/05, CFG-01/02 (13 reqs) ✅
 - Phase 2: TASK-01..14 (14 reqs) ✅
@@ -330,9 +330,9 @@ Updated post-audit. ADR-009 eliminates phases (26 tools → 6). ADR-010 adds ses
 - Phase 4: GIT-01..08, CFG-03 (9 reqs) ✅
 - Phase 5: AGENT-01..11, AGENT-16..18, CFG-04 (15 reqs) ✅
 - Phase 6: REVIEW-01..03 (3 reqs) ✅
-- Phase 7: MCP-04, DB-05a, SYNC-01..04, WSL-01..04, LIFE-01..05 (16 reqs)
-- Phase 8: AGENT-19, OBS-01 extension (2 reqs)
-- Phase 9: GIT-09, OBS-02, CFG-02 MCP tools, REVIEW-01..03 completion (5 reqs)
+- Phase 7: MCP-04, DB-05a, SYNC-01..04, WSL-01..04, LIFE-01..05 (16 reqs) ✅
+- Phase 8: AGENT-19, OBS-01 extension (2 reqs) ✅
+- Phase 9: GIT-09, OBS-02, CFG-02 MCP tools, REVIEW-01..03 completion (5 reqs) ✅
 - Cross-cutting: TEST-01..03 (3 reqs)
 
 Total: 94 (88 prior + AGENT-19 + 5 gap-identified coverage gaps) ✓
@@ -350,6 +350,8 @@ Total: 94 (88 prior + AGENT-19 + 5 gap-identified coverage gaps) ✓
 - [[Agent Harness Scope]] — scope boundaries for Goose integration
 - [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — ADR-009 driving Phase 9 execution tools
 - [[ADR-010: Session Cost Tracking — Per-Task Token Metrics]] — ADR-010 driving Phase 8 session visibility
+- [[ADR-012 Epic Review Batches and Structured Output Nudging]] — ADR-012 driving epic review batch orchestration and output nudging
+- [[ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]] — ADR-013 for future OS-level agent sandboxing
 
 
 ## Traceability

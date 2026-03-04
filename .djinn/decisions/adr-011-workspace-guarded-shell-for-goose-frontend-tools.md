@@ -1,6 +1,12 @@
+---
+title: ADR-011: Workspace-Guarded Shell for Goose Frontend Tools
+type: adr
+tags: []
+---
+
 # ADR-011: Workspace-Guarded Shell for Goose Frontend Tools
 
-Status: Accepted
+Status: Superseded by [[ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]]
 Date: 2026-03-04
 
 ## Context
