@@ -7,6 +7,7 @@ pub enum SessionStatus {
     Completed,
     Interrupted,
     Failed,
+    Paused,
 }
 
 impl SessionStatus {
@@ -16,6 +17,7 @@ impl SessionStatus {
             Self::Completed => "completed",
             Self::Interrupted => "interrupted",
             Self::Failed => "failed",
+            Self::Paused => "paused",
         }
     }
 }
@@ -34,4 +36,5 @@ pub struct SessionRecord {
     pub tokens_in: i64,
     pub tokens_out: i64,
     pub worktree_path: Option<String>,
+    pub goose_session_id: Option<String>,
 }
