@@ -575,7 +575,9 @@ impl AgentSupervisor {
                 SupervisorError::Goose(e.to_string())
             })?;
 
-        self.app_state.health_tracker().record_success(&model_id);
+        // NOTE: do NOT record_success here — provider creation is just configuration,
+        // not an actual API call. Success is recorded in handle_session_result when
+        // the session completes without error.
 
         for ext in extensions {
             agent
