@@ -1,4 +1,8 @@
 use std::path::PathBuf;
+use std::process::Stdio;
+
+use tokio::process::Command;
+use tokio::time::{Duration, timeout};
 
 use goose::agents::ExtensionConfig;
 use goose::conversation::message::{Message, MessageContent};
@@ -7,6 +11,7 @@ use rmcp::object;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::AgentType;
+use super::workspace_guard;
 use crate::db::repositories::note::NoteRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
@@ -36,7 +41,9 @@ pub fn config(agent_type: AgentType) -> ExtensionConfig {
     ) {
         tool_values
             .push(serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"));
+        tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
         available_tools.push("task_update".to_string());
+        available_tools.push("shell".to_string());
     }
 
     let tools = serde_json::from_value(serde_json::Value::Array(tool_values))
@@ -47,7 +54,7 @@ pub fn config(agent_type: AgentType) -> ExtensionConfig {
         description: "Djinn task and memory tools".to_string(),
         tools,
         instructions: Some(
-            "Use Djinn tools for task lifecycle and project memory. Always include the project path for memory tools.".to_string(),
+            "Use Djinn tools for task lifecycle and project memory. For shell calls, pass workdir as the active task worktree path; set external_dir=true only for intentional outside-workspace access.".to_string(),
         ),
         bundled: Some(true),
         available_tools,
@@ -123,6 +130,7 @@ where
         "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments).await,
+        "shell" => call_shell(&call.arguments).await,
         other => Err(format!("unknown djinn frontend tool: {other}")),
     }
 }
@@ -179,6 +187,14 @@ struct MemorySearchParams {
     #[serde(rename = "type")]
     note_type: Option<String>,
     limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct ShellParams {
+    command: String,
+    workdir: String,
+    timeout_ms: Option<u64>,
+    external_dir: Option<bool>,
 }
 
 async fn call_task_show(
@@ -407,6 +423,62 @@ async fn call_memory_search(
         .collect();
 
     Ok(serde_json::json!({ "results": items }))
+}
+
+async fn call_shell(
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ShellParams = parse_args(arguments)?;
+    let external_dir = p.external_dir.unwrap_or(false);
+    let timeout_ms = p.timeout_ms.unwrap_or(120_000).max(1000);
+
+    let workdir = workspace_guard::resolve_path(
+        &p.workdir,
+        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    );
+    workspace_guard::enforce_workdir(&workdir, external_dir)?;
+
+    let outside = workspace_guard::command_outside_workspace_paths(&p.command, &workdir, external_dir);
+    if !outside.is_empty() {
+        return Ok(serde_json::json!({
+            "ok": false,
+            "error_code": "EXTERNAL_DIR_REQUIRED",
+            "error": "Command targets paths outside the active workspace.",
+            "hint": "Use the active task worktree so changes are committed correctly. If intentional, retry with external_dir=true.",
+            "offending_paths": outside,
+            "workdir": workdir,
+        }));
+    }
+
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.arg("/c").arg(&p.command);
+        c
+    } else {
+        let mut c = Command::new("bash");
+        c.arg("-lc").arg(&p.command);
+        c
+    };
+
+    let output = timeout(
+        Duration::from_millis(timeout_ms),
+        cmd.current_dir(&workdir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+    .await
+    .map_err(|_| format!("shell timed out after {} ms", timeout_ms))?
+    .map_err(|e| format!("failed to run shell command: {e}"))?;
+
+    Ok(serde_json::json!({
+        "ok": output.status.success(),
+        "exit_code": output.status.code(),
+        "stdout": String::from_utf8_lossy(&output.stdout),
+        "stderr": String::from_utf8_lossy(&output.stderr),
+        "workdir": workdir,
+    }))
 }
 
 fn parse_args<T>(
@@ -642,6 +714,23 @@ fn tool_memory_search() -> RmcpTool {
                 "folder": {"type": "string"},
                 "type": {"type": "string"},
                 "limit": {"type": "integer"}
+            }
+        }),
+    )
+}
+
+fn tool_shell() -> RmcpTool {
+    RmcpTool::new(
+        "shell".to_string(),
+        "Execute shell commands guarded to task worktree by default. Outside access requires external_dir=true.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["command", "workdir"],
+            "properties": {
+                "command": {"type": "string"},
+                "workdir": {"type": "string", "description": "Absolute task worktree path"},
+                "timeout_ms": {"type": "integer"},
+                "external_dir": {"type": "boolean", "description": "Set true only for intentional out-of-worktree access"}
             }
         }),
     )

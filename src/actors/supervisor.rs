@@ -1611,23 +1611,7 @@ impl AgentSupervisor {
     }
 
     fn extensions_for(&self, agent_type: AgentType) -> Vec<goose::config::ExtensionConfig> {
-        let mut extensions = vec![extension::config(agent_type)];
-
-        if matches!(
-            agent_type,
-            AgentType::Worker | AgentType::ConflictResolver | AgentType::TaskReviewer
-        ) {
-            extensions.push(goose::config::ExtensionConfig::Builtin {
-                name: "developer".to_string(),
-                description: "Developer tools for project execution".to_string(),
-                display_name: Some("Developer".to_string()),
-                timeout: Some(300),
-                bundled: Some(true),
-                available_tools: vec!["shell".to_string(), "text_editor".to_string()],
-            });
-        }
-
-        extensions
+        vec![extension::config(agent_type)]
     }
 
     async fn prepare_worktree(

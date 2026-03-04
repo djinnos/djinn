@@ -178,7 +178,7 @@ impl CoordinatorActor {
                 // 4. 30s safety-net tick for stuck detection (AGENT-08).
                 _ = self.tick.tick() => {
                     if !self.paused {
-                        self.detect_and_recover_stuck().await;
+                        self.detect_and_recover_stuck_filtered(None).await;
                     }
                 }
             }
@@ -190,10 +190,12 @@ impl CoordinatorActor {
         match msg {
             CoordinatorMessage::TriggerDispatch => {
                 if !self.paused {
+                    self.detect_and_recover_stuck_filtered(None).await;
                     self.dispatch_ready_tasks(None).await;
                 }
             }
             CoordinatorMessage::TriggerProjectDispatch { project_id } => {
+                self.detect_and_recover_stuck_filtered(Some(&project_id)).await;
                 self.dispatch_ready_tasks(Some(&project_id)).await;
             }
             CoordinatorMessage::Pause {
@@ -224,6 +226,7 @@ impl CoordinatorActor {
                     self.paused = false;
                     self.paused_projects.clear();
                     self.resumed_projects.clear();
+                    self.detect_and_recover_stuck_filtered(None).await;
                     self.dispatch_ready_tasks(None).await;
                 }
             }
@@ -233,6 +236,7 @@ impl CoordinatorActor {
                 } else {
                     self.paused_projects.remove(&project_id);
                 }
+                self.detect_and_recover_stuck_filtered(Some(&project_id)).await;
                 self.dispatch_ready_tasks(Some(&project_id)).await;
             }
             CoordinatorMessage::GetStatus {
@@ -252,7 +256,7 @@ impl CoordinatorActor {
             }
             CoordinatorMessage::TriggerStuckScan => {
                 if !self.paused {
-                    self.detect_and_recover_stuck().await;
+                    self.detect_and_recover_stuck_filtered(None).await;
                 }
             }
             CoordinatorMessage::UpdateDispatchLimit { limit } => {
@@ -286,6 +290,7 @@ impl CoordinatorActor {
                 );
                 self.events = self.events_tx.subscribe();
                 if !self.paused {
+                    self.detect_and_recover_stuck_filtered(None).await;
                     self.dispatch_ready_tasks(None).await;
                 }
             }
@@ -576,7 +581,7 @@ impl CoordinatorActor {
 
     /// On each tick: find tasks in active execution states with no active session
     /// and release them back to a dispatch-ready state (AGENT-08).
-    async fn detect_and_recover_stuck(&mut self) {
+    async fn detect_and_recover_stuck_filtered(&mut self, project_filter: Option<&str>) {
         let repo = self.task_repo();
 
         let mut any_recovered = false;
@@ -598,6 +603,12 @@ impl CoordinatorActor {
             };
 
             for task in tasks {
+                if let Some(project_id) = project_filter
+                    && task.project_id != project_id
+                {
+                    continue;
+                }
+
                 match self.supervisor.has_session(&task.id).await {
                     Ok(true) => continue, // healthy — session is active
                     Ok(false) => {}

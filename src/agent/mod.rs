@@ -7,6 +7,7 @@ pub mod config;
 pub mod extension;
 pub mod output_parser;
 pub mod prompts;
+pub mod workspace_guard;
 
 use std::{path::PathBuf, sync::Arc, time::Instant};
 

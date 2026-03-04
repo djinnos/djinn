@@ -439,6 +439,7 @@ impl AppState {
     }
 
     async fn apply_runtime_settings(&self, json: &serde_json::Value) {
+        let mut coordinator_handle = None;
         if let Some(coordinator) = self.coordinator().await {
             let _ = coordinator
                 .update_dispatch_limit(read_dispatch_limit(json).unwrap_or(50))
@@ -446,6 +447,7 @@ impl AppState {
             let _ = coordinator
                 .update_model_priorities(read_model_priorities(json).unwrap_or_default())
                 .await;
+            coordinator_handle = Some(coordinator);
         }
 
         if let Some(supervisor) = self.supervisor().await {
@@ -456,6 +458,12 @@ impl AppState {
                     read_default_max_sessions(json).unwrap_or(1),
                 )
                 .await;
+        }
+
+        // Capacity/model changes can make additional tasks dispatchable immediately.
+        // Trigger a dispatch pass now instead of waiting for the next event/tick.
+        if let Some(coordinator) = coordinator_handle {
+            let _ = coordinator.trigger_dispatch().await;
         }
     }
 
