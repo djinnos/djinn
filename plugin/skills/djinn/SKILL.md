@@ -13,32 +13,32 @@ For project planning workflows, use the dedicated skills: `new-project`, `discus
 
 Always orient first:
 
-1. `memory_catalog()` — see what knowledge exists
-2. `task_list(status="in_progress")` — check active work
-3. `task_ready()` — see what's next
+1. `memory_catalog(project=PROJECT)` — see what knowledge exists
+2. `task_list(project=PROJECT, status="in_progress")` — check active work
+3. `task_ready(project=PROJECT)` — see what's next
 
 ## Hierarchy
 
 Epics and tasks are managed by **separate MCP tools** (per ADR-003):
 
 ```
-epic_create()  → Epic (strategic container, weeks+)
-task_create()  → feature / task / bug  (all flat siblings under an epic)
+epic_create(project=PROJECT, ...)  → Epic (strategic container, weeks+)
+task_create(project=PROJECT, ...)  → feature / task / bug (epic-linked or standalone)
 ```
 
 Epics use: `epic_create`, `epic_list`, `epic_show`, `epic_tasks`, `epic_update`, `epic_close`, `epic_reopen`, `epic_delete`, `epic_count`.
 
-Tasks use: `task_create(epic_id=..., issue_type="task"|"feature"|"bug")` — all work items are direct children of an epic. There is no nesting of tasks under features — features, tasks, and bugs are siblings.
+Tasks use: `task_create(project=PROJECT, issue_type="task"|"feature"|"bug", epic_id=...)` — `epic_id` is optional, so tasks may be standalone or epic-linked. There is no nesting of tasks under features.
 
-Always set `epic_id` (required). Always set `issue_type`. Use `acceptance_criteria` (array), not description, for what "done" looks like. Use `design` for how to implement.
+Always set `project` and `issue_type`. Use `acceptance_criteria` (array), not description, for what "done" looks like. Use `design` for how to implement.
 
 ## Status Transitions
 
 ```
-open → in_progress → needs_task_review → needs_phase_review → closed
+open → in_progress → needs_task_review → needs_epic_review → closed
 ```
 
-Key actions: `start`, `submit_task_review`, `task_review_approve`, `phase_review_approve`, `close` (skip review), `reopen`, `block`/`unblock`.
+Key actions: `start`, `submit_task_review`, `task_review_approve`, `epic_review_approve`, `close` (skip review), `reopen`, `block`/`unblock`.
 
 ## Progress Notes
 
@@ -72,7 +72,7 @@ Load when you need detailed patterns:
 |------|---------|
 | Task CRUD, lifecycle, blockers, queries | `cookbook/task-management.md` |
 | Memory write, search, wikilinks, maintenance | `cookbook/memory-management.md` |
-| Phase planning, launch, monitor, review | `cookbook/execution-planning.md` |
+| Execution control, monitoring, session operations | `cookbook/execution-planning.md` |
 | Structuring epics → features → tasks | `cookbook/work-decomposition.md` |
 
 ## Common Mistakes
@@ -84,7 +84,7 @@ Load when you need detailed patterns:
 | Skipping `memory_catalog()` at session start | Run it first — it tells you what knowledge exists before you create or search |
 | Setting blockers on features that could run in parallel | Only block on real technical or logical dependencies — let the coordinator parallelize the rest |
 | Using `close` on a task that needs review | Use `submit_task_review` → let the review pipeline run. `close` skips review entirely. |
-| Passing `project` when not needed | Most task/epic tools no longer require `project`. Only pass it when explicitly needed (e.g., `memory_*` tools). |
-| Creating tasks without `epic_id` | Every task/feature/bug needs an `epic_id`. Tasks without an epic are rejected by the API. |
+| Omitting `project` on task/epic tools | `project` is required on task/epic reads and writes (for example `task_create`, `task_list`, `epic_create`, `epic_list`). |
+| Assuming `epic_id` is required | `epic_id` is optional. Standalone tasks are valid when epic grouping is not needed. |
 | Using `task_create` for epics | Use `epic_create()` — epics have their own tool namespace (ADR-003). |
 | Nesting tasks under features | Features, tasks, and bugs are flat siblings under an epic. There is no parent-child between them. |

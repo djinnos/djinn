@@ -67,7 +67,7 @@ Read the planning artifacts needed to decompose this milestone. Execute these su
    - Look for a scope reference note created by the discuss-milestone workflow (titled "Milestone {N} Scope")
    - **If no scope notes found:** Display the warning: "No discussion context found for milestone {N} -- planning with defaults." Proceed with available context. This is normal if discuss-milestone was not run before planning.
 
-6. **Check existing epics on the task board:** `epic_list()`
+6. **Check existing epics on the task board:** `epic_list(project=PROJECT)`
    - Retrieve all existing epics to avoid creating duplicates (per ADR-001, epics are domain-structured and persist across milestones)
    - Record each epic's ID, title, and domain area for matching in Step 3
 
@@ -141,10 +141,10 @@ If the milestone involves domain areas with no existing research coverage, inves
 
 Determine where on the task board this milestone's work belongs.
 
-1. Check for existing epics: `epic_list()`
+1. Check for existing epics: `epic_list(project=PROJECT)`
 2. Match the milestone's domain areas to existing epics
-3. If an epic exists for a domain area, use it. If not, create via `epic_create(...)`
-4. List existing features under each epic: `epic_tasks(epic_id="{epic_id}")`
+3. If an epic exists for a domain area, use it. If not, create via `epic_create(project=PROJECT, ...)`
+4. List existing features under each epic: `epic_tasks(project=PROJECT, epic_id="{epic_id}")`
 5. Determine which features need to be created for this milestone
 6. Avoid duplicating features that already exist from prior milestone planning
 
@@ -162,26 +162,26 @@ For each feature, create it with:
 - `acceptance_criteria`: Array of testable criteria derived from the milestone's success criteria
 - `memory_refs`: Links to relevant memory notes (requirements, research, ADRs)
 
-For each task under a feature, create it with:
+For each implementation task, create it with:
 - `description`: One-commit-sized scope of work
 - `design`: Specific implementation steps and technical approach
 - `acceptance_criteria`: Array of `{criterion, met}` objects -- `met` starts as `false`
 - `priority`: Based on dependency ordering (`critical` > `high` > `medium` > `low`)
-- `labels`: `["wave:N"]` for wave-based ordering
+- `labels`: domain tags only (do not use `wave:N` labels for ordering)
 - `memory_refs`: Links to the requirements this task implements
 
 See `cookbook/task-templates.md` for task creation and wave patterns.
 
 ### Step 5: Set Wave Ordering
 
-Assign wave labels and set blocker dependencies to control execution order.
+Define dependency stages and set blocker dependencies to control execution order.
 
 **Blockers are THE implementation sequence mechanism.** The Djinn coordinator dispatches any open task with no unresolved blockers. If you don't set blockers, tasks run in parallel — even when one logically depends on another. Blockers are not metadata; they are the execution order. Getting them right is as important as getting the task decomposition right.
 
 1. **Wave 1 tasks**: No blockers. These are foundation tasks that can start immediately (schemas, configs, interfaces).
-2. **Wave 2 tasks**: `blocked_by` one or more Wave 1 task IDs. Core logic that depends on foundation.
-3. **Wave 3 tasks**: `blocked_by` one or more Wave 2 task IDs. Integration and validation that depends on core logic.
-4. Use `task_blockers_add()` to add blocker relationships beyond those set at creation time.
+2. **Stage 2 tasks**: blocked by one or more Stage 1 task IDs. Core logic that depends on foundation.
+3. **Stage 3 tasks**: blocked by one or more Stage 2 task IDs. Integration and validation that depends on core logic.
+4. Use `task_blockers_add(project=PROJECT, ...)` to add blocker relationships.
 
 **Two failure modes to avoid:**
 - **Missing blocker**: The coordinator dispatches a task before its dependency ships. The agent fails or produces broken code against APIs/schemas that don't exist yet.
@@ -202,7 +202,7 @@ Verify the task decomposition achieves the milestone's goals. The plan-checker r
    **Dimension 1 -- Success criteria coverage:**
    For each milestone success criterion from Step 1's context summary (`success_criteria[]`):
    - Check if any created task's `acceptance_criteria` addresses this criterion
-   - If not covered: create a task to cover it using the same `task_create` pattern as Step 4 -- with `epic_id` set to the most relevant epic, `labels=["wave:N"]` for appropriate wave, `acceptance_criteria` addressing the criterion, `memory_refs` linking to requirements, and `priority` as integer (0=critical, 1=high, 2=medium, 3=low)
+   - If not covered: create a task to cover it using the same `task_create(project=PROJECT, ...)` pattern as Step 4 -- with `epic_id` set when epic grouping is helpful, `acceptance_criteria` addressing the criterion, `memory_refs` linking to requirements, and `priority` as integer (0=critical, 1=high, 2=medium, 3=low)
    - Log: "Gap found: criterion '{criterion}' not covered -> created task {new_task_id}"
 
    **Dimension 2 -- Requirement coverage:**
@@ -213,15 +213,15 @@ Verify the task decomposition achieves the milestone's goals. The plan-checker r
 
    **Dimension 3 -- Hierarchy integrity:**
    For each created task and feature:
-   - Verify `epic_id` is set: every task/feature/bug must belong to an epic
-   - If an item is orphaned: assign it to the most appropriate epic using `task_update(id=item_id, epic_id=best_match_epic_id)`
-   - Log: "Gap found: orphan task {task_id} -> assigned to epic {epic_id}"
+   - Verify optional epic linkage is intentional: tasks may be standalone or epic-linked
+   - If an item should be grouped under an epic but is not, assign it using `task_update(id=item_id, epic_id=best_match_epic_id)`
+   - Log: "Gap found: ungrouped task {task_id} -> assigned to epic {epic_id}"
 
-   **Dimension 4 -- Wave ordering sanity:**
-   - Verify wave:1 tasks have NO blockers. If a wave:1 task has blockers, either reclassify it to a higher wave number or remove the incorrect blockers
-   - Verify every wave:N+1 task (N >= 1) is blocked by at least one wave:N task. If not, add a blocker: `task_blockers_add(id=task_id, blocking_id=appropriate_wave_n_task_id, project=PROJECT)`
-   - Verify no dependency cycles exist. For milestone-sized graphs of 8-15 tasks, a simple invariant check is sufficient: wave 1 has no blockers, each subsequent wave references only lower waves. If a cycle is detected, break it by removing the blocker that violates the wave ordering: `task_blockers_remove(id=task_id, blocking_id=offending_id)`
-   - Log: "Gap found: wave:{N} task {task_id} missing blocker -> added blocker on {blocking_task_id}"
+   **Dimension 4 -- Dependency ordering sanity:**
+   - Verify foundation tasks have no blockers
+   - Verify downstream tasks are blocked by at least one prerequisite task where a real dependency exists. If not, add a blocker: `task_blockers_add(project=PROJECT, id=task_id, blocking_id=blocking_task_id)`
+   - Verify no dependency cycles exist. If a cycle is detected, remove the offending blocker with `task_blockers_remove(id=task_id, blocking_id=offending_id)`
+   - Log: "Gap found: task {task_id} missing blocker -> added blocker on {blocking_task_id}"
 
 3. **Evaluate iteration result.** After checking all 4 dimensions: if no gaps were found in this iteration, validation passes -- break out of the loop and proceed to Step 7.
 
@@ -258,10 +258,10 @@ Present the planning results to the user in a structured format. Include all six
    ```
    Epic: {name} ({emoji})
      Feature: {name} ({task_count} tasks)
-       - {task_title} [wave:{N}] ({priority_label})
-       - {task_title} [wave:{N}] ({priority_label})
+       - {task_title} ({priority_label})
+       - {task_title} ({priority_label})
      Feature: {name} ({task_count} tasks)
-       - {task_title} [wave:{N}] ({priority_label})
+       - {task_title} ({priority_label})
    ```
    Priority labels: 0=critical, 1=high, 2=medium, 3=low.
 
@@ -305,8 +305,8 @@ After a successful run, the following artifacts exist:
 
 **On the task board:**
 - Features under domain-structured epics, each with design and acceptance criteria
-- Tasks under features, scoped to one-commit outcomes with `{criterion, met}` acceptance criteria
-- Wave labels (wave:1, wave:2, wave:3+) on all tasks
+- Implementation tasks scoped to one-commit outcomes with `{criterion, met}` acceptance criteria
+- Dependency ordering enforced through blocker relationships
 - Blocker dependencies enforcing wave ordering via `task_blockers_add`
 - `memory_refs` on all tasks linking to requirements, research, and ADR notes
 
@@ -314,7 +314,7 @@ After a successful run, the following artifacts exist:
 - Every milestone success criterion maps to at least one task (verified by plan-checker dimension 1)
 - Every REQ-ID for this milestone maps to at least one task (verified by plan-checker dimension 2)
 - Bidirectional links between memory notes and task board items (established in Step 7)
-- No orphaned tasks -- complete hierarchy from epic to task (verified by plan-checker dimension 3)
+- Epic linkage is intentional: tasks are grouped under epics when useful, standalone tasks allowed (verified by plan-checker dimension 3)
 
 **Validation:**
 - Plan-checker has run up to 3 iterations across 4 dimensions with auto-fix

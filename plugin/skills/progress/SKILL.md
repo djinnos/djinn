@@ -41,10 +41,10 @@ These tools are outside this workflow's scope:
 Gather all the data needed to derive progress from live queries.
 
 1. Read the roadmap from memory: `memory_read("roadmap")` to understand milestone structure
-2. Query task counts by status: `task_count(group_by="status")` to see how many tasks are in each state
-3. Query ready tasks: `task_ready()` to find tasks with no unresolved blockers
+2. Query task counts by status: `task_count(project=PROJECT, group_by="status")` to see how many tasks are in each state
+3. Query ready tasks: `task_ready(project=PROJECT)` to find tasks with no unresolved blockers
 4. Check execution: `execution_status()` to see if an execution session is active
-5. If a specific milestone was requested, query its tasks: `epic_tasks(epic_id="{milestone_epic_id}")`
+5. If a specific milestone was requested, query its tasks: `epic_tasks(project=PROJECT, epic_id="{milestone_epic_id}")`
 
 All data comes from live queries. Do not store, cache, or write progress state anywhere.
 

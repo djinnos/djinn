@@ -14,7 +14,7 @@ Every task has these key fields:
 | `acceptance_criteria` | What done looks like | Array of strings or {criterion, met} objects |
 | `design` | How to implement | ADR refs, technical approach, architecture notes |
 | `priority` | 0=highest, higher=lower | 0 for blocking/critical work |
-| `epic_id` | Parent epic ID | Required — every task/feature/bug belongs to an epic |
+| `epic_id` | Parent epic ID | Optional — use when grouping work under an epic |
 | `labels` | Arbitrary tags | Use for sprint:X, area:auth grouping |
 | `status` | Current state | See status flow in SKILL.md |
 | `owner` | Assigned agent/user | email format |
@@ -24,6 +24,7 @@ Every task has these key fields:
 ### Epic (top-level container — separate tool)
 ```
 epic_create(
+  project=PROJECT,
   title="User Authentication System",
   emoji="🔐",
   color="#8B5CF6",       # Must be hex format
@@ -36,6 +37,7 @@ Epics are managed via their own tools: `epic_create`, `epic_list`, `epic_show`, 
 ### Feature (deliverable, 2-4h scope)
 ```
 task_create(
+  project=PROJECT,
   title="Login UI",
   issue_type="feature",
   epic_id="epic-short-id",
@@ -53,6 +55,7 @@ task_create(
 ### Task (implementation step)
 ```
 task_create(
+  project=PROJECT,
   title="Create auth middleware",
   issue_type="task",
   epic_id="epic-short-id",
@@ -71,6 +74,7 @@ task_create(
 ### Bug
 ```
 task_create(
+  project=PROJECT,
   title="Login fails with special characters in password",
   issue_type="bug",
   epic_id="epic-short-id",
@@ -83,7 +87,7 @@ task_create(
   priority=1
 )
 # If it depends on something, add a blocker after creation:
-# task_blockers_add(id="this-bug-id", blocking_id="other-task-id")
+# task_blockers_add(project=PROJECT, id="this-bug-id", blocking_id="other-task-id")
 
 ```
 
@@ -92,7 +96,8 @@ task_create(
 ### Claim next available task
 ```
 task_claim(
-    issue_type="task",      # Filter to tasks only
+  project=PROJECT,
+  issue_type="task",      # Filter to tasks only
   label="sprint:3",       # Optional: filter by sprint
   priority_max=2          # Only grab up to priority 2
 )
@@ -106,6 +111,7 @@ task_transition(id="task-id", action="start")
 ### List ready tasks (no blockers, open status)
 ```
 task_ready(
+  project=PROJECT,
   limit=10
 )
 ```
@@ -117,30 +123,35 @@ Always add comments at key moments. This enables any agent or human to resume wi
 ```
 # Starting work
 task_comment_add(
+  project=PROJECT,
   id="task-id",
   body="[STARTING] Approach: implement JWT middleware using existing session package. ADR-005 applies."
 )
 
 # Mid-task progress
 task_comment_add(
+  project=PROJECT,
   id="task-id",
   body="[PROGRESS] Middleware validates tokens. Next: add user context injection and error responses."
 )
 
 # Blocked
 task_comment_add(
+  project=PROJECT,
   id="task-id",
   body="[BLOCKED] Waiting for session package update (#123). Token format changed in latest version."
 )
 
 # Pausing session
 task_comment_add(
+  project=PROJECT,
   id="task-id",
   body="[PAUSED] Completed: token validation, error handling. Next: user context injection. Branch: feature/auth-middleware"
 )
 
 # Done
 task_comment_add(
+  project=PROJECT,
   id="task-id",
   body="[DONE] Implemented JWT middleware with validation, error handling, user context. All tests passing."
 )
@@ -157,10 +168,10 @@ task_comment_add(
 | in_progress | submit_task_review | needs_task_review | Work done, request review |
 | in_progress | close | closed | Skip review (quick close) |
 | needs_task_review | task_review_start | in_task_review | Start reviewing |
-| needs_task_review | task_review_approve | needs_phase_review | Task approved |
+| needs_task_review | task_review_approve | needs_epic_review | Task approved |
 | needs_task_review | task_review_reject | in_progress | Send back for fixes |
-| needs_phase_review | phase_review_approve | closed | Final approval |
-| needs_phase_review | phase_review_reject | in_progress | Major rework needed |
+| needs_epic_review | epic_review_approve | closed | Final approval |
+| needs_epic_review | epic_review_reject | in_progress | Major rework needed |
 | any | block | blocked | Hit blocker |
 | blocked | unblock | previous | Blocker resolved |
 | closed | reopen | open | Needs more work |
@@ -179,6 +190,7 @@ task_transition(id="task-id", action="submit_task_review")
 ### Reopen
 ```
 task_transition(
+  project=PROJECT,
   id="task-id",
   action="reopen",
   reason="Found regression in edge case"
@@ -190,64 +202,64 @@ task_transition(
 ### Add blocker relationship
 ```
 # Task B is blocked by Task A
-task_blockers_add(id="task-b-id", blocking_id="task-a-id")
+task_blockers_add(project=PROJECT, id="task-b-id", blocking_id="task-a-id")
 ```
 
 ### List what blocks a task
 ```
-task_blockers_list(id="task-id")
+task_blockers_list(project=PROJECT, id="task-id")
 ```
 
 ### List what a task blocks
 ```
-task_blocked_list(id="task-id")
+task_blocked_list(project=PROJECT, id="task-id")
 ```
 
 ### Remove blocker
 ```
-task_blockers_remove(id="task-id", blocking_id="task-a-id")
+task_blockers_remove(project=PROJECT, id="task-id", blocking_id="task-a-id")
 ```
 
 ## Querying Tasks
 
 ### Filter by status
 ```
-task_list(status="in_progress")
-task_list(status="needs_task_review")
+task_list(project=PROJECT, status="in_progress")
+task_list(project=PROJECT, status="needs_task_review")
 ```
 
 ### Filter by type
 ```
-task_list(issue_type="bug")
+task_list(project=PROJECT, issue_type="bug")
 ```
 
 ### Get all children of an epic
 ```
-epic_tasks(epic_id="epic-id")
+epic_tasks(project=PROJECT, epic_id="epic-id")
 ```
 
 ### Text search
 ```
-task_list(text="authentication")
+task_list(project=PROJECT, text="authentication")
 ```
 
 ### Count by status
 ```
-task_count(group_by="status")
+task_count(project=PROJECT, group_by="status")
 ```
 
 ### Get epic children
 ```
-epic_tasks(epic_id="epic-id")
+epic_tasks(project=PROJECT, epic_id="epic-id")
 ```
 
 ### Paginate large result sets
 ```
 # Page 1
-task_list(limit=25, offset=0)
+task_list(project=PROJECT, limit=25, offset=0)
 
 # Page 2
-task_list(limit=25, offset=25)
+task_list(project=PROJECT, limit=25, offset=25)
 ```
 
 ## Updating Tasks
@@ -255,6 +267,7 @@ task_list(limit=25, offset=25)
 ### Update fields
 ```
 task_update(
+  project=PROJECT,
   id="task-id",
   title="Better title",
   priority=0,
@@ -270,15 +283,16 @@ task_update(
 ### Add/remove labels
 ```
 # Add labels
-task_update(id="task-id", labels_add=["area:auth", "sprint:3"])
+task_update(project=PROJECT, id="task-id", labels_add=["area:auth", "sprint:3"])
 
 # Remove labels
-task_update(id="task-id", labels_remove=["old-label"])
+task_update(project=PROJECT, id="task-id", labels_remove=["old-label"])
 ```
 
 ### Link to memory note
 ```
 task_update(
+  project=PROJECT,
   id="task-id",
   memory_refs_add=["decisions/auth-strategy.md"]
 )
@@ -288,20 +302,20 @@ task_update(
 
 ```
 # Default: priority ASC (best for "what to work on next")
-task_list(sort="priority")
+task_list(project=PROJECT, sort="priority")
 
 # Recently closed (best for "what was just done")
-task_list(status="closed", sort="closed")
+task_list(project=PROJECT, status="closed", sort="closed")
 
 # Recently updated
-task_list(sort="updated_desc")
+task_list(project=PROJECT, sort="updated_desc")
 ```
 
-## Multi-Project Queries
+## Project-Scoped Queries
 
-Omit `project` to search across all projects:
+Task and epic board tools are project-scoped; always pass `project`:
 ```
-task_list(status="in_progress")    # All in-progress tasks everywhere
-task_claim()                        # Claim from any project
-task_ready()                        # Ready tasks from all projects
+task_list(project=PROJECT, status="in_progress")
+task_claim(project=PROJECT)
+task_ready(project=PROJECT)
 ```
