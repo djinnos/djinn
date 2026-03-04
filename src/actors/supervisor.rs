@@ -633,13 +633,12 @@ impl AgentSupervisor {
             );
             let mut output = ParsedAgentOutput::default();
             let run_result: anyhow::Result<()> = async {
-                let mut prompts = vec![kickoff];
-                let mut nudge_count: u8 = 0;
+                let mut pending_message = Some(kickoff);
                 let mut saw_any_event = false;
                 let mut saw_any_assistant_message = false;
                 let assistant_role = GooseMessage::assistant().role;
 
-                while let Some(next_message) = prompts.pop() {
+                while let Some(next_message) = pending_message.take() {
                     let env_diag = runtime_env_diagnostics(
                         &session_id,
                         &project_path_for_join,
@@ -686,7 +685,6 @@ impl AgentSupervisor {
 
                     let mut interrupted: Option<&'static str> = None;
                     let mut saw_round_event = false;
-                    let mut saw_round_assistant_message = false;
                     loop {
                         tokio::select! {
                             _ = session_cancel_for_reply.cancelled() => {
@@ -722,7 +720,6 @@ impl AgentSupervisor {
                                 if let goose::agents::AgentEvent::Message(msg) = &evt
                                     && msg.role == assistant_role
                                 {
-                                    saw_round_assistant_message = true;
                                     saw_any_assistant_message = true;
                                     for content in &msg.content {
                                         match content {
@@ -752,17 +749,6 @@ impl AgentSupervisor {
                             diag
                         ));
                     }
-
-                    if let Some(nudge) = Self::missing_marker_nudge(run_agent_type, &output, nudge_count) {
-                        if !saw_round_assistant_message {
-                            return Err(anyhow::anyhow!(
-                                "agent reply ended without assistant message; refusing marker nudge"
-                            ));
-                        }
-                        nudge_count = nudge_count.saturating_add(1);
-                        prompts.push(GooseMessage::user().with_text(nudge));
-                        continue;
-                    }
                 }
 
                 if !saw_any_event {
@@ -772,6 +758,53 @@ impl AgentSupervisor {
                         "agent session produced no events; {}",
                         diag
                     ));
+                }
+
+                // Session complete — send a single nudge if the marker is missing
+                // and the agent did produce assistant output.
+                if saw_any_assistant_message
+                    && Self::missing_required_marker(run_agent_type, &output)
+                {
+                    if let Some(nudge) = Self::missing_marker_nudge(run_agent_type, &output) {
+                        tracing::info!(
+                            task_id = %task_id_for_join,
+                            agent_type = %run_agent_type.as_str(),
+                            "Supervisor: session ended without required marker; sending post-session nudge"
+                        );
+                        let nudge_msg = GooseMessage::user().with_text(nudge);
+                        let mut stream = agent
+                            .reply(
+                                nudge_msg,
+                                GooseSessionConfig {
+                                    id: session_id.clone(),
+                                    schedule_id: None,
+                                    max_turns: Some(3),
+                                    retry_config: None,
+                                },
+                                Some(session_cancel_for_reply.clone()),
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("nudge reply init failed: {e}"))?;
+
+                        while let Some(evt) = stream.next().await {
+                            let evt = evt.map_err(|e| anyhow::anyhow!("nudge stream error: {e}"))?;
+                            if let goose::agents::AgentEvent::Message(msg) = &evt
+                                && msg.role == assistant_role
+                            {
+                                for content in &msg.content {
+                                    match content {
+                                        MessageContent::Text(text) => {
+                                            output.ingest_text(&text.text);
+                                        }
+                                        _ => {
+                                            output.ingest_text(&content.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            extension::handle_event(&app_state, &agent, &evt).await;
+                        }
+                    }
                 }
 
                 if Self::missing_required_marker(run_agent_type, &output) {
@@ -1801,15 +1834,7 @@ impl AgentSupervisor {
         }
     }
 
-    fn missing_marker_nudge(
-        agent_type: AgentType,
-        output: &ParsedAgentOutput,
-        nudge_count: u8,
-    ) -> Option<&'static str> {
-        const MAX_NUDGES: u8 = 2;
-        if nudge_count >= MAX_NUDGES {
-            return None;
-        }
+    fn missing_marker_nudge(agent_type: AgentType, output: &ParsedAgentOutput) -> Option<&'static str> {
         if !Self::missing_required_marker(agent_type, output) {
             return None;
         }
