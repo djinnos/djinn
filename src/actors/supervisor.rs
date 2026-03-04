@@ -12,7 +12,7 @@ use goose::agents::{
     SessionConfig as GooseSessionConfig,
 };
 use goose::config::{Config as GooseConfig, GooseMode, PermissionManager};
-use goose::conversation::message::Message as GooseMessage;
+use goose::conversation::message::{Message as GooseMessage, MessageContent};
 use goose::model::ModelConfig;
 use goose::providers;
 use goose::providers::base::ProviderMetadata;
@@ -95,6 +95,22 @@ fn runtime_env_diagnostics(session_id: &str, project_path: &str, worktree_path: 
         project_path,
         path,
     )
+}
+
+fn log_snippet(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    let mut out = String::new();
+    for ch in trimmed.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if trimmed.chars().count() > max_chars {
+        out.push_str("…");
+    }
+    if out.is_empty() {
+        "<empty>".to_string()
+    } else {
+        out
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,8 +401,14 @@ impl AgentSupervisor {
                 output,
             } => {
                 if self.interrupted_sessions.remove(&task_id) {
+                    tracing::info!(task_id = %task_id, "Supervisor: ignoring completion for interrupted session");
                     return;
                 }
+                tracing::info!(
+                    task_id = %task_id,
+                    result = if result.is_ok() { "ok" } else { "error" },
+                    "Supervisor: session completion received"
+                );
                 let session = self.remove_session(&task_id);
                 self.handle_session_result(&task_id, session, result, output)
                     .await;
@@ -440,6 +462,19 @@ impl AgentSupervisor {
         } else {
             self.agent_type_for_task(&task, conflict_ctx.is_some())
         };
+
+        tracing::info!(
+            task_id = %task.short_id,
+            task_uuid = %task.id,
+            project_id = %task.project_id,
+            model_id = %model_id,
+            agent_type = %agent_type.as_str(),
+            task_status = %task.status,
+            has_conflict_context = conflict_ctx.is_some(),
+            has_merge_validation_context = merge_validation_ctx.is_some(),
+            "Supervisor: dispatch accepted; preparing session"
+        );
+
         self.transition_start(&task, agent_type).await?;
 
         let (catalog_provider_id, model_name) = Self::parse_model_id(&model_id)?;
@@ -601,6 +636,8 @@ impl AgentSupervisor {
                 let mut prompts = vec![kickoff];
                 let mut nudge_count: u8 = 0;
                 let mut saw_any_event = false;
+                let mut saw_any_assistant_message = false;
+                let assistant_role = GooseMessage::assistant().role;
 
                 while let Some(next_message) = prompts.pop() {
                     let env_diag = runtime_env_diagnostics(
@@ -649,6 +686,7 @@ impl AgentSupervisor {
 
                     let mut interrupted: Option<&'static str> = None;
                     let mut saw_round_event = false;
+                    let mut saw_round_assistant_message = false;
                     loop {
                         tokio::select! {
                             _ = session_cancel_for_reply.cancelled() => {
@@ -681,7 +719,22 @@ impl AgentSupervisor {
                                 })?;
                                 saw_any_event = true;
                                 saw_round_event = true;
-                                output.ingest_event(&evt);
+                                if let goose::agents::AgentEvent::Message(msg) = &evt
+                                    && msg.role == assistant_role
+                                {
+                                    saw_round_assistant_message = true;
+                                    saw_any_assistant_message = true;
+                                    for content in &msg.content {
+                                        match content {
+                                            MessageContent::Text(text) => {
+                                                output.ingest_text(&text.text);
+                                            }
+                                            _ => {
+                                                output.ingest_text(&content.to_string());
+                                            }
+                                        }
+                                    }
+                                }
                                 extension::handle_event(&app_state, &agent, &evt).await;
                             }
                         }
@@ -700,9 +753,12 @@ impl AgentSupervisor {
                         ));
                     }
 
-                    if let Some(nudge) =
-                        Self::missing_marker_nudge(run_agent_type, &output, nudge_count)
-                    {
+                    if let Some(nudge) = Self::missing_marker_nudge(run_agent_type, &output, nudge_count) {
+                        if !saw_round_assistant_message {
+                            return Err(anyhow::anyhow!(
+                                "agent reply ended without assistant message; refusing marker nudge"
+                            ));
+                        }
                         nudge_count = nudge_count.saturating_add(1);
                         prompts.push(GooseMessage::user().with_text(nudge));
                         continue;
@@ -719,7 +775,20 @@ impl AgentSupervisor {
                 }
 
                 if Self::missing_required_marker(run_agent_type, &output) {
-                    let reason = match run_agent_type {
+                    let reason = if !saw_any_assistant_message {
+                        match run_agent_type {
+                            AgentType::Worker | AgentType::ConflictResolver => {
+                                "worker ended without assistant output"
+                            }
+                            AgentType::TaskReviewer => {
+                                "task reviewer ended without assistant output"
+                            }
+                            AgentType::EpicReviewer => {
+                                "epic reviewer ended without assistant output"
+                            }
+                        }
+                    } else {
+                        match run_agent_type {
                         AgentType::Worker | AgentType::ConflictResolver => {
                             "worker ended without WORKER_RESULT marker"
                         }
@@ -729,6 +798,7 @@ impl AgentSupervisor {
                         AgentType::EpicReviewer => {
                             "epic reviewer ended without EPIC_REVIEW_RESULT marker"
                         }
+                    }
                     };
                     return Err(anyhow::anyhow!(reason));
                 }
@@ -769,6 +839,19 @@ impl AgentSupervisor {
         self.task_session_records
             .insert(task_id.clone(), session_record.id);
         self.session_agent_types.insert(task_id, agent_type);
+
+        if let Some(handle) = self.sessions.get(&task.id) {
+            tracing::info!(
+                task_id = %task.short_id,
+                task_uuid = %task.id,
+                project_id = %task.project_id,
+                session_id = %handle.session_id,
+                agent_type = %agent_type.as_str(),
+                worktree = ?handle.worktree_path.as_ref().map(|p| p.display().to_string()),
+                "Supervisor: session registered"
+            );
+        }
+
         Ok(())
     }
 
@@ -1199,6 +1282,15 @@ impl AgentSupervisor {
         }
 
         if let Some((action, reason)) = transition {
+            tracing::info!(
+                task_id = %task_id,
+                agent_type = %agent_type.as_str(),
+                transition_action = ?action,
+                transition_reason = reason.as_deref().unwrap_or("<none>"),
+                tokens_in,
+                tokens_out,
+                "Supervisor: applying session transition"
+            );
             if let Err(e) = repo
                 .transition(
                     task_id,
@@ -1212,6 +1304,14 @@ impl AgentSupervisor {
             {
                 tracing::warn!(task_id = %task_id, error = %e, "failed to transition task after session");
             }
+        } else {
+            tracing::info!(
+                task_id = %task_id,
+                agent_type = %agent_type.as_str(),
+                tokens_in,
+                tokens_out,
+                "Supervisor: session completed with no task transition"
+            );
         }
 
         // Capacity has just been released by this session completion. Trigger an
@@ -1578,6 +1678,14 @@ impl AgentSupervisor {
             .await
         {
             Ok(result) => {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    task_uuid = %task.id,
+                    base_branch = %base_branch,
+                    merge_target = %merge_target,
+                    commit_sha = %result.commit_sha,
+                    "Supervisor: post-review squash merge succeeded"
+                );
                 if let Err(e) = git.delete_branch(&base_branch).await {
                     tracing::warn!(
                         task_id = %task.short_id,
@@ -1595,6 +1703,15 @@ impl AgentSupervisor {
                 Some((TransitionAction::TaskReviewApprove, None))
             }
             Err(GitError::MergeConflict { files, .. }) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    task_uuid = %task.id,
+                    base_branch = %base_branch,
+                    merge_target = %merge_target,
+                    conflict_count = files.len(),
+                    conflicting_files = ?files,
+                    "Supervisor: post-review merge conflict"
+                );
                 let metadata = MergeConflictMetadata {
                     conflicting_files: files,
                     base_branch,
@@ -1623,6 +1740,18 @@ impl AgentSupervisor {
                 stdout,
                 stderr,
             }) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    task_uuid = %task.id,
+                    base_branch = %base_branch,
+                    merge_target = %merge_target,
+                    exit_code = code,
+                    command = %command,
+                    cwd = %cwd,
+                    stdout_snippet = %log_snippet(&stdout, 400),
+                    stderr_snippet = %log_snippet(&stderr, 400),
+                    "Supervisor: post-review merge commit rejected"
+                );
                 let metadata = MergeValidationFailureMetadata {
                     base_branch,
                     merge_target,
@@ -1646,10 +1775,21 @@ impl AgentSupervisor {
                     .await;
                 Some((TransitionAction::TaskReviewRejectConflict, Some(reason)))
             }
-            Err(e) => Some((
-                TransitionAction::ReleaseTaskReview,
-                Some(format!("post-review squash merge failed: {e}")),
-            )),
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    task_uuid = %task.id,
+                    base_branch = %base_branch,
+                    merge_target = %merge_target,
+                    error = %e,
+                    error_debug = ?e,
+                    "Supervisor: post-review squash merge failed"
+                );
+                Some((
+                    TransitionAction::ReleaseTaskReview,
+                    Some(format!("post-review squash merge failed: {e} ({e:?})")),
+                ))
+            }
         }
     }
 

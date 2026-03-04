@@ -534,7 +534,17 @@ impl CoordinatorActor {
                     .await
                 {
                     Ok(()) => {
-                        tracing::info!(task_id = %task.short_id, model_id = %model_id, "CoordinatorActor: task dispatched");
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            task_uuid = %task.id,
+                            project_id = %task.project_id,
+                            status = %task.status,
+                            priority = task.priority,
+                            role,
+                            model_id = %model_id,
+                            project_path,
+                            "CoordinatorActor: task dispatched"
+                        );
                         self.dispatched += 1;
                         dispatched = true;
                         break;
@@ -568,7 +578,12 @@ impl CoordinatorActor {
             if !dispatched {
                 tracing::debug!(
                     task_id = %task.short_id,
+                    task_uuid = %task.id,
+                    project_id = %task.project_id,
                     role,
+                    status = %task.status,
+                    candidate_models = model_ids.len(),
+                    role_at_capacity,
                     "CoordinatorActor: no model with available capacity for task"
                 );
                 if role_at_capacity {
@@ -701,7 +716,10 @@ impl CoordinatorActor {
 
                 tracing::warn!(
                     task_id = %task.short_id,
+                    task_uuid = %task.id,
+                    project_id = %task.project_id,
                     status,
+                    transition_action = ?action,
                     "CoordinatorActor: stuck task detected (no session) — releasing"
                 );
                 match repo
@@ -716,6 +734,14 @@ impl CoordinatorActor {
                     .await
                 {
                     Ok(_) => {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            task_uuid = %task.id,
+                            project_id = %task.project_id,
+                            status,
+                            transition_action = ?action,
+                            "CoordinatorActor: released stuck task"
+                        );
                         self.recovered += 1;
                         any_recovered = true;
                     }
