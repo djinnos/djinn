@@ -216,6 +216,42 @@ impl SessionRepository {
         )
     }
 
+    /// Return sessions for a task in continuation-chain order (root first, each subsequent
+    /// session linked via `continuation_of`).  Handles chains of any length (A → B → C …).
+    pub async fn chain_for_task(&self, task_id: &str) -> Result<Vec<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, SessionRecord>(
+            "WITH RECURSIVE chain AS (
+               SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                      status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
+               FROM sessions
+               WHERE task_id = ?1 AND continuation_of IS NULL
+               UNION ALL
+               SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type, s.started_at, s.ended_at,
+                      s.status, s.tokens_in, s.tokens_out, s.worktree_path, s.goose_session_id, s.continuation_of
+               FROM sessions s JOIN chain c ON s.continuation_of = c.id
+             )
+             SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                    status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
+             FROM chain
+             ORDER BY started_at",
+        )
+        .bind(task_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Number of compacted (continuation) sessions for a task.
+    pub async fn compaction_count(&self, task_id: &str) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sessions WHERE task_id = ?1 AND continuation_of IS NOT NULL",
+        )
+        .bind(task_id)
+        .fetch_one(self.db.pool())
+        .await?)
+    }
+
     /// Set session status to Paused without setting ended_at.
     /// Used when a worker completes (Done) but its worktree is kept alive for the review cycle.
     pub async fn pause(&self, id: &str, tokens_in: i64, tokens_out: i64) -> Result<SessionRecord> {
@@ -398,5 +434,40 @@ mod tests {
             .unwrap();
         let active_task = repo.active_for_task(&task_id).await.unwrap();
         assert_eq!(active_task.unwrap().id, first.id);
+    }
+
+    #[tokio::test]
+    async fn chain_query_and_compaction_count() {
+        let db = test_helpers::create_test_db();
+        let (tx, _) = broadcast::channel(1024);
+        let (project_id, task_id) = create_task(tx.clone(), db.clone()).await;
+        let repo = SessionRepository::new(db, tx);
+
+        // A: root session
+        let a = repo
+            .create(&project_id, &task_id, "openai/gpt-5", "worker", None, None, None)
+            .await
+            .unwrap();
+
+        // B: compacted from A
+        let b = repo
+            .create(&project_id, &task_id, "openai/gpt-5", "worker", None, None, Some(&a.id))
+            .await
+            .unwrap();
+
+        // C: compacted from B
+        let c = repo
+            .create(&project_id, &task_id, "openai/gpt-5", "worker", None, None, Some(&b.id))
+            .await
+            .unwrap();
+
+        let chain = repo.chain_for_task(&task_id).await.unwrap();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[0].id, a.id);
+        assert_eq!(chain[1].id, b.id);
+        assert_eq!(chain[2].id, c.id);
+
+        let count = repo.compaction_count(&task_id).await.unwrap();
+        assert_eq!(count, 2); // B and C have continuation_of set
     }
 }

@@ -853,6 +853,31 @@ async fn perform_compaction(
         }
     };
 
+    // Log compaction activity entry so the desktop can render the session timeline.
+    {
+        let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+        let usage_pct = if context_window > 0 {
+            final_tokens_in as f64 / context_window as f64
+        } else {
+            0.0
+        };
+        let payload = serde_json::json!({
+            "old_session_id": old_record_id.as_deref().unwrap_or(""),
+            "new_session_id": new_record.id,
+            "tokens_in_at_compaction": final_tokens_in,
+            "context_window": context_window,
+            "usage_pct": usage_pct,
+            "summary_token_count": summary.chars().count(),
+        })
+        .to_string();
+        if let Err(e) = task_repo
+            .log_activity(Some(&task_id), "system", "system", "compaction", &payload)
+            .await
+        {
+            tracing::warn!(task_id = %task_id, error = %e, "compaction: failed to log activity");
+        }
+    }
+
     // 7. Set up new agent with provider and extensions.
     let extensions = vec![extension::config(agent_type)];
     let provider =
