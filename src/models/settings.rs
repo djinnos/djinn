@@ -15,10 +15,12 @@ pub struct Setting {
 #[serde(deny_unknown_fields)]
 pub struct DjinnSettings {
     /// Maximum number of tasks to dispatch per cycle (default 50).
+    #[schemars(with = "Option<i64>")]
     pub dispatch_limit: Option<u32>,
     /// Per-role ordered model lists, e.g. `{"worker": ["openai/gpt-4o"]}`.
     pub model_priority: Option<HashMap<String, Vec<String>>>,
     /// Per-model concurrent session caps, e.g. `{"openai/gpt-4o": 4}`.
+    #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
 }
 
