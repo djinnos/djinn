@@ -145,6 +145,7 @@ struct SessionClosure {
     agent_type: AgentType,
     goose_session_id: String,
     record_id: Option<String>,
+    worktree_path: Option<PathBuf>,
 }
 
 struct AgentSupervisor {
@@ -631,6 +632,7 @@ impl AgentSupervisor {
 
         if let Some(worktree_path) = handle.worktree_path.as_ref() {
             self.commit_wip_if_needed(&task_id, worktree_path).await;
+            self.cleanup_worktree(&task_id, worktree_path).await;
         }
         let (tokens_in, tokens_out) = self.tokens_for_session(&goose_session_id).await;
         self.update_session_record(
@@ -651,10 +653,10 @@ impl AgentSupervisor {
     }
 
     fn remove_session(&mut self, task_id: &str) -> SessionClosure {
-        let goose_session_id = self
-            .sessions
-            .remove(task_id)
-            .map(|h| h.session_id)
+        let removed = self.sessions.remove(task_id);
+        let goose_session_id = removed
+            .as_ref()
+            .map(|h| h.session_id.clone())
             .unwrap_or_else(|| format!("unknown-session-{task_id}"));
         self.decrement_capacity(task_id);
         SessionClosure {
@@ -665,6 +667,7 @@ impl AgentSupervisor {
                 .unwrap_or(AgentType::Worker),
             goose_session_id,
             record_id: self.task_session_records.remove(task_id),
+            worktree_path: removed.and_then(|h| h.worktree_path),
         }
     }
 
@@ -757,6 +760,38 @@ impl AgentSupervisor {
         }
     }
 
+    async fn cleanup_worktree(&self, task_id: &str, worktree_path: &Path) {
+        let task = match self.load_task(task_id).await {
+            Ok(task) => task,
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "failed to load task for worktree cleanup");
+                return;
+            }
+        };
+
+        let Some(project_path) = self.project_path_for_id(&task.project_id).await else {
+            tracing::warn!(task_id = %task_id, "project path not found for worktree cleanup");
+            return;
+        };
+
+        let git = match self.app_state.git_actor(Path::new(&project_path)).await {
+            Ok(git) => git,
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "failed to open git actor for worktree cleanup");
+                return;
+            }
+        };
+
+        if let Err(e) = git.remove_worktree(worktree_path).await {
+            tracing::warn!(task_id = %task_id, error = %e, "failed to remove worktree; attempting filesystem cleanup");
+            if worktree_path.exists()
+                && let Err(remove_err) = std::fs::remove_dir_all(worktree_path)
+            {
+                tracing::warn!(task_id = %task_id, error = %remove_err, "failed to remove worktree directory");
+            }
+        }
+    }
+
     async fn transition_interrupted(&self, task_id: &str, agent_type: AgentType, reason: &str) {
         let action = match agent_type {
             AgentType::Worker | AgentType::ConflictResolver => TransitionAction::Release,
@@ -813,6 +848,10 @@ impl AgentSupervisor {
             tokens_out,
         )
         .await;
+
+        if let Some(worktree_path) = session.worktree_path.as_ref() {
+            self.cleanup_worktree(task_id, worktree_path).await;
+        }
 
         if let Some(feedback) = output.reviewer_feedback.as_deref() {
             let payload = serde_json::json!({ "body": feedback }).to_string();
@@ -1410,6 +1449,7 @@ impl AgentSupervisor {
             if let Some(worktree_path) = item.worktree_path.as_ref() {
                 self.commit_wip_if_needed(&item.task_id, worktree_path)
                     .await;
+                self.cleanup_worktree(&item.task_id, worktree_path).await;
             }
             let (tokens_in, tokens_out) = self.tokens_for_session(&item.goose_session_id).await;
             self.update_session_record(
