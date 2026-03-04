@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 
 /// Number of consecutive failures before circuit breaker trips.
 const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
-/// Initial cooldown after first circuit-breaker trip: 5 minutes.
-const INITIAL_COOLDOWN: Duration = Duration::from_secs(5 * 60);
-/// Maximum cooldown: 24 hours.
-const MAX_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
+/// Initial cooldown after first circuit-breaker trip: 5 seconds.
+const INITIAL_COOLDOWN: Duration = Duration::from_secs(5);
+/// Maximum cooldown: 5 minutes.
+const MAX_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 /// Wire-format health state for a single model.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -79,11 +79,11 @@ impl ModelState {
     }
 
     fn compute_cooldown(&self) -> Duration {
-        // Exponential backoff: 5m, 10m, 20m, … capped at 24h.
+        // Exponential backoff: 5s, 15s, 45s, 135s, 300s (capped).
         // disable_ttl_trips counts how many times this model has been disabled.
         let mut ttl = INITIAL_COOLDOWN;
         for _ in 0..self.disable_ttl_trips {
-            ttl = (ttl * 2).min(MAX_COOLDOWN);
+            ttl = (ttl * 3).min(MAX_COOLDOWN);
         }
         ttl
     }
@@ -310,7 +310,7 @@ mod tests {
         }
         let h2 = ht.model_health("model");
         assert_eq!(h2.disable_ttl_trips, 2);
-        // Second trip cooldown should be double the first (i.e. ≥ 10 minutes).
+        // Second trip cooldown should be 3x the first (i.e. ≥ 15s).
         let secs = h2.cooldown_seconds_remaining.unwrap_or(0);
         assert!(
             secs > INITIAL_COOLDOWN.as_secs(),
