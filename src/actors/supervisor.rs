@@ -635,7 +635,7 @@ impl AgentSupervisor {
             let run_result: anyhow::Result<()> = async {
                 let mut pending_message = Some(kickoff);
                 let mut saw_any_event = false;
-                let mut saw_any_assistant_message = false;
+                let mut saw_any_tool_use = false;
                 let assistant_role = GooseMessage::assistant().role;
 
                 while let Some(next_message) = pending_message.take() {
@@ -720,11 +720,14 @@ impl AgentSupervisor {
                                 if let goose::agents::AgentEvent::Message(msg) = &evt
                                     && msg.role == assistant_role
                                 {
-                                    saw_any_assistant_message = true;
                                     for content in &msg.content {
                                         match content {
                                             MessageContent::Text(text) => {
                                                 output.ingest_text(&text.text);
+                                            }
+                                            MessageContent::ToolRequest(_) => {
+                                                saw_any_tool_use = true;
+                                                output.ingest_text(&content.to_string());
                                             }
                                             _ => {
                                                 output.ingest_text(&content.to_string());
@@ -761,8 +764,9 @@ impl AgentSupervisor {
                 }
 
                 // Session complete — send a single nudge if the marker is missing
-                // and the agent did produce assistant output.
-                if saw_any_assistant_message
+                // and the agent did real work (used tools). Skip nudge when the
+                // session only produced error text (e.g. provider 429).
+                if saw_any_tool_use
                     && Self::missing_required_marker(run_agent_type, &output)
                 {
                     if let Some(nudge) = Self::missing_marker_nudge(run_agent_type, &output) {
@@ -808,30 +812,30 @@ impl AgentSupervisor {
                 }
 
                 if Self::missing_required_marker(run_agent_type, &output) {
-                    let reason = if !saw_any_assistant_message {
+                    let reason = if !saw_any_tool_use {
                         match run_agent_type {
                             AgentType::Worker | AgentType::ConflictResolver => {
-                                "worker ended without assistant output"
+                                "worker ended without any tool use (provider error?)"
                             }
                             AgentType::TaskReviewer => {
-                                "task reviewer ended without assistant output"
+                                "task reviewer ended without any tool use (provider error?)"
                             }
                             AgentType::EpicReviewer => {
-                                "epic reviewer ended without assistant output"
+                                "epic reviewer ended without any tool use (provider error?)"
                             }
                         }
                     } else {
                         match run_agent_type {
-                        AgentType::Worker | AgentType::ConflictResolver => {
-                            "worker ended without WORKER_RESULT marker"
+                            AgentType::Worker | AgentType::ConflictResolver => {
+                                "worker ended without WORKER_RESULT marker"
+                            }
+                            AgentType::TaskReviewer => {
+                                "task reviewer ended without REVIEW_RESULT marker"
+                            }
+                            AgentType::EpicReviewer => {
+                                "epic reviewer ended without EPIC_REVIEW_RESULT marker"
+                            }
                         }
-                        AgentType::TaskReviewer => {
-                            "task reviewer ended without REVIEW_RESULT marker"
-                        }
-                        AgentType::EpicReviewer => {
-                            "epic reviewer ended without EPIC_REVIEW_RESULT marker"
-                        }
-                    }
                     };
                     return Err(anyhow::anyhow!(reason));
                 }
