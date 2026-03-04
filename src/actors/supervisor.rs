@@ -567,6 +567,11 @@ impl AgentSupervisor {
         cancel: CancellationToken,
     ) -> Self {
         register_goose_builtin_extensions();
+        // Disable Goose's built-in auto-compaction so Djinn owns the compaction lifecycle entirely.
+        // check_if_compaction_needed() returns false when threshold <= 0.0 || threshold >= 1.0.
+        if let Err(e) = GooseConfig::global().set_param("GOOSE_AUTO_COMPACT_THRESHOLD", 0.0f64) {
+            tracing::warn!(error = %e, "Failed to disable Goose auto-compaction threshold");
+        }
         Self {
             receiver,
             sessions: HashMap::new(),
@@ -970,6 +975,7 @@ impl AgentSupervisor {
                 agent_type.as_str(),
                 worktree_path.to_str(),
                 Some(session.id.as_str()),
+                None,
             )
             .await
             .map_err(|e| SupervisorError::Goose(e.to_string()))?;
@@ -1178,6 +1184,7 @@ impl AgentSupervisor {
                 AgentType::Worker.as_str(),
                 worktree_path.to_str(),
                 Some(&goose_session_id),
+                None,
             )
             .await
             .map_err(|e| SupervisorError::Goose(e.to_string()))?;

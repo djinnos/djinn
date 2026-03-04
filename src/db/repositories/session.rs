@@ -23,14 +23,15 @@ impl SessionRepository {
         agent_type: &str,
         worktree_path: Option<&str>,
         goose_session_id: Option<&str>,
+        continuation_of: Option<&str>,
     ) -> Result<SessionRecord> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
 
         sqlx::query(
             "INSERT INTO sessions
-                (id, project_id, task_id, model_id, agent_type, status, worktree_path, goose_session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7)",
+                (id, project_id, task_id, model_id, agent_type, status, worktree_path, goose_session_id, continuation_of)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8)",
         )
         .bind(&id)
         .bind(project_id)
@@ -39,12 +40,13 @@ impl SessionRepository {
         .bind(agent_type)
         .bind(worktree_path)
         .bind(goose_session_id)
+        .bind(continuation_of)
         .execute(self.db.pool())
         .await?;
 
         let session = sqlx::query_as::<_, SessionRecord>(
             "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
+                    status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
              FROM sessions
              WHERE id = ?1",
         )
@@ -84,7 +86,7 @@ impl SessionRepository {
 
         let session = sqlx::query_as::<_, SessionRecord>(
             "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
+                    status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
              FROM sessions
              WHERE id = ?1",
         )
@@ -102,7 +104,7 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(
             "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
+                    status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
              FROM sessions
              WHERE id = ?1",
         )
@@ -119,7 +121,7 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(
             "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
+                    status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
              FROM sessions
              WHERE project_id = ?1 AND id = ?2",
         )
@@ -133,7 +135,7 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(
             "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
+                    status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
              FROM sessions
              WHERE task_id = ?1
              ORDER BY started_at DESC",
@@ -151,7 +153,7 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(
             "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
+                    status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
              FROM sessions
              WHERE project_id = ?1 AND task_id = ?2
              ORDER BY started_at DESC",
@@ -166,7 +168,7 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(
             "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
+                    status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
              FROM sessions
              WHERE status = 'running'
              ORDER BY started_at DESC",
@@ -179,7 +181,7 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(
             "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
+                    status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
              FROM sessions
              WHERE project_id = ?1 AND status = 'running'
              ORDER BY started_at DESC",
@@ -193,7 +195,7 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(
             "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
+                    status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
              FROM sessions
              WHERE task_id = ?1 AND status = 'running'
              ORDER BY started_at DESC
@@ -230,7 +232,7 @@ impl SessionRepository {
 
         let session = sqlx::query_as::<_, SessionRecord>(
             "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
+                    status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
              FROM sessions
              WHERE id = ?1",
         )
@@ -255,7 +257,7 @@ impl SessionRepository {
 
         let session = sqlx::query_as::<_, SessionRecord>(
             "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
+                    status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
              FROM sessions
              WHERE id = ?1",
         )
@@ -274,7 +276,7 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(
             "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
+                    status, tokens_in, tokens_out, worktree_path, goose_session_id, continuation_of
              FROM sessions
              WHERE task_id = ?1 AND status = 'paused'
              ORDER BY started_at DESC
@@ -323,6 +325,7 @@ mod tests {
                 "worker",
                 Some("/tmp/djinn-worktree-task"),
                 Some("goose-session-abc123"),
+                None,
             )
             .await
             .unwrap();
@@ -366,12 +369,12 @@ mod tests {
         let repo = SessionRepository::new(db, tx);
 
         let first = repo
-            .create(&project_id, &task_id, "openai/gpt-5", "worker", None, None)
+            .create(&project_id, &task_id, "openai/gpt-5", "worker", None, None, None)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let second = repo
-            .create(&project_id, &task_id, "openai/gpt-5", "worker", None, None)
+            .create(&project_id, &task_id, "openai/gpt-5", "worker", None, None, None)
             .await
             .unwrap();
 

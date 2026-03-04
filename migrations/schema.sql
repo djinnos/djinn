@@ -1,6 +1,6 @@
 -- Canonical schema — ground truth. Matches result of running all migrations.
 -- Updated manually after each migration is added.
--- Last updated: V20260305000002__add_session_goose_id_and_paused.sql
+-- Last updated: V20260305000003__add_session_continuation_of.sql
 
 CREATE TABLE settings (
     key        TEXT NOT NULL PRIMARY KEY,
@@ -129,9 +129,11 @@ CREATE TABLE sessions (
     tokens_in        INTEGER NOT NULL DEFAULT 0,
     tokens_out       INTEGER NOT NULL DEFAULT 0,
     worktree_path    TEXT,
-    goose_session_id TEXT
+    goose_session_id TEXT,
+    continuation_of  TEXT REFERENCES sessions(id)
 );
 
 CREATE INDEX sessions_project_id ON sessions(project_id);
 CREATE INDEX sessions_task_id ON sessions(task_id);
 CREATE INDEX sessions_status ON sessions(status);
+CREATE INDEX idx_sessions_continuation_of ON sessions(continuation_of);
