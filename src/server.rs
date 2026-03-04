@@ -311,8 +311,21 @@ impl AppState {
             .list()
             .await
             .map_err(|e| format!("list credentials: {e}"))?;
-        let connected_provider_ids: HashSet<String> =
+        let mut connected_provider_ids: HashSet<String> =
             credentials.into_iter().map(|c| c.provider_id).collect();
+
+        // Also consider OAuth-connected providers (e.g. chatgpt_codex, github_copilot).
+        let goose_entries = crate::mcp::tools::provider_tools::goose_provider_entries().await;
+        let catalog_providers = self.catalog().list_providers();
+        for provider in &catalog_providers {
+            let oauth_keys =
+                crate::mcp::tools::provider_tools::oauth_keys_for_provider(&provider.id, &goose_entries);
+            if !oauth_keys.is_empty()
+                && crate::mcp::tools::provider_tools::is_oauth_key_present(&oauth_keys)
+            {
+                connected_provider_ids.insert(provider.id.clone());
+            }
+        }
 
         let mut missing_provider_ids: Vec<String> = configured_provider_ids
             .difference(&connected_provider_ids)

@@ -82,7 +82,7 @@ pub(crate) fn resolve_goose_provider_name(
         .map(|(meta, _)| meta.name.clone())
 }
 
-fn oauth_keys_for_provider(
+pub(crate) fn oauth_keys_for_provider(
     provider_id: &str,
     entries: &[(ProviderMetadata, ProviderType)],
 ) -> Vec<String> {
@@ -103,6 +103,19 @@ fn oauth_keys_for_provider(
         .unwrap_or_default()
 }
 
+/// Check whether any of the given OAuth keys have a stored token.
+pub(crate) fn is_oauth_key_present(oauth_keys: &[String]) -> bool {
+    oauth_keys.iter().any(|key| {
+        if GooseConfig::global().get_secret::<String>(key).is_ok() {
+            return true;
+        }
+        if key == "CHATGPT_CODEX_TOKEN" {
+            return GoosePaths::in_config_dir("chatgpt_codex/tokens.json").exists();
+        }
+        false
+    })
+}
+
 fn provider_connection_status(
     provider: &Provider,
     oauth_keys: &[String],
@@ -115,20 +128,7 @@ fn provider_connection_status(
             .iter()
             .any(|env| credential_key_names.contains(env));
 
-    let oauth_connected = !oauth_keys.is_empty()
-        && oauth_keys.iter().any(|key| {
-            // Standard path: token stored in GooseConfig secret store.
-            if GooseConfig::global().get_secret::<String>(key).is_ok() {
-                return true;
-            }
-            // ChatGPT Codex stores its OAuth token in a file cache rather than
-            // GooseConfig secrets.  Check for the cache file existence.
-            if key == "CHATGPT_CODEX_TOKEN" {
-                let cache = GoosePaths::in_config_dir("chatgpt_codex/tokens.json");
-                return cache.exists();
-            }
-            false
-        });
+    let oauth_connected = !oauth_keys.is_empty() && is_oauth_key_present(oauth_keys);
 
     let mut methods = Vec::new();
     if credential_connected {
