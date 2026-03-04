@@ -1358,18 +1358,36 @@ impl AgentSupervisor {
             .await
             .map_err(|e| SupervisorError::Goose(e.to_string()))?;
 
-        match git.create_worktree(&task.short_id, &branch).await {
-            Ok(path) => Ok(path),
-            Err(_) => {
-                let target_branch = self.default_target_branch(&task.project_id).await;
-                git.create_branch(&task.short_id, &target_branch)
-                    .await
-                    .map_err(|e| SupervisorError::Goose(e.to_string()))?;
-                git.create_worktree(&task.short_id, &branch)
-                    .await
-                    .map_err(|e| SupervisorError::Goose(e.to_string()))
-            }
+        let stale_worktree_path = project_dir.join(".djinn").join("worktrees").join(&task.short_id);
+        let _ = git.remove_worktree(&stale_worktree_path).await;
+        if stale_worktree_path.exists() {
+            let _ = std::fs::remove_dir_all(&stale_worktree_path);
         }
+
+        let branch_exists = match git
+            .run_command(vec![
+                "show-ref".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                format!("refs/heads/{branch}"),
+            ])
+            .await
+        {
+            Ok(_) => true,
+            Err(GitError::CommandFailed { code: 1, .. }) => false,
+            Err(e) => return Err(SupervisorError::Goose(e.to_string())),
+        };
+
+        if !branch_exists {
+            let target_branch = self.default_target_branch(&task.project_id).await;
+            git.create_branch(&task.short_id, &target_branch)
+                .await
+                .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+        }
+
+        git.create_worktree(&task.short_id, &branch)
+            .await
+            .map_err(|e| SupervisorError::Goose(e.to_string()))
     }
 
     async fn default_target_branch(&self, project_id: &str) -> String {
