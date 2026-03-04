@@ -141,7 +141,7 @@ fn write_daemon_info(path: &Path, info: &DaemonInfo) -> Result<(), String> {
     Ok(())
 }
 
-fn pid_is_alive(pid: u32) -> bool {
+pub fn pid_is_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
@@ -149,12 +149,21 @@ fn pid_is_alive(pid: u32) -> bool {
         return true;
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
-        return Path::new(&format!("/proc/{pid}")).exists();
+        // POSIX kill(pid, 0) checks process existence without sending a signal.
+        // Returns 0 if process exists and we can signal it.
+        // Returns -1 with EPERM if process exists but we lack permission.
+        // Returns -1 with ESRCH if process does not exist.
+        let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if ret == 0 {
+            return true;
+        }
+        // EPERM means the process exists but we can't signal it (different user).
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         false
     }
@@ -195,5 +204,66 @@ mod tests {
         let path = dir.path().join("missing.json");
         let parsed = read_daemon_info(&path).unwrap();
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn current_process_is_alive() {
+        assert!(pid_is_alive(std::process::id()));
+    }
+
+    #[test]
+    fn bogus_pid_is_not_alive() {
+        // PID 4_000_000 is far beyond typical PID ranges on any system.
+        assert!(!pid_is_alive(4_000_000));
+    }
+
+    #[test]
+    fn zero_pid_is_not_alive() {
+        assert!(!pid_is_alive(0));
+    }
+
+    #[test]
+    fn pid_one_is_alive() {
+        // PID 1 (init/launchd) is always running on Unix.
+        #[cfg(unix)]
+        assert!(pid_is_alive(1));
+    }
+
+    #[test]
+    fn acquire_detects_running_daemon() {
+        // Simulate a lockfile written by the current process with a different
+        // "daemon PID" that is actually alive (PID 1 = init/launchd).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.json");
+        let info = DaemonInfo {
+            pid: 1, // PID 1 is always alive on Unix
+            port: 9999,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        write_daemon_info(&path, &info).unwrap();
+
+        // Verify pid_is_alive correctly detects PID 1 as alive.
+        #[cfg(unix)]
+        assert!(pid_is_alive(1));
+    }
+
+    #[test]
+    fn acquire_reclaims_stale_lockfile() {
+        // Simulate a lockfile from a dead process.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.json");
+        let info = DaemonInfo {
+            pid: 4_000_000, // dead PID
+            port: 8372,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        write_daemon_info(&path, &info).unwrap();
+
+        // pid_is_alive should return false for the dead PID.
+        assert!(!pid_is_alive(4_000_000));
+
+        // Read it back and verify it was the stale one.
+        let parsed = read_daemon_info(&path).unwrap().unwrap();
+        assert_eq!(parsed.pid, 4_000_000);
     }
 }

@@ -170,7 +170,7 @@ async fn run_stdio_bridge(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 async fn ensure_daemon_running(cli: &Cli) -> Result<(), String> {
     if let Some(info) = read_daemon_info()
-        && daemon_pid_alive(info.pid)
+        && daemon::pid_is_alive(info.pid)
     {
         tracing::info!(pid = info.pid, port = info.port, "daemon already running");
         return Ok(());
@@ -192,7 +192,7 @@ async fn ensure_daemon_running(cli: &Cli) -> Result<(), String> {
 
     for _ in 0..40 {
         if let Some(info) = read_daemon_info()
-            && daemon_pid_alive(info.pid)
+            && daemon::pid_is_alive(info.pid)
         {
             tracing::info!(pid = info.pid, port = info.port, "daemon started");
             return Ok(());
@@ -226,22 +226,6 @@ fn read_daemon_info() -> Option<daemon::DaemonInfo> {
     serde_json::from_str::<daemon::DaemonInfo>(&raw).ok()
 }
 
-fn daemon_pid_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    if pid == std::process::id() {
-        return true;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        false
-    }
-}
 
 fn init_logging() -> (WorkerGuard, WorkerGuard) {
     logging::setup_log_dir_and_retention();

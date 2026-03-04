@@ -9,16 +9,26 @@ use ring::rand::{SecureRandom, SystemRandom};
 
 use crate::error::{Error, Result};
 
+fn system_hostname() -> String {
+    let mut buf = [0u8; 256];
+    #[cfg(unix)]
+    {
+        // POSIX gethostname — works on macOS, Linux, and all Unix variants.
+        let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+        if rc == 0 {
+            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            if let Ok(name) = std::str::from_utf8(&buf[..len]) {
+                if !name.is_empty() {
+                    return name.to_string();
+                }
+            }
+        }
+    }
+    std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string())
+}
+
 fn machine_key_material() -> String {
-    let hostname = std::fs::read_to_string("/etc/hostname")
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let hostname = if hostname.is_empty() {
-        std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string())
-    } else {
-        hostname
-    };
+    let hostname = system_hostname();
     let user = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "unknown".to_string());
@@ -106,5 +116,48 @@ mod tests {
     #[test]
     fn too_short_blob_fails() {
         assert!(decrypt(&[0u8; 5]).is_err());
+    }
+
+    #[test]
+    fn system_hostname_returns_nonempty() {
+        let hostname = system_hostname();
+        assert!(!hostname.is_empty());
+        assert_ne!(hostname, "localhost", "should resolve real hostname via syscall, not fallback");
+    }
+
+    #[test]
+    fn system_hostname_matches_system_command() {
+        // Cross-check: our syscall should return the same value as `hostname` CLI.
+        let output = std::process::Command::new("hostname")
+            .output()
+            .expect("failed to run hostname command");
+        let expected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let actual = system_hostname();
+        assert_eq!(actual, expected, "syscall hostname should match `hostname` command output");
+    }
+
+    #[test]
+    fn machine_key_material_is_deterministic() {
+        // Same machine should always produce the same key material.
+        let a = machine_key_material();
+        let b = machine_key_material();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn machine_key_material_contains_hostname() {
+        let material = machine_key_material();
+        let hostname = system_hostname();
+        assert!(
+            material.contains(&hostname),
+            "key material '{material}' should contain hostname '{hostname}'"
+        );
+    }
+
+    #[test]
+    fn key_derivation_produces_valid_aes_key() {
+        // build_key() should not panic — verifies the full chain:
+        // system_hostname() → machine_key_material() → SHA-256 → AES-256-GCM key
+        let _key = build_key();
     }
 }

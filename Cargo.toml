@@ -5,7 +5,8 @@ edition = "2024"
 
 [dependencies]
 # Goose: in-process agent harness (ADR-008). default-features=false excludes V8/Deno.
-goose = { path = "../../references/goose/crates/goose", default-features = false }
+# Pinned to v1.26.0 tag. Bump rev when upgrading.
+goose = { git = "https://github.com/block/goose.git", rev = "bc50d110004cec83f1ce72a68d87c0f7688b39ea", default-features = false }
 anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
@@ -14,6 +15,7 @@ git2 = "0.20"
 dirs = "6"
 refinery = { version = "0.9", features = ["int8-versions"] }
 rmcp = { version = "0.15", features = ["server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+libc = "0.2"
 ring = "0.17"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros"] }
 schemars = "1"
