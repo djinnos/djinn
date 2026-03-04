@@ -273,6 +273,12 @@ enum SupervisorMessage {
         worktree_path: PathBuf,
         resume_prompt: String,
     },
+    CompactionNeeded {
+        task_id: String,
+        goose_session_id: String,
+        tokens_in: i64,
+        context_window: i64,
+    },
 }
 
 struct SessionClosure {
@@ -299,6 +305,8 @@ fn spawn_reply_task(
     global_cancel: CancellationToken,
     sender: mpsc::Sender<SupervisorMessage>,
     app_state: AppState,
+    context_window: i64,
+    session_manager: Arc<SessionManager>,
 ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
     tokio::spawn(async move {
         let mut output = ParsedAgentOutput::default();
@@ -309,6 +317,7 @@ fn spawn_reply_task(
             let assistant_role = GooseMessage::assistant().role;
             let mut assistant_message_count: usize = 0;
             let mut assistant_fragments: Vec<String> = Vec::new();
+            let mut compaction_signaled = false;
 
             let push_fragment = |fragments: &mut Vec<String>, value: String| {
                 const MAX_FRAGMENTS: usize = 12;
@@ -406,6 +415,41 @@ fn spawn_reply_task(
                                             push_fragment(&mut assistant_fragments, format!("{}", content));
                                             output.ingest_text(&content.to_string());
                                         }
+                                    }
+                                }
+
+                                // After each agent turn, check accumulated tokens against 80% of
+                                // the model's context window and signal if compaction is needed.
+                                if !compaction_signaled && context_window > 0 {
+                                    let goose_session = session_manager.get_session(&session_id, false).await;
+                                    let tokens_in = if let Ok(s) = goose_session {
+                                        s.accumulated_input_tokens
+                                            .or(s.input_tokens)
+                                            .unwrap_or(0) as i64
+                                    } else {
+                                        AgentSupervisor::tokens_from_goose_sqlite(&session_id)
+                                            .await
+                                            .map(|(ti, _)| ti)
+                                            .unwrap_or(0)
+                                    };
+                                    if tokens_in as f64 >= 0.8 * context_window as f64 {
+                                        compaction_signaled = true;
+                                        tracing::info!(
+                                            task_id = %task_id,
+                                            session_id = %session_id,
+                                            tokens_in,
+                                            context_window,
+                                            threshold_pct = 80,
+                                            "Supervisor: compaction threshold reached; signalling supervisor"
+                                        );
+                                        let _ = sender
+                                            .send(SupervisorMessage::CompactionNeeded {
+                                                task_id: task_id.clone(),
+                                                goose_session_id: session_id.clone(),
+                                                tokens_in,
+                                                context_window,
+                                            })
+                                            .await;
                                     }
                                 }
                             }
@@ -735,6 +779,21 @@ impl AgentSupervisor {
                 {
                     tracing::warn!(error = %e, "Supervisor: failed to dispatch resume session after verification failure");
                 }
+            }
+            SupervisorMessage::CompactionNeeded {
+                task_id,
+                goose_session_id,
+                tokens_in,
+                context_window,
+            } => {
+                tracing::info!(
+                    task_id = %task_id,
+                    goose_session_id = %goose_session_id,
+                    tokens_in,
+                    context_window,
+                    threshold_pct = 80,
+                    "Supervisor: compaction threshold exceeded; compaction flow not yet implemented"
+                );
             }
         }
     }
@@ -1072,6 +1131,12 @@ impl AgentSupervisor {
         if let Some(entry) = self.capacity.get_mut(&model_id) {
             entry.active += 1;
         }
+        let context_window = self
+            .app_state
+            .catalog()
+            .find_model(&model_id)
+            .map(|m| m.context_window)
+            .unwrap_or(0);
         let session_cancel = CancellationToken::new();
         let kickoff = GooseMessage::user().with_text(
             "Start by understanding the task context and execute it fully before stopping.",
@@ -1088,6 +1153,8 @@ impl AgentSupervisor {
             self.cancel.clone(),
             self.sender.clone(),
             self.app_state.clone(),
+            context_window,
+            self.session_manager.clone(),
         );
 
         self.sessions.insert(
@@ -1230,6 +1297,12 @@ impl AgentSupervisor {
             entry.active += 1;
         }
 
+        let context_window = self
+            .app_state
+            .catalog()
+            .find_model(&model_id)
+            .map(|m| m.context_window)
+            .unwrap_or(0);
         let session_cancel = CancellationToken::new();
         let kickoff = GooseMessage::user().with_text(&resume_prompt);
 
@@ -1245,6 +1318,8 @@ impl AgentSupervisor {
             self.cancel.clone(),
             self.sender.clone(),
             self.app_state.clone(),
+            context_window,
+            self.session_manager.clone(),
         );
 
         self.sessions.insert(
@@ -1568,6 +1643,12 @@ impl AgentSupervisor {
             entry.active += 1;
         }
 
+        let context_window = self
+            .app_state
+            .catalog()
+            .find_model(&model_id)
+            .map(|m| m.context_window)
+            .unwrap_or(0);
         let session_cancel = CancellationToken::new();
         let kickoff = GooseMessage::user().with_text(&context_message);
         let join = spawn_reply_task(
@@ -1582,6 +1663,8 @@ impl AgentSupervisor {
             self.cancel.clone(),
             self.sender.clone(),
             self.app_state.clone(),
+            context_window,
+            self.session_manager.clone(),
         );
 
         self.sessions.insert(
