@@ -10,6 +10,7 @@ use crate::mcp::tools::AnyJson;
 use crate::models::provider::{CustomProvider, Model, Provider, SeedModel};
 use crate::provider::validate::{self, ValidationRequest};
 use goose::config::Config as GooseConfig;
+use goose::config::paths::Paths as GoosePaths;
 use goose::providers::base::{ProviderMetadata, ProviderType};
 
 // ── Shared response helpers ───────────────────────────────────────────────────
@@ -115,9 +116,19 @@ fn provider_connection_status(
             .any(|env| credential_key_names.contains(env));
 
     let oauth_connected = !oauth_keys.is_empty()
-        && oauth_keys
-            .iter()
-            .any(|key| GooseConfig::global().get_secret::<String>(key).is_ok());
+        && oauth_keys.iter().any(|key| {
+            // Standard path: token stored in GooseConfig secret store.
+            if GooseConfig::global().get_secret::<String>(key).is_ok() {
+                return true;
+            }
+            // ChatGPT Codex stores its OAuth token in a file cache rather than
+            // GooseConfig secrets.  Check for the cache file existence.
+            if key == "CHATGPT_CODEX_TOKEN" {
+                let cache = GoosePaths::in_config_dir("chatgpt_codex/tokens.json");
+                return cache.exists();
+            }
+            false
+        });
 
     let mut methods = Vec::new();
     if credential_connected {

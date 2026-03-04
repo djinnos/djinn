@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
 use crate::models::provider::{Model, Pricing, Provider};
+use goose::providers::base::{ProviderMetadata, ProviderType};
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -193,6 +194,65 @@ impl CatalogService {
 
     // ── Write accessors ───────────────────────────────────────────────────────
 
+    /// Inject synthetic catalog entries for Goose-registered providers that have no
+    /// corresponding models.dev entry.  This makes providers like `chatgpt_codex` and
+    /// `gcp_vertex_ai` visible in `provider_catalog` without requiring them to exist
+    /// in the upstream models.dev JSON.
+    pub fn inject_goose_providers(&self, entries: &[(ProviderMetadata, ProviderType)]) {
+        let mut data = self.inner.write().unwrap();
+        let existing_ids: HashSet<String> = data.providers.iter().map(|p| p.id.clone()).collect();
+
+        for (meta, _) in entries {
+            if existing_ids.contains(&meta.name) {
+                continue;
+            }
+
+            let env_vars: Vec<String> = meta
+                .config_keys
+                .iter()
+                .filter(|k| k.required)
+                .map(|k| k.name.clone())
+                .collect();
+
+            let provider = Provider {
+                id: meta.name.clone(),
+                name: meta.display_name.clone(),
+                npm: String::new(),
+                env_vars,
+                base_url: String::new(),
+                docs_url: meta.model_doc_link.clone(),
+                is_openai_compatible: false, // filtered via goose_ids instead
+            };
+            data.providers.push(provider);
+
+            let models: Vec<Model> = meta
+                .known_models
+                .iter()
+                .map(|info| Model {
+                    id: info.name.clone(),
+                    provider_id: meta.name.clone(),
+                    name: info.name.clone(),
+                    tool_call: true,
+                    reasoning: false,
+                    attachment: false,
+                    context_window: info.context_limit as i64,
+                    output_limit: 0,
+                    pricing: Pricing {
+                        input_per_million: info.input_token_cost.unwrap_or(0.0) * 1_000_000.0,
+                        output_per_million: info.output_token_cost.unwrap_or(0.0) * 1_000_000.0,
+                        ..Pricing::default()
+                    },
+                })
+                .collect();
+
+            if !models.is_empty() {
+                data.models_idx.insert(meta.name.clone(), models);
+            }
+        }
+
+        data.providers.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+
     /// Add or replace a custom provider and its seed models in the in-memory catalog.
     /// Persisting to DB is the caller's responsibility.
     pub fn add_custom_provider(&self, provider: Provider, seed_models: Vec<Model>) {
@@ -342,5 +402,61 @@ mod tests {
         let providers = catalog.list_providers();
         assert_eq!(providers.len(), initial_count + 1);
         assert!(providers.iter().any(|p| p.id == "my-custom"));
+    }
+
+    #[test]
+    fn inject_goose_providers_adds_missing_entries() {
+        use goose::providers::base::{ConfigKey, ModelInfo};
+
+        let catalog = CatalogService::new();
+        let initial_count = catalog.list_providers().len();
+
+        // Simulate a Goose-only provider not in models.dev.
+        let meta = ProviderMetadata::new(
+            "test_oauth_provider",
+            "Test OAuth",
+            "An OAuth-only test provider",
+            "test-model-v1",
+            vec!["test-model-v1", "test-model-v2"],
+            "https://example.com/docs",
+            vec![ConfigKey::new_oauth("TEST_OAUTH_TOKEN", true, true, None, false)],
+        );
+        let entries = vec![(meta, ProviderType::Preferred)];
+        catalog.inject_goose_providers(&entries);
+
+        let providers = catalog.list_providers();
+        assert_eq!(providers.len(), initial_count + 1);
+
+        let injected = providers
+            .iter()
+            .find(|p| p.id == "test_oauth_provider")
+            .expect("injected provider should exist");
+        assert_eq!(injected.name, "Test OAuth");
+        assert!(!injected.is_openai_compatible);
+
+        let models = catalog.list_models("test_oauth_provider");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].provider_id, "test_oauth_provider");
+    }
+
+    #[test]
+    fn inject_goose_providers_skips_existing() {
+        let catalog = CatalogService::new();
+        let initial_count = catalog.list_providers().len();
+
+        // "anthropic" is already in the snapshot — should not be duplicated.
+        let meta = ProviderMetadata::new(
+            "anthropic",
+            "Anthropic (dupe)",
+            "",
+            "claude-3",
+            vec![],
+            "",
+            vec![],
+        );
+        let entries = vec![(meta, ProviderType::Preferred)];
+        catalog.inject_goose_providers(&entries);
+
+        assert_eq!(catalog.list_providers().len(), initial_count);
     }
 }
