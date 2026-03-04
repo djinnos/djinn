@@ -10,6 +10,9 @@ mod auth;
 mod commands;
 mod server;
 
+/// Server state managed by Tauri
+pub use server::ServerState;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -26,19 +29,73 @@ pub fn run() {
         // Managed state
         .manage(Mutex::new(server::init_server_state(8080)))
         
-        // Setup hook - spawn server sidecar, etc.
+        // Setup hook - spawn server sidecar, run health check loop
         .setup(|app| {
-            // TODO: Spawn server sidecar and start health check loop
-            // Server should start with window hidden, then show after health check passes
+            let app_handle = app.handle().clone();
             
-            let _app_handle = app.handle().clone();
-            
-            // Spawn server in background
-            // tauri::async_runtime::spawn(async move {
-            //     if let Err(e) = server::spawn_server(&app_handle, 8080).await {
-            //         eprintln!("Failed to spawn server: {}", e);
-            //     }
-            // });
+            // Spawn server discovery and health check in background
+            tauri::async_runtime::spawn(async move {
+                // First try to discover an existing server
+                let mut port = 8080;
+                
+                if let Some(discovered_port) = server::discover_server() {
+                    log::info!("Discovered existing server on port {}", discovered_port);
+                    port = discovered_port;
+                    
+                    // Update state with discovered port
+                    if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
+                        if let Ok(mut state) = state.lock() {
+                            state.port = port;
+                        }
+                    }
+                }
+                
+                // Run health check loop with exponential backoff
+                let max_retries = 10;
+                let mut retries = 0;
+                let mut interval_ms = 2000u64; // Start with 2 seconds
+                
+                log::info!("Starting health check loop for port {}", port);
+                
+                loop {
+                    if server::health_check(port).await {
+                        log::info!("Server on port {} is healthy", port);
+                        
+                        // Update state to mark as healthy
+                        if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
+                            if let Ok(mut state) = state.lock() {
+                                state.port = port;
+                            }
+                        }
+                        
+                        // Show the main window once server is healthy
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                        
+                        break;
+                    }
+                    
+                    retries += 1;
+                    if retries >= max_retries {
+                        log::error!("Health check failed after {} retries", max_retries);
+                        break;
+                    }
+                    
+                    log::debug!(
+                        "Health check failed, retrying in {}ms (attempt {}/{ })",
+                        interval_ms,
+                        retries,
+                        max_retries
+                    );
+                    
+                    tokio::time::sleep(tokio::time::Duration::from_millis(interval_ms)).await;
+                    
+                    // Exponential backoff: double the interval, cap at 30 seconds
+                    interval_ms = (interval_ms * 2).min(30000);
+                }
+            });
             
             Ok(())
         })

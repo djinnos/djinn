@@ -1,5 +1,6 @@
-use tauri::AppHandle;
-use crate::server;
+use std::sync::Mutex;
+use tauri::State;
+use crate::server::ServerState;
 
 /// Greet command - sample command for testing
 #[tauri::command]
@@ -9,19 +10,12 @@ pub fn greet(name: &str) -> String {
 
 /// Get server port from app state
 /// 
-/// Attempts to discover a running server via daemon.json first,
-/// falling back to the default port if no server is found.
+/// Reads the port from the ServerState managed by Tauri.
+/// This returns the port that the backend server is expected to be running on.
 #[tauri::command]
-pub fn get_server_port(_app: AppHandle) -> Result<u16, String> {
-    // Try to discover an existing server
-    if let Some(port) = server::discover_server() {
-        log::info!("Discovered server on port {}", port);
-        return Ok(port);
-    }
-    
-    // Fall back to default port
-    log::debug!("No server discovered, using default port 8080");
-    Ok(8080)
+pub fn get_server_port(state: State<Mutex<ServerState>>) -> Result<u16, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    Ok(state.port)
 }
 
 /// Get authentication token
