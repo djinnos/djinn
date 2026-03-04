@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { getServerPort } from "@/tauri/commands";
+import { getServerStatus, retryServerDiscovery } from "@/tauri/commands";
 
 export type ConnectionStatus = "loading" | "connected" | "error";
 
@@ -7,27 +7,35 @@ export interface ServerHealthState {
   status: ConnectionStatus;
   port: number | null;
   error: string | null;
+  retry: () => Promise<void>;
+  isRetrying: boolean;
 }
 
-const POLL_INTERVAL_MS = 1000;
-const MAX_RETRIES = 30;
+const POLL_INTERVAL_MS = 2000;
 
 export function useServerHealth(): ServerHealthState {
   const [status, setStatus] = useState<ConnectionStatus>("loading");
   const [port, setPort] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isRetrying, setIsRetrying] = useState(false);
 
-  const checkHealth = useCallback(async () => {
+  const checkStatus = useCallback(async () => {
     try {
-      const serverPort = await getServerPort();
-      
-      if (serverPort > 0) {
-        setPort(serverPort);
+      const serverStatus = await getServerStatus();
+
+      if (serverStatus.is_healthy && serverStatus.port) {
+        setPort(serverStatus.port);
         setStatus("connected");
         setError(null);
         return true;
       }
-      
+
+      if (serverStatus.has_error) {
+        setStatus("error");
+        setError(serverStatus.error_message || "Failed to connect to server");
+        return false;
+      }
+
       return false;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
@@ -35,42 +43,38 @@ export function useServerHealth(): ServerHealthState {
     }
   }, []);
 
+  const retry = useCallback(async () => {
+    setIsRetrying(true);
+    try {
+      setStatus("loading");
+      setError(null);
+      await retryServerDiscovery();
+      // Wait a moment then check status
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      await checkStatus();
+    } catch (err) {
+      setStatus("error");
+      setError(err instanceof Error ? err.message : "Failed to retry connection");
+    } finally {
+      setIsRetrying(false);
+    }
+  }, [checkStatus]);
+
   useEffect(() => {
-    let retries = 0;
-    let intervalId: ReturnType<typeof setInterval> | null = null;
+    // Initial check
+    checkStatus();
 
-    const poll = async () => {
-      const isHealthy = await checkHealth();
-      
-      if (isHealthy) {
-        if (intervalId) {
-          clearInterval(intervalId);
-          intervalId = null;
-        }
-        return;
+    // Poll while not connected
+    const intervalId = setInterval(() => {
+      if (status !== "connected") {
+        checkStatus();
       }
-
-      retries++;
-      if (retries >= MAX_RETRIES) {
-        setStatus("error");
-        setError("Failed to connect to server after maximum retries");
-        if (intervalId) {
-          clearInterval(intervalId);
-          intervalId = null;
-        }
-      }
-    };
-
-    poll();
-
-    intervalId = setInterval(poll, POLL_INTERVAL_MS);
+    }, POLL_INTERVAL_MS);
 
     return () => {
-      if (intervalId) {
-        clearInterval(intervalId);
-      }
+      clearInterval(intervalId);
     };
-  }, [checkHealth]);
+  }, [checkStatus, status]);
 
-  return { status, port, error };
+  return { status, port, error, retry, isRetrying };
 }
