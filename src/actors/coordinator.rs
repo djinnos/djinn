@@ -76,8 +76,12 @@ enum CoordinatorMessage {
         project_id: Option<String>,
         respond_to: Reply<CoordinatorStatus>,
     },
-    /// Pause dispatch for one project.
-    PauseProject { project_id: String },
+    /// Pause dispatch for one project, optionally interrupting active sessions.
+    PauseProject {
+        project_id: String,
+        interrupt_active: bool,
+        reason: String,
+    },
     /// Update runtime dispatch limit from settings reload.
     UpdateDispatchLimit { limit: usize },
     /// Update per-role model priority list from settings reload.
@@ -214,11 +218,24 @@ impl CoordinatorActor {
                     }
                 }
             }
-            CoordinatorMessage::PauseProject { project_id } => {
+            CoordinatorMessage::PauseProject {
+                project_id,
+                interrupt_active,
+                reason,
+            } => {
                 if self.paused {
                     self.resumed_projects.remove(&project_id);
                 } else {
-                    self.paused_projects.insert(project_id);
+                    self.paused_projects.insert(project_id.clone());
+                }
+                if interrupt_active {
+                    if let Err(e) = self.supervisor.interrupt_project(&project_id, &reason).await {
+                        tracing::warn!(
+                            project_id = %project_id,
+                            error = %e,
+                            "CoordinatorActor: failed to interrupt project sessions on pause"
+                        );
+                    }
                 }
             }
             CoordinatorMessage::Resume => {
@@ -352,8 +369,25 @@ impl CoordinatorActor {
                 return Vec::new();
             }
 
-            let credential_provider_ids: HashSet<String> =
+            let mut credential_provider_ids: HashSet<String> =
                 credentials.iter().map(|c| c.provider_id.clone()).collect();
+
+            // Also consider OAuth-connected providers (e.g. chatgpt_codex).
+            let goose_entries =
+                crate::mcp::tools::provider_tools::goose_provider_entries().await;
+            for provider in self.catalog.list_providers() {
+                let oauth_keys =
+                    crate::mcp::tools::provider_tools::oauth_keys_for_provider(
+                        &provider.id,
+                        &goose_entries,
+                    );
+                if !oauth_keys.is_empty()
+                    && crate::mcp::tools::provider_tools::is_oauth_key_present(&oauth_keys)
+                {
+                    credential_provider_ids.insert(provider.id.clone());
+                }
+            }
+
             let mut selected = Vec::new();
             let mut seen = HashSet::new();
 
@@ -396,6 +430,15 @@ impl CoordinatorActor {
                 return selected;
             }
 
+            // When model_priorities are configured but none resolved (e.g. provider
+            // disconnected), do NOT fall back to enumerating every credential —
+            // that spawns sessions for random models the user never configured.
+            if !self.model_priorities.is_empty() {
+                return selected; // empty — dispatch_ready_tasks will skip
+            }
+
+            // Only enumerate all providers when NO priorities are configured at all
+            // (backwards compat for unconfigured setups).
             for cred in &credentials {
                 let models = self.catalog.list_models(&cred.provider_id);
                 // Prefer a model with tool_call capability.
@@ -880,6 +923,21 @@ impl CoordinatorHandle {
     pub async fn pause_project(&self, project_id: &str) -> Result<(), CoordinatorError> {
         self.send(CoordinatorMessage::PauseProject {
             project_id: project_id.to_owned(),
+            interrupt_active: false,
+            reason: String::new(),
+        })
+        .await
+    }
+
+    pub async fn pause_project_immediate(
+        &self,
+        project_id: &str,
+        reason: &str,
+    ) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::PauseProject {
+            project_id: project_id.to_owned(),
+            interrupt_active: true,
+            reason: reason.to_owned(),
         })
         .await
     }

@@ -133,8 +133,12 @@ impl DjinnMcpServer {
         let pause_result = match (mode, project_id.as_deref()) {
             ("graceful", Some(id)) => coordinator.pause_project(id).await,
             ("graceful", None) => coordinator.pause().await,
-            ("immediate", Some(_)) => {
-                return json_error("execution_pause(immediate) is only supported for global scope");
+            ("immediate", Some(id)) => {
+                let reason = p
+                    .reason
+                    .as_deref()
+                    .unwrap_or("session interrupted by execution_pause(immediate)");
+                coordinator.pause_project_immediate(id, reason).await
             }
             ("immediate", None) => {
                 let reason = p

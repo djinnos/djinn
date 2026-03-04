@@ -1013,16 +1013,16 @@ mod tests {
 
         handle.create_branch("abc1", "main").await.unwrap();
 
-        // Branch exists locally.
+        // Branch ref exists locally.
         let out = handle
             .run_command(vec!["branch".into(), "--list".into(), "task/abc1".into()])
             .await
             .unwrap();
         assert!(out.stdout.contains("task/abc1"));
 
-        // HEAD is on the new branch.
+        // create_branch only creates the ref — HEAD stays on main.
         let branch = handle.current_branch().await.unwrap();
-        assert_eq!(branch, "task/abc1");
+        assert_eq!(branch, "main");
     }
 
     /// `squash_merge` produces a single commit on the target branch (GIT-03).
@@ -1064,13 +1064,25 @@ mod tests {
 
         assert_eq!(result.commit_sha.len(), 40, "commit SHA should be 40 chars");
 
-        // `main` should have exactly 2 commits: init + squash.
+        // Squash merge pushes to origin/main. Fetch and check the remote ref.
+        handle
+            .run_command(vec!["fetch".into(), "origin".into()])
+            .await
+            .unwrap();
         let log = handle
-            .run_command(vec!["log".into(), "--oneline".into(), "main".into()])
+            .run_command(vec![
+                "log".into(),
+                "--oneline".into(),
+                "origin/main".into(),
+            ])
             .await
             .unwrap();
         let lines: Vec<&str> = log.stdout.lines().collect();
-        assert_eq!(lines.len(), 2, "main should have init + squash commit");
+        assert_eq!(
+            lines.len(),
+            2,
+            "origin/main should have init + squash commit"
+        );
         assert!(lines[0].contains("squashed feature"));
     }
 
@@ -1225,6 +1237,13 @@ mod tests {
             .unwrap();
         std::process::Command::new("git")
             .args(["commit", "-m", "main change"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        // Push so that origin/main has the conflicting change (squash_merge
+        // uses a detached worktree from origin/<target>).
+        std::process::Command::new("git")
+            .args(["push", "origin", "main"])
             .current_dir(path)
             .output()
             .unwrap();

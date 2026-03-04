@@ -218,6 +218,11 @@ enum SupervisorMessage {
         reason: String,
         respond_to: Reply<()>,
     },
+    InterruptProject {
+        project_id: String,
+        reason: String,
+        respond_to: Reply<()>,
+    },
     GetStatus {
         respond_to: Reply<SupervisorStatus>,
     },
@@ -255,6 +260,7 @@ struct AgentSupervisor {
     capacity: HashMap<String, ModelCapacity>,
     session_models: HashMap<String, String>,
     session_agent_types: HashMap<String, AgentType>,
+    session_projects: HashMap<String, String>,
     task_session_records: HashMap<String, String>,
     interrupted_sessions: HashSet<String>,
     default_max_sessions: u32,
@@ -280,6 +286,7 @@ impl AgentSupervisor {
             capacity: HashMap::new(),
             session_models: HashMap::new(),
             session_agent_types: HashMap::new(),
+            session_projects: HashMap::new(),
             task_session_records: HashMap::new(),
             interrupted_sessions: HashSet::new(),
             default_max_sessions: 1,
@@ -381,6 +388,14 @@ impl AgentSupervisor {
             }
             SupervisorMessage::InterruptAll { reason, respond_to } => {
                 self.interrupt_all_sessions(&reason).await;
+                let _ = respond_to.send(Ok(()));
+            }
+            SupervisorMessage::InterruptProject {
+                project_id,
+                reason,
+                respond_to,
+            } => {
+                self.interrupt_project_sessions(&project_id, &reason).await;
                 let _ = respond_to.send(Ok(()));
             }
             SupervisorMessage::UpdateMaxSessions { max, respond_to } => {
@@ -875,6 +890,8 @@ impl AgentSupervisor {
             },
         );
         self.session_models.insert(task_id.clone(), model_id);
+        self.session_projects
+            .insert(task_id.clone(), task.project_id.clone());
         self.task_session_records
             .insert(task_id.clone(), session_record.id);
         self.session_agent_types.insert(task_id, agent_type);
@@ -942,6 +959,7 @@ impl AgentSupervisor {
             .session_agent_types
             .remove(&task_id)
             .unwrap_or(AgentType::Worker);
+        self.session_projects.remove(&task_id);
         let session_record_id = self.task_session_records.remove(&task_id);
         let goose_session_id = handle.session_id.clone();
 
@@ -987,6 +1005,7 @@ impl AgentSupervisor {
             .map(|h| h.session_id.clone())
             .unwrap_or_else(|| format!("unknown-session-{task_id}"));
         self.decrement_capacity(task_id);
+        self.session_projects.remove(task_id);
         SessionClosure {
             model_id: self.session_models.remove(task_id),
             agent_type: self
@@ -2201,37 +2220,30 @@ impl AgentSupervisor {
             .await;
     }
 
-    async fn interrupt_all_sessions(&mut self, reason: &str) {
-        struct PendingSession {
-            task_id: String,
-            join: tokio::task::JoinHandle<anyhow::Result<()>>,
-            worktree_path: Option<PathBuf>,
-            model_id: Option<String>,
-            agent_type: AgentType,
-            goose_session_id: String,
-            session_record_id: Option<String>,
+    fn collect_pending_session(
+        &mut self,
+        task_id: String,
+        mut handle: GooseSessionHandle,
+    ) -> PendingInterrupt {
+        handle.cancel.cancel();
+        self.interrupted_sessions.insert(task_id.clone());
+        PendingInterrupt {
+            model_id: self.session_models.remove(&task_id),
+            agent_type: self
+                .session_agent_types
+                .remove(&task_id)
+                .unwrap_or(AgentType::Worker),
+            session_record_id: self.task_session_records.remove(&task_id),
+            goose_session_id: handle.session_id,
+            join: handle.join,
+            worktree_path: handle.worktree_path.take(),
+            task_id,
         }
+    }
 
-        let mut pending = Vec::new();
-        for (task_id, mut handle) in std::mem::take(&mut self.sessions) {
-            handle.cancel.cancel();
-            self.interrupted_sessions.insert(task_id.clone());
-            pending.push(PendingSession {
-                model_id: self.session_models.remove(&task_id),
-                agent_type: self
-                    .session_agent_types
-                    .remove(&task_id)
-                    .unwrap_or(AgentType::Worker),
-                session_record_id: self.task_session_records.remove(&task_id),
-                task_id,
-                join: handle.join,
-                worktree_path: handle.worktree_path.take(),
-                goose_session_id: handle.session_id,
-            });
-        }
-
+    async fn drain_pending_sessions(&mut self, pending: &mut Vec<PendingInterrupt>, reason: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
-        for item in &mut pending {
+        for item in pending.iter_mut() {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 item.join.abort();
@@ -2247,7 +2259,7 @@ impl AgentSupervisor {
             }
         }
 
-        for item in pending {
+        for item in pending.drain(..) {
             self.decrement_capacity_for_model(item.model_id.as_deref());
             if let Some(worktree_path) = item.worktree_path.as_ref() {
                 self.commit_wip_if_needed(&item.task_id, worktree_path)
@@ -2266,6 +2278,43 @@ impl AgentSupervisor {
                 .await;
         }
     }
+
+    async fn interrupt_all_sessions(&mut self, reason: &str) {
+        let mut pending: Vec<PendingInterrupt> = Vec::new();
+        for (task_id, handle) in std::mem::take(&mut self.sessions) {
+            self.session_projects.remove(&task_id);
+            pending.push(self.collect_pending_session(task_id, handle));
+        }
+        self.drain_pending_sessions(&mut pending, reason).await;
+    }
+
+    async fn interrupt_project_sessions(&mut self, project_id: &str, reason: &str) {
+        let matching_task_ids: Vec<String> = self
+            .session_projects
+            .iter()
+            .filter(|(_, pid)| *pid == project_id)
+            .map(|(tid, _)| tid.clone())
+            .collect();
+
+        let mut pending: Vec<PendingInterrupt> = Vec::new();
+        for task_id in matching_task_ids {
+            self.session_projects.remove(&task_id);
+            if let Some(handle) = self.sessions.remove(&task_id) {
+                pending.push(self.collect_pending_session(task_id, handle));
+            }
+        }
+        self.drain_pending_sessions(&mut pending, reason).await;
+    }
+}
+
+struct PendingInterrupt {
+    task_id: String,
+    join: tokio::task::JoinHandle<anyhow::Result<()>>,
+    worktree_path: Option<PathBuf>,
+    model_id: Option<String>,
+    agent_type: AgentType,
+    goose_session_id: String,
+    session_record_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2341,6 +2390,19 @@ impl AgentSupervisorHandle {
     ) -> Result<Option<RunningSessionInfo>, SupervisorError> {
         self.request(|tx| SupervisorMessage::GetSessionForTask {
             task_id: task_id.to_owned(),
+            respond_to: tx,
+        })
+        .await
+    }
+
+    pub async fn interrupt_project(
+        &self,
+        project_id: &str,
+        reason: &str,
+    ) -> Result<(), SupervisorError> {
+        self.request(|tx| SupervisorMessage::InterruptProject {
+            project_id: project_id.to_owned(),
+            reason: reason.to_owned(),
             respond_to: tx,
         })
         .await

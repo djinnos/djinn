@@ -131,9 +131,15 @@ mod tests {
     #[test]
     fn system_hostname_matches_system_command() {
         // Cross-check: our syscall should return the same value as `hostname` CLI.
-        let output = std::process::Command::new("hostname")
-            .output()
-            .expect("failed to run hostname command");
+        let output = match std::process::Command::new("hostname").output() {
+            Ok(o) => o,
+            Err(_) => {
+                // `hostname` binary may not exist on minimal systems (e.g. Arch
+                // without inetutils). Skip rather than fail.
+                eprintln!("skipping: hostname command not found");
+                return;
+            }
+        };
         let expected = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let actual = system_hostname();
         assert_eq!(

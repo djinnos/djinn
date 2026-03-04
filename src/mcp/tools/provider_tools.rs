@@ -180,6 +180,14 @@ pub struct ProviderCatalogResponse {
     pub total: i64,
 }
 
+// ── provider_connected ────────────────────────────────────────────────────────
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProviderConnectedResponse {
+    pub providers: Vec<AnyJson>,
+    pub total: i64,
+}
+
 // ── provider_models ───────────────────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema)]
@@ -191,6 +199,14 @@ pub struct ProviderModelsInput {
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderModelsResponse {
     pub provider_id: String,
+    pub models: Vec<AnyJson>,
+    pub total: i64,
+}
+
+// ── provider_models_connected ─────────────────────────────────────────────────
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProviderModelsConnectedResponse {
     pub models: Vec<AnyJson>,
     pub total: i64,
 }
@@ -413,6 +429,61 @@ impl DjinnMcpServer {
         Json(ProviderCatalogResponse { providers, total })
     }
 
+    /// List only connected providers (those with a stored credential or OAuth token).
+    #[tool(
+        description = "List connected providers only. Returns providers that have a stored API key or active OAuth token."
+    )]
+    pub async fn provider_connected(&self) -> Json<ProviderConnectedResponse> {
+        let goose_ids = goose_provider_ids().await;
+        let goose_entries = goose_provider_entries().await;
+        let credential_repo =
+            CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
+        let (credential_provider_ids, credential_key_names) = match credential_repo.list().await {
+            Ok(creds) => {
+                let provider_ids = creds.iter().map(|c| c.provider_id.clone()).collect();
+                let key_names = creds.iter().map(|c| c.key_name.clone()).collect();
+                (provider_ids, key_names)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "provider_connected: failed to load credentials");
+                (HashSet::new(), HashSet::new())
+            }
+        };
+
+        let providers: Vec<AnyJson> = self
+            .state
+            .catalog()
+            .list_providers()
+            .iter()
+            .filter(|p| is_provider_usable_by_goose(p, &goose_ids))
+            .filter_map(|p| {
+                let mut value = provider_to_json(p);
+                let oauth_keys = oauth_keys_for_provider(&p.id, &goose_entries);
+                let (connected, methods) = provider_connection_status(
+                    p,
+                    &oauth_keys,
+                    &credential_provider_ids,
+                    &credential_key_names,
+                );
+                if !connected {
+                    return None;
+                }
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("connected".into(), serde_json::json!(true));
+                    obj.insert(
+                        "oauth_supported".into(),
+                        serde_json::json!(!oauth_keys.is_empty()),
+                    );
+                    obj.insert("oauth_keys".into(), serde_json::json!(oauth_keys));
+                    obj.insert("connection_methods".into(), serde_json::json!(methods));
+                }
+                Some(AnyJson::from(value))
+            })
+            .collect();
+        let total = i64::try_from(providers.len()).unwrap_or(i64::MAX);
+        Json(ProviderConnectedResponse { providers, total })
+    }
+
     /// List all models for a provider. Each model includes capabilities
     /// (tool_call, reasoning, attachment), context limits, and per-million-token pricing.
     #[tool(
@@ -457,6 +528,60 @@ impl DjinnMcpServer {
             models,
             total,
         })
+    }
+
+    /// List all models across all connected providers in a single call.
+    #[tool(
+        description = "List all available models across all connected providers. Returns models grouped by provider with capabilities and pricing."
+    )]
+    pub async fn provider_models_connected(&self) -> Json<ProviderModelsConnectedResponse> {
+        let goose_ids = goose_provider_ids().await;
+        let goose_entries = goose_provider_entries().await;
+        let credential_repo =
+            CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
+        let (credential_provider_ids, credential_key_names) = match credential_repo.list().await {
+            Ok(creds) => {
+                let provider_ids = creds.iter().map(|c| c.provider_id.clone()).collect();
+                let key_names = creds.iter().map(|c| c.key_name.clone()).collect();
+                (provider_ids, key_names)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "provider_models_connected: failed to load credentials");
+                (HashSet::new(), HashSet::new())
+            }
+        };
+
+        let connected_provider_ids: Vec<String> = self
+            .state
+            .catalog()
+            .list_providers()
+            .iter()
+            .filter(|p| is_provider_usable_by_goose(p, &goose_ids))
+            .filter(|p| {
+                let oauth_keys = oauth_keys_for_provider(&p.id, &goose_entries);
+                let (connected, _) = provider_connection_status(
+                    p,
+                    &oauth_keys,
+                    &credential_provider_ids,
+                    &credential_key_names,
+                );
+                connected
+            })
+            .map(|p| p.id.clone())
+            .collect();
+
+        let models: Vec<AnyJson> = connected_provider_ids
+            .iter()
+            .flat_map(|pid| {
+                self.state
+                    .catalog()
+                    .list_models(pid)
+                    .into_iter()
+                    .map(|m| AnyJson::from(model_to_json(&m)))
+            })
+            .collect();
+        let total = i64::try_from(models.len()).unwrap_or(i64::MAX);
+        Json(ProviderModelsConnectedResponse { models, total })
     }
 
     /// Start OAuth authentication flow for a Goose provider that supports OAuth.
