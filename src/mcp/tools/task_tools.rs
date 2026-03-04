@@ -4,6 +4,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 
 use crate::db::repositories::epic::EpicRepository;
+use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::{
     ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository,
@@ -1244,6 +1245,80 @@ impl DjinnMcpServer {
                         .is_ok()
                 };
 
+                // ── batch-* worktree cleanup (ADR-016) ───────────────────
+                let mut stale_batch_worktrees: Vec<String> = Vec::new();
+                let project_repo =
+                    ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
+                if let Ok(Some(project)) = project_repo.get(&project_id).await {
+                    let project_path = std::path::PathBuf::from(&project.path);
+                    let worktrees_dir = project_path.join(".djinn").join("worktrees");
+
+                    // Collect active worktree paths from live supervisor sessions.
+                    let active_worktree_paths: std::collections::HashSet<String> =
+                        match supervisor.get_status().await {
+                            Ok(status) => status
+                                .running_sessions
+                                .into_iter()
+                                .filter_map(|s| s.worktree_path)
+                                .collect(),
+                            Err(_) => std::collections::HashSet::new(),
+                        };
+
+                    if let Ok(entries) = std::fs::read_dir(&worktrees_dir) {
+                        let batch_dirs: Vec<std::path::PathBuf> = entries
+                            .filter_map(|e| e.ok())
+                            .filter(|e| {
+                                e.file_name()
+                                    .to_str()
+                                    .map(|n| n.starts_with("batch-"))
+                                    .unwrap_or(false)
+                                    && e.path().is_dir()
+                            })
+                            .map(|e| e.path())
+                            .collect();
+
+                        if !batch_dirs.is_empty() {
+                            if let Ok(git) = self.state.git_actor(&project_path).await {
+                                for batch_dir in batch_dirs {
+                                    let batch_str = batch_dir.display().to_string();
+                                    if active_worktree_paths.contains(&batch_str) {
+                                        continue;
+                                    }
+                                    tracing::info!(
+                                        project_id = %project_id,
+                                        worktree = %batch_dir.display(),
+                                        "board_reconcile: removing stale batch-* worktree"
+                                    );
+                                    if let Err(e) = git.remove_worktree(&batch_dir).await {
+                                        tracing::warn!(
+                                            project_id = %project_id,
+                                            worktree = %batch_dir.display(),
+                                            error = %e,
+                                            "board_reconcile: failed to remove stale batch worktree"
+                                        );
+                                    } else {
+                                        stale_batch_worktrees.push(
+                                            batch_dir
+                                                .file_name()
+                                                .unwrap_or_default()
+                                                .to_string_lossy()
+                                                .into_owned(),
+                                        );
+                                    }
+                                }
+                                if !stale_batch_worktrees.is_empty() {
+                                    let _ = git
+                                        .run_command(vec![
+                                            "worktree".into(),
+                                            "prune".into(),
+                                        ])
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if let Some(obj) = result.as_object_mut() {
                     obj.insert(
                         "stale_sessions_finalized".to_string(),
@@ -1256,6 +1331,14 @@ impl DjinnMcpServer {
                     obj.insert(
                         "recovery_triggered".to_string(),
                         serde_json::json!(recovery_triggered),
+                    );
+                    obj.insert(
+                        "stale_batch_worktrees_removed".to_string(),
+                        serde_json::json!(stale_batch_worktrees.len()),
+                    );
+                    obj.insert(
+                        "stale_batch_worktrees".to_string(),
+                        serde_json::json!(stale_batch_worktrees),
                     );
                 }
 
