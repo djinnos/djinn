@@ -56,6 +56,7 @@ The 26-tool execution surface collapses to ~6 tools:
 - Session capacity is configured per model via `max_sessions` (map of `provider/model` -> integer).
 - Total executor capacity is the sum of all configured model capacities.
 - Coordinator routing uses per-role model priority lists and attempts fallback models in order when a higher-priority model is at capacity or unavailable.
+- Execution controls support both global scope and project scope: global start dispatches across all currently registered projects, while project-scoped start/pause/resume only affects that project.
 
 ## Relations
 

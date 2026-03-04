@@ -46,6 +46,7 @@ pub enum CoordinatorError {
 #[derive(Debug, Clone)]
 pub struct CoordinatorStatus {
     pub paused: bool,
+    pub global_paused: bool,
     pub tasks_dispatched: u64,
     pub sessions_recovered: u64,
 }
@@ -57,6 +58,8 @@ type Reply<T> = oneshot::Sender<T>;
 enum CoordinatorMessage {
     /// Run an immediate dispatch pass for all ready tasks.
     TriggerDispatch,
+    /// Run an immediate dispatch pass for a specific project.
+    TriggerProjectDispatch { project_id: String },
     /// Pause dispatch — no new sessions will start until `Resume`.
     Pause {
         /// If true, interrupt all active sessions immediately.
@@ -66,10 +69,15 @@ enum CoordinatorMessage {
     },
     /// Resume dispatch and immediately run a dispatch pass.
     Resume,
+    /// Resume dispatch for one project.
+    ResumeProject { project_id: String },
     /// Return current coordinator status.
     GetStatus {
+        project_id: Option<String>,
         respond_to: Reply<CoordinatorStatus>,
     },
+    /// Pause dispatch for one project.
+    PauseProject { project_id: String },
     /// Update runtime dispatch limit from settings reload.
     UpdateDispatchLimit { limit: usize },
     /// Update per-role model priority list from settings reload.
@@ -96,6 +104,8 @@ struct CoordinatorActor {
     health: HealthTracker,
     // State
     paused: bool,
+    paused_projects: HashSet<String>,
+    resumed_projects: HashSet<String>,
     dispatch_limit: usize,
     model_priorities: HashMap<String, Vec<String>>,
     // Metrics
@@ -130,6 +140,8 @@ impl CoordinatorActor {
             catalog,
             health,
             paused: true,
+            paused_projects: HashSet::new(),
+            resumed_projects: HashSet::new(),
             dispatch_limit: 50,
             model_priorities: HashMap::new(),
             dispatched: 0,
@@ -178,8 +190,11 @@ impl CoordinatorActor {
         match msg {
             CoordinatorMessage::TriggerDispatch => {
                 if !self.paused {
-                    self.dispatch_ready_tasks().await;
+                    self.dispatch_ready_tasks(None).await;
                 }
+            }
+            CoordinatorMessage::TriggerProjectDispatch { project_id } => {
+                self.dispatch_ready_tasks(Some(&project_id)).await;
             }
             CoordinatorMessage::Pause {
                 interrupt_active,
@@ -188,22 +203,49 @@ impl CoordinatorActor {
                 if !self.paused {
                     tracing::info!("CoordinatorActor: paused");
                     self.paused = true;
+                    self.paused_projects.clear();
+                    self.resumed_projects.clear();
                     if interrupt_active && let Err(e) = self.supervisor.interrupt_all(&reason).await
                     {
                         tracing::warn!(error = %e, "CoordinatorActor: failed to interrupt active sessions on pause");
                     }
                 }
             }
+            CoordinatorMessage::PauseProject { project_id } => {
+                if self.paused {
+                    self.resumed_projects.remove(&project_id);
+                } else {
+                    self.paused_projects.insert(project_id);
+                }
+            }
             CoordinatorMessage::Resume => {
                 if self.paused {
                     tracing::info!("CoordinatorActor: resumed");
                     self.paused = false;
-                    self.dispatch_ready_tasks().await;
+                    self.paused_projects.clear();
+                    self.resumed_projects.clear();
+                    self.dispatch_ready_tasks(None).await;
                 }
             }
-            CoordinatorMessage::GetStatus { respond_to } => {
+            CoordinatorMessage::ResumeProject { project_id } => {
+                if self.paused {
+                    self.resumed_projects.insert(project_id.clone());
+                } else {
+                    self.paused_projects.remove(&project_id);
+                }
+                self.dispatch_ready_tasks(Some(&project_id)).await;
+            }
+            CoordinatorMessage::GetStatus {
+                project_id,
+                respond_to,
+            } => {
+                let paused = project_id
+                    .as_deref()
+                    .map(|id| !self.is_project_dispatch_enabled(id))
+                    .unwrap_or(self.paused);
                 let _ = respond_to.send(CoordinatorStatus {
-                    paused: self.paused,
+                    paused,
+                    global_paused: self.paused,
                     tasks_dispatched: self.dispatched,
                     sessions_recovered: self.recovered,
                 });
@@ -244,7 +286,7 @@ impl CoordinatorActor {
                 );
                 self.events = self.events_tx.subscribe();
                 if !self.paused {
-                    self.dispatch_ready_tasks().await;
+                    self.dispatch_ready_tasks(None).await;
                 }
             }
             Err(broadcast::error::RecvError::Closed) => {
@@ -264,9 +306,17 @@ impl CoordinatorActor {
                     task_id = %t.short_id,
                     "CoordinatorActor: open-task event → dispatch pass"
                 );
-                self.dispatch_ready_tasks().await;
+                self.dispatch_ready_tasks(Some(&t.project_id)).await;
             }
             _ => {}
+        }
+    }
+
+    fn is_project_dispatch_enabled(&self, project_id: &str) -> bool {
+        if self.paused {
+            self.resumed_projects.contains(project_id)
+        } else {
+            !self.paused_projects.contains(project_id)
         }
     }
 
@@ -368,7 +418,7 @@ impl CoordinatorActor {
 
     /// Find all ready tasks (open, no unresolved blockers, non-epic) and dispatch
     /// those that don't already have an active session.
-    async fn dispatch_ready_tasks(&mut self) {
+    async fn dispatch_ready_tasks(&mut self, project_filter: Option<&str>) {
         let mut role_models: HashMap<&'static str, Vec<String>> = HashMap::new();
         for role in ["worker", "task_reviewer", "epic_reviewer"] {
             let model_ids = self.resolve_dispatch_models_for_role(role).await;
@@ -415,6 +465,15 @@ impl CoordinatorActor {
         });
 
         for task in ready {
+            if let Some(project_id) = project_filter
+                && task.project_id != project_id
+            {
+                continue;
+            }
+            if !self.is_project_dispatch_enabled(&task.project_id) {
+                continue;
+            }
+
             let role = Self::role_for_task_status(&task.status);
             let Some(model_ids) = role_models.get(role) else {
                 tracing::debug!(task_id = %task.short_id, role, "CoordinatorActor: no model configured for task role");
@@ -560,7 +619,7 @@ impl CoordinatorActor {
 
         // After releasing stuck tasks, immediately try to dispatch the now-open tasks.
         if any_recovered {
-            self.dispatch_ready_tasks().await;
+            self.dispatch_ready_tasks(None).await;
         }
     }
 
@@ -615,11 +674,28 @@ impl CoordinatorHandle {
         self.send(CoordinatorMessage::TriggerDispatch).await
     }
 
+    pub async fn trigger_dispatch_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::TriggerProjectDispatch {
+            project_id: project_id.to_owned(),
+        })
+        .await
+    }
+
     /// Pause dispatch (no new sessions will start).
     pub async fn pause(&self) -> Result<(), CoordinatorError> {
         self.send(CoordinatorMessage::Pause {
             interrupt_active: false,
             reason: "session interrupted by coordinator pause".to_string(),
+        })
+        .await
+    }
+
+    pub async fn pause_project(&self, project_id: &str) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::PauseProject {
+            project_id: project_id.to_owned(),
         })
         .await
     }
@@ -638,10 +714,33 @@ impl CoordinatorHandle {
         self.send(CoordinatorMessage::Resume).await
     }
 
+    pub async fn resume_project(&self, project_id: &str) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::ResumeProject {
+            project_id: project_id.to_owned(),
+        })
+        .await
+    }
+
     /// Return the current coordinator status snapshot.
     pub async fn get_status(&self) -> Result<CoordinatorStatus, CoordinatorError> {
         let (tx, rx) = oneshot::channel();
-        self.send(CoordinatorMessage::GetStatus { respond_to: tx })
+        self.send(CoordinatorMessage::GetStatus {
+            project_id: None,
+            respond_to: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| CoordinatorError::NoResponse)
+    }
+
+    pub async fn get_project_status(
+        &self,
+        project_id: &str,
+    ) -> Result<CoordinatorStatus, CoordinatorError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(CoordinatorMessage::GetStatus {
+            project_id: Some(project_id.to_owned()),
+            respond_to: tx,
+        })
             .await?;
         rx.await.map_err(|_| CoordinatorError::NoResponse)
     }
