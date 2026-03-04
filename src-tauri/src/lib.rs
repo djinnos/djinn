@@ -4,6 +4,7 @@
 // main.rs is a thin shim that calls run()
 
 use std::sync::Mutex;
+use tauri::Manager;
 
 mod auth;
 mod commands;
@@ -14,6 +15,13 @@ pub fn run() {
     tauri::Builder::default()
         // Plugin registration
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let _ = app.get_webview_window("main")
+                .expect("no main window")
+                .set_focus();
+        }))
         
         // Managed state
         .manage(Mutex::new(server::init_server_state(8080)))

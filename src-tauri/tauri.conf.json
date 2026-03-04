@@ -12,20 +12,23 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "DjinnOS Desktop",
         "width": 1200,
         "height": 800,
         "minWidth": 800,
-        "minHeight": 600
+        "minHeight": 600,
+        "visible": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:*"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": ["binaries/djinn-server"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

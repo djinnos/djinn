@@ -7,4 +7,5 @@
 /gen/schemas
 
 # Sidecar binaries - built in CI, not committed
-/binaries/
+/binaries/*
+!/binaries/README.md
