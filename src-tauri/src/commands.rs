@@ -1,13 +1,48 @@
 use crate::auth::{build_authorize_url, generate_pkce, PkceParams};
 use crate::server::ServerState;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UserProfile {
+    pub sub: String,
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub picture: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AuthSession {
+    access_token: String,
+    expires_in: Option<u64>,
+    user_profile: Option<UserProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    id_token: Option<String>,
+    expires_in: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IdTokenClaims {
+    sub: String,
+    name: Option<String>,
+    email: Option<String>,
+    picture: Option<String>,
+}
+
+use serde::Deserialize;
 use std::sync::Mutex as StdMutex;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
 /// Global storage for PKCE params during OAuth flow
 static PKCE_PARAMS: Lazy<StdMutex<Option<PkceParams>>> = Lazy::new(|| StdMutex::new(None));
+static AUTH_SESSION: Lazy<StdMutex<Option<AuthSession>>> = Lazy::new(|| StdMutex::new(None));
 
 /// Greet command - sample command for testing
 #[tauri::command]
@@ -57,18 +92,33 @@ pub async fn retry_server_discovery(app: AppHandle) -> Result<u16, String> {
 /// Get authentication token
 #[tauri::command]
 pub async fn get_auth_token() -> Result<Option<String>, String> {
-    Ok(None)
+    let session = AUTH_SESSION
+        .lock()
+        .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+    Ok(session.as_ref().map(|s| s.access_token.clone()))
 }
 
 /// Set authentication token
 #[tauri::command]
-pub async fn set_auth_token(_token: String) -> Result<(), String> {
+pub async fn set_auth_token(token: String) -> Result<(), String> {
+    let mut session = AUTH_SESSION
+        .lock()
+        .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+    *session = Some(AuthSession {
+        access_token: token,
+        expires_in: None,
+        user_profile: None,
+    });
     Ok(())
 }
 
 /// Clear authentication token
 #[tauri::command]
 pub async fn clear_auth_token() -> Result<(), String> {
+    let mut session = AUTH_SESSION
+        .lock()
+        .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+    *session = None;
     Ok(())
 }
 
@@ -99,6 +149,85 @@ pub async fn initiate_oauth_login(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+
+
+/// Exchange authorization code for tokens at Clerk token endpoint
+#[tauri::command]
+pub async fn exchange_auth_code(
+    code: String,
+    code_verifier: String,
+    redirect_uri: String,
+    client_id: String,
+) -> Result<UserProfile, String> {
+    let client = reqwest::Client::new();
+    let token_url = format!("https://{}/oauth/token", crate::auth::CLERK_DOMAIN);
+
+    let resp = client
+        .post(&token_url)
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("code_verifier", code_verifier.as_str()),
+            ("redirect_uri", redirect_uri.as_str()),
+            ("client_id", client_id.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Token request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_string());
+        return Err(format!("Token endpoint returned {}: {}", status, body));
+    }
+
+    let token_response: TokenResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+
+    let user_profile = token_response
+        .id_token
+        .as_deref()
+        .map(decode_id_token)
+        .transpose()?;
+
+    let mut auth_session = AUTH_SESSION
+        .lock()
+        .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+    *auth_session = Some(AuthSession {
+        access_token: token_response.access_token,
+        expires_in: token_response.expires_in,
+        user_profile: user_profile.clone(),
+    });
+    drop(auth_session);
+
+    if let Some(refresh_token) = token_response.refresh_token {
+        log::info!("Received refresh token ({} chars), ready for storage handoff", refresh_token.len());
+    }
+
+    user_profile.ok_or_else(|| "Missing id_token in token response".to_string())
+}
+
+fn decode_id_token(id_token: &str) -> Result<UserProfile, String> {
+    let mut parts = id_token.split('.');
+    let _header = parts.next().ok_or("Invalid id_token format")?;
+    let payload = parts.next().ok_or("Invalid id_token format")?;
+
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .map_err(|e| format!("Failed to decode id_token payload: {}", e))?;
+
+    let claims: IdTokenClaims = serde_json::from_slice(&payload_bytes)
+        .map_err(|e| format!("Failed to parse id_token claims: {}", e))?;
+
+    Ok(UserProfile {
+        sub: claims.sub,
+        name: claims.name,
+        email: claims.email,
+        picture: claims.picture,
+    })
+}
 /// Get stored PKCE code_verifier (for token exchange)
 ///
 /// This should be called during the OAuth callback to retrieve

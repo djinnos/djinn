@@ -148,6 +148,7 @@ pub fn run() {
             commands::get_auth_token,
             commands::set_auth_token,
             commands::clear_auth_token,
+            commands::exchange_auth_code,
             commands::initiate_oauth_login,
             commands::get_pkce_code_verifier,
             commands::clear_pkce_params,
