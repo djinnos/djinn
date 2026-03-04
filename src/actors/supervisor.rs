@@ -2974,7 +2974,7 @@ impl AgentSupervisor {
                 .await;
         }
 
-        git.create_worktree(&task.short_id, &branch)
+        git.create_worktree(&task.short_id, &branch, false)
             .await
             .map_err(|e| SupervisorError::Goose(e.to_string()))
     }

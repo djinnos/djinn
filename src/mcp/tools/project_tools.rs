@@ -360,7 +360,7 @@ impl DjinnMcpServer {
 
             let wt_name = format!("cmd-validate-{}", uuid::Uuid::now_v7());
             let wt_path = match git_actor
-                .create_worktree(&wt_name, &git_settings.target_branch)
+                .create_worktree(&wt_name, &git_settings.target_branch, true)
                 .await
             {
                 Ok(p) => p,

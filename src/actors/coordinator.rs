@@ -1045,7 +1045,7 @@ async fn run_project_health_check(
     }
 
     let wt_path = git
-        .create_worktree("_health_check", &target_branch)
+        .create_worktree("_health_check", &target_branch, true)
         .await
         .map_err(|e| format!("failed to create health-check worktree: {e}"))?;
 

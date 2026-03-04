@@ -168,6 +168,7 @@ enum GitMessage {
     CreateWorktree {
         task_short_id: String,
         branch: String,
+        detach: bool,
         respond_to: Reply<PathBuf>,
     },
     /// Remove a worktree by path and prune stale entries (GIT-06).
@@ -255,10 +256,12 @@ impl GitActor {
             GitMessage::CreateWorktree {
                 task_short_id,
                 branch,
+                detach,
                 respond_to,
             } => {
                 let path = self.path.clone();
-                let result = Self::create_worktree_impl(path, task_short_id, branch).await;
+                let result =
+                    Self::create_worktree_impl(path, task_short_id, branch, detach).await;
                 let _ = respond_to.send(result);
             }
             GitMessage::RemoveWorktree {
@@ -626,22 +629,21 @@ impl GitActor {
         path: PathBuf,
         task_short_id: String,
         branch: String,
+        detach: bool,
     ) -> Result<PathBuf, GitError> {
         // GIT-06: prune stale worktree bookkeeping before creating.
         let _ = Self::run_git_command(path.clone(), vec!["worktree".into(), "prune".into()]).await;
 
         let wt_path = path.join(".djinn").join("worktrees").join(&task_short_id);
 
-        Self::run_git_command(
-            path,
-            vec![
-                "worktree".into(),
-                "add".into(),
-                wt_path.to_str().unwrap_or_default().into(),
-                branch,
-            ],
-        )
-        .await?;
+        let mut args = vec!["worktree".into(), "add".into()];
+        if detach {
+            args.push("--detach".into());
+        }
+        args.push(wt_path.to_str().unwrap_or_default().into());
+        args.push(branch);
+
+        Self::run_git_command(path, args).await?;
 
         Ok(wt_path)
     }
@@ -850,14 +852,22 @@ impl GitActorHandle {
     }
 
     /// Create a worktree at `.djinn/worktrees/{task_short_id}/` on `branch` (GIT-02).
+    ///
+    /// When `detach` is true, passes `--detach` to `git worktree add` so the
+    /// worktree gets a detached HEAD instead of checking out the branch.  Use
+    /// this for ephemeral worktrees (health checks, validation) that only need
+    /// the code at a point-in-time and would otherwise fail when the branch is
+    /// already checked out in the main working tree.
     pub async fn create_worktree(
         &self,
         task_short_id: &str,
         branch: &str,
+        detach: bool,
     ) -> Result<PathBuf, GitError> {
         self.request(|tx| GitMessage::CreateWorktree {
             task_short_id: task_short_id.into(),
             branch: branch.into(),
+            detach,
             respond_to: tx,
         })
         .await
@@ -1282,7 +1292,7 @@ mod tests {
             .unwrap();
 
         let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
-        let wt_path = handle.create_worktree("wt1", "task/wt1").await.unwrap();
+        let wt_path = handle.create_worktree("wt1", "task/wt1", false).await.unwrap();
 
         // Directory must exist.
         assert!(wt_path.exists(), "worktree directory should exist");
@@ -1311,7 +1321,7 @@ mod tests {
             .unwrap();
 
         let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
-        let wt_path = handle.create_worktree("wt2", "task/wt2").await.unwrap();
+        let wt_path = handle.create_worktree("wt2", "task/wt2", false).await.unwrap();
         assert!(wt_path.exists(), "precondition: worktree should exist");
 
         handle.remove_worktree(&wt_path).await.unwrap();
@@ -1331,7 +1341,7 @@ mod tests {
             .unwrap();
 
         let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
-        let wt_path = handle.create_worktree("wt3", "task/wt3").await.unwrap();
+        let wt_path = handle.create_worktree("wt3", "task/wt3", false).await.unwrap();
 
         let worktrees = handle.list_worktrees().await.unwrap();
         assert!(
