@@ -64,4 +64,11 @@ pub enum DjinnEvent {
     // Agent sessions
     SessionCreated(SessionRecord),
     SessionUpdated(SessionRecord),
+
+    // Project health (setup/verification commands result)
+    ProjectHealthChanged {
+        project_id: String,
+        healthy: bool,
+        error: Option<String>,
+    },
 }

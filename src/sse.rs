@@ -173,6 +173,19 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             id: None,
             project_id: None,
         },
+        DjinnEvent::ProjectHealthChanged {
+            project_id,
+            healthy,
+            error,
+        } => Envelope {
+            entity_type: "project",
+            action: if healthy { "health_ok" } else { "health_error" },
+            data: Some(
+                serde_json::json!({ "project_id": project_id, "healthy": healthy, "error": error }),
+            ),
+            id: Some(project_id),
+            project_id: None,
+        },
     }
 }
 

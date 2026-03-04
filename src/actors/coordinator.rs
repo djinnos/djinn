@@ -17,8 +17,11 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{self, Interval};
 use tokio_util::sync::CancellationToken;
 
+use crate::actors::git::GitActorHandle;
 use crate::actors::supervisor::{AgentSupervisorHandle, SupervisorError};
+use crate::commands::{CommandSpec, run_commands};
 use crate::db::connection::Database;
+use crate::db::repositories::git_settings::GitSettingsRepository;
 use crate::db::repositories::task::{ReadyQuery, TaskRepository};
 use crate::events::DjinnEvent;
 use crate::models::task::TransitionAction;
@@ -90,6 +93,14 @@ enum CoordinatorMessage {
     },
     /// Run an immediate stuck-task detection pass.
     TriggerStuckScan,
+    /// Trigger background health validation for all (or one) project on execution_start.
+    ValidateProjectHealth { project_id_filter: Option<String> },
+    /// Internal callback: result from a background project health-check task.
+    SetProjectHealth {
+        project_id: String,
+        healthy: bool,
+        error: Option<String>,
+    },
 }
 
 // ─── Actor (≤20 fields — AGENT-11) ───────────────────────────────────────────
@@ -106,12 +117,16 @@ struct CoordinatorActor {
     supervisor: AgentSupervisorHandle,
     catalog: CatalogService,
     health: HealthTracker,
+    // Sender clone for background tasks to send results back.
+    self_sender: mpsc::Sender<CoordinatorMessage>,
     // State
     paused: bool,
     paused_projects: HashSet<String>,
     resumed_projects: HashSet<String>,
     dispatch_limit: usize,
     model_priorities: HashMap<String, Vec<String>>,
+    // Per-project health: project_id → error message (only unhealthy projects appear here).
+    unhealthy_projects: HashMap<String, String>,
     // Metrics
     dispatched: u64,
     recovered: u64,
@@ -123,6 +138,7 @@ struct CoordinatorActor {
 impl CoordinatorActor {
     fn new(
         receiver: mpsc::Receiver<CoordinatorMessage>,
+        self_sender: mpsc::Sender<CoordinatorMessage>,
         events_tx: broadcast::Sender<DjinnEvent>,
         cancel: CancellationToken,
         db: Database,
@@ -143,11 +159,13 @@ impl CoordinatorActor {
             supervisor,
             catalog,
             health,
+            self_sender,
             paused: true,
             paused_projects: HashSet::new(),
             resumed_projects: HashSet::new(),
             dispatch_limit: 50,
             model_priorities: HashMap::new(),
+            unhealthy_projects: HashMap::new(),
             dispatched: 0,
             recovered: 0,
         }
@@ -293,6 +311,41 @@ impl CoordinatorActor {
                 self.model_priorities = priorities;
                 tracing::info!("CoordinatorActor: updated per-role model priorities");
             }
+            CoordinatorMessage::ValidateProjectHealth { project_id_filter } => {
+                self.validate_all_project_health(project_id_filter).await;
+            }
+            CoordinatorMessage::SetProjectHealth {
+                project_id,
+                healthy,
+                error,
+            } => {
+                let was_unhealthy = self.unhealthy_projects.contains_key(&project_id);
+                if healthy {
+                    self.unhealthy_projects.remove(&project_id);
+                    tracing::info!(project_id = %project_id, "CoordinatorActor: project health check passed");
+                } else {
+                    let err = error.clone().unwrap_or_default();
+                    tracing::warn!(
+                        project_id = %project_id,
+                        error = %err,
+                        "CoordinatorActor: project health check failed — skipping dispatch for project"
+                    );
+                    self.unhealthy_projects.insert(project_id.clone(), err);
+                }
+                // Emit SSE event on health change.
+                let changed = healthy && was_unhealthy || !healthy && !was_unhealthy;
+                if changed {
+                    let _ = self.events_tx.send(DjinnEvent::ProjectHealthChanged {
+                        project_id: project_id.clone(),
+                        healthy,
+                        error,
+                    });
+                }
+                // If project just became healthy and dispatch is enabled, trigger a dispatch pass.
+                if healthy && self.is_project_dispatch_enabled(&project_id) {
+                    self.dispatch_ready_tasks(Some(&project_id)).await;
+                }
+            }
         }
     }
 
@@ -340,6 +393,9 @@ impl CoordinatorActor {
     }
 
     fn is_project_dispatch_enabled(&self, project_id: &str) -> bool {
+        if self.unhealthy_projects.contains_key(project_id) {
+            return false;
+        }
         if self.paused {
             self.resumed_projects.contains(project_id)
         } else {
@@ -850,6 +906,97 @@ impl CoordinatorActor {
         }
     }
 
+    /// Spawn background health-check tasks for all projects (or one) that have
+    /// setup/verification commands configured (ADR-014, task bit0).
+    async fn validate_all_project_health(&mut self, project_id_filter: Option<String>) {
+        struct ProjectRow {
+            id: String,
+            path: String,
+            setup_commands: String,
+            verification_commands: String,
+        }
+
+        let rows: Vec<ProjectRow> = sqlx::query(
+            "SELECT id, path, setup_commands, verification_commands FROM projects",
+        )
+        .fetch_all(self.db.pool())
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| {
+            use sqlx::Row;
+            ProjectRow {
+                id: row.get("id"),
+                path: row.get("path"),
+                setup_commands: row.get("setup_commands"),
+                verification_commands: row.get("verification_commands"),
+            }
+        })
+        .collect();
+
+        for row in rows {
+            if let Some(ref filter) = project_id_filter {
+                if row.id != *filter {
+                    continue;
+                }
+            }
+
+            let setup_cmds: Vec<CommandSpec> =
+                serde_json::from_str(&row.setup_commands).unwrap_or_default();
+            let verify_cmds: Vec<CommandSpec> =
+                serde_json::from_str(&row.verification_commands).unwrap_or_default();
+
+            if setup_cmds.is_empty() && verify_cmds.is_empty() {
+                // No commands configured — always healthy; clear any stale failure.
+                if self.unhealthy_projects.remove(&row.id).is_some() {
+                    let _ = self.events_tx.send(DjinnEvent::ProjectHealthChanged {
+                        project_id: row.id.clone(),
+                        healthy: true,
+                        error: None,
+                    });
+                }
+                continue;
+            }
+
+            let sender = self.self_sender.clone();
+            let db = self.db.clone();
+            let events_tx = self.events_tx.clone();
+            let project_id = row.id.clone();
+            let path = row.path.clone();
+
+            tracing::info!(
+                project_id = %project_id,
+                setup_count = setup_cmds.len(),
+                verify_count = verify_cmds.len(),
+                "CoordinatorActor: spawning project health check"
+            );
+
+            tokio::spawn(async move {
+                let (healthy, error) =
+                    match run_project_health_check(
+                        project_id.clone(),
+                        path,
+                        setup_cmds,
+                        verify_cmds,
+                        db,
+                        events_tx,
+                    )
+                    .await
+                    {
+                        Ok(()) => (true, None),
+                        Err(e) => (false, Some(e)),
+                    };
+                let _ = sender
+                    .send(CoordinatorMessage::SetProjectHealth {
+                        project_id,
+                        healthy,
+                        error,
+                    })
+                    .await;
+            });
+        }
+    }
+
     fn task_repo(&self) -> TaskRepository {
         TaskRepository::new(self.db.clone(), self.events_tx.clone())
     }
@@ -862,6 +1009,87 @@ impl CoordinatorActor {
             .ok()
             .flatten()
     }
+}
+
+// ─── Project health check (ADR-014) ──────────────────────────────────────────
+
+/// Create a temporary git worktree, run setup + verification commands, clean up,
+/// and return `Ok(())` if all commands pass or `Err(reason)` if any fail.
+async fn run_project_health_check(
+    project_id: String,
+    path: String,
+    setup_cmds: Vec<CommandSpec>,
+    verify_cmds: Vec<CommandSpec>,
+    db: Database,
+    events_tx: broadcast::Sender<DjinnEvent>,
+) -> Result<(), String> {
+    let project_path = std::path::PathBuf::from(&path);
+
+    // Resolve target branch (falls back to "main").
+    let target_branch = GitSettingsRepository::new(db, events_tx)
+        .get(&project_id)
+        .await
+        .map(|s| s.target_branch)
+        .unwrap_or_else(|_| "main".to_string());
+
+    let git = GitActorHandle::spawn(project_path.clone())
+        .map_err(|e| format!("failed to open git repo at {path}: {e}"))?;
+
+    // Remove any stale health-check worktree from a previous crashed run.
+    let stale = project_path
+        .join(".djinn")
+        .join("worktrees")
+        .join("_health_check");
+    if stale.exists() {
+        let _ = git.remove_worktree(&stale).await;
+    }
+
+    let wt_path = git
+        .create_worktree("_health_check", &target_branch)
+        .await
+        .map_err(|e| format!("failed to create health-check worktree: {e}"))?;
+
+    let result = async {
+        if !setup_cmds.is_empty() {
+            let results = run_commands(&setup_cmds, &wt_path)
+                .await
+                .map_err(|e| format!("setup error: {e}"))?;
+            if let Some(f) = results.last().filter(|r| r.exit_code != 0) {
+                return Err(format!(
+                    "setup command '{}' failed (exit {}): {}",
+                    f.name,
+                    f.exit_code,
+                    f.stderr.trim()
+                ));
+            }
+        }
+        if !verify_cmds.is_empty() {
+            let results = run_commands(&verify_cmds, &wt_path)
+                .await
+                .map_err(|e| format!("verification error: {e}"))?;
+            if let Some(f) = results.last().filter(|r| r.exit_code != 0) {
+                return Err(format!(
+                    "verification command '{}' failed (exit {}): {}",
+                    f.name,
+                    f.exit_code,
+                    f.stderr.trim()
+                ));
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    // Always remove the temporary worktree.
+    if let Err(e) = git.remove_worktree(&wt_path).await {
+        tracing::warn!(
+            project_id = %project_id,
+            error = %e,
+            "CoordinatorActor: failed to remove health-check worktree"
+        );
+    }
+
+    result
 }
 
 // ─── Handle ───────────────────────────────────────────────────────────────────
@@ -883,8 +1111,16 @@ impl CoordinatorHandle {
         health: HealthTracker,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(32);
-        let actor =
-            CoordinatorActor::new(receiver, events_tx, cancel, db, supervisor, catalog, health);
+        let actor = CoordinatorActor::new(
+            receiver,
+            sender.clone(),
+            events_tx,
+            cancel,
+            db,
+            supervisor,
+            catalog,
+            health,
+        );
         tokio::spawn(actor.run());
         Self { sender }
     }
@@ -1006,6 +1242,16 @@ impl CoordinatorHandle {
         priorities: HashMap<String, Vec<String>>,
     ) -> Result<(), CoordinatorError> {
         self.send(CoordinatorMessage::UpdateModelPriorities { priorities })
+            .await
+    }
+
+    /// Trigger background project health validation on execution_start (ADR-014).
+    /// Scoped to `project_id_filter` if provided, otherwise validates all projects.
+    pub async fn validate_project_health(
+        &self,
+        project_id_filter: Option<String>,
+    ) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::ValidateProjectHealth { project_id_filter })
             .await
     }
 }

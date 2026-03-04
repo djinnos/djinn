@@ -84,6 +84,14 @@ impl DjinnMcpServer {
             return json_error("coordinator actor not initialized");
         };
 
+        // Trigger background health validation before dispatching (ADR-014).
+        if let Err(e) = coordinator
+            .validate_project_health(project_id.clone())
+            .await
+        {
+            tracing::warn!(error = %e, "execution_start: failed to trigger project health validation");
+        }
+
         let status_result = match project_id.as_deref() {
             Some(id) => coordinator.get_project_status(id).await,
             None => coordinator.get_status().await,
