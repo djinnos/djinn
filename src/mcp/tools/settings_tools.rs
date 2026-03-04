@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::repositories::settings::SettingsRepository;
 use crate::mcp::server::DjinnMcpServer;
 use crate::mcp::tools::AnyJson;
+use crate::models::settings::DjinnSettings;
 
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 
@@ -22,23 +23,14 @@ pub struct SettingsGetResponse {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct SettingsSetParams {
-    /// Raw JSON settings payload.
-    pub raw: String,
+    /// Typed settings object. Unknown fields are rejected.
+    pub settings: DjinnSettings,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SettingsSetResponse {
     pub ok: bool,
     pub applied: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct SettingsReloadParams {}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct SettingsReloadResponse {
-    pub ok: bool,
     pub error: Option<String>,
 }
 
@@ -64,8 +56,10 @@ impl DjinnMcpServer {
         match repo.get(&key).await {
             Ok(Some(setting)) => {
                 let value = if key == SETTINGS_RAW_KEY {
-                    serde_json::from_str::<serde_json::Value>(&setting.value)
-                        .unwrap_or_else(|_| serde_json::json!({ "raw": setting.value }))
+                    // Deserialize through DjinnSettings so the response is always
+                    // the canonical typed shape, even if the DB contains legacy JSON.
+                    let typed = DjinnSettings::from_db_value(&setting.value);
+                    serde_json::to_value(&typed).unwrap_or(serde_json::Value::Null)
                 } else {
                     serde_json::json!(setting.value)
                 };
@@ -93,7 +87,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<SettingsSetParams>,
     ) -> Json<SettingsSetResponse> {
-        match self.state.apply_settings_raw(&p.raw).await {
+        match self.state.apply_settings(&p.settings).await {
             Ok(()) => Json(SettingsSetResponse {
                 ok: true,
                 applied: true,
@@ -102,23 +96,6 @@ impl DjinnMcpServer {
             Err(e) => Json(SettingsSetResponse {
                 ok: false,
                 applied: false,
-                error: Some(e),
-            }),
-        }
-    }
-
-    #[tool(description = "Reload runtime settings from ~/.djinn/settings.json")]
-    pub async fn settings_reload(
-        &self,
-        Parameters(_): Parameters<SettingsReloadParams>,
-    ) -> Json<SettingsReloadResponse> {
-        match self.state.reload_settings_from_disk().await {
-            Ok(()) => Json(SettingsReloadResponse {
-                ok: true,
-                error: None,
-            }),
-            Err(e) => Json(SettingsReloadResponse {
-                ok: false,
                 error: Some(e),
             }),
         }
