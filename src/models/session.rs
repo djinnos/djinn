@@ -8,6 +8,8 @@ pub enum SessionStatus {
     Interrupted,
     Failed,
     Paused,
+    /// Session was compacted: summary generated, agent continues in a new continuation session.
+    Compacted,
 }
 
 impl SessionStatus {
@@ -18,6 +20,7 @@ impl SessionStatus {
             Self::Interrupted => "interrupted",
             Self::Failed => "failed",
             Self::Paused => "paused",
+            Self::Compacted => "compacted",
         }
     }
 }
