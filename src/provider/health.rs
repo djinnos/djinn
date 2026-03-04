@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Number of consecutive failures before circuit breaker trips.
 const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
@@ -12,7 +12,7 @@ const INITIAL_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const MAX_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Wire-format health state for a single model.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelHealth {
     pub model_id: String,
     pub auto_disabled: bool,
@@ -156,6 +156,36 @@ impl HealthTracker {
         health
     }
 
+    /// Replace all tracked model health state with a persisted snapshot.
+    pub fn restore_all(&self, snapshot: Vec<ModelHealth>) {
+        let mut map = self.inner.lock().unwrap();
+        map.clear();
+        for health in snapshot {
+            let mut state = ModelState {
+                auto_disabled: health.auto_disabled,
+                cooldown_until: None,
+                consecutive_failures: health.consecutive_failures,
+                total_failures: health.total_failures,
+                total_successes: health.total_successes,
+                disable_ttl_trips: health.disable_ttl_trips,
+            };
+
+            if health.auto_disabled {
+                if let Some(seconds) = health.cooldown_seconds_remaining {
+                    if seconds > 0 {
+                        state.cooldown_until = Some(Instant::now() + Duration::from_secs(seconds));
+                    } else {
+                        state.auto_disabled = false;
+                    }
+                } else {
+                    state.auto_disabled = false;
+                }
+            }
+
+            map.insert(health.model_id, state);
+        }
+    }
+
     /// Return health state for a single model (returns zero state if untracked).
     pub fn model_health(&self, model_id: &str) -> ModelHealth {
         let map = self.inner.lock().unwrap();
@@ -286,5 +316,23 @@ mod tests {
             secs > INITIAL_COOLDOWN.as_secs(),
             "second trip cooldown should be longer"
         );
+    }
+
+    #[test]
+    fn restore_all_rehydrates_persisted_state() {
+        let ht = HealthTracker::new();
+        ht.restore_all(vec![ModelHealth {
+            model_id: "a/model".to_string(),
+            auto_disabled: true,
+            consecutive_failures: 3,
+            total_failures: 10,
+            total_successes: 2,
+            disable_ttl_trips: 1,
+            cooldown_seconds_remaining: Some(120),
+        }]);
+
+        let h = ht.model_health("a/model");
+        assert!(h.auto_disabled);
+        assert_eq!(h.total_failures, 10);
     }
 }

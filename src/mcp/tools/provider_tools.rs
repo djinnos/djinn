@@ -298,6 +298,7 @@ impl DjinnMcpServer {
             "reset" => {
                 if let Some(model_id) = &input.model {
                     tracker.reset(model_id);
+                    self.state.persist_model_health_state().await;
                     let h = tracker.model_health(model_id);
                     Json(ModelHealthResponse {
                         action: "reset".into(),
@@ -314,6 +315,7 @@ impl DjinnMcpServer {
             }
             "reset_all" => {
                 tracker.reset_all();
+                self.state.persist_model_health_state().await;
                 Json(ModelHealthResponse {
                     action: "reset_all".into(),
                     models: vec![],
@@ -322,6 +324,7 @@ impl DjinnMcpServer {
             "enable" => {
                 if let Some(model_id) = &input.model {
                     tracker.enable(model_id);
+                    self.state.persist_model_health_state().await;
                     let h = tracker.model_health(model_id);
                     Json(ModelHealthResponse {
                         action: "enable".into(),
@@ -354,7 +357,8 @@ impl DjinnMcpServer {
     pub async fn provider_catalog(&self) -> Json<ProviderCatalogResponse> {
         let goose_ids = goose_provider_ids().await;
         let goose_entries = goose_provider_entries().await;
-        let credential_repo = CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
+        let credential_repo =
+            CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
         let (credential_provider_ids, credential_key_names) = match credential_repo.list().await {
             Ok(creds) => {
                 let provider_ids = creds.iter().map(|c| c.provider_id.clone()).collect();
@@ -723,12 +727,8 @@ mod tests {
         let p = provider("openai", true);
         let credential_provider_ids = HashSet::from(["openai".to_string()]);
         let credential_key_names = HashSet::new();
-        let (connected, methods) = provider_connection_status(
-            &p,
-            &[],
-            &credential_provider_ids,
-            &credential_key_names,
-        );
+        let (connected, methods) =
+            provider_connection_status(&p, &[], &credential_provider_ids, &credential_key_names);
         assert!(connected);
         assert_eq!(methods, vec!["credential"]);
     }

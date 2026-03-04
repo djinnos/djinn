@@ -25,6 +25,8 @@ use crate::provider::{CatalogService, HealthTracker};
 use crate::sync::SyncManager;
 
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
+const SETTINGS_RAW_KEY: &str = "settings.raw";
+const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
 
 /// Shared application state, cheaply cloneable via `Arc`.
 #[derive(Clone)]
@@ -144,6 +146,8 @@ impl AppState {
         *self.inner.supervisor.lock().await = Some(supervisor.clone());
         *self.inner.coordinator.lock().await = Some(coordinator.clone());
 
+        self.apply_runtime_settings_from_db().await;
+
         // Coordinator starts paused — require explicit `execution_start` to begin dispatching.
         tracing::info!("coordinator spawned (paused — awaiting explicit execution_start)");
     }
@@ -200,6 +204,8 @@ impl AppState {
         sync.restore().await;
         sync.spawn_background_task(self.cancel().clone(), self.sync_user_id().to_string());
 
+        self.restore_model_health_state().await;
+
         self.reindex_all_projects_on_startup().await;
         self.reload_settings_and_apply().await;
         self.spawn_settings_file_watcher();
@@ -244,6 +250,36 @@ impl AppState {
         };
         if let Err(e) = self.reload_settings_from_file(&path).await {
             tracing::warn!(error = %e, path = %path.display(), "settings reload failed");
+        }
+    }
+
+    pub async fn reload_settings_from_disk(&self) -> Result<(), String> {
+        let Some(path) = settings_file_path() else {
+            return Ok(());
+        };
+        self.reload_settings_from_file(&path).await
+    }
+
+    pub async fn apply_settings_raw(&self, raw: &str) -> Result<(), String> {
+        let json: serde_json::Value =
+            serde_json::from_str(raw).map_err(|e| format!("parse settings JSON: {e}"))?;
+        let repo = SettingsRepository::new(self.db().clone(), self.events().clone());
+        repo.set(SETTINGS_RAW_KEY, raw)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.apply_runtime_settings(&json).await;
+        Ok(())
+    }
+
+    pub async fn reset_runtime_settings(&self) {
+        if let Some(coordinator) = self.coordinator().await {
+            let _ = coordinator.update_dispatch_limit(50).await;
+            let _ = coordinator
+                .update_model_priorities(std::collections::HashMap::new())
+                .await;
+        }
+        if let Some(supervisor) = self.supervisor().await {
+            let _ = supervisor.update_max_sessions(1).await;
         }
     }
 
@@ -321,17 +357,81 @@ impl AppState {
             .map_err(|e| format!("parse settings file {}: {e}", path.display()))?;
 
         let repo = SettingsRepository::new(self.db().clone(), self.events().clone());
-        repo.set("settings.raw", &raw)
+        repo.set(SETTINGS_RAW_KEY, &raw)
             .await
             .map_err(|e| e.to_string())?;
-
-        if let Some(limit) = read_dispatch_limit(&json)
-            && let Some(coordinator) = self.coordinator().await
-        {
-            let _ = coordinator.update_dispatch_limit(limit).await;
-        }
+        self.apply_runtime_settings(&json).await;
 
         Ok(())
+    }
+
+    async fn apply_runtime_settings_from_db(&self) {
+        let repo = SettingsRepository::new(self.db().clone(), self.events().clone());
+        let raw = repo
+            .get(SETTINGS_RAW_KEY)
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s.value);
+        let Some(raw) = raw else {
+            self.reset_runtime_settings().await;
+            return;
+        };
+        let parsed: serde_json::Result<serde_json::Value> = serde_json::from_str(&raw);
+        match parsed {
+            Ok(json) => self.apply_runtime_settings(&json).await,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to parse persisted settings.raw");
+                self.reset_runtime_settings().await;
+            }
+        }
+    }
+
+    async fn apply_runtime_settings(&self, json: &serde_json::Value) {
+        if let Some(coordinator) = self.coordinator().await {
+            let _ = coordinator
+                .update_dispatch_limit(read_dispatch_limit(json).unwrap_or(50))
+                .await;
+            let _ = coordinator
+                .update_model_priorities(read_model_priorities(json).unwrap_or_default())
+                .await;
+        }
+
+        if let Some(supervisor) = self.supervisor().await {
+            let _ = supervisor
+                .update_max_sessions(read_max_sessions(json).unwrap_or(1))
+                .await;
+        }
+    }
+
+    pub async fn persist_model_health_state(&self) {
+        let repo = SettingsRepository::new(self.db().clone(), self.events().clone());
+        let snapshot = self.health_tracker().all_health();
+        match serde_json::to_string(&snapshot) {
+            Ok(raw) => {
+                if let Err(e) = repo.set(MODEL_HEALTH_STATE_KEY, &raw).await {
+                    tracing::warn!(error = %e, "failed to persist model health state");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to serialize model health state"),
+        }
+    }
+
+    async fn restore_model_health_state(&self) {
+        let repo = SettingsRepository::new(self.db().clone(), self.events().clone());
+        let raw = repo
+            .get(MODEL_HEALTH_STATE_KEY)
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s.value);
+        let Some(raw) = raw else {
+            return;
+        };
+        match serde_json::from_str::<Vec<crate::provider::health::ModelHealth>>(&raw) {
+            Ok(snapshot) => self.health_tracker().restore_all(snapshot),
+            Err(e) => tracing::warn!(error = %e, "failed to parse model health state"),
+        }
     }
 }
 
@@ -353,6 +453,50 @@ fn read_dispatch_limit(settings: &serde_json::Value) -> Option<usize> {
         })
         .and_then(serde_json::Value::as_u64)
         .map(|v| v as usize)
+}
+
+fn read_max_sessions(settings: &serde_json::Value) -> Option<u32> {
+    settings
+        .get("supervisor")
+        .and_then(|v| v.get("max_sessions"))
+        .or_else(|| {
+            settings
+                .get("execution")
+                .and_then(|v| v.get("max_sessions"))
+        })
+        .and_then(serde_json::Value::as_u64)
+        .map(|v| v as u32)
+}
+
+fn read_model_priorities(
+    settings: &serde_json::Value,
+) -> Option<std::collections::HashMap<String, Vec<String>>> {
+    let root = settings
+        .get("coordinator")
+        .and_then(|v| v.get("model_priority"))
+        .or_else(|| {
+            settings
+                .get("execution")
+                .and_then(|v| v.get("model_priority"))
+        })
+        .or_else(|| settings.get("models").and_then(|v| v.get("priority")))?
+        .as_object()?;
+
+    let mut out = std::collections::HashMap::new();
+    for (role, value) in root {
+        let Some(arr) = value.as_array() else {
+            continue;
+        };
+        let models: Vec<String> = arr
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect();
+        if !models.is_empty() {
+            out.insert(role.clone(), models);
+        }
+    }
+    Some(out)
 }
 
 #[derive(Serialize)]
@@ -405,6 +549,7 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
 
+    use super::{read_max_sessions, read_model_priorities};
     use crate::test_helpers;
 
     /// Integration test: hit /health via tower::ServiceExt::oneshot().
@@ -686,7 +831,11 @@ mod tests {
                     continue;
                 }
                 // Skip the json_object.rs helper (it wraps Value on purpose).
-                if path.file_name().map(|n| n == "json_object.rs").unwrap_or(false) {
+                if path
+                    .file_name()
+                    .map(|n| n == "json_object.rs")
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 let content = std::fs::read_to_string(&path).expect("read rust file");
@@ -734,5 +883,38 @@ mod tests {
 
         // With start_paused, the 60s sleep advances virtual time instantly.
         assert_eq!(elapsed.as_secs(), 60);
+    }
+
+    #[test]
+    fn reads_max_sessions_from_supervisor_or_execution() {
+        let settings = serde_json::json!({"supervisor": {"max_sessions": 4}});
+        assert_eq!(read_max_sessions(&settings), Some(4));
+
+        let settings = serde_json::json!({"execution": {"max_sessions": 2}});
+        assert_eq!(read_max_sessions(&settings), Some(2));
+    }
+
+    #[test]
+    fn reads_model_priorities_from_supported_paths() {
+        let settings = serde_json::json!({
+            "coordinator": {
+                "model_priority": {
+                    "worker": ["openai/gpt-4o"],
+                    "task_reviewer": ["anthropic/claude-opus-4-6"]
+                }
+            }
+        });
+        let parsed = read_model_priorities(&settings).unwrap();
+        assert_eq!(parsed.get("worker").unwrap(), &vec!["openai/gpt-4o"]);
+
+        let settings = serde_json::json!({
+            "models": {
+                "priority": {
+                    "phase_reviewer": ["openai/o3"]
+                }
+            }
+        });
+        let parsed = read_model_priorities(&settings).unwrap();
+        assert_eq!(parsed.get("phase_reviewer").unwrap(), &vec!["openai/o3"]);
     }
 }

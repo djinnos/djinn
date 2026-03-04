@@ -10,7 +10,7 @@
 //   3. broadcast::Receiver<DjinnEvent> — react to open-task events.
 //   4. 30-second Interval tick — stuck detection safety net (AGENT-08).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -19,7 +19,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::actors::supervisor::{AgentSupervisorHandle, SupervisorError};
 use crate::db::connection::Database;
-use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::task::{ReadyQuery, TaskRepository};
 use crate::events::DjinnEvent;
 use crate::models::task::TransitionAction;
@@ -73,6 +72,10 @@ enum CoordinatorMessage {
     },
     /// Update runtime dispatch limit from settings reload.
     UpdateDispatchLimit { limit: usize },
+    /// Update per-role model priority list from settings reload.
+    UpdateModelPriorities {
+        priorities: HashMap<String, Vec<String>>,
+    },
     /// Run an immediate stuck-task detection pass.
     TriggerStuckScan,
 }
@@ -94,6 +97,7 @@ struct CoordinatorActor {
     // State
     paused: bool,
     dispatch_limit: usize,
+    model_priorities: HashMap<String, Vec<String>>,
     // Metrics
     dispatched: u64,
     recovered: u64,
@@ -127,6 +131,7 @@ impl CoordinatorActor {
             health,
             paused: true,
             dispatch_limit: 50,
+            model_priorities: HashMap::new(),
             dispatched: 0,
             recovered: 0,
         }
@@ -219,6 +224,10 @@ impl CoordinatorActor {
                     self.dispatch_limit = limit;
                 }
             }
+            CoordinatorMessage::UpdateModelPriorities { priorities } => {
+                self.model_priorities = priorities;
+                tracing::info!("CoordinatorActor: updated per-role model priorities");
+            }
         }
     }
 
@@ -261,9 +270,9 @@ impl CoordinatorActor {
         }
     }
 
-    /// Resolve dispatch model: find a provider with stored credentials and pick
-    /// its first tool_call-capable model. Returns `None` if no model is configured.
-    async fn resolve_dispatch_model(&self) -> Option<String> {
+    /// Resolve dispatch model for a given role from configured priorities,
+    /// falling back to first credential-backed tool-capable model.
+    async fn resolve_dispatch_model_for_role(&self, _role: &str) -> Option<String> {
         #[cfg(test)]
         {
             return Some(DEFAULT_MODEL_ID.to_owned());
@@ -271,10 +280,45 @@ impl CoordinatorActor {
 
         #[cfg(not(test))]
         {
-            let cred_repo = CredentialRepository::new(self.db.clone(), self.events_tx.clone());
+            let cred_repo = crate::db::repositories::credential::CredentialRepository::new(
+                self.db.clone(),
+                self.events_tx.clone(),
+            );
             let credentials = cred_repo.list().await.ok()?;
             if credentials.is_empty() {
                 return None;
+            }
+
+            let credential_provider_ids: HashSet<String> =
+                credentials.iter().map(|c| c.provider_id.clone()).collect();
+
+            if let Some(priority_models) = self.model_priorities.get(_role) {
+                for configured in priority_models {
+                    if let Some((provider_id, model_name)) = configured.split_once('/') {
+                        if !credential_provider_ids.contains(provider_id) {
+                            continue;
+                        }
+                        let exists = self
+                            .catalog
+                            .list_models(provider_id)
+                            .iter()
+                            .any(|m| m.id == model_name);
+                        if exists {
+                            return Some(configured.clone());
+                        }
+                        continue;
+                    }
+
+                    if credential_provider_ids.contains(configured) {
+                        let models = self.catalog.list_models(configured);
+                        if let Some(model) = models.iter().find(|m| m.tool_call) {
+                            return Some(format!("{configured}/{}", model.id));
+                        }
+                        if let Some(model) = models.first() {
+                            return Some(format!("{configured}/{}", model.id));
+                        }
+                    }
+                }
             }
 
             for cred in &credentials {
@@ -293,20 +337,27 @@ impl CoordinatorActor {
         }
     }
 
+    fn role_for_task_status(status: &str) -> &'static str {
+        match status {
+            "needs_task_review" | "in_task_review" => "task_reviewer",
+            "needs_phase_review" | "in_phase_review" => "phase_reviewer",
+            _ => "worker",
+        }
+    }
+
     /// Find all ready tasks (open, no unresolved blockers, non-epic) and dispatch
     /// those that don't already have an active session.
     async fn dispatch_ready_tasks(&mut self) {
-        // Resolve the model to use for dispatch. If no model is configured
-        // (no credentials stored), skip dispatch entirely.
-        let model_id = match self.resolve_dispatch_model().await {
-            Some(id) => id,
-            None => {
-                tracing::debug!(
-                    "CoordinatorActor: no configured model found, skipping dispatch"
-                );
-                return;
+        let mut role_models: HashMap<&'static str, String> = HashMap::new();
+        for role in ["worker", "task_reviewer", "phase_reviewer"] {
+            if let Some(model_id) = self.resolve_dispatch_model_for_role(role).await {
+                role_models.insert(role, model_id);
             }
-        };
+        }
+        if role_models.is_empty() {
+            tracing::debug!("CoordinatorActor: no configured model found, skipping dispatch");
+            return;
+        }
 
         let repo = self.task_repo();
         let mut ready = match repo
@@ -342,6 +393,12 @@ impl CoordinatorActor {
         });
 
         for task in ready {
+            let role = Self::role_for_task_status(&task.status);
+            let Some(model_id) = role_models.get(role) else {
+                tracing::debug!(task_id = %task.short_id, role, "CoordinatorActor: no model configured for task role");
+                continue;
+            };
+
             if !self.health.is_available(&model_id) {
                 tracing::warn!(
                     model_id = %model_id,
@@ -369,7 +426,7 @@ impl CoordinatorActor {
             }
 
             tracing::info!(task_id = %task.short_id, model_id = %model_id, "CoordinatorActor: dispatching task");
-            match self.supervisor.dispatch(&task.id, &model_id).await {
+            match self.supervisor.dispatch(&task.id, model_id).await {
                 Ok(()) => self.dispatched += 1,
                 Err(e) => {
                     tracing::warn!(
@@ -532,6 +589,15 @@ impl CoordinatorHandle {
             limit: limit.max(1),
         })
         .await
+    }
+
+    /// Update per-role model priority lists.
+    pub async fn update_model_priorities(
+        &self,
+        priorities: HashMap<String, Vec<String>>,
+    ) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::UpdateModelPriorities { priorities })
+            .await
     }
 }
 

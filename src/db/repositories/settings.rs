@@ -25,6 +25,15 @@ impl SettingsRepository {
         .await?)
     }
 
+    pub async fn list(&self) -> Result<Vec<Setting>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Setting>(
+            "SELECT key, value, updated_at FROM settings ORDER BY key ASC",
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     /// Upsert a setting. Returns the full entity and emits `SettingUpdated`.
     pub async fn set(&self, key: &str, value: &str) -> Result<Setting> {
         self.db.ensure_initialized().await?;
@@ -51,6 +60,24 @@ impl SettingsRepository {
             .events
             .send(DjinnEvent::SettingUpdated(setting.clone()));
         Ok(setting)
+    }
+
+    /// Delete a setting. Emits `SettingUpdated` tombstone event with empty value.
+    pub async fn delete(&self, key: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let res = sqlx::query("DELETE FROM settings WHERE key = ?1")
+            .bind(key)
+            .execute(self.db.pool())
+            .await?;
+        let deleted = res.rows_affected() > 0;
+        if deleted {
+            let _ = self.events.send(DjinnEvent::SettingUpdated(Setting {
+                key: key.to_string(),
+                value: String::new(),
+                updated_at: String::new(),
+            }));
+        }
+        Ok(deleted)
     }
 }
 
@@ -112,5 +139,32 @@ mod tests {
 
         let fetched = repo.get("k").await.unwrap().unwrap();
         assert_eq!(fetched.value, "v2");
+    }
+
+    #[tokio::test]
+    async fn list_returns_all_keys_sorted() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(1024);
+        let repo = SettingsRepository::new(db, tx);
+
+        repo.set("b", "2").await.unwrap();
+        repo.set("a", "1").await.unwrap();
+
+        let rows = repo.list().await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].key, "a");
+        assert_eq!(rows[1].key, "b");
+    }
+
+    #[tokio::test]
+    async fn delete_removes_key() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(1024);
+        let repo = SettingsRepository::new(db, tx);
+
+        repo.set("x", "1").await.unwrap();
+        assert!(repo.delete("x").await.unwrap());
+        assert!(repo.get("x").await.unwrap().is_none());
+        assert!(!repo.delete("x").await.unwrap());
     }
 }

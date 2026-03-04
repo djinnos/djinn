@@ -123,6 +123,10 @@ enum SupervisorMessage {
         task_id: String,
         respond_to: Reply<Option<RunningSessionInfo>>,
     },
+    UpdateMaxSessions {
+        max: u32,
+        respond_to: Reply<()>,
+    },
     SessionCompleted {
         task_id: String,
         result: Result<(), String>,
@@ -145,6 +149,7 @@ struct AgentSupervisor {
     session_agent_types: HashMap<String, AgentType>,
     task_session_records: HashMap<String, String>,
     interrupted_sessions: HashSet<String>,
+    default_max_sessions: u32,
     session_manager: Arc<SessionManager>,
     app_state: AppState,
     cancel: CancellationToken,
@@ -167,6 +172,7 @@ impl AgentSupervisor {
             session_agent_types: HashMap::new(),
             task_session_records: HashMap::new(),
             interrupted_sessions: HashSet::new(),
+            default_max_sessions: 1,
             session_manager,
             app_state,
             cancel,
@@ -233,6 +239,13 @@ impl AgentSupervisor {
                 self.interrupt_all_sessions(&reason).await;
                 let _ = respond_to.send(Ok(()));
             }
+            SupervisorMessage::UpdateMaxSessions { max, respond_to } => {
+                self.default_max_sessions = max.max(1);
+                for capacity in self.capacity.values_mut() {
+                    capacity.max = self.default_max_sessions;
+                }
+                let _ = respond_to.send(Ok(()));
+            }
             SupervisorMessage::SessionCompleted {
                 task_id,
                 result,
@@ -257,7 +270,10 @@ impl AgentSupervisor {
             let entry = self
                 .capacity
                 .entry(model_id.clone())
-                .or_insert(ModelCapacity { active: 0, max: 1 });
+                .or_insert(ModelCapacity {
+                    active: 0,
+                    max: self.default_max_sessions,
+                });
             (entry.active, entry.max)
         };
         if active >= max {
@@ -734,6 +750,7 @@ impl AgentSupervisor {
                 Ok(()) => self.app_state.health_tracker().record_success(model_id),
                 Err(_) => self.app_state.health_tracker().record_failure(model_id),
             }
+            self.app_state.persist_model_health_state().await;
         }
 
         let (tokens_in, tokens_out) = self.tokens_for_session(&session.goose_session_id).await;
@@ -1442,6 +1459,14 @@ impl AgentSupervisorHandle {
     pub async fn interrupt_all(&self, reason: &str) -> Result<(), SupervisorError> {
         self.request(|tx| SupervisorMessage::InterruptAll {
             reason: reason.to_owned(),
+            respond_to: tx,
+        })
+        .await
+    }
+
+    pub async fn update_max_sessions(&self, max: u32) -> Result<(), SupervisorError> {
+        self.request(|tx| SupervisorMessage::UpdateMaxSessions {
+            max: max.max(1),
             respond_to: tx,
         })
         .await
