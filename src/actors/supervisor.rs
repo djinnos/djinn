@@ -273,6 +273,8 @@ enum SupervisorMessage {
         goose_session_id: String,
         worktree_path: PathBuf,
         resume_prompt: String,
+        tokens_in: i64,
+        old_record_id: Option<String>,
     },
     CompactionNeeded {
         task_id: String,
@@ -637,6 +639,9 @@ async fn perform_compaction(
     session_manager: Arc<SessionManager>,
     app_state: AppState,
     sender: mpsc::Sender<SupervisorMessage>,
+    // Resume context appended to the summary (for resume-time compaction).
+    // When present, the kickoff becomes "{summary}\n\n---\n\n{resume_context}".
+    resume_context: Option<String>,
 ) {
     let abort = |task_id: String, model_id: String, worktree_path: Option<PathBuf>| {
         let s = sender.clone();
@@ -913,7 +918,13 @@ async fn perform_compaction(
         }
     }
 
-    // 8. Send CompactionComplete — supervisor will spawn the new reply task.
+    // 8. Append resume context to summary if this is a resume-time compaction.
+    let kickoff_summary = match resume_context {
+        Some(ctx) => format!("{summary}\n\n---\n\n{ctx}"),
+        None => summary,
+    };
+
+    // 9. Send CompactionComplete — supervisor will spawn the new reply task.
     let _ = sender
         .send(SupervisorMessage::CompactionComplete {
             task_id,
@@ -924,7 +935,7 @@ async fn perform_compaction(
             new_record_id: new_record.id,
             agent,
             worktree_path,
-            summary,
+            summary: kickoff_summary,
             context_window,
         })
         .await;
@@ -1122,9 +1133,11 @@ impl AgentSupervisor {
                 goose_session_id,
                 worktree_path,
                 resume_prompt,
+                tokens_in,
+                old_record_id,
             } => {
                 if let Err(e) = self
-                    .dispatch_resume(task_id, model_id, goose_session_id, worktree_path, resume_prompt)
+                    .dispatch_resume(task_id, model_id, goose_session_id, worktree_path, resume_prompt, tokens_in, old_record_id)
                     .await
                 {
                     tracing::warn!(error = %e, "Supervisor: failed to dispatch resume session after verification failure");
@@ -1576,6 +1589,8 @@ impl AgentSupervisor {
         goose_session_id: String,
         worktree_path: PathBuf,
         resume_prompt: String,
+        tokens_in: i64,
+        old_record_id: Option<String>,
     ) -> Result<(), SupervisorError> {
         if self.sessions.contains_key(&task_id) {
             return Err(SupervisorError::SessionAlreadyActive { task_id });
@@ -1601,6 +1616,48 @@ impl AgentSupervisor {
         }
 
         let task = self.load_task(&task_id).await?;
+
+        // Check if the paused session's context is over 80% of the context window.
+        // If so, compact before resuming to avoid running out of context mid-task.
+        let context_window = self
+            .app_state
+            .catalog()
+            .find_model(&model_id)
+            .map(|m| m.context_window)
+            .unwrap_or(0);
+        if context_window > 0 && tokens_in as f64 >= 0.8 * context_window as f64 {
+            tracing::info!(
+                task_id = %task_id,
+                tokens_in,
+                context_window,
+                "Supervisor: dispatch_resume compaction triggered (over 80% context threshold)"
+            );
+            let max_sessions = self.max_for_model(&model_id);
+            self.capacity
+                .entry(model_id.clone())
+                .or_insert(ModelCapacity { active: 0, max: max_sessions })
+                .active += 1;
+            self.compacting_tasks.insert(task_id.clone());
+            let sender = self.sender.clone();
+            let session_manager = self.session_manager.clone();
+            let app_state = self.app_state.clone();
+            tokio::spawn(perform_compaction(
+                task_id,
+                AgentType::Worker,
+                task.project_id,
+                goose_session_id,
+                old_record_id,
+                model_id,
+                Some(worktree_path),
+                context_window,
+                tokens_in,
+                session_manager,
+                app_state,
+                sender,
+                Some(resume_prompt),
+            ));
+            return Ok(());
+        }
         let project_path = self
             .project_path_for_id(&task.project_id)
             .await
@@ -1932,6 +1989,48 @@ impl AgentSupervisor {
 
         self.transition_start(&task, agent_type).await?;
 
+        // Check if the paused session's context is over 80% of the context window.
+        // If so, compact before resuming to avoid running out of context mid-task.
+        let context_window = self
+            .app_state
+            .catalog()
+            .find_model(&model_id)
+            .map(|m| m.context_window)
+            .unwrap_or(0);
+        if context_window > 0 && paused.tokens_in as f64 >= 0.8 * context_window as f64 {
+            tracing::info!(
+                task_id = %task_id,
+                tokens_in = paused.tokens_in,
+                context_window,
+                "Supervisor: resume-time compaction triggered (paused session over 80% context threshold)"
+            );
+            let max_sessions = self.max_for_model(&model_id);
+            self.capacity
+                .entry(model_id.clone())
+                .or_insert(ModelCapacity { active: 0, max: max_sessions })
+                .active += 1;
+            self.compacting_tasks.insert(task_id.clone());
+            let sender = self.sender.clone();
+            let session_manager = self.session_manager.clone();
+            let app_state = self.app_state.clone();
+            tokio::spawn(perform_compaction(
+                task_id,
+                agent_type,
+                task.project_id,
+                goose_session_id,
+                Some(paused.id),
+                model_id,
+                Some(worktree_path),
+                context_window,
+                paused.tokens_in,
+                session_manager,
+                app_state,
+                sender,
+                Some(context_message),
+            ));
+            return Ok(());
+        }
+
         let (catalog_provider_id, model_name) = Self::parse_model_id(&model_id)?;
         let goose_provider_id = self.resolve_goose_provider_id(&catalog_provider_id).await;
 
@@ -2021,13 +2120,6 @@ impl AgentSupervisor {
         if let Some(entry) = self.capacity.get_mut(&model_id) {
             entry.active += 1;
         }
-
-        let context_window = self
-            .app_state
-            .catalog()
-            .find_model(&model_id)
-            .map(|m| m.context_window)
-            .unwrap_or(0);
         let session_cancel = CancellationToken::new();
         let kickoff = GooseMessage::user().with_text(&context_message);
         let join = spawn_reply_task(
@@ -2137,6 +2229,7 @@ impl AgentSupervisor {
                 session_manager,
                 app_state,
                 sender,
+                None,
             )
             .await;
         });
@@ -2628,6 +2721,7 @@ impl AgentSupervisor {
                         &session,
                         worktree_path,
                         &feedback,
+                        tokens_in,
                     )
                     .await;
                     return;
@@ -2841,6 +2935,7 @@ impl AgentSupervisor {
         session: &SessionClosure,
         worktree_path: &Path,
         feedback: &str,
+        tokens_in: i64,
     ) {
         let repo =
             TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
@@ -2872,6 +2967,8 @@ impl AgentSupervisor {
             goose_session_id: session.goose_session_id.clone(),
             worktree_path: worktree_path.to_owned(),
             resume_prompt: feedback.to_owned(),
+            tokens_in,
+            old_record_id: session.record_id.clone(),
         };
         if let Err(e) = self.sender.send(msg).await {
             tracing::warn!(task_id = %task_id, error = %e, "failed to queue resume session after verification failure");
