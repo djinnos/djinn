@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use crate::actors::git::GitError;
 use crate::agent::extension;
 use crate::agent::output_parser::{
-    ParsedAgentOutput, PhaseReviewVerdict, ReviewerVerdict, WorkerSignal,
+    EpicReviewVerdict, ParsedAgentOutput, ReviewerVerdict, WorkerSignal,
 };
 use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::{AgentType, GooseSessionHandle, SessionManager, SessionType};
@@ -714,7 +714,7 @@ impl AgentSupervisor {
         let action = match agent_type {
             AgentType::Worker | AgentType::ConflictResolver => TransitionAction::Release,
             AgentType::TaskReviewer => TransitionAction::ReleaseTaskReview,
-            AgentType::PhaseReviewer => TransitionAction::ReleasePhaseReview,
+            AgentType::EpicReviewer => TransitionAction::ReleaseEpicReview,
         };
 
         let repo =
@@ -792,8 +792,8 @@ impl AgentSupervisor {
                 AgentType::TaskReviewer => {
                     Some((TransitionAction::ReleaseTaskReview, Some(reason)))
                 }
-                AgentType::PhaseReviewer => {
-                    Some((TransitionAction::ReleasePhaseReview, Some(reason)))
+                AgentType::EpicReviewer => {
+                    Some((TransitionAction::ReleaseEpicReview, Some(reason)))
                 }
             },
         };
@@ -870,24 +870,22 @@ impl AgentSupervisor {
                     ))
                 }
             },
-            AgentType::PhaseReviewer => match output.phase_verdict {
-                Some(PhaseReviewVerdict::Clean) => {
-                    Some((TransitionAction::PhaseReviewApprove, None))
+            AgentType::EpicReviewer => match output.epic_verdict {
+                Some(EpicReviewVerdict::Clean) => {
+                    Some((TransitionAction::EpicReviewApprove, None))
                 }
-                Some(PhaseReviewVerdict::IssuesFound) => Some((
-                    TransitionAction::PhaseReviewReject,
+                Some(EpicReviewVerdict::IssuesFound) => Some((
+                    TransitionAction::EpicReviewReject,
                     Some(
-                        "phase reviewer reported ARCHITECT_BATCH_RESULT: ISSUES_FOUND".to_string(),
+                        "epic reviewer reported EPIC_REVIEW_RESULT: ISSUES_FOUND".to_string(),
                     ),
                 )),
                 None => {
-                    tracing::warn!(
-                        "phase reviewer session completed without ARCHITECT_BATCH_RESULT marker"
-                    );
+                    tracing::warn!("epic reviewer session completed without EPIC_REVIEW_RESULT marker");
                     Some((
-                        TransitionAction::ReleasePhaseReview,
+                        TransitionAction::ReleaseEpicReview,
                         Some(
-                            "phase reviewer completed without ARCHITECT_BATCH_RESULT marker"
+                            "epic reviewer completed without EPIC_REVIEW_RESULT marker"
                                 .to_string(),
                         ),
                     ))
@@ -1021,8 +1019,8 @@ impl AgentSupervisor {
             (AgentType::TaskReviewer, "needs_task_review") => {
                 Some(TransitionAction::TaskReviewStart)
             }
-            (AgentType::PhaseReviewer, "needs_phase_review") => {
-                Some(TransitionAction::PhaseReviewStart)
+            (AgentType::EpicReviewer, "needs_epic_review") => {
+                Some(TransitionAction::EpicReviewStart)
             }
             _ => None,
         };
@@ -1166,7 +1164,7 @@ impl AgentSupervisor {
     fn agent_type_for_task(&self, task: &Task, has_conflict_context: bool) -> AgentType {
         match task.status.as_str() {
             "needs_task_review" | "in_task_review" => AgentType::TaskReviewer,
-            "needs_phase_review" | "in_phase_review" => AgentType::PhaseReviewer,
+            "needs_epic_review" | "in_epic_review" => AgentType::EpicReviewer,
             "open" if has_conflict_context => AgentType::ConflictResolver,
             _ => AgentType::Worker,
         }

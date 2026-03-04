@@ -1,21 +1,30 @@
--- Canonical schema — ground truth. Matches result of running all migrations.
--- Updated manually after each migration is added.
--- Last updated: V20260304000001__project_scoping.sql
+-- Scope epics/tasks/sessions by project_id.
+-- Also rename phase-review statuses to epic-review statuses.
 
-CREATE TABLE settings (
-    key        TEXT NOT NULL PRIMARY KEY,
-    value      TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+PRAGMA foreign_keys = OFF;
 
-CREATE TABLE projects (
-    id         TEXT NOT NULL PRIMARY KEY,
-    name       TEXT NOT NULL UNIQUE,
-    path       TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+-- Backfill strategy: if any scoped table has rows, there must be exactly one
+-- project to attach those rows to.
+SELECT CASE
+    WHEN (SELECT COUNT(*) FROM epics) = 0 THEN 1
+    WHEN (SELECT COUNT(*) FROM projects) = 1 THEN 1
+    ELSE RAISE(ABORT, 'cannot migrate epics: multiple projects exist')
+END;
 
-CREATE TABLE epics (
+SELECT CASE
+    WHEN (SELECT COUNT(*) FROM tasks) = 0 THEN 1
+    WHEN (SELECT COUNT(*) FROM projects) = 1 THEN 1
+    ELSE RAISE(ABORT, 'cannot migrate tasks: multiple projects exist')
+END;
+
+SELECT CASE
+    WHEN (SELECT COUNT(*) FROM sessions) = 0 THEN 1
+    WHEN (SELECT COUNT(*) FROM projects) = 1 THEN 1
+    ELSE RAISE(ABORT, 'cannot migrate sessions: multiple projects exist')
+END;
+
+-- EPICS -----------------------------------------------------------------------
+CREATE TABLE epics_new (
     id          TEXT NOT NULL PRIMARY KEY,
     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     short_id    TEXT NOT NULL,
@@ -32,9 +41,32 @@ CREATE TABLE epics (
     UNIQUE(project_id, short_id)
 );
 
+INSERT INTO epics_new (
+    id, project_id, short_id, title, description, emoji, color, status,
+    owner, created_at, updated_at, closed_at
+)
+SELECT
+    e.id,
+    COALESCE((SELECT id FROM projects LIMIT 1), ''),
+    e.short_id,
+    e.title,
+    e.description,
+    e.emoji,
+    e.color,
+    e.status,
+    e.owner,
+    e.created_at,
+    e.updated_at,
+    e.closed_at
+FROM epics e;
+
+DROP TABLE epics;
+ALTER TABLE epics_new RENAME TO epics;
+
 CREATE INDEX epics_project_id ON epics(project_id);
 
-CREATE TABLE tasks (
+-- TASKS -----------------------------------------------------------------------
+CREATE TABLE tasks_new (
     id                  TEXT NOT NULL PRIMARY KEY,
     project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     short_id            TEXT NOT NULL,
@@ -67,30 +99,47 @@ CREATE TABLE tasks (
     UNIQUE(project_id, short_id)
 );
 
+INSERT INTO tasks_new (
+    id, project_id, short_id, epic_id, title, description, design,
+    issue_type, status, priority, owner, labels, acceptance_criteria,
+    reopen_count, continuation_count, created_at, updated_at, closed_at,
+    blocked_from_status, close_reason, merge_commit_sha, memory_refs
+)
+SELECT
+    t.id,
+    COALESCE((SELECT id FROM projects LIMIT 1), ''),
+    t.short_id,
+    t.epic_id,
+    t.title,
+    t.description,
+    t.design,
+    t.issue_type,
+    t.status,
+    t.priority,
+    t.owner,
+    t.labels,
+    t.acceptance_criteria,
+    t.reopen_count,
+    t.continuation_count,
+    t.created_at,
+    t.updated_at,
+    t.closed_at,
+    t.blocked_from_status,
+    t.close_reason,
+    t.merge_commit_sha,
+    COALESCE(t.memory_refs, '[]')
+FROM tasks t;
+
+DROP TABLE tasks;
+ALTER TABLE tasks_new RENAME TO tasks;
+
 CREATE INDEX tasks_project_id ON tasks(project_id);
 CREATE INDEX tasks_epic_id ON tasks(epic_id);
-CREATE INDEX tasks_status   ON tasks(status);
+CREATE INDEX tasks_status ON tasks(status);
 CREATE INDEX tasks_priority ON tasks(priority, created_at);
 
-CREATE TABLE blockers (
-    task_id          TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    blocking_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    PRIMARY KEY (task_id, blocking_task_id)
-);
-
-CREATE TABLE activity_log (
-    id          TEXT NOT NULL PRIMARY KEY,
-    task_id     TEXT,
-    actor_id    TEXT NOT NULL DEFAULT '',
-    actor_role  TEXT NOT NULL DEFAULT '',
-    event_type  TEXT NOT NULL,
-    payload     TEXT NOT NULL DEFAULT '{}',
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
-CREATE INDEX activity_log_task_id ON activity_log(task_id);
-
-CREATE TABLE sessions (
+-- SESSIONS --------------------------------------------------------------------
+CREATE TABLE sessions_new (
     id            TEXT NOT NULL PRIMARY KEY,
     project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -104,6 +153,30 @@ CREATE TABLE sessions (
     worktree_path TEXT
 );
 
+INSERT INTO sessions_new (
+    id, project_id, task_id, model_id, agent_type,
+    started_at, ended_at, status, tokens_in, tokens_out, worktree_path
+)
+SELECT
+    s.id,
+    COALESCE(t.project_id, (SELECT id FROM projects LIMIT 1)),
+    s.task_id,
+    s.model_id,
+    s.agent_type,
+    s.started_at,
+    s.ended_at,
+    s.status,
+    s.tokens_in,
+    s.tokens_out,
+    s.worktree_path
+FROM sessions s
+LEFT JOIN tasks t ON t.id = s.task_id;
+
+DROP TABLE sessions;
+ALTER TABLE sessions_new RENAME TO sessions;
+
 CREATE INDEX sessions_project_id ON sessions(project_id);
 CREATE INDEX sessions_task_id ON sessions(task_id);
 CREATE INDEX sessions_status ON sessions(status);
+
+PRAGMA foreign_keys = ON;

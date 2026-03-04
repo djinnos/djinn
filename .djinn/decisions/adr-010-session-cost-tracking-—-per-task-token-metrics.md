@@ -25,7 +25,7 @@ sessions (
   id TEXT PRIMARY KEY,           -- UUIDv7
   task_id TEXT NOT NULL,         -- FK to tasks
   model_id TEXT NOT NULL,        -- e.g., "anthropic/claude-sonnet-4-5"
-  agent_type TEXT NOT NULL,      -- worker, task_reviewer, phase_reviewer
+  agent_type TEXT NOT NULL,      -- worker, task_reviewer, epic_reviewer
   started_at TEXT NOT NULL,
   ended_at TEXT,
   status TEXT NOT NULL,          -- running, completed, interrupted, failed

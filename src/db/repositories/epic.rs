@@ -228,9 +228,10 @@ impl EpicRepository {
     pub async fn reopen(&self, id: &str) -> Result<Epic> {
         self.db.ensure_initialized().await?;
         // Verify current status is closed.
-        let current = self.get(id).await?.ok_or_else(|| {
-            Error::Internal(format!("epic not found: {id}"))
-        })?;
+        let current = self
+            .get(id)
+            .await?
+            .ok_or_else(|| Error::Internal(format!("epic not found: {id}")))?;
         if current.status != "closed" {
             return Err(Error::InvalidTransition(format!(
                 "epic must be closed to reopen (current: {})",
@@ -284,11 +285,10 @@ impl EpicRepository {
     /// Count child tasks then CASCADE-delete the epic. Returns the child task count.
     pub async fn delete_with_count(&self, id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE epic_id = ?1")
-                .bind(id)
-                .fetch_one(self.db.pool())
-                .await?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE epic_id = ?1")
+            .bind(id)
+            .fetch_one(self.db.pool())
+            .await?;
         self.delete(id).await?;
         Ok(count)
     }
@@ -409,10 +409,7 @@ fn encode_base36(mut n: u32) -> String {
 
 // ── Dynamic query helpers ────────────────────────────────────────────────────
 
-fn epic_build_where(
-    status: &Option<String>,
-    text: &Option<String>,
-) -> (String, Vec<SqlParam>) {
+fn epic_build_where(status: &Option<String>, text: &Option<String>) -> (String, Vec<SqlParam>) {
     let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<SqlParam> = Vec::new();
 
@@ -602,9 +599,18 @@ mod tests {
         let task_repo = crate::db::repositories::task::TaskRepository::new(db, tx);
 
         let epic = epic_repo.create("Counts", "", "", "", "").await.unwrap();
-        task_repo.create(&epic.id, "T1", "", "", "task", 0, "").await.unwrap();
-        task_repo.create(&epic.id, "T2", "", "", "task", 0, "").await.unwrap();
-        let t3 = task_repo.create(&epic.id, "T3", "", "", "task", 0, "").await.unwrap();
+        task_repo
+            .create(&epic.id, "T1", "", "", "task", 0, "")
+            .await
+            .unwrap();
+        task_repo
+            .create(&epic.id, "T2", "", "", "task", 0, "")
+            .await
+            .unwrap();
+        let t3 = task_repo
+            .create(&epic.id, "T3", "", "", "task", 0, "")
+            .await
+            .unwrap();
         task_repo.set_status(&t3.id, "closed").await.unwrap();
 
         let counts = epic_repo.task_counts(&epic.id).await.unwrap();
@@ -621,8 +627,14 @@ mod tests {
         let task_repo = crate::db::repositories::task::TaskRepository::new(db, tx);
 
         let epic = epic_repo.create("Delete", "", "", "", "").await.unwrap();
-        task_repo.create(&epic.id, "T1", "", "", "task", 0, "").await.unwrap();
-        task_repo.create(&epic.id, "T2", "", "", "task", 0, "").await.unwrap();
+        task_repo
+            .create(&epic.id, "T1", "", "", "task", 0, "")
+            .await
+            .unwrap();
+        task_repo
+            .create(&epic.id, "T2", "", "", "task", 0, "")
+            .await
+            .unwrap();
 
         let count = epic_repo.delete_with_count(&epic.id).await.unwrap();
         assert_eq!(count, 2);

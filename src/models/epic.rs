@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Epic {
     pub id: String,
+    pub project_id: String,
     pub short_id: String,
     pub title: String,
     pub description: String,

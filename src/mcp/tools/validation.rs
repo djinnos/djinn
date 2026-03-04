@@ -10,10 +10,7 @@ pub fn validate_title(s: &str) -> Result<String, String> {
         return Err("title must not be empty".into());
     }
     if trimmed.len() > 200 {
-        return Err(format!(
-            "title exceeds 200 chars (got {})",
-            trimmed.len()
-        ));
+        return Err(format!("title exceeds 200 chars (got {})", trimmed.len()));
     }
     Ok(trimmed)
 }
@@ -112,10 +109,7 @@ pub fn validate_labels_count(n: usize) -> Result<(), String> {
 pub fn validate_owner(s: &str) -> Result<String, String> {
     let trimmed = s.trim().to_owned();
     if trimmed.len() > 100 {
-        return Err(format!(
-            "owner exceeds 100 chars (got {})",
-            trimmed.len()
-        ));
+        return Err(format!("owner exceeds 100 chars (got {})", trimmed.len()));
     }
     Ok(trimmed)
 }
@@ -164,10 +158,7 @@ pub fn validate_reason(s: &str) -> Result<(), String> {
 /// Validate actor_id: max 100 chars.
 pub fn validate_actor_id(s: &str) -> Result<(), String> {
     if s.len() > 100 {
-        return Err(format!(
-            "actor_id exceeds 100 chars (got {})",
-            s.len()
-        ));
+        return Err(format!("actor_id exceeds 100 chars (got {})", s.len()));
     }
     Ok(())
 }
@@ -175,10 +166,7 @@ pub fn validate_actor_id(s: &str) -> Result<(), String> {
 /// Validate actor_role: max 50 chars.
 pub fn validate_actor_role(s: &str) -> Result<(), String> {
     if s.len() > 50 {
-        return Err(format!(
-            "actor_role exceeds 50 chars (got {})",
-            s.len()
-        ));
+        return Err(format!("actor_role exceeds 50 chars (got {})", s.len()));
     }
     Ok(())
 }

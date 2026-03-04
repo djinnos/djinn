@@ -3,7 +3,9 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::Deserialize;
 
-use crate::db::repositories::epic::{EpicCountQuery, EpicListQuery, EpicRepository, EpicTaskCounts};
+use crate::db::repositories::epic::{
+    EpicCountQuery, EpicListQuery, EpicRepository, EpicTaskCounts,
+};
 use crate::db::repositories::task::{ListQuery, TaskRepository};
 use crate::mcp::server::DjinnMcpServer;
 use crate::mcp::tools::validation::{
@@ -69,8 +71,14 @@ fn task_to_value(t: &crate::models::task::Task) -> serde_json::Value {
 
 fn enrich_with_counts(mut value: serde_json::Value, counts: &EpicTaskCounts) -> serde_json::Value {
     if let Some(map) = value.as_object_mut() {
-        map.insert("task_count".to_string(), serde_json::json!(counts.task_count));
-        map.insert("open_count".to_string(), serde_json::json!(counts.open_count));
+        map.insert(
+            "task_count".to_string(),
+            serde_json::json!(counts.task_count),
+        );
+        map.insert(
+            "open_count".to_string(),
+            serde_json::json!(counts.open_count),
+        );
         map.insert(
             "in_progress_count".to_string(),
             serde_json::json!(counts.in_progress_count),
@@ -166,7 +174,9 @@ pub struct EpicCountParams {
 #[tool_router(router = epic_tool_router, vis = "pub")]
 impl DjinnMcpServer {
     /// Create a new epic.
-    #[tool(description = "Create a new epic (top-level grouping entity). Returns the created epic.")]
+    #[tool(
+        description = "Create a new epic (top-level grouping entity). Returns the created epic."
+    )]
     pub async fn epic_create(
         &self,
         Parameters(p): Parameters<EpicCreateParams>,
@@ -203,10 +213,7 @@ impl DjinnMcpServer {
     #[tool(
         description = "Show details of an epic including child task counts. Accepts epic UUID or short_id."
     )]
-    pub async fn epic_show(
-        &self,
-        Parameters(p): Parameters<EpicShowParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn epic_show(&self, Parameters(p): Parameters<EpicShowParams>) -> Json<ObjectJson> {
         let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
         let Some(epic) = repo.resolve(&p.id).await.ok().flatten() else {
             return json_object(epic_not_found(&p.id));
@@ -222,10 +229,7 @@ impl DjinnMcpServer {
     #[tool(
         description = "List epics with optional filters and offset-based pagination. Returns {epics[], total_count, limit, offset, has_more}."
     )]
-    pub async fn epic_list(
-        &self,
-        Parameters(p): Parameters<EpicListParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn epic_list(&self, Parameters(p): Parameters<EpicListParams>) -> Json<ObjectJson> {
         let sort = p.sort.as_deref().unwrap_or("created");
         if let Err(e) = validate_sort(
             sort,
@@ -246,8 +250,7 @@ impl DjinnMcpServer {
         let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.list_filtered(query).await {
             Ok(result) => {
-                let epics: Vec<_> =
-                    result.epics.iter().map(epic_to_value).collect();
+                let epics: Vec<_> = result.epics.iter().map(epic_to_value).collect();
                 json_object(serde_json::json!({
                     "epics":       epics,
                     "total_count": result.total_count,
@@ -302,7 +305,10 @@ impl DjinnMcpServer {
             epic.owner.clone()
         };
 
-        match repo.update(&epic.id, &title, description, emoji, color, &owner).await {
+        match repo
+            .update(&epic.id, &title, description, emoji, color, &owner)
+            .await
+        {
             Ok(updated) => json_object(epic_to_value(&updated)),
             Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
@@ -310,10 +316,7 @@ impl DjinnMcpServer {
 
     /// Close an epic.
     #[tool(description = "Close an epic. Accepts epic UUID or short_id.")]
-    pub async fn epic_close(
-        &self,
-        Parameters(p): Parameters<EpicCloseParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn epic_close(&self, Parameters(p): Parameters<EpicCloseParams>) -> Json<ObjectJson> {
         let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
         let Some(epic) = repo.resolve(&p.id).await.ok().flatten() else {
             return json_object(epic_not_found(&p.id));
@@ -370,10 +373,7 @@ impl DjinnMcpServer {
     #[tool(
         description = "List tasks under an epic with optional filters and pagination. Accepts epic UUID or short_id."
     )]
-    pub async fn epic_tasks(
-        &self,
-        Parameters(p): Parameters<EpicTasksParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn epic_tasks(&self, Parameters(p): Parameters<EpicTasksParams>) -> Json<ObjectJson> {
         let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
         let Some(epic) = epic_repo.resolve(&p.epic_id).await.ok().flatten() else {
             return json_object(epic_not_found(&p.epic_id));
@@ -382,7 +382,14 @@ impl DjinnMcpServer {
         let sort = p.sort.as_deref().unwrap_or("priority");
         if let Err(e) = validate_sort(
             sort,
-            &["priority", "created", "created_desc", "updated", "updated_desc", "closed"],
+            &[
+                "priority",
+                "created",
+                "created_desc",
+                "updated",
+                "updated_desc",
+                "closed",
+            ],
         ) {
             return json_object(serde_json::json!({ "error": e }));
         }
@@ -401,8 +408,7 @@ impl DjinnMcpServer {
         let task_repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         match task_repo.list_filtered(query).await {
             Ok(result) => {
-                let tasks: Vec<_> =
-                    result.tasks.iter().map(task_to_value).collect();
+                let tasks: Vec<_> = result.tasks.iter().map(task_to_value).collect();
                 json_object(serde_json::json!({
                     "tasks":       tasks,
                     "total_count": result.total_count,
@@ -417,10 +423,7 @@ impl DjinnMcpServer {
 
     /// Count epics with optional grouping.
     #[tool(description = "Count epics with optional grouping by status.")]
-    pub async fn epic_count(
-        &self,
-        Parameters(p): Parameters<EpicCountParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn epic_count(&self, Parameters(p): Parameters<EpicCountParams>) -> Json<ObjectJson> {
         if let Some(ref gb) = p.group_by {
             if let Err(e) = validate_sort(gb, &["status"]) {
                 return json_object(serde_json::json!({ "error": e }));

@@ -1,5 +1,5 @@
 use rmcp::Json;
-use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 
 /// A JSON object (`Map<String, Value>`) with a valid JSON Schema.

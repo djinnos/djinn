@@ -30,12 +30,16 @@ impl DjinnMcpServer {
     ) -> Json<ObjectJson> {
         let task_repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let Some(task) = task_repo.resolve(&p.task_id).await.ok().flatten() else {
-            return json_object(serde_json::json!({ "error": format!("task not found: {}", p.task_id) }));
+            return json_object(
+                serde_json::json!({ "error": format!("task not found: {}", p.task_id) }),
+            );
         };
 
         let repo = SessionRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.list_for_task(&task.id).await {
-            Ok(sessions) => json_object(serde_json::json!({ "task_id": task.id, "sessions": sessions })),
+            Ok(sessions) => {
+                json_object(serde_json::json!({ "task_id": task.id, "sessions": sessions }))
+            }
             Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }

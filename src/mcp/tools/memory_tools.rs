@@ -174,10 +174,7 @@ impl DjinnMcpServer {
     #[tool(
         description = "Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, research->research/, requirement->requirements/, reference->reference/, design->design/, persona->design/personas, journey->design/journeys, design_spec->design/specs, session->research/sessions, competitive->research/competitive, tech_spike->research/technical). Singleton types (brief, roadmap) write a fixed file at docs root — one per project, title is ignored. Use [[wikilinks]] in content to connect notes — any [[Note Title]] creates a link in the knowledge graph. Add a '## Relations' section at the bottom with '- [[Related Note]]' entries to make connections explicit. For large documents (>150 lines): create with initial content, then use memory_edit with operation=\"append\" to add remaining sections."
     )]
-    pub async fn memory_write(
-        &self,
-        Parameters(p): Parameters<WriteParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn memory_write(&self, Parameters(p): Parameters<WriteParams>) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
             return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),
@@ -234,10 +231,7 @@ impl DjinnMcpServer {
 
     /// Read a note by permalink or title. Updates last_accessed timestamp.
     #[tool(description = "Read a note by permalink or title. Updates last_accessed timestamp.")]
-    pub async fn memory_read(
-        &self,
-        Parameters(p): Parameters<ReadParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn memory_read(&self, Parameters(p): Parameters<ReadParams>) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
             return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),
@@ -287,10 +281,7 @@ impl DjinnMcpServer {
     #[tool(
         description = "Edit an existing note. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section). Use append to build large notes incrementally after memory_write creates the initial note. When type is provided and differs from current type, the note is automatically moved to the correct folder for the new type."
     )]
-    pub async fn memory_edit(
-        &self,
-        Parameters(p): Parameters<EditParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn memory_edit(&self, Parameters(p): Parameters<EditParams>) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
             return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),
@@ -354,10 +345,7 @@ impl DjinnMcpServer {
     #[tool(
         description = "Search notes using FTS5 full-text search with BM25 ranking. Returns compact results with snippets."
     )]
-    pub async fn memory_search(
-        &self,
-        Parameters(p): Parameters<SearchParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn memory_search(&self, Parameters(p): Parameters<SearchParams>) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
             return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),
@@ -400,10 +388,7 @@ impl DjinnMcpServer {
     #[tool(
         description = "List notes in a folder with depth control. Returns compact summaries without full content."
     )]
-    pub async fn memory_list(
-        &self,
-        Parameters(p): Parameters<ListParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn memory_list(&self, Parameters(p): Parameters<ListParams>) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
             return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),
@@ -423,10 +408,7 @@ impl DjinnMcpServer {
 
     /// Delete a note. Removes file and index entry.
     #[tool(description = "Delete a note. Removes file and index entry.")]
-    pub async fn memory_delete(
-        &self,
-        Parameters(p): Parameters<DeleteParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn memory_delete(&self, Parameters(p): Parameters<DeleteParams>) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
             return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),
@@ -451,10 +433,7 @@ impl DjinnMcpServer {
     #[tool(
         description = "Move a note to a new location. Updates permalink and resolves inbound links."
     )]
-    pub async fn memory_move(
-        &self,
-        Parameters(p): Parameters<MoveParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn memory_move(&self, Parameters(p): Parameters<MoveParams>) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
             return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),
@@ -485,13 +464,12 @@ impl DjinnMcpServer {
     #[tool(
         description = "Returns aggregate health report (total notes, broken links, orphan notes, stale notes by folder)."
     )]
-    pub async fn memory_health(
-        &self,
-        Parameters(p): Parameters<HealthParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn memory_health(&self, Parameters(p): Parameters<HealthParams>) -> Json<ObjectJson> {
         let project_path = match &p.project {
             Some(path) => path.clone(),
-            None => return json_object(serde_json::json!({ "error": "project parameter required" })),
+            None => {
+                return json_object(serde_json::json!({ "error": "project parameter required" }));
+            }
         };
 
         let Some(project_id) = self.project_id_for_path(&project_path).await else {
@@ -533,10 +511,7 @@ impl DjinnMcpServer {
     #[tool(
         description = "List recently updated notes by timeframe (e.g., '7d', '24h', 'today'). Returns compact summaries."
     )]
-    pub async fn memory_recent(
-        &self,
-        Parameters(p): Parameters<RecentParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn memory_recent(&self, Parameters(p): Parameters<RecentParams>) -> Json<ObjectJson> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
             return json_object(
                 serde_json::json!({ "error": format!("project not found: {}", p.project) }),

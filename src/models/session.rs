@@ -24,6 +24,7 @@ impl SessionStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct SessionRecord {
     pub id: String,
+    pub project_id: String,
     pub task_id: String,
     pub model_id: String,
     pub agent_type: String,

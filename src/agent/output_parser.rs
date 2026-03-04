@@ -15,7 +15,7 @@ pub enum ReviewerVerdict {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PhaseReviewVerdict {
+pub enum EpicReviewVerdict {
     Clean,
     IssuesFound,
 }
@@ -26,7 +26,7 @@ pub struct ParsedAgentOutput {
     pub worker_reason: Option<String>,
     pub reviewer_verdict: Option<ReviewerVerdict>,
     pub reviewer_feedback: Option<String>,
-    pub phase_verdict: Option<PhaseReviewVerdict>,
+    pub epic_verdict: Option<EpicReviewVerdict>,
 }
 
 impl ParsedAgentOutput {
@@ -59,8 +59,8 @@ impl ParsedAgentOutput {
                 }
             }
 
-            if let Some(payload) = marker_payload(&line, "ARCHITECT_BATCH_RESULT") {
-                self.parse_phase_verdict(payload);
+            if let Some(payload) = marker_payload(&line, "EPIC_REVIEW_RESULT") {
+                self.parse_epic_verdict(payload);
             }
         }
     }
@@ -115,7 +115,7 @@ impl ParsedAgentOutput {
         };
     }
 
-    fn parse_phase_verdict(&mut self, payload: &str) {
+    fn parse_epic_verdict(&mut self, payload: &str) {
         let verdict = payload
             .split_whitespace()
             .next()
@@ -123,12 +123,12 @@ impl ParsedAgentOutput {
             .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_')
             .to_ascii_uppercase();
 
-        self.phase_verdict = match verdict.as_str() {
-            "CLEAN" => Some(PhaseReviewVerdict::Clean),
-            "ISSUES_FOUND" => Some(PhaseReviewVerdict::IssuesFound),
+        self.epic_verdict = match verdict.as_str() {
+            "CLEAN" => Some(EpicReviewVerdict::Clean),
+            "ISSUES_FOUND" => Some(EpicReviewVerdict::IssuesFound),
             _ => {
-                tracing::warn!(value = %payload, "malformed ARCHITECT_BATCH_RESULT marker");
-                self.phase_verdict
+                tracing::warn!(value = %payload, "malformed EPIC_REVIEW_RESULT marker");
+                self.epic_verdict
             }
         };
     }
@@ -187,18 +187,18 @@ mod tests {
     }
 
     #[test]
-    fn parses_architect_batch_result() {
+    fn parses_epic_review_result() {
         let mut out = ParsedAgentOutput::default();
-        out.ingest_text("ARCHITECT_BATCH_RESULT: CLEAN");
-        assert_eq!(out.phase_verdict, Some(PhaseReviewVerdict::Clean));
+        out.ingest_text("EPIC_REVIEW_RESULT: CLEAN");
+        assert_eq!(out.epic_verdict, Some(EpicReviewVerdict::Clean));
     }
 
     #[test]
     fn ignores_malformed_markers_without_crashing() {
         let mut out = ParsedAgentOutput::default();
-        out.ingest_text("REVIEW_RESULT: MAYBE\nARCHITECT_BATCH_RESULT: ???");
+        out.ingest_text("REVIEW_RESULT: MAYBE\nEPIC_REVIEW_RESULT: ???");
 
         assert_eq!(out.reviewer_verdict, None);
-        assert_eq!(out.phase_verdict, None);
+        assert_eq!(out.epic_verdict, None);
     }
 }

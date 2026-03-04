@@ -910,11 +910,11 @@ mod tests {
         let settings = serde_json::json!({
             "models": {
                 "priority": {
-                    "phase_reviewer": ["openai/o3"]
+                    "epic_reviewer": ["openai/o3"]
                 }
             }
         });
         let parsed = read_model_priorities(&settings).unwrap();
-        assert_eq!(parsed.get("phase_reviewer").unwrap(), &vec!["openai/o3"]);
+        assert_eq!(parsed.get("epic_reviewer").unwrap(), &vec!["openai/o3"]);
     }
 }

@@ -32,7 +32,7 @@ CREATE TABLE tasks (
                              CHECK(status IN (
                                  'draft', 'open', 'in_progress',
                                  'needs_task_review', 'in_task_review',
-                                 'needs_phase_review', 'in_phase_review',
+                                 'needs_epic_review', 'in_epic_review',
                                  'approved', 'closed', 'blocked'
                              )),
     priority            INTEGER NOT NULL DEFAULT 0,

@@ -340,7 +340,7 @@ impl CoordinatorActor {
     fn role_for_task_status(status: &str) -> &'static str {
         match status {
             "needs_task_review" | "in_task_review" => "task_reviewer",
-            "needs_phase_review" | "in_phase_review" => "phase_reviewer",
+            "needs_epic_review" | "in_epic_review" => "epic_reviewer",
             _ => "worker",
         }
     }
@@ -349,7 +349,7 @@ impl CoordinatorActor {
     /// those that don't already have an active session.
     async fn dispatch_ready_tasks(&mut self) {
         let mut role_models: HashMap<&'static str, String> = HashMap::new();
-        for role in ["worker", "task_reviewer", "phase_reviewer"] {
+        for role in ["worker", "task_reviewer", "epic_reviewer"] {
             if let Some(model_id) = self.resolve_dispatch_model_for_role(role).await {
                 role_models.insert(role, model_id);
             }
@@ -375,7 +375,7 @@ impl CoordinatorActor {
             }
         };
 
-        for status in ["needs_task_review", "needs_phase_review"] {
+        for status in ["needs_task_review", "needs_epic_review"] {
             match repo.list_by_status(status).await {
                 Ok(mut tasks) => ready.append(&mut tasks),
                 Err(e) => {

@@ -44,27 +44,27 @@ Check how changes from different tasks interact:
 If issues are found, include a concise reason in your review notes and emit:
 
 ```text
-ARCHITECT_BATCH_RESULT: ISSUES_FOUND
+EPIC_REVIEW_RESULT: ISSUES_FOUND
 ```
 
 If the batch is clean, emit:
 
 ```text
-ARCHITECT_BATCH_RESULT: CLEAN
+EPIC_REVIEW_RESULT: CLEAN
 ```
 
-Do not stop after analysis. You must emit one `ARCHITECT_BATCH_RESULT` marker.
+Do not stop after analysis. You must emit one `EPIC_REVIEW_RESULT` marker.
 
 ## Output
 
 Emit exactly one status marker:
 
 ```
-ARCHITECT_BATCH_RESULT: CLEAN
+EPIC_REVIEW_RESULT: CLEAN
 ```
 or
 ```
-ARCHITECT_BATCH_RESULT: ISSUES_FOUND
+EPIC_REVIEW_RESULT: ISSUES_FOUND
 ```
 
 Also include:

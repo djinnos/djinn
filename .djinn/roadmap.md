@@ -193,7 +193,7 @@ _Updated: 2026-03-03 (post-audit)_
 
 **Goal**: Task review and phase review agents verify quality before approval. **Runs as Goose sessions per ADR-008.**
 
-**Progress**: COMPLETE. Review agents (`lm7a`) closed. Scaffold system (`1nby`) dropped per ADR-008. Coordinator dispatches review agents for tasks in `needs_task_review` and `needs_phase_review` states. Supervisor handles transitions for all three agent types (worker, task_reviewer, phase_reviewer).
+**Progress**: COMPLETE. Review agents (`lm7a`) closed. Scaffold system (`1nby`) dropped per ADR-008. Coordinator dispatches review agents for tasks in `needs_task_review` and `needs_epic_review` states. Supervisor handles transitions for all three agent types (worker, task_reviewer, epic_reviewer).
 
 **Requirements addressed**:
 - REVIEW-01 (task review: AC verification + code nitpicks)

@@ -6,8 +6,9 @@ use crate::error::{Error, Result};
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Task {
     pub id: String,
+    pub project_id: String,
     pub short_id: String,
-    pub epic_id: String,
+    pub epic_id: Option<String>,
     pub title: String,
     pub description: String,
     pub design: String,
@@ -55,8 +56,8 @@ pub enum TaskStatus {
     InProgress,
     NeedsTaskReview,
     InTaskReview,
-    NeedsPhaseReview,
-    InPhaseReview,
+    NeedsEpicReview,
+    InEpicReview,
     Approved,
     Closed,
     Blocked,
@@ -71,8 +72,8 @@ impl TaskStatus {
             Self::InProgress => "in_progress",
             Self::NeedsTaskReview => "needs_task_review",
             Self::InTaskReview => "in_task_review",
-            Self::NeedsPhaseReview => "needs_phase_review",
-            Self::InPhaseReview => "in_phase_review",
+            Self::NeedsEpicReview => "needs_epic_review",
+            Self::InEpicReview => "in_epic_review",
             Self::Approved => "approved",
             Self::Closed => "closed",
             Self::Blocked => "blocked",
@@ -87,8 +88,8 @@ impl TaskStatus {
             "in_progress" => Ok(Self::InProgress),
             "needs_task_review" => Ok(Self::NeedsTaskReview),
             "in_task_review" => Ok(Self::InTaskReview),
-            "needs_phase_review" => Ok(Self::NeedsPhaseReview),
-            "in_phase_review" => Ok(Self::InPhaseReview),
+            "needs_epic_review" => Ok(Self::NeedsEpicReview),
+            "in_epic_review" => Ok(Self::InEpicReview),
             "approved" => Ok(Self::Approved),
             "closed" => Ok(Self::Closed),
             "blocked" => Ok(Self::Blocked),
@@ -114,14 +115,14 @@ pub enum TransitionAction {
     TaskReviewReject,
     TaskReviewRejectConflict,
     TaskReviewApprove,
-    PhaseReviewStart,
-    PhaseReviewReject,
-    PhaseReviewApprove,
+    EpicReviewStart,
+    EpicReviewReject,
+    EpicReviewApprove,
     Close,
     Reopen,
     Release,
     ReleaseTaskReview,
-    ReleasePhaseReview,
+    ReleaseEpicReview,
     Block,
     Unblock,
     ForceClose,
@@ -135,11 +136,11 @@ impl TransitionAction {
             self,
             Self::TaskReviewReject
                 | Self::TaskReviewRejectConflict
-                | Self::PhaseReviewReject
+                | Self::EpicReviewReject
                 | Self::Reopen
                 | Self::Release
                 | Self::ReleaseTaskReview
-                | Self::ReleasePhaseReview
+                | Self::ReleaseEpicReview
                 | Self::Block
                 | Self::ForceClose
         )
@@ -155,14 +156,14 @@ impl TransitionAction {
             "task_review_reject" => Ok(Self::TaskReviewReject),
             "task_review_reject_conflict" => Ok(Self::TaskReviewRejectConflict),
             "task_review_approve" => Ok(Self::TaskReviewApprove),
-            "phase_review_start" => Ok(Self::PhaseReviewStart),
-            "phase_review_reject" => Ok(Self::PhaseReviewReject),
-            "phase_review_approve" => Ok(Self::PhaseReviewApprove),
+            "epic_review_start" => Ok(Self::EpicReviewStart),
+            "epic_review_reject" => Ok(Self::EpicReviewReject),
+            "epic_review_approve" => Ok(Self::EpicReviewApprove),
             "close" => Ok(Self::Close),
             "reopen" => Ok(Self::Reopen),
             "release" => Ok(Self::Release),
             "release_task_review" => Ok(Self::ReleaseTaskReview),
-            "release_phase_review" => Ok(Self::ReleasePhaseReview),
+            "release_epic_review" => Ok(Self::ReleaseEpicReview),
             "block" => Ok(Self::Block),
             "unblock" => Ok(Self::Unblock),
             "force_close" => Ok(Self::ForceClose),
@@ -301,16 +302,16 @@ pub fn compute_transition(
             }
         }
 
-        TransitionAction::PhaseReviewStart => {
-            if *from != TaskStatus::NeedsPhaseReview {
-                return bad("phase_review_start is only valid from needs_phase_review");
+        TransitionAction::EpicReviewStart => {
+            if *from != TaskStatus::NeedsEpicReview {
+                return bad("epic_review_start is only valid from needs_epic_review");
             }
-            TransitionApply::simple(TaskStatus::InPhaseReview)
+            TransitionApply::simple(TaskStatus::InEpicReview)
         }
 
-        TransitionAction::PhaseReviewReject => {
-            if *from != TaskStatus::InPhaseReview {
-                return bad("phase_review_reject is only valid from in_phase_review");
+        TransitionAction::EpicReviewReject => {
+            if *from != TaskStatus::InEpicReview {
+                return bad("epic_review_reject is only valid from in_epic_review");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
@@ -320,9 +321,9 @@ pub fn compute_transition(
             }
         }
 
-        TransitionAction::PhaseReviewApprove => {
-            if *from != TaskStatus::InPhaseReview {
-                return bad("phase_review_approve is only valid from in_phase_review");
+        TransitionAction::EpicReviewApprove => {
+            if *from != TaskStatus::InEpicReview {
+                return bad("epic_review_approve is only valid from in_epic_review");
             }
             TransitionApply::simple(TaskStatus::Approved)
         }
@@ -371,11 +372,11 @@ pub fn compute_transition(
             TransitionApply::simple(TaskStatus::NeedsTaskReview)
         }
 
-        TransitionAction::ReleasePhaseReview => {
-            if *from != TaskStatus::InPhaseReview {
-                return bad("release_phase_review is only valid from in_phase_review");
+        TransitionAction::ReleaseEpicReview => {
+            if *from != TaskStatus::InEpicReview {
+                return bad("release_epic_review is only valid from in_epic_review");
             }
-            TransitionApply::simple(TaskStatus::NeedsPhaseReview)
+            TransitionApply::simple(TaskStatus::NeedsEpicReview)
         }
 
         TransitionAction::Block => {

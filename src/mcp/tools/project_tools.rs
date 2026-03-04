@@ -201,9 +201,7 @@ impl DjinnMcpServer {
                     })
                     .collect(),
             }),
-            Err(_) => Json(ProjectListResponse {
-                projects: vec![],
-            }),
+            Err(_) => Json(ProjectListResponse { projects: vec![] }),
         }
     }
 }

@@ -863,11 +863,11 @@ impl TaskRepository {
                     SUM(CASE WHEN t.status = 'closed' THEN 1 ELSE 0 END) AS closed,
                     SUM(CASE WHEN t.status IN (
                         'needs_task_review','in_task_review',
-                        'needs_phase_review','in_phase_review'
+                        'needs_epic_review','in_epic_review'
                     ) THEN 1 ELSE 0 END) AS in_review,
                     MIN(CASE WHEN t.status IN (
                         'needs_task_review','in_task_review',
-                        'needs_phase_review','in_phase_review'
+                        'needs_epic_review','in_epic_review'
                     ) THEN t.updated_at ELSE NULL END) AS oldest_review_at
              FROM epics e
              LEFT JOIN tasks t ON t.epic_id = e.id
@@ -935,7 +935,7 @@ impl TaskRepository {
              JOIN epics e ON t.epic_id = e.id
              WHERE t.status IN (
                  'needs_task_review','in_task_review',
-                 'needs_phase_review','in_phase_review'
+                 'needs_epic_review','in_epic_review'
              )
              ORDER BY t.updated_at ASC",
         )
@@ -1762,8 +1762,8 @@ mod tests {
             "in_progress",
             "needs_task_review",
             "in_task_review",
-            "needs_phase_review",
-            "in_phase_review",
+            "needs_epic_review",
+            "in_epic_review",
             "approved",
             "closed",
             "blocked",

@@ -61,7 +61,7 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
         AgentType::Worker => DEV_TEMPLATE,
         AgentType::ConflictResolver => CONFLICT_RESOLVER_TEMPLATE,
         AgentType::TaskReviewer => TASK_REVIEWER_TEMPLATE,
-        AgentType::PhaseReviewer => EPIC_REVIEWER_TEMPLATE,
+        AgentType::EpicReviewer => EPIC_REVIEWER_TEMPLATE,
     };
 
     let ac = format_acceptance_criteria(&task.acceptance_criteria);
@@ -168,8 +168,9 @@ mod tests {
     fn make_task() -> Task {
         Task {
             id: "task-123".into(),
+            project_id: "project-1".into(),
             short_id: "t123".into(),
-            epic_id: "epic-1".into(),
+            epic_id: Some("epic-1".into()),
             title: "Add widget".into(),
             description: "Implement the widget feature.".into(),
             design: "Use the widget pattern.".into(),
@@ -253,7 +254,7 @@ mod tests {
             tasks_summary: Some("abc1234 lnfo: Add widget\ndef5678 rvmf: Fix regression".into()),
             ..make_ctx()
         };
-        let prompt = render_prompt(AgentType::PhaseReviewer, &task, &ctx);
+        let prompt = render_prompt(AgentType::EpicReviewer, &task, &ctx);
 
         assert!(prompt.contains("Batch: 2") || prompt.contains("**Batch:** 2"));
         assert!(prompt.contains("abc1234 lnfo: Add widget"));

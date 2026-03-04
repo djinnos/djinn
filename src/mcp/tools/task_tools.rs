@@ -235,17 +235,17 @@ pub struct TaskTransitionParams {
     pub id: String,
     /// Transition action: accept, start, submit_task_review, task_review_start,
     /// task_review_reject, task_review_reject_conflict, task_review_approve,
-    /// phase_review_start, phase_review_reject, phase_review_approve, reopen, close,
-    /// release, release_task_review, release_phase_review, block, unblock, force_close,
+    /// epic_review_start, epic_review_reject, epic_review_approve, reopen, close,
+    /// release, release_task_review, release_epic_review, block, unblock, force_close,
     /// user_override.
     pub action: String,
-    /// Required for: task_review_reject, task_review_reject_conflict, phase_review_reject,
-    /// reopen, release, release_task_review, release_phase_review, block, force_close.
+    /// Required for: task_review_reject, task_review_reject_conflict, epic_review_reject,
+    /// reopen, release, release_task_review, release_epic_review, block, force_close.
     pub reason: Option<String>,
     pub actor_id: Option<String>,
     pub actor_role: Option<String>,
     /// Required when action = "user_override". Allowed values: draft, open, needs_task_review,
-    /// needs_phase_review, approved, closed.
+    /// needs_epic_review, approved, closed.
     pub target_status: Option<String>,
 }
 
@@ -322,13 +322,23 @@ impl DjinnMcpServer {
 
         // Resolve parent epic.
         let Some(epic_id) = self.resolve_epic_id(&p.epic_id).await else {
-            return json_object(serde_json::json!({ "error": format!("epic not found: {}", p.epic_id) }));
+            return json_object(
+                serde_json::json!({ "error": format!("epic not found: {}", p.epic_id) }),
+            );
         };
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
 
         let task = match repo
-            .create(&epic_id, &title, description, design, issue_type, priority, &owner)
+            .create(
+                &epic_id,
+                &title,
+                description,
+                design,
+                issue_type,
+                priority,
+                &owner,
+            )
             .await
         {
             Ok(t) => t,
@@ -427,11 +437,13 @@ impl DjinnMcpServer {
         };
 
         // Resolve new parent epic if provided.
-        let epic_id = if let Some(ref par) = p.epic_id {
+        let epic_id: Option<String> = if let Some(ref par) = p.epic_id {
             match self.resolve_epic_id(par).await {
-                Some(id) => id,
+                Some(id) => Some(id),
                 None => {
-                    return json_object(serde_json::json!({ "error": format!("epic not found: {par}") }));
+                    return json_object(
+                        serde_json::json!({ "error": format!("epic not found: {par}") }),
+                    );
                 }
             }
         } else {
@@ -474,8 +486,14 @@ impl DjinnMcpServer {
 
         // If parent changed, move the task first.
         if epic_id != task.epic_id {
-            if let Err(e) = repo.move_to_epic(&task.id, &epic_id).await {
-                return json_object(serde_json::json!({ "error": e.to_string() }));
+            if let Some(ref new_epic_id) = epic_id {
+                if let Err(e) = repo.move_to_epic(&task.id, new_epic_id).await {
+                    return json_object(serde_json::json!({ "error": e.to_string() }));
+                }
+            } else {
+                return json_object(
+                    serde_json::json!({ "error": "moving a task to no epic is not implemented yet" }),
+                );
             }
         }
 
@@ -524,10 +542,7 @@ impl DjinnMcpServer {
     #[tool(
         description = "Show details of a work item including recent activity and blockers. Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
     )]
-    pub async fn task_show(
-        &self,
-        Parameters(p): Parameters<TaskShowParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn task_show(&self, Parameters(p): Parameters<TaskShowParams>) -> Json<ObjectJson> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let session_repo =
             SessionRepository::new(self.state.db().clone(), self.state.events().clone());
@@ -564,7 +579,14 @@ impl DjinnMcpServer {
         let sort = p.sort.as_deref().unwrap_or("priority");
         if let Err(e) = validate_sort(
             sort,
-            &["priority", "created", "created_desc", "updated", "updated_desc", "closed"],
+            &[
+                "priority",
+                "created",
+                "created_desc",
+                "updated",
+                "updated_desc",
+                "closed",
+            ],
         ) {
             let limit = validate_limit(p.limit.unwrap_or(25));
             let offset = validate_offset(p.offset.unwrap_or(0));
@@ -610,7 +632,11 @@ impl DjinnMcpServer {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.list_filtered(query).await {
             Ok(result) => {
-                let tasks = result.tasks.iter().map(|t| AnyJson::from(task_to_value(t))).collect();
+                let tasks = result
+                    .tasks
+                    .iter()
+                    .map(|t| AnyJson::from(task_to_value(t)))
+                    .collect();
                 Json(TaskListResponse {
                     has_more: offset + limit < result.total_count,
                     tasks,
@@ -634,10 +660,7 @@ impl DjinnMcpServer {
 
     /// Count work items matching the filter, with optional grouping.
     #[tool(description = "Count work items matching the filter, with optional grouping.")]
-    pub async fn task_count(
-        &self,
-        Parameters(p): Parameters<TaskCountParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn task_count(&self, Parameters(p): Parameters<TaskCountParams>) -> Json<ObjectJson> {
         if let Some(ref gb) = p.group_by {
             if let Err(e) = validate_sort(gb, &["status", "priority", "issue_type", "epic"]) {
                 return json_object(serde_json::json!({ "error": e }));
@@ -784,10 +807,7 @@ impl DjinnMcpServer {
     #[tool(
         description = "List work items ready to start (open status with no blocking dependencies)"
     )]
-    pub async fn task_ready(
-        &self,
-        Parameters(p): Parameters<TaskReadyParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn task_ready(&self, Parameters(p): Parameters<TaskReadyParams>) -> Json<ObjectJson> {
         if let Err(e) = self.validate_optional_project(&p.project).await {
             return e;
         }
@@ -883,10 +903,7 @@ impl DjinnMcpServer {
     #[tool(
         description = "Claim the next available work item (highest priority, oldest) and transition it to in_progress"
     )]
-    pub async fn task_claim(
-        &self,
-        Parameters(p): Parameters<TaskClaimParams>,
-    ) -> Json<ObjectJson> {
+    pub async fn task_claim(&self, Parameters(p): Parameters<TaskClaimParams>) -> Json<ObjectJson> {
         if let Err(e) = self.validate_optional_project(&p.project).await {
             return e;
         }
@@ -1066,7 +1083,9 @@ impl DjinnMcpServer {
         };
         let refs: serde_json::Value =
             serde_json::from_str(&task.memory_refs).unwrap_or(serde_json::json!([]));
-        json_object(serde_json::json!({ "id": task.id, "short_id": task.short_id, "memory_refs": refs }))
+        json_object(
+            serde_json::json!({ "id": task.id, "short_id": task.short_id, "memory_refs": refs }),
+        )
     }
 }
 
@@ -1093,8 +1112,7 @@ impl DjinnMcpServer {
 
     /// Resolve an epic UUID or short_id to its UUID.
     pub(crate) async fn resolve_epic_id(&self, id_or_short: &str) -> Option<String> {
-        let epic_repo =
-            EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
         epic_repo
             .resolve(id_or_short)
             .await
