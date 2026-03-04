@@ -95,6 +95,8 @@ fn enrich_with_counts(mut value: serde_json::Value, counts: &EpicTaskCounts) -> 
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct EpicCreateParams {
+    /// Absolute project path.
+    pub project: String,
     pub title: String,
     pub description: Option<String>,
     pub emoji: Option<String>,
@@ -104,12 +106,16 @@ pub struct EpicCreateParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct EpicShowParams {
+    /// Absolute project path.
+    pub project: String,
     /// Epic UUID or short_id.
     pub id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct EpicListParams {
+    /// Absolute project path.
+    pub project: String,
     pub status: Option<String>,
     /// Full-text search on title and description.
     pub text: Option<String>,
@@ -121,6 +127,8 @@ pub struct EpicListParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct EpicUpdateParams {
+    /// Absolute project path.
+    pub project: String,
     /// Epic UUID or short_id.
     pub id: String,
     pub title: Option<String>,
@@ -132,24 +140,32 @@ pub struct EpicUpdateParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct EpicCloseParams {
+    /// Absolute project path.
+    pub project: String,
     /// Epic UUID or short_id.
     pub id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct EpicReopenParams {
+    /// Absolute project path.
+    pub project: String,
     /// Epic UUID or short_id.
     pub id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct EpicDeleteParams {
+    /// Absolute project path.
+    pub project: String,
     /// Epic UUID or short_id.
     pub id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct EpicTasksParams {
+    /// Absolute project path.
+    pub project: String,
     /// Epic UUID or short_id.
     pub epic_id: String,
     pub status: Option<String>,
@@ -164,6 +180,8 @@ pub struct EpicTasksParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct EpicCountParams {
+    /// Absolute project path.
+    pub project: String,
     pub status: Option<String>,
     /// Group results by: "status".
     pub group_by: Option<String>,
@@ -203,7 +221,14 @@ impl DjinnMcpServer {
         };
 
         let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
-        match repo.create(&title, description, emoji, color, &owner).await {
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => return json_object(serde_json::json!({ "error": e })),
+        };
+        match repo
+            .create_for_project(&project_id, &title, description, emoji, color, &owner)
+            .await
+        {
             Ok(epic) => json_object(epic_to_value(&epic)),
             Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
@@ -215,7 +240,16 @@ impl DjinnMcpServer {
     )]
     pub async fn epic_show(&self, Parameters(p): Parameters<EpicShowParams>) -> Json<ObjectJson> {
         let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
-        let Some(epic) = repo.resolve(&p.id).await.ok().flatten() else {
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => return json_object(serde_json::json!({ "error": e })),
+        };
+        let Some(epic) = repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        else {
             return json_object(epic_not_found(&p.id));
         };
         let counts = match repo.task_counts(&epic.id).await {
@@ -240,7 +274,12 @@ impl DjinnMcpServer {
         let limit = validate_limit(p.limit.unwrap_or(25));
         let offset = validate_offset(p.offset.unwrap_or(0));
 
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => return json_object(serde_json::json!({ "error": e })),
+        };
         let query = EpicListQuery {
+            project_id: Some(project_id),
             status: p.status,
             text: p.text,
             sort: sort.to_owned(),
@@ -272,7 +311,16 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<EpicUpdateParams>,
     ) -> Json<ObjectJson> {
         let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
-        let Some(epic) = repo.resolve(&p.id).await.ok().flatten() else {
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => return json_object(serde_json::json!({ "error": e })),
+        };
+        let Some(epic) = repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        else {
             return json_object(epic_not_found(&p.id));
         };
 
@@ -318,7 +366,16 @@ impl DjinnMcpServer {
     #[tool(description = "Close an epic. Accepts epic UUID or short_id.")]
     pub async fn epic_close(&self, Parameters(p): Parameters<EpicCloseParams>) -> Json<ObjectJson> {
         let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
-        let Some(epic) = repo.resolve(&p.id).await.ok().flatten() else {
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => return json_object(serde_json::json!({ "error": e })),
+        };
+        let Some(epic) = repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        else {
             return json_object(epic_not_found(&p.id));
         };
         if epic.status != "open" {
@@ -339,7 +396,16 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<EpicReopenParams>,
     ) -> Json<ObjectJson> {
         let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
-        let Some(epic) = repo.resolve(&p.id).await.ok().flatten() else {
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => return json_object(serde_json::json!({ "error": e })),
+        };
+        let Some(epic) = repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        else {
             return json_object(epic_not_found(&p.id));
         };
         match repo.reopen(&epic.id).await {
@@ -357,7 +423,16 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<EpicDeleteParams>,
     ) -> Json<ObjectJson> {
         let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
-        let Some(epic) = repo.resolve(&p.id).await.ok().flatten() else {
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => return json_object(serde_json::json!({ "error": e })),
+        };
+        let Some(epic) = repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        else {
             return json_object(epic_not_found(&p.id));
         };
         match repo.delete_with_count(&epic.id).await {
@@ -375,7 +450,16 @@ impl DjinnMcpServer {
     )]
     pub async fn epic_tasks(&self, Parameters(p): Parameters<EpicTasksParams>) -> Json<ObjectJson> {
         let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
-        let Some(epic) = epic_repo.resolve(&p.epic_id).await.ok().flatten() else {
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => return json_object(serde_json::json!({ "error": e })),
+        };
+        let Some(epic) = epic_repo
+            .resolve_in_project(&project_id, &p.epic_id)
+            .await
+            .ok()
+            .flatten()
+        else {
             return json_object(epic_not_found(&p.epic_id));
         };
 
@@ -397,6 +481,7 @@ impl DjinnMcpServer {
         let offset = validate_offset(p.offset.unwrap_or(0));
 
         let query = ListQuery {
+            project_id: Some(project_id),
             parent: Some(epic.id),
             status: p.status,
             issue_type: p.issue_type,
@@ -429,7 +514,12 @@ impl DjinnMcpServer {
                 return json_object(serde_json::json!({ "error": e }));
             }
         }
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => return json_object(serde_json::json!({ "error": e })),
+        };
         let query = EpicCountQuery {
+            project_id: Some(project_id),
             status: p.status,
             group_by: p.group_by,
         };

@@ -5,23 +5,32 @@ PRAGMA foreign_keys = OFF;
 
 -- Backfill strategy: if any scoped table has rows, there must be exactly one
 -- project to attach those rows to.
+CREATE TEMP TABLE _migration_guard (
+    ok INTEGER NOT NULL CHECK (ok = 1)
+);
+
+INSERT INTO _migration_guard(ok)
 SELECT CASE
     WHEN (SELECT COUNT(*) FROM epics) = 0 THEN 1
     WHEN (SELECT COUNT(*) FROM projects) = 1 THEN 1
-    ELSE RAISE(ABORT, 'cannot migrate epics: multiple projects exist')
+    ELSE 0
 END;
 
+INSERT INTO _migration_guard(ok)
 SELECT CASE
     WHEN (SELECT COUNT(*) FROM tasks) = 0 THEN 1
     WHEN (SELECT COUNT(*) FROM projects) = 1 THEN 1
-    ELSE RAISE(ABORT, 'cannot migrate tasks: multiple projects exist')
+    ELSE 0
 END;
 
+INSERT INTO _migration_guard(ok)
 SELECT CASE
     WHEN (SELECT COUNT(*) FROM sessions) = 0 THEN 1
     WHEN (SELECT COUNT(*) FROM projects) = 1 THEN 1
-    ELSE RAISE(ABORT, 'cannot migrate sessions: multiple projects exist')
+    ELSE 0
 END;
+
+DROP TABLE _migration_guard;
 
 -- EPICS -----------------------------------------------------------------------
 CREATE TABLE epics_new (

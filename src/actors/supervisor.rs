@@ -101,6 +101,7 @@ type Reply<T> = oneshot::Sender<Result<T, SupervisorError>>;
 enum SupervisorMessage {
     Dispatch {
         task_id: String,
+        project_path: String,
         model_id: String,
         respond_to: Reply<()>,
     },
@@ -201,10 +202,11 @@ impl AgentSupervisor {
         match msg {
             SupervisorMessage::Dispatch {
                 task_id,
+                project_path,
                 model_id,
                 respond_to,
             } => {
-                let _ = respond_to.send(self.dispatch(task_id, model_id).await);
+                let _ = respond_to.send(self.dispatch(task_id, project_path, model_id).await);
             }
             SupervisorMessage::HasSession {
                 task_id,
@@ -261,7 +263,12 @@ impl AgentSupervisor {
         }
     }
 
-    async fn dispatch(&mut self, task_id: String, model_id: String) -> Result<(), SupervisorError> {
+    async fn dispatch(
+        &mut self,
+        task_id: String,
+        project_path: String,
+        model_id: String,
+    ) -> Result<(), SupervisorError> {
         if self.sessions.contains_key(&task_id) {
             return Err(SupervisorError::SessionAlreadyActive { task_id });
         }
@@ -312,7 +319,7 @@ impl AgentSupervisor {
         }
 
         let session_name = format!("{} {}", task.short_id, task.title);
-        let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let project_dir = PathBuf::from(&project_path);
         let worktree_path = self.prepare_worktree(&project_dir, &task).await?;
         let session = self
             .session_manager
@@ -324,10 +331,11 @@ impl AgentSupervisor {
             SessionRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
         let session_record = session_repo
             .create(
+                &task.project_id,
                 &task.id,
                 &model_id,
                 agent_type.as_str(),
-                Some(&worktree_path.to_string_lossy()),
+                worktree_path.to_str(),
             )
             .await
             .map_err(|e| SupervisorError::Goose(e.to_string()))?;
@@ -382,10 +390,7 @@ impl AgentSupervisor {
             agent_type,
             &task,
             &TaskContext {
-                project_path: std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .display()
-                    .to_string(),
+                project_path: project_path.clone(),
                 diff: None,
                 commits: None,
                 start_commit: None,
@@ -871,22 +876,19 @@ impl AgentSupervisor {
                 }
             },
             AgentType::EpicReviewer => match output.epic_verdict {
-                Some(EpicReviewVerdict::Clean) => {
-                    Some((TransitionAction::EpicReviewApprove, None))
-                }
+                Some(EpicReviewVerdict::Clean) => Some((TransitionAction::EpicReviewApprove, None)),
                 Some(EpicReviewVerdict::IssuesFound) => Some((
                     TransitionAction::EpicReviewReject,
-                    Some(
-                        "epic reviewer reported EPIC_REVIEW_RESULT: ISSUES_FOUND".to_string(),
-                    ),
+                    Some("epic reviewer reported EPIC_REVIEW_RESULT: ISSUES_FOUND".to_string()),
                 )),
                 None => {
-                    tracing::warn!("epic reviewer session completed without EPIC_REVIEW_RESULT marker");
+                    tracing::warn!(
+                        "epic reviewer session completed without EPIC_REVIEW_RESULT marker"
+                    );
                     Some((
                         TransitionAction::ReleaseEpicReview,
                         Some(
-                            "epic reviewer completed without EPIC_REVIEW_RESULT marker"
-                                .to_string(),
+                            "epic reviewer completed without EPIC_REVIEW_RESULT marker".to_string(),
                         ),
                     ))
                 }
@@ -1104,7 +1106,11 @@ impl AgentSupervisor {
             }
         };
 
-        let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let project_dir = self
+            .project_path_for_id(&task.project_id)
+            .await
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
         let git = match self.app_state.git_actor(&project_dir).await {
             Ok(git) => git,
             Err(e) => {
@@ -1116,7 +1122,7 @@ impl AgentSupervisor {
         };
 
         let base_branch = format!("task/{}", task.short_id);
-        let merge_target = self.default_target_branch().await;
+        let merge_target = self.default_target_branch(&task.project_id).await;
         let message = format!("{}: {}", task.short_id, task.title);
 
         match git
@@ -1274,7 +1280,7 @@ impl AgentSupervisor {
         match git.create_worktree(&task.short_id, &branch).await {
             Ok(path) => Ok(path),
             Err(_) => {
-                let target_branch = self.default_target_branch().await;
+                let target_branch = self.default_target_branch(&task.project_id).await;
                 git.create_branch(&task.short_id, &target_branch)
                     .await
                     .map_err(|e| SupervisorError::Goose(e.to_string()))?;
@@ -1285,30 +1291,25 @@ impl AgentSupervisor {
         }
     }
 
-    async fn default_target_branch(&self) -> String {
+    async fn default_target_branch(&self, project_id: &str) -> String {
         let repo = GitSettingsRepository::new(
             self.app_state.db().clone(),
             self.app_state.events().clone(),
         );
-        let project_path = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .display()
-            .to_string();
-
-        let project_id = sqlx::query_scalar::<_, String>("SELECT id FROM projects WHERE path = ?1")
-            .bind(project_path)
-            .fetch_optional(self.app_state.db().pool())
-            .await
-            .ok()
-            .flatten();
-
-        if let Some(project_id) = project_id
-            && let Ok(settings) = repo.get(&project_id).await
-        {
+        if let Ok(settings) = repo.get(project_id).await {
             return settings.target_branch;
         }
 
         "main".to_string()
+    }
+
+    async fn project_path_for_id(&self, project_id: &str) -> Option<String> {
+        sqlx::query_scalar::<_, String>("SELECT path FROM projects WHERE id = ?1")
+            .bind(project_id)
+            .fetch_optional(self.app_state.db().pool())
+            .await
+            .ok()
+            .flatten()
     }
 
     async fn shutdown(&mut self) {
@@ -1421,9 +1422,15 @@ impl AgentSupervisorHandle {
         .await
     }
 
-    pub async fn dispatch(&self, task_id: &str, model_id: &str) -> Result<(), SupervisorError> {
+    pub async fn dispatch(
+        &self,
+        task_id: &str,
+        project_path: &str,
+        model_id: &str,
+    ) -> Result<(), SupervisorError> {
         self.request(|tx| SupervisorMessage::Dispatch {
             task_id: task_id.to_owned(),
+            project_path: project_path.to_owned(),
             model_id: model_id.to_owned(),
             respond_to: tx,
         })
@@ -1494,9 +1501,13 @@ mod tests {
     async fn tracks_session_lifecycle() {
         let temp = tempfile::tempdir().unwrap();
         let supervisor = spawn_supervisor(&temp);
+        let project_path = temp.path().to_str().unwrap();
 
         assert!(!supervisor.has_session("task-1").await.unwrap());
-        supervisor.dispatch("task-1", "test/mock").await.unwrap();
+        supervisor
+            .dispatch("task-1", project_path, "test/mock")
+            .await
+            .unwrap();
         assert!(supervisor.has_session("task-1").await.unwrap());
 
         supervisor.kill_session("task-1").await.unwrap();
@@ -1508,25 +1519,36 @@ mod tests {
     async fn enforces_per_model_capacity() {
         let temp = tempfile::tempdir().unwrap();
         let supervisor = spawn_supervisor(&temp);
+        let project_path = temp.path().to_str().unwrap();
 
-        supervisor.dispatch("task-1", "test/mock").await.unwrap();
+        supervisor
+            .dispatch("task-1", project_path, "test/mock")
+            .await
+            .unwrap();
         let err = supervisor
-            .dispatch("task-2", "test/mock")
+            .dispatch("task-2", project_path, "test/mock")
             .await
             .unwrap_err();
         assert!(matches!(err, SupervisorError::ModelAtCapacity { .. }));
 
         supervisor.kill_session("task-1").await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        supervisor.dispatch("task-2", "test/mock").await.unwrap();
+        supervisor
+            .dispatch("task-2", project_path, "test/mock")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn status_reports_capacity_and_active_count() {
         let temp = tempfile::tempdir().unwrap();
         let supervisor = spawn_supervisor(&temp);
+        let project_path = temp.path().to_str().unwrap();
 
-        supervisor.dispatch("task-1", "test/mock").await.unwrap();
+        supervisor
+            .dispatch("task-1", project_path, "test/mock")
+            .await
+            .unwrap();
         let status = supervisor.get_status().await.unwrap();
         assert_eq!(status.active_sessions, 1);
         let model = status.capacity.get("test/mock").unwrap();
@@ -1538,8 +1560,12 @@ mod tests {
     async fn interrupt_all_cancels_active_mock_sessions() {
         let temp = tempfile::tempdir().unwrap();
         let supervisor = spawn_supervisor(&temp);
+        let project_path = temp.path().to_str().unwrap();
 
-        supervisor.dispatch("task-1", "test/mock").await.unwrap();
+        supervisor
+            .dispatch("task-1", project_path, "test/mock")
+            .await
+            .unwrap();
         assert!(supervisor.has_session("task-1").await.unwrap());
 
         supervisor

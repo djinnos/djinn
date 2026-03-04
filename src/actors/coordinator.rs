@@ -426,7 +426,15 @@ impl CoordinatorActor {
             }
 
             tracing::info!(task_id = %task.short_id, model_id = %model_id, "CoordinatorActor: dispatching task");
-            match self.supervisor.dispatch(&task.id, model_id).await {
+            let Some(project_path) = self.project_path_for_id(&task.project_id).await else {
+                tracing::warn!(task_id = %task.short_id, project_id = %task.project_id, "CoordinatorActor: project path not found, skipping dispatch");
+                continue;
+            };
+            match self
+                .supervisor
+                .dispatch(&task.id, &project_path, model_id)
+                .await
+            {
                 Ok(()) => self.dispatched += 1,
                 Err(e) => {
                     tracing::warn!(
@@ -507,6 +515,15 @@ impl CoordinatorActor {
 
     fn task_repo(&self) -> TaskRepository {
         TaskRepository::new(self.db.clone(), self.events_tx.clone())
+    }
+
+    async fn project_path_for_id(&self, project_id: &str) -> Option<String> {
+        sqlx::query_scalar::<_, String>("SELECT path FROM projects WHERE id = ?1")
+            .bind(project_id)
+            .fetch_optional(self.db.pool())
+            .await
+            .ok()
+            .flatten()
     }
 }
 

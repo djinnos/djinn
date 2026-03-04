@@ -17,6 +17,7 @@ impl SessionRepository {
 
     pub async fn create(
         &self,
+        project_id: &str,
         task_id: &str,
         model_id: &str,
         agent_type: &str,
@@ -27,10 +28,11 @@ impl SessionRepository {
 
         sqlx::query(
             "INSERT INTO sessions
-                (id, task_id, model_id, agent_type, status, worktree_path)
-             VALUES (?1, ?2, ?3, ?4, 'running', ?5)",
+                (id, project_id, task_id, model_id, agent_type, status, worktree_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
         )
         .bind(&id)
+        .bind(project_id)
         .bind(task_id)
         .bind(model_id)
         .bind(agent_type)
@@ -39,7 +41,7 @@ impl SessionRepository {
         .await?;
 
         let session = sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, task_id, model_id, agent_type, started_at, ended_at,
+            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                     status, tokens_in, tokens_out, worktree_path
              FROM sessions
              WHERE id = ?1",
@@ -79,7 +81,7 @@ impl SessionRepository {
         .await?;
 
         let session = sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, task_id, model_id, agent_type, started_at, ended_at,
+            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                     status, tokens_in, tokens_out, worktree_path
              FROM sessions
              WHERE id = ?1",
@@ -97,7 +99,7 @@ impl SessionRepository {
     pub async fn get(&self, id: &str) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, task_id, model_id, agent_type, started_at, ended_at,
+            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                     status, tokens_in, tokens_out, worktree_path
              FROM sessions
              WHERE id = ?1",
@@ -107,10 +109,28 @@ impl SessionRepository {
         .await?)
     }
 
+    pub async fn get_in_project(
+        &self,
+        project_id: &str,
+        id: &str,
+    ) -> Result<Option<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, SessionRecord>(
+            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                    status, tokens_in, tokens_out, worktree_path
+             FROM sessions
+             WHERE project_id = ?1 AND id = ?2",
+        )
+        .bind(project_id)
+        .bind(id)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
     pub async fn list_for_task(&self, task_id: &str) -> Result<Vec<SessionRecord>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, task_id, model_id, agent_type, started_at, ended_at,
+            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                     status, tokens_in, tokens_out, worktree_path
              FROM sessions
              WHERE task_id = ?1
@@ -121,10 +141,29 @@ impl SessionRepository {
         .await?)
     }
 
+    pub async fn list_for_task_in_project(
+        &self,
+        project_id: &str,
+        task_id: &str,
+    ) -> Result<Vec<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, SessionRecord>(
+            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                    status, tokens_in, tokens_out, worktree_path
+             FROM sessions
+             WHERE project_id = ?1 AND task_id = ?2
+             ORDER BY started_at DESC",
+        )
+        .bind(project_id)
+        .bind(task_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     pub async fn list_active(&self) -> Result<Vec<SessionRecord>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, task_id, model_id, agent_type, started_at, ended_at,
+            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                     status, tokens_in, tokens_out, worktree_path
              FROM sessions
              WHERE status = 'running'
@@ -134,10 +173,24 @@ impl SessionRepository {
         .await?)
     }
 
+    pub async fn list_active_in_project(&self, project_id: &str) -> Result<Vec<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, SessionRecord>(
+            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                    status, tokens_in, tokens_out, worktree_path
+             FROM sessions
+             WHERE project_id = ?1 AND status = 'running'
+             ORDER BY started_at DESC",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     pub async fn active_for_task(&self, task_id: &str) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, task_id, model_id, agent_type, started_at, ended_at,
+            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                     status, tokens_in, tokens_out, worktree_path
              FROM sessions
              WHERE task_id = ?1 AND status = 'running'
@@ -167,7 +220,10 @@ mod tests {
     use crate::db::repositories::task::TaskRepository;
     use crate::test_helpers;
 
-    async fn create_task(repo_events: broadcast::Sender<DjinnEvent>, db: Database) -> String {
+    async fn create_task(
+        repo_events: broadcast::Sender<DjinnEvent>,
+        db: Database,
+    ) -> (String, String) {
         let epic_repo = EpicRepository::new(db.clone(), repo_events.clone());
         let epic = epic_repo.create("Epic", "", "", "", "").await.unwrap();
 
@@ -176,18 +232,19 @@ mod tests {
             .create(&epic.id, "Task", "", "", "task", 0, "")
             .await
             .unwrap();
-        task.id
+        (task.project_id, task.id)
     }
 
     #[tokio::test]
     async fn create_and_update_emit_events() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
-        let task_id = create_task(tx.clone(), db.clone()).await;
+        let (project_id, task_id) = create_task(tx.clone(), db.clone()).await;
         let repo = SessionRepository::new(db, tx);
 
         let created = repo
             .create(
+                &project_id,
                 &task_id,
                 "openai/gpt-5",
                 "worker",
@@ -231,16 +288,16 @@ mod tests {
     async fn list_and_active_queries() {
         let db = test_helpers::create_test_db();
         let (tx, _) = broadcast::channel(1024);
-        let task_id = create_task(tx.clone(), db.clone()).await;
+        let (project_id, task_id) = create_task(tx.clone(), db.clone()).await;
         let repo = SessionRepository::new(db, tx);
 
         let first = repo
-            .create(&task_id, "openai/gpt-5", "worker", None)
+            .create(&project_id, &task_id, "openai/gpt-5", "worker", None)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let second = repo
-            .create(&task_id, "openai/gpt-5", "worker", None)
+            .create(&project_id, &task_id, "openai/gpt-5", "worker", None)
             .await
             .unwrap();
 

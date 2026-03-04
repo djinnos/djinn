@@ -3,6 +3,7 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::Deserialize;
 
+use crate::db::repositories::task::TaskRepository;
 use crate::mcp::server::DjinnMcpServer;
 use crate::mcp::tools::{ObjectJson, json_object};
 
@@ -44,8 +45,8 @@ pub struct ExecutionKillTaskParams {
 pub struct SessionForTaskParams {
     /// Task ID to query.
     pub task_id: String,
-    /// Project path (accepted for API compatibility, currently unused).
-    pub project: Option<String>,
+    /// Absolute project path.
+    pub project: String,
 }
 
 fn json_error(message: impl Into<String>) -> Json<ObjectJson> {
@@ -250,28 +251,38 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<SessionForTaskParams>,
     ) -> Json<ObjectJson> {
-        if let Err(e) = self.validate_optional_project(&p.project).await {
-            return e;
-        }
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => return json_error(e),
+        };
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let Some(task) = task_repo
+            .resolve_in_project(&project_id, &p.task_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return json_error(format!("task not found: {}", p.task_id));
+        };
         let Some(supervisor) = self.state.supervisor().await else {
             return json_error("supervisor actor not initialized");
         };
 
-        let session = match supervisor.session_for_task(&p.task_id).await {
+        let session = match supervisor.session_for_task(&task.id).await {
             Ok(session) => session,
             Err(e) => return json_error(e.to_string()),
         };
 
         match session {
             Some(session) => json_object(serde_json::json!({
-                "task_id": session.task_id,
+                "task_id": task.id,
                 "model_id": session.model_id,
                 "session_id": session.session_id,
                 "duration_seconds": session.duration_seconds,
                 "worktree_path": session.worktree_path,
             })),
             None => json_object(serde_json::json!({
-                "task_id": p.task_id,
+                "task_id": task.id,
                 "session": null,
             })),
         }

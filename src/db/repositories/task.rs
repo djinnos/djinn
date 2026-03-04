@@ -11,6 +11,7 @@ use crate::models::task::{ActivityEntry, Task, TaskStatus, TransitionAction, com
 
 /// Filters and pagination for [`TaskRepository::list_filtered`].
 pub struct ListQuery {
+    pub project_id: Option<String>,
     pub status: Option<String>,
     pub issue_type: Option<String>,
     pub priority: Option<i64>,
@@ -28,6 +29,7 @@ impl Default for ListQuery {
     fn default() -> Self {
         Self {
             status: None,
+            project_id: None,
             issue_type: None,
             priority: None,
             label: None,
@@ -47,6 +49,7 @@ pub struct ListResult {
 
 /// Filters for [`TaskRepository::count_grouped`].
 pub struct CountQuery {
+    pub project_id: Option<String>,
     pub status: Option<String>,
     pub issue_type: Option<String>,
     pub priority: Option<i64>,
@@ -59,6 +62,7 @@ pub struct CountQuery {
 
 /// Filters for [`TaskRepository::query_activity`].
 pub struct ActivityQuery {
+    pub project_id: Option<String>,
     pub task_id: Option<String>,
     pub event_type: Option<String>,
     pub from_time: Option<String>,
@@ -71,6 +75,7 @@ impl Default for ActivityQuery {
     fn default() -> Self {
         Self {
             task_id: None,
+            project_id: None,
             event_type: None,
             from_time: None,
             to_time: None,
@@ -97,6 +102,7 @@ enum SqlParam {
 
 /// Filters for [`TaskRepository::list_ready`].
 pub struct ReadyQuery {
+    pub project_id: Option<String>,
     pub issue_type: Option<String>,
     pub label: Option<String>,
     pub owner: Option<String>,
@@ -108,6 +114,7 @@ impl Default for ReadyQuery {
     fn default() -> Self {
         Self {
             issue_type: None,
+            project_id: None,
             label: None,
             owner: None,
             priority_max: None,
@@ -129,7 +136,7 @@ impl TaskRepository {
     pub async fn list_by_epic(&self, epic_id: &str) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Task>(
-            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
                     blocked_from_status, close_reason, merge_commit_sha, memory_refs
@@ -143,7 +150,7 @@ impl TaskRepository {
     pub async fn list_by_status(&self, status: &str) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Task>(
-            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
                     blocked_from_status, close_reason, merge_commit_sha, memory_refs
@@ -165,7 +172,7 @@ impl TaskRepository {
     pub async fn get_by_short_id(&self, short_id: &str) -> Result<Option<Task>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Task>(
-            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
                     blocked_from_status, close_reason, merge_commit_sha, memory_refs
@@ -187,15 +194,47 @@ impl TaskRepository {
         owner: &str,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
+        let project_id =
+            sqlx::query_scalar::<_, String>("SELECT project_id FROM epics WHERE id = ?1")
+                .bind(epic_id)
+                .fetch_optional(self.db.pool())
+                .await?
+                .ok_or_else(|| Error::Internal(format!("epic not found: {epic_id}")))?;
+        self.create_in_project(
+            &project_id,
+            Some(epic_id),
+            title,
+            description,
+            design,
+            issue_type,
+            priority,
+            owner,
+        )
+        .await
+    }
+
+    pub async fn create_in_project(
+        &self,
+        project_id: &str,
+        epic_id: Option<&str>,
+        title: &str,
+        description: &str,
+        design: &str,
+        issue_type: &str,
+        priority: i64,
+        owner: &str,
+    ) -> Result<Task> {
+        self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
         sqlx::query(
             "INSERT INTO tasks
-                (id, short_id, epic_id, title, description, design,
+                (id, project_id, short_id, epic_id, title, description, design,
                  issue_type, priority, owner)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .bind(&id)
+        .bind(project_id)
         .bind(&short_id)
         .bind(epic_id)
         .bind(title)
@@ -290,13 +329,13 @@ impl TaskRepository {
         let apply = compute_transition(&action, &from, target_override.as_ref())?;
 
         // For Start: block if any unresolved blockers exist.
-        // A blocker is unresolved if its blocking task is not in approved/closed status.
+        // A blocker is unresolved if its blocking task has not reached post-merge states.
         if action == TransitionAction::Start {
             let count: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM blockers b
                  JOIN tasks bt ON b.blocking_task_id = bt.id
                  WHERE b.task_id = ?1
-                   AND bt.status NOT IN ('approved', 'closed')",
+                   AND bt.status NOT IN ('needs_epic_review', 'in_epic_review', 'approved', 'closed')",
             )
             .bind(id)
             .fetch_one(&mut *tx)
@@ -390,9 +429,12 @@ impl TaskRepository {
 
         let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
 
-        // Blocker resolution: when a task reaches approved/closed, notify any tasks
+        // Blocker resolution: when a task reaches post-merge/closed states, notify any tasks
         // it was blocking that are now fully unblocked, so coordinators can dispatch them.
-        if matches!(task.status.as_str(), "approved" | "closed") {
+        if matches!(
+            task.status.as_str(),
+            "needs_epic_review" | "in_epic_review" | "approved" | "closed"
+        ) {
             self.emit_unblocked_tasks(&task.id).await?;
         }
 
@@ -430,8 +472,8 @@ impl TaskRepository {
         Ok(task)
     }
 
-    /// Move a task to a different epic.
-    pub async fn move_to_epic(&self, id: &str, new_epic_id: &str) -> Result<Task> {
+    /// Move a task to a different epic (or detach from epic with None).
+    pub async fn move_to_epic(&self, id: &str, new_epic_id: Option<&str>) -> Result<Task> {
         self.db.ensure_initialized().await?;
         sqlx::query(
             "UPDATE tasks SET epic_id = ?2,
@@ -552,11 +594,16 @@ impl TaskRepository {
                  SELECT 1 FROM blockers b2
                  JOIN tasks bt ON bt.id = b2.blocking_task_id
                  WHERE b2.task_id = t.id
-                   AND bt.status NOT IN ('approved', 'closed')
+                    AND bt.status NOT IN ('needs_epic_review', 'in_epic_review', 'approved', 'closed')
              )"
             .to_owned(),
         ];
         let mut params: Vec<SqlParam> = Vec::new();
+
+        if let Some(project_id) = &query.project_id {
+            clauses.push("t.project_id = ?".to_owned());
+            params.push(SqlParam::Text(project_id.clone()));
+        }
 
         if let Some(it) = &query.issue_type {
             if let Some(neg) = it.strip_prefix('!') {
@@ -582,7 +629,7 @@ impl TaskRepository {
 
         let where_sql = clauses.join(" AND ");
         let sql = format!(
-            "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
+            "SELECT t.id, t.project_id, t.short_id, t.epic_id, t.title, t.description, t.design,
                     t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.created_at, t.updated_at, t.closed_at,
@@ -626,11 +673,16 @@ impl TaskRepository {
                  SELECT 1 FROM blockers b2
                  JOIN tasks bt ON bt.id = b2.blocking_task_id
                  WHERE b2.task_id = t.id
-                   AND bt.status NOT IN ('approved', 'closed')
+                    AND bt.status NOT IN ('needs_epic_review', 'in_epic_review', 'approved', 'closed')
              )"
             .to_owned(),
         ];
         let mut params: Vec<SqlParam> = Vec::new();
+
+        if let Some(project_id) = &query.project_id {
+            clauses.push("t.project_id = ?".to_owned());
+            params.push(SqlParam::Text(project_id.clone()));
+        }
 
         if let Some(it) = &query.issue_type {
             if let Some(neg) = it.strip_prefix('!') {
@@ -656,7 +708,7 @@ impl TaskRepository {
 
         let where_sql = clauses.join(" AND ");
         let sql = format!(
-            "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
+            "SELECT t.id, t.project_id, t.short_id, t.epic_id, t.title, t.description, t.design,
                     t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.created_at, t.updated_at, t.closed_at,
@@ -727,11 +779,11 @@ impl TaskRepository {
     }
 
     /// Emit `TaskUpdated` for tasks that were blocked by `completed_task_id` and
-    /// are now fully unblocked (all their remaining blockers are approved/closed).
+    /// are now fully unblocked (all blockers are in resolved post-merge/closed states).
     async fn emit_unblocked_tasks(&self, completed_task_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         let unblocked = sqlx::query_as::<_, Task>(
-            "SELECT t.id, t.short_id, t.epic_id, t.title, t.description, t.design,
+            "SELECT t.id, t.project_id, t.short_id, t.epic_id, t.title, t.description, t.design,
                     t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.created_at, t.updated_at, t.closed_at,
@@ -744,7 +796,7 @@ impl TaskRepository {
                    SELECT 1 FROM blockers b2
                    JOIN tasks bt ON bt.id = b2.blocking_task_id
                    WHERE b2.task_id = t.id
-                     AND bt.status NOT IN ('approved', 'closed')
+                      AND bt.status NOT IN ('needs_epic_review', 'in_epic_review', 'approved', 'closed')
                )",
         )
         .bind(completed_task_id)
@@ -810,6 +862,11 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         let mut clauses: Vec<String> = Vec::new();
         let mut params: Vec<SqlParam> = Vec::new();
+
+        if let Some(ref pid) = q.project_id {
+            clauses.push("EXISTS (SELECT 1 FROM tasks t WHERE t.id = activity_log.task_id AND t.project_id = ?)".to_owned());
+            params.push(SqlParam::Text(pid.clone()));
+        }
 
         if let Some(ref tid) = q.task_id {
             clauses.push("task_id = ?".to_owned());
@@ -970,7 +1027,7 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
         let sql = format!(
-            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
                     blocked_from_status, close_reason, merge_commit_sha, memory_refs
@@ -1035,7 +1092,7 @@ impl TaskRepository {
     pub async fn resolve(&self, id_or_short: &str) -> Result<Option<Task>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Task>(
-            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
                     blocked_from_status, close_reason, merge_commit_sha, memory_refs
@@ -1046,10 +1103,30 @@ impl TaskRepository {
         .await?)
     }
 
+    pub async fn resolve_in_project(
+        &self,
+        project_id: &str,
+        id_or_short: &str,
+    ) -> Result<Option<Task>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Task>(
+            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels, acceptance_criteria,
+                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
+             FROM tasks WHERE project_id = ?1 AND (id = ?2 OR short_id = ?2)",
+        )
+        .bind(project_id)
+        .bind(id_or_short)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
     /// List tasks with filters, sorting, and pagination.
     pub async fn list_filtered(&self, query: ListQuery) -> Result<ListResult> {
         self.db.ensure_initialized().await?;
         let (where_sql, params) = build_where(
+            &query.project_id,
             &query.status,
             &query.issue_type,
             query.priority,
@@ -1070,7 +1147,7 @@ impl TaskRepository {
         let total = total_q.fetch_one(self.db.pool()).await?;
 
         let sql = format!(
-            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
                     blocked_from_status, close_reason, merge_commit_sha, memory_refs
@@ -1099,6 +1176,7 @@ impl TaskRepository {
     pub async fn count_grouped(&self, query: CountQuery) -> Result<serde_json::Value> {
         self.db.ensure_initialized().await?;
         let (where_sql, params) = build_where(
+            &query.project_id,
             &query.status,
             &query.issue_type,
             query.priority,
@@ -1206,7 +1284,7 @@ impl TaskRepository {
         let pattern = format!("%\"{permalink}\"%");
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Task>(
-            "SELECT id, short_id, epic_id, title, description, design, issue_type,
+            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
                     blocked_from_status, close_reason, merge_commit_sha, memory_refs
@@ -1227,28 +1305,31 @@ impl TaskRepository {
     pub async fn upsert_peer(&self, task: &Task) -> Result<bool> {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
-        // Verify epic exists before INSERT (foreign key is enforced).
-        let epic_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM epics WHERE id = ?1")
-            .bind(&task.epic_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        if epic_exists == 0 {
-            tx.commit().await?;
-            return Ok(false);
+        // Verify epic exists before INSERT when task references one.
+        if let Some(epic_id) = &task.epic_id {
+            let epic_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM epics WHERE id = ?1")
+                .bind(epic_id)
+                .fetch_one(&mut *tx)
+                .await?;
+            if epic_exists == 0 {
+                tx.commit().await?;
+                return Ok(false);
+            }
         }
 
         let changed = match sqlx::query(
             "INSERT INTO tasks (
-                id, short_id, epic_id, title, description, design,
+                id, project_id, short_id, epic_id, title, description, design,
                 issue_type, status, priority, owner, labels,
                 acceptance_criteria, reopen_count, continuation_count,
                 created_at, updated_at, closed_at,
                 blocked_from_status, close_reason, merge_commit_sha, memory_refs
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
              )
              ON CONFLICT(id) DO UPDATE SET
+                project_id          = excluded.project_id,
                 title               = excluded.title,
                 description         = excluded.description,
                 design              = excluded.design,
@@ -1269,6 +1350,7 @@ impl TaskRepository {
              WHERE excluded.updated_at > tasks.updated_at",
         )
         .bind(&task.id)
+        .bind(&task.project_id)
         .bind(&task.short_id)
         .bind(&task.epic_id)
         .bind(&task.title)
@@ -1326,7 +1408,7 @@ impl TaskRepository {
 }
 
 const TASK_SELECT_WHERE_ID: &str =
-    "SELECT id, short_id, epic_id, title, description, design, issue_type,
+    "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
             status, priority, owner, labels, acceptance_criteria,
             reopen_count, continuation_count, created_at, updated_at, closed_at,
             blocked_from_status, close_reason, merge_commit_sha, memory_refs
@@ -1354,6 +1436,7 @@ fn encode_base36(mut n: u32) -> String {
 ///
 /// Returns `("1=1", [])` when no filters are supplied.
 fn build_where(
+    project_id: &Option<String>,
     status: &Option<String>,
     issue_type: &Option<String>,
     priority: Option<i64>,
@@ -1363,6 +1446,11 @@ fn build_where(
 ) -> (String, Vec<SqlParam>) {
     let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<SqlParam> = Vec::new();
+
+    if let Some(p) = project_id {
+        clauses.push("project_id = ?".to_owned());
+        params.push(SqlParam::Text(p.clone()));
+    }
 
     if let Some(s) = status {
         clauses.push("status = ?".to_owned());
@@ -1572,7 +1660,7 @@ mod tests {
         assert_eq!(blockers[0].status, "open");
         assert!(!matches!(
             blockers[0].status.as_str(),
-            "approved" | "closed"
+            "needs_epic_review" | "in_epic_review" | "approved" | "closed"
         ));
 
         // inverse: t1 blocks t2
@@ -2117,6 +2205,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(t.status, "in_progress");
+    }
+
+    #[tokio::test]
+    async fn start_allowed_when_blocker_is_in_epic_review() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db, tx);
+
+        let blocker = open_task(&repo, &epic.id).await;
+        let blocked = open_task(&repo, &epic.id).await;
+        repo.add_blocker(&blocked.id, &blocker.id).await.unwrap();
+
+        // Post-merge review state should be considered resolved for blockers.
+        repo.set_status(&blocker.id, "needs_epic_review")
+            .await
+            .unwrap();
+
+        let started = repo
+            .transition(
+                &blocked.id,
+                TransitionAction::Start,
+                "",
+                "system",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.status, "in_progress");
     }
 
     #[tokio::test]

@@ -14,7 +14,7 @@ fn build_goose_custom_provider_json(
     models: &[Model],
     api_key_env: &str,
 ) -> serde_json::Value {
-    let model_entries: Vec<serde_json::Value> = models
+    let model_entries = models
         .iter()
         .map(|m| {
             serde_json::json!({
@@ -22,7 +22,7 @@ fn build_goose_custom_provider_json(
                 "context_limit": m.context_window.max(1),
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
 
     serde_json::json!({
         "name": provider.id,

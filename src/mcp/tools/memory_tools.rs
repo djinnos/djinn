@@ -7,6 +7,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::Deserialize;
 
 use crate::db::repositories::note::NoteRepository;
+use crate::db::repositories::project::ProjectRepository;
 use crate::mcp::server::DjinnMcpServer;
 use crate::mcp::tools::{AnyJson, ObjectJson, json_object};
 use crate::models::note::{GitLogEntry, Note, ReindexSummary};
@@ -804,6 +805,25 @@ impl DjinnMcpServer {
             .await
             .ok()
             .flatten()
+    }
+
+    /// Resolve a project path to ID, creating a project entry when missing.
+    pub(crate) async fn resolve_project_id(&self, project_path: &str) -> Result<String, String> {
+        if let Some(id) = self.project_id_for_path(project_path).await {
+            return Ok(id);
+        }
+
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
+        let name = Path::new(project_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("project");
+
+        repo.create(name, project_path)
+            .await
+            .map(|p| p.id)
+            .map_err(|e| e.to_string())
     }
 
     /// Validate an optional project path — returns an error JSON if a path is

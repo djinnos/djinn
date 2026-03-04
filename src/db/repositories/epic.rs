@@ -18,6 +18,7 @@ pub struct EpicTaskCounts {
 
 /// Filters and pagination for [`EpicRepository::list_filtered`].
 pub struct EpicListQuery {
+    pub project_id: Option<String>,
     pub status: Option<String>,
     pub text: Option<String>,
     pub sort: String,
@@ -29,6 +30,7 @@ impl Default for EpicListQuery {
     fn default() -> Self {
         Self {
             status: None,
+            project_id: None,
             text: None,
             sort: "created".to_owned(),
             limit: 25,
@@ -44,6 +46,7 @@ pub struct EpicListResult {
 
 /// Filters for [`EpicRepository::count_grouped`].
 pub struct EpicCountQuery {
+    pub project_id: Option<String>,
     pub status: Option<String>,
     pub group_by: Option<String>,
 }
@@ -66,7 +69,7 @@ impl EpicRepository {
     pub async fn list(&self) -> Result<Vec<Epic>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Epic>(
-            "SELECT id, short_id, title, description, emoji, color, status,
+            "SELECT id, project_id, short_id, title, description, emoji, color, status,
                         owner, created_at, updated_at, closed_at
                  FROM epics ORDER BY created_at",
         )
@@ -77,7 +80,7 @@ impl EpicRepository {
     pub async fn get(&self, id: &str) -> Result<Option<Epic>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Epic>(
-            "SELECT id, short_id, title, description, emoji, color, status,
+            "SELECT id, project_id, short_id, title, description, emoji, color, status,
                         owner, created_at, updated_at, closed_at
                  FROM epics WHERE id = ?1",
         )
@@ -89,7 +92,7 @@ impl EpicRepository {
     pub async fn get_by_short_id(&self, short_id: &str) -> Result<Option<Epic>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Epic>(
-            "SELECT id, short_id, title, description, emoji, color, status,
+            "SELECT id, project_id, short_id, title, description, emoji, color, status,
                         owner, created_at, updated_at, closed_at
                  FROM epics WHERE short_id = ?1",
         )
@@ -106,14 +109,29 @@ impl EpicRepository {
         color: &str,
         owner: &str,
     ) -> Result<Epic> {
+        let project_id = self.ensure_default_project_id().await?;
+        self.create_for_project(&project_id, title, description, emoji, color, owner)
+            .await
+    }
+
+    pub async fn create_for_project(
+        &self,
+        project_id: &str,
+        title: &str,
+        description: &str,
+        emoji: &str,
+        color: &str,
+        owner: &str,
+    ) -> Result<Epic> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
         sqlx::query(
-            "INSERT INTO epics (id, short_id, title, description, emoji, color, owner)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )
         .bind(&id)
+        .bind(project_id)
         .bind(&short_id)
         .bind(title)
         .bind(description)
@@ -123,7 +141,7 @@ impl EpicRepository {
         .execute(self.db.pool())
         .await?;
         let epic: Epic = sqlx::query_as(
-            "SELECT id, short_id, title, description, emoji, color, status,
+            "SELECT id, project_id, short_id, title, description, emoji, color, status,
                     owner, created_at, updated_at, closed_at
              FROM epics WHERE id = ?1",
         )
@@ -160,7 +178,7 @@ impl EpicRepository {
         .execute(self.db.pool())
         .await?;
         let epic: Epic = sqlx::query_as(
-            "SELECT id, short_id, title, description, emoji, color, status,
+            "SELECT id, project_id, short_id, title, description, emoji, color, status,
                     owner, created_at, updated_at, closed_at
              FROM epics WHERE id = ?1",
         )
@@ -184,7 +202,7 @@ impl EpicRepository {
         .execute(self.db.pool())
         .await?;
         let epic: Epic = sqlx::query_as(
-            "SELECT id, short_id, title, description, emoji, color, status,
+            "SELECT id, project_id, short_id, title, description, emoji, color, status,
                     owner, created_at, updated_at, closed_at
              FROM epics WHERE id = ?1",
         )
@@ -215,10 +233,28 @@ impl EpicRepository {
     pub async fn resolve(&self, id_or_short: &str) -> Result<Option<Epic>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Epic>(
-            "SELECT id, short_id, title, description, emoji, color, status,
+            "SELECT id, project_id, short_id, title, description, emoji, color, status,
                     owner, created_at, updated_at, closed_at
              FROM epics WHERE id = ?1 OR short_id = ?1",
         )
+        .bind(id_or_short)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    /// Resolve an epic by UUID or short_id constrained to a project.
+    pub async fn resolve_in_project(
+        &self,
+        project_id: &str,
+        id_or_short: &str,
+    ) -> Result<Option<Epic>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Epic>(
+            "SELECT id, project_id, short_id, title, description, emoji, color, status,
+                    owner, created_at, updated_at, closed_at
+             FROM epics WHERE project_id = ?1 AND (id = ?2 OR short_id = ?2)",
+        )
+        .bind(project_id)
         .bind(id_or_short)
         .fetch_optional(self.db.pool())
         .await?)
@@ -248,7 +284,7 @@ impl EpicRepository {
         .execute(self.db.pool())
         .await?;
         let epic: Epic = sqlx::query_as(
-            "SELECT id, short_id, title, description, emoji, color, status,
+            "SELECT id, project_id, short_id, title, description, emoji, color, status,
                     owner, created_at, updated_at, closed_at
              FROM epics WHERE id = ?1",
         )
@@ -296,7 +332,7 @@ impl EpicRepository {
     /// List epics with optional filters, sorting, and pagination.
     pub async fn list_filtered(&self, query: EpicListQuery) -> Result<EpicListResult> {
         self.db.ensure_initialized().await?;
-        let (where_sql, params) = epic_build_where(&query.status, &query.text);
+        let (where_sql, params) = epic_build_where(&query.project_id, &query.status, &query.text);
         let order_sql = epic_sort_to_sql(&query.sort);
 
         let total_sql = format!("SELECT COUNT(*) FROM epics WHERE {where_sql}");
@@ -308,7 +344,7 @@ impl EpicRepository {
         let total = total_q.fetch_one(self.db.pool()).await?;
 
         let sql = format!(
-            "SELECT id, short_id, title, description, emoji, color, status,
+            "SELECT id, project_id, short_id, title, description, emoji, color, status,
                     owner, created_at, updated_at, closed_at
              FROM epics WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
         );
@@ -332,7 +368,7 @@ impl EpicRepository {
     /// Count epics with optional group_by.
     pub async fn count_grouped(&self, query: EpicCountQuery) -> Result<serde_json::Value> {
         self.db.ensure_initialized().await?;
-        let (where_sql, params) = epic_build_where(&query.status, &None);
+        let (where_sql, params) = epic_build_where(&query.project_id, &query.status, &None);
 
         match query.group_by.as_deref() {
             Some("status") => {
@@ -385,6 +421,26 @@ impl EpicRepository {
             "short_id collision after 16 retries".into(),
         ))
     }
+
+    async fn ensure_default_project_id(&self) -> Result<String> {
+        self.db.ensure_initialized().await?;
+        if let Some(id) =
+            sqlx::query_scalar::<_, String>("SELECT id FROM projects ORDER BY created_at LIMIT 1")
+                .fetch_optional(self.db.pool())
+                .await?
+        {
+            return Ok(id);
+        }
+
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
+            .bind(&id)
+            .bind("default")
+            .bind(".")
+            .execute(self.db.pool())
+            .await?;
+        Ok(id)
+    }
 }
 
 // ── Short ID helpers ─────────────────────────────────────────────────────────
@@ -409,9 +465,18 @@ fn encode_base36(mut n: u32) -> String {
 
 // ── Dynamic query helpers ────────────────────────────────────────────────────
 
-fn epic_build_where(status: &Option<String>, text: &Option<String>) -> (String, Vec<SqlParam>) {
+fn epic_build_where(
+    project_id: &Option<String>,
+    status: &Option<String>,
+    text: &Option<String>,
+) -> (String, Vec<SqlParam>) {
     let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<SqlParam> = Vec::new();
+
+    if let Some(p) = project_id {
+        clauses.push("project_id = ?".to_owned());
+        params.push(SqlParam::Text(p.clone()));
+    }
 
     if let Some(s) = status {
         clauses.push("status = ?".to_owned());
