@@ -127,6 +127,12 @@ impl HealthTracker {
         state.consecutive_failures += 1;
         state.total_failures += 1;
 
+        // If the previous cooldown expired, clear the flag so we can re-trip.
+        if state.auto_disabled && state.is_available() {
+            state.auto_disabled = false;
+            state.cooldown_until = None;
+        }
+
         if !state.auto_disabled && state.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
             let cooldown = state.compute_cooldown();
             state.auto_disabled = true;
