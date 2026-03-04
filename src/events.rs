@@ -65,6 +65,26 @@ pub enum DjinnEvent {
     SessionCreated(SessionRecord),
     SessionUpdated(SessionRecord),
 
+    /// Periodic token usage snapshot emitted after each agent turn.
+    /// `usage_pct` is `tokens_in / context_window` (0.0 when context_window unknown).
+    SessionTokenUpdate {
+        session_id: String,
+        task_id: String,
+        tokens_in: i64,
+        tokens_out: i64,
+        context_window: i64,
+        usage_pct: f64,
+    },
+
+    /// Emitted when a session is compacted into a new continuation session.
+    SessionCompacted {
+        old_session_id: String,
+        new_session_id: String,
+        task_id: String,
+        summary_tokens: i64,
+        continuation_of: Option<String>,
+    },
+
     // Project health (setup/verification commands result)
     ProjectHealthChanged {
         project_id: String,

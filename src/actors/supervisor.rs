@@ -37,6 +37,7 @@ use crate::db::repositories::git_settings::GitSettingsRepository;
 use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
+use crate::events::DjinnEvent;
 use crate::models::session::{SessionRecord, SessionStatus};
 use crate::models::task::{Task, TransitionAction};
 use crate::server::AppState;
@@ -418,21 +419,37 @@ fn spawn_reply_task(
                                     }
                                 }
 
-                                // After each agent turn, check accumulated tokens against 80% of
-                                // the model's context window and signal if compaction is needed.
-                                if !compaction_signaled && context_window > 0 {
+                                // After each agent turn, read token usage and emit a telemetry
+                                // event. Also check against the 80% compaction threshold.
+                                {
                                     let goose_session = session_manager.get_session(&session_id, false).await;
-                                    let tokens_in = if let Ok(s) = goose_session {
-                                        s.accumulated_input_tokens
+                                    let (tokens_in, tokens_out) = if let Ok(s) = goose_session {
+                                        let ti = s.accumulated_input_tokens
                                             .or(s.input_tokens)
-                                            .unwrap_or(0) as i64
+                                            .unwrap_or(0) as i64;
+                                        let to = s.accumulated_output_tokens
+                                            .or(s.output_tokens)
+                                            .unwrap_or(0) as i64;
+                                        (ti, to)
                                     } else {
                                         AgentSupervisor::tokens_from_goose_sqlite(&session_id)
                                             .await
-                                            .map(|(ti, _)| ti)
-                                            .unwrap_or(0)
+                                            .unwrap_or((0, 0))
                                     };
-                                    if tokens_in as f64 >= 0.8 * context_window as f64 {
+                                    let usage_pct = if context_window > 0 {
+                                        tokens_in as f64 / context_window as f64
+                                    } else {
+                                        0.0
+                                    };
+                                    let _ = app_state.events().send(DjinnEvent::SessionTokenUpdate {
+                                        session_id: session_id.clone(),
+                                        task_id: task_id.clone(),
+                                        tokens_in,
+                                        tokens_out,
+                                        context_window,
+                                        usage_pct,
+                                    });
+                                    if !compaction_signaled && context_window > 0 && usage_pct >= 0.8 {
                                         compaction_signaled = true;
                                         tracing::info!(
                                             task_id = %task_id,
