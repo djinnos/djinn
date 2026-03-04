@@ -1,3 +1,4 @@
+use tauri::Manager;
 use std::sync::Mutex;
 
 mod auth;
