@@ -646,6 +646,21 @@ impl AgentSupervisor {
                 let mut saw_any_event = false;
                 let mut saw_any_tool_use = false;
                 let assistant_role = GooseMessage::assistant().role;
+                let mut assistant_message_count: usize = 0;
+                let mut assistant_fragments: Vec<String> = Vec::new();
+
+                let push_fragment = |fragments: &mut Vec<String>, value: String| {
+                    const MAX_FRAGMENTS: usize = 12;
+                    let normalized = value.replace('\n', "\\n").trim().to_string();
+                    if normalized.is_empty() {
+                        return;
+                    }
+                    let snippet: String = normalized.chars().take(160).collect();
+                    if fragments.len() >= MAX_FRAGMENTS {
+                        fragments.remove(0);
+                    }
+                    fragments.push(snippet);
+                };
 
                 while let Some(next_message) = pending_message.take() {
                     let env_diag = runtime_env_diagnostics(
@@ -729,16 +744,34 @@ impl AgentSupervisor {
                                 if let goose::agents::AgentEvent::Message(msg) = &evt
                                     && msg.role == assistant_role
                                 {
+                                    assistant_message_count += 1;
                                     for content in &msg.content {
                                         match content {
                                             MessageContent::Text(text) => {
                                                 output.ingest_text(&text.text);
+                                                push_fragment(&mut assistant_fragments, format!("text:{}", text.text));
                                             }
-                                            MessageContent::ToolRequest(_) => {
+                                            MessageContent::ToolRequest(req) => {
+                                                push_fragment(
+                                                    &mut assistant_fragments,
+                                                    format!("tool_request:{}", req.id),
+                                                );
+                                                saw_any_tool_use = true;
+                                                output.ingest_text(&content.to_string());
+                                            }
+                                            MessageContent::FrontendToolRequest(req) => {
+                                                push_fragment(
+                                                    &mut assistant_fragments,
+                                                    format!("frontend_tool_request:{}", req.id),
+                                                );
                                                 saw_any_tool_use = true;
                                                 output.ingest_text(&content.to_string());
                                             }
                                             _ => {
+                                                push_fragment(
+                                                    &mut assistant_fragments,
+                                                    format!("{}", content),
+                                                );
                                                 output.ingest_text(&content.to_string());
                                             }
                                         }
@@ -820,7 +853,33 @@ impl AgentSupervisor {
                     }
                 }
 
+                if let Some(last_assistant_text) =
+                    Self::last_assistant_text_from_goose_sqlite(&session_id).await
+                {
+                    output.ingest_text(&last_assistant_text);
+                    tracing::info!(
+                        task_id = %task_id_for_join,
+                        agent_type = %run_agent_type.as_str(),
+                        marker_present_after_persisted_check = !Self::missing_required_marker(run_agent_type, &output),
+                        "Supervisor: parsed persisted last assistant message before marker decision"
+                    );
+                }
+
                 if Self::missing_required_marker(run_agent_type, &output) {
+                    tracing::warn!(
+                        task_id = %task_id_for_join,
+                        agent_type = %run_agent_type.as_str(),
+                        saw_any_event,
+                        saw_any_tool_use,
+                        assistant_message_count,
+                        worker_signal = ?output.worker_signal,
+                        reviewer_verdict = ?output.reviewer_verdict,
+                        epic_verdict = ?output.epic_verdict,
+                        runtime_error = ?output.runtime_error,
+                        reviewer_feedback = ?output.reviewer_feedback,
+                        assistant_fragments = ?assistant_fragments,
+                        "Supervisor: required marker missing at session end"
+                    );
                     let reason = if !saw_any_tool_use {
                         match run_agent_type {
                             AgentType::Worker | AgentType::ConflictResolver => {
@@ -1490,6 +1549,19 @@ impl AgentSupervisor {
         None
     }
 
+    async fn last_assistant_text_from_goose_sqlite(goose_session_id: &str) -> Option<String> {
+        for db_path in Self::goose_session_db_candidates() {
+            let Some(text) =
+                Self::last_assistant_text_from_goose_sqlite_at(&db_path, goose_session_id).await
+            else {
+                continue;
+            };
+            return Some(text);
+        }
+
+        None
+    }
+
     fn goose_session_db_candidates() -> Vec<PathBuf> {
         let mut candidates = Vec::new();
 
@@ -1540,6 +1612,58 @@ impl AgentSupervisor {
         .ok()??;
 
         Some(row)
+    }
+
+    async fn last_assistant_text_from_goose_sqlite_at(
+        db_path: &Path,
+        goose_session_id: &str,
+    ) -> Option<String> {
+        if !db_path.exists() {
+            return None;
+        }
+
+        let options = SqliteConnectOptions::new()
+            .filename(db_path)
+            .read_only(true)
+            .create_if_missing(false)
+            .busy_timeout(Duration::from_secs(1));
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .ok()?;
+
+        let content_json = sqlx::query_scalar::<_, String>(
+            "SELECT content_json FROM messages WHERE session_id = ?1 AND role = 'assistant' ORDER BY id DESC LIMIT 1",
+        )
+        .bind(goose_session_id)
+        .fetch_optional(&pool)
+        .await
+        .ok()??;
+
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content_json)
+            && let Some(items) = value.as_array()
+        {
+            let mut text_parts = Vec::new();
+            for item in items {
+                let is_text = item
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|t| t == "text");
+                if !is_text {
+                    continue;
+                }
+                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                    text_parts.push(text);
+                }
+            }
+            if !text_parts.is_empty() {
+                return Some(text_parts.join("\n"));
+            }
+        }
+
+        Some(content_json)
     }
 
     async fn update_session_record(
