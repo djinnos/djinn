@@ -30,9 +30,11 @@ use crate::agent::output_parser::{
 use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::{AgentType, GooseSessionHandle, SessionManager, SessionType};
 use crate::db::repositories::credential::CredentialRepository;
+use crate::commands::{CommandSpec, run_commands};
 use crate::db::repositories::epic::EpicRepository;
 use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
 use crate::db::repositories::git_settings::GitSettingsRepository;
+use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
 use crate::models::session::SessionStatus;
@@ -516,6 +518,110 @@ impl AgentSupervisor {
                 "worktree preflight failed before session creation: {diag}"
             )));
         }
+
+        // Run setup commands in the worktree before starting the agent session.
+        {
+            let project_repo = ProjectRepository::new(
+                self.app_state.db().clone(),
+                self.app_state.events().clone(),
+            );
+            if let Ok(Some(project)) = project_repo.get(&task.project_id).await {
+                let setup_specs: Vec<CommandSpec> =
+                    serde_json::from_str(&project.setup_commands).unwrap_or_default();
+                if !setup_specs.is_empty() {
+                    let setup_start = std::time::Instant::now();
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        command_count = setup_specs.len(),
+                        "Supervisor: running setup commands"
+                    );
+                    let setup_result = run_commands(&setup_specs, &worktree_path).await;
+                    match setup_result {
+                        Ok(results) => {
+                            let failed = results.last().filter(|r| r.exit_code != 0);
+                            if let Some(failure) = failed {
+                                let reason = format!(
+                                    "Setup command '{}' failed (exit {})\nstdout: {}\nstderr: {}",
+                                    failure.name,
+                                    failure.exit_code,
+                                    failure.stdout.trim(),
+                                    failure.stderr.trim(),
+                                );
+                                tracing::warn!(
+                                    task_id = %task.short_id,
+                                    command = %failure.name,
+                                    exit_code = failure.exit_code,
+                                    "Supervisor: setup command failed; blocking task"
+                                );
+                                let task_repo = TaskRepository::new(
+                                    self.app_state.db().clone(),
+                                    self.app_state.events().clone(),
+                                );
+                                if let Err(e) = task_repo
+                                    .transition(
+                                        &task.id,
+                                        TransitionAction::Block,
+                                        "agent-supervisor",
+                                        "system",
+                                        Some(&reason),
+                                        None,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        task_id = %task.short_id,
+                                        error = %e,
+                                        "failed to block task after setup failure"
+                                    );
+                                }
+                                self.cleanup_worktree(&task.id, &worktree_path).await;
+                                return Err(SupervisorError::Goose(format!(
+                                    "setup commands failed for task {}: {}",
+                                    task.short_id, reason
+                                )));
+                            }
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                duration_ms = setup_start.elapsed().as_millis(),
+                                "Supervisor: setup commands completed"
+                            );
+                        }
+                        Err(e) => {
+                            let reason = format!("Setup commands error: {e}");
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                error = %e,
+                                "Supervisor: setup command error; blocking task"
+                            );
+                            let task_repo = TaskRepository::new(
+                                self.app_state.db().clone(),
+                                self.app_state.events().clone(),
+                            );
+                            if let Err(e2) = task_repo
+                                .transition(
+                                    &task.id,
+                                    TransitionAction::Block,
+                                    "agent-supervisor",
+                                    "system",
+                                    Some(&reason),
+                                    None,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    task_id = %task.short_id,
+                                    error = %e2,
+                                    "failed to block task after setup error"
+                                );
+                            }
+                            self.cleanup_worktree(&task.id, &worktree_path).await;
+                            return Err(SupervisorError::Goose(reason));
+                        }
+                    }
+                }
+            }
+        }
+
         let session = self
             .session_manager
             .create_session(worktree_path.clone(), session_name, SessionType::SubAgent)

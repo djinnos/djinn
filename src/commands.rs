@@ -3,11 +3,13 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandSpec {
     pub name: String,
     pub command: String,
