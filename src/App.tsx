@@ -2,16 +2,42 @@ import { useServerHealth } from "@/hooks/useServerHealth";
 import { LoadingScreen } from "@/components/LoadingScreen";
 import { Wizard } from "@/components/Wizard";
 import { WizardStep } from "@/components/WizardStep";
+import { ServerCheckStep } from "@/components/ServerCheckStep";
+import { ProviderSetupStep } from "@/components/ProviderSetupStep";
 import { useWizardStore, shouldShowWizard } from "@/stores/wizardStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 
-function StepContent({ title, description }: { title: string; description: string }) {
+function WelcomeStep() {
   return (
     <div className="flex flex-col gap-4 text-center">
-      <h2 className="text-2xl font-semibold">{title}</h2>
-      <p className="text-muted-foreground">{description}</p>
+      <h2 className="text-2xl font-semibold">Welcome to DjinnOS</h2>
+      <p className="text-muted-foreground">
+        Let's set up your workspace in a few simple steps.
+      </p>
+    </div>
+  );
+}
+
+function ProjectSetupStep() {
+  return (
+    <div className="flex flex-col gap-4 text-center">
+      <h2 className="text-2xl font-semibold">Create Project</h2>
+      <p className="text-muted-foreground">
+        Create your first project to organize your work.
+      </p>
+    </div>
+  );
+}
+
+function CompletionStep() {
+  return (
+    <div className="flex flex-col gap-4 text-center">
+      <h2 className="text-2xl font-semibold">You're All Set!</h2>
+      <p className="text-muted-foreground">
+        Your workspace is ready. Start creating amazing things.
+      </p>
     </div>
   );
 }
@@ -49,28 +75,19 @@ export default function App() {
         onSkip={() => setShowWizard(false)}
       >
         <WizardStep stepNumber={1}>
-          <StepContent
-            title="Welcome to DjinnOS"
-            description="Let's set up your workspace in a few simple steps."
-          ></StepContent>
+          <WelcomeStep />
         </WizardStep>
         <WizardStep stepNumber={2}>
-          <StepContent
-            title="Configure Provider"
-            description="Set up your AI provider to get started."
-          ></StepContent>
+          <ServerCheckStep />
         </WizardStep>
         <WizardStep stepNumber={3}>
-          <StepContent
-            title="Create Project"
-            description="Create your first project to organize your work."
-          ></StepContent>
+          <ProviderSetupStep />
         </WizardStep>
         <WizardStep stepNumber={4}>
-          <StepContent
-            title="You're All Set!"
-            description="Your workspace is ready. Start creating amazing things."
-          ></StepContent>
+          <ProjectSetupStep />
+        </WizardStep>
+        <WizardStep stepNumber={5}>
+          <CompletionStep />
         </WizardStep>
       </Wizard>
     );

@@ -23,7 +23,7 @@ export interface WizardActions {
 
 const INITIAL_STATE: WizardState = {
   currentStep: 1,
-  totalSteps: 4,
+  totalSteps: 5,
   completedSteps: [],
   skippedSteps: [],
   isCompleted: false,
