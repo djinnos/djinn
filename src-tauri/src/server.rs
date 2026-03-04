@@ -226,17 +226,15 @@ async fn wait_for_daemon_json(path: &PathBuf, timeout_secs: u64) -> Result<u16, 
 /// Get the path to daemon.json/lockfile
 ///
 /// The server writes this file when it is ready and includes the port
-fn get_daemon_json_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+fn get_daemon_json_path<R: Runtime>(_app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let home_dir = dirs::home_dir().ok_or_else(|| "Failed to resolve home directory".to_string())?;
+    let daemon_dir = home_dir.join(".djinn");
 
     // Ensure the directory exists
-    std::fs::create_dir_all(&app_data_dir)
-        .map_err(|e| format!("Failed to create app data dir: {}", e))?;
+    std::fs::create_dir_all(&daemon_dir)
+        .map_err(|e| format!("Failed to create daemon dir: {}", e))?;
 
-    Ok(app_data_dir.join("daemon.json"))
+    Ok(daemon_dir.join("daemon.json"))
 }
 
 /// Discover an existing server by reading daemon.json

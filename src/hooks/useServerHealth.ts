@@ -38,6 +38,7 @@ export function useServerHealth(): ServerHealthState {
 
       return false;
     } catch (err) {
+      setStatus("error");
       setError(err instanceof Error ? err.message : "Unknown error");
       return false;
     }

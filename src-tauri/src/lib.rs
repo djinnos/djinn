@@ -68,6 +68,11 @@ pub fn run() {
                                 state.mark_error(&e);
                             }
                         }
+
+                        // Show the main window so the frontend can render error/retry UI
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.show();
+                        }
                     }
                 }
             });
@@ -89,6 +94,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::greet,
             commands::get_server_port,
+            commands::get_server_status,
+            commands::retry_server_discovery,
             commands::get_auth_token,
             commands::set_auth_token,
             commands::clear_auth_token,
