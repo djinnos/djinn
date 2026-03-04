@@ -174,6 +174,7 @@ _Updated: 2026-03-03 (post-audit)_
 - AGENT-16 (credential vault in Djinn DB)
 - AGENT-17 (Goose provider creation from vault at dispatch time)
 - AGENT-18 (per-session Goose Agent configuration)
+- AGENT-19 (OAuth-capable providers exposed/configurable via MCP)
 
 **Success criteria**:
 1. ~~Coordinator dispatches Goose agent to an open task; agent works in worktree~~ ✓
@@ -183,6 +184,7 @@ _Updated: 2026-03-03 (post-audit)_
 5. ~~Stuck detection recovers tasks from unresponsive agents within 30s~~ ✓
 6. ~~Credential vault stores API keys; Goose providers created from vault at dispatch time~~ ✓
 7. ~~Per-session prompt and extension configuration for different agent types~~ ✓
+8. OAuth-capable Goose providers are discoverable/configurable over MCP and can dispatch without manual API key entry
 
 **Depends on**: Phase 2 (task board for dispatch), Phase 4 (git for worktrees)
 

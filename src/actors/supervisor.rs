@@ -14,6 +14,7 @@ use goose::config::{Config as GooseConfig, GooseMode, PermissionManager};
 use goose::conversation::message::Message as GooseMessage;
 use goose::model::ModelConfig;
 use goose::providers;
+use goose::providers::base::ProviderMetadata;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::{mpsc, oneshot};
@@ -280,11 +281,19 @@ impl AgentSupervisor {
         let agent_type = self.agent_type_for_task(&task, conflict_ctx.is_some());
         self.transition_start(&task, agent_type).await?;
 
-        let (provider_id, model_name) = Self::parse_model_id(&model_id)?;
-        let (key_name, api_key) = self.load_provider_api_key(&provider_id).await?;
-        GooseConfig::global()
-            .set_secret(&key_name, &api_key)
-            .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+        let (catalog_provider_id, model_name) = Self::parse_model_id(&model_id)?;
+        let goose_provider_id = self.resolve_goose_provider_id(&catalog_provider_id).await;
+
+        if !self
+            .provider_supports_oauth(&goose_provider_id)
+            .await
+            .unwrap_or(false)
+        {
+            let (key_name, api_key) = self.load_provider_api_key(&catalog_provider_id).await?;
+            GooseConfig::global()
+                .set_secret(&key_name, &api_key)
+                .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+        }
 
         let session_name = format!("{} {}", task.short_id, task.title);
         let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -309,11 +318,11 @@ impl AgentSupervisor {
 
         let goose_model = ModelConfig::new(&model_name)
             .map_err(|e| SupervisorError::Goose(e.to_string()))?
-            .with_canonical_limits(&provider_id);
+            .with_canonical_limits(&goose_provider_id);
 
         let extensions = self.extensions_for(agent_type);
 
-        let provider = providers::create(&provider_id, goose_model, extensions.clone())
+        let provider = providers::create(&goose_provider_id, goose_model, extensions.clone())
             .await
             .map_err(|e| {
                 self.app_state.health_tracker().record_failure(&model_id);
@@ -1177,6 +1186,49 @@ impl AgentSupervisor {
                 key_name,
             }),
         }
+    }
+
+    async fn goose_provider_entries(
+        &self,
+    ) -> Vec<(ProviderMetadata, goose::providers::base::ProviderType)> {
+        providers::providers().await
+    }
+
+    fn canonical_provider_id(id: &str) -> String {
+        id.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+
+    fn resolve_provider_alias(
+        provider_id: &str,
+        entries: &[(ProviderMetadata, goose::providers::base::ProviderType)],
+    ) -> Option<String> {
+        if let Some((meta, _)) = entries.iter().find(|(meta, _)| meta.name == provider_id) {
+            return Some(meta.name.clone());
+        }
+
+        let canonical = Self::canonical_provider_id(provider_id);
+        entries
+            .iter()
+            .find(|(meta, _)| Self::canonical_provider_id(&meta.name) == canonical)
+            .map(|(meta, _)| meta.name.clone())
+    }
+
+    async fn resolve_goose_provider_id(&self, provider_id: &str) -> String {
+        let entries = self.goose_provider_entries().await;
+        Self::resolve_provider_alias(provider_id, &entries)
+            .unwrap_or_else(|| provider_id.to_string())
+    }
+
+    async fn provider_supports_oauth(&self, provider_id: &str) -> Option<bool> {
+        let entries = self.goose_provider_entries().await;
+        let resolved = Self::resolve_provider_alias(provider_id, &entries)?;
+        entries
+            .iter()
+            .find(|(meta, _)| meta.name == resolved)
+            .map(|(meta, _)| meta.config_keys.iter().any(|k| k.oauth_flow))
     }
 
     fn provider_secret_key(&self, provider_id: &str) -> Option<String> {

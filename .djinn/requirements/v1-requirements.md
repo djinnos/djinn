@@ -91,6 +91,7 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 | AGENT-16 | Credential vault in Djinn DB with encrypted API key storage — supports VPS, WSL, standalone deployment | v1 | ADR-008 |
 | AGENT-17 | Goose provider creation from vault credentials at dispatch time (runtime key management, no server restart) | v1 | ADR-008 |
 | AGENT-18 | Per-session Goose Agent configuration: prompt override + extension scoping per agent type | v1 | ADR-008 |
+| AGENT-19 | OAuth-capable Goose providers exposed through MCP: catalog advertises OAuth support and a tool can trigger provider OAuth setup without manual CLI configuration | v1 | ADR-008 |
 
 ## Category: REVIEW (Review System)
 

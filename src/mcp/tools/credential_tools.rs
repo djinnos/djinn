@@ -168,9 +168,12 @@ impl DjinnMcpServer {
             .await
         {
             Ok(cred) => {
-                if let Err(e) =
-                    maybe_auto_register_goose_custom_provider(self, &input.provider_id, &input.key_name)
-                        .await
+                if let Err(e) = maybe_auto_register_goose_custom_provider(
+                    self,
+                    &input.provider_id,
+                    &input.key_name,
+                )
+                .await
                 {
                     tracing::warn!(
                         provider_id = %input.provider_id,

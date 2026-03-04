@@ -78,6 +78,8 @@ Goose's `SessionManager::new(data_dir)` pointed at `~/.djinn/sessions/` to co-lo
 
 Server owns a credential vault in the Djinn DB (settings table, encrypted at rest). Supports VPS, WSL, and standalone deployment where the desktop doesn't spawn the server. When creating a Goose provider, Djinn loads the key from its vault and injects it. No server restart needed to add keys.
 
+For OAuth-capable Goose providers (for example ChatGPT Codex and GitHub Copilot), Djinn also exposes OAuth setup through MCP so the UI can start the provider's `configure_oauth()` flow directly. Provider catalog responses include OAuth capability metadata and connection state (credential and/or OAuth token), so desktop flows can render a unified "connected" status without shelling out to Goose CLI.
+
 ### Fleet-Level Model Health
 
 Djinn's existing model health system (`n8e4` — circuit breakers, cooldowns, rerouting) wraps Goose's provider selection. Flow:

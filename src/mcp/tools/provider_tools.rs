@@ -3,12 +3,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::custom_provider::CustomProviderRepository;
 use crate::mcp::server::DjinnMcpServer;
 use crate::mcp::tools::AnyJson;
 use crate::models::provider::{CustomProvider, Model, Provider, SeedModel};
 use crate::provider::validate::{self, ValidationRequest};
-use goose::providers::base::ProviderType;
+use goose::config::Config as GooseConfig;
+use goose::providers::base::{ProviderMetadata, ProviderType};
 
 // ── Shared response helpers ───────────────────────────────────────────────────
 
@@ -21,7 +23,7 @@ fn provider_to_json(p: &Provider) -> serde_json::Value {
         "base_url":             p.base_url,
         "docs_url":             p.docs_url,
         "is_openai_compatible": p.is_openai_compatible,
-        // Always false from the server — desktop merges its local credential state.
+        // Server-computed connection state (credential vault and/or OAuth token present).
         "connected": false,
     })
 }
@@ -45,6 +47,13 @@ fn model_to_json(m: &Model) -> serde_json::Value {
     })
 }
 
+pub(crate) fn canonical_provider_id(id: &str) -> String {
+    id.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 pub(crate) async fn goose_provider_ids() -> HashSet<String> {
     goose::providers::providers()
         .await
@@ -53,13 +62,82 @@ pub(crate) async fn goose_provider_ids() -> HashSet<String> {
         .collect()
 }
 
-pub(crate) async fn is_goose_builtin_provider(provider_id: &str) -> bool {
-    goose::providers::providers()
-        .await
-        .into_iter()
-        .any(|(meta, ty)| {
-            meta.name == provider_id && matches!(ty, ProviderType::Builtin | ProviderType::Preferred)
+pub(crate) async fn goose_provider_entries() -> Vec<(ProviderMetadata, ProviderType)> {
+    goose::providers::providers().await
+}
+
+pub(crate) fn resolve_goose_provider_name(
+    provider_id: &str,
+    entries: &[(ProviderMetadata, ProviderType)],
+) -> Option<String> {
+    if let Some((meta, _)) = entries.iter().find(|(meta, _)| meta.name == provider_id) {
+        return Some(meta.name.clone());
+    }
+
+    let canonical = canonical_provider_id(provider_id);
+    entries
+        .iter()
+        .find(|(meta, _)| canonical_provider_id(&meta.name) == canonical)
+        .map(|(meta, _)| meta.name.clone())
+}
+
+fn oauth_keys_for_provider(
+    provider_id: &str,
+    entries: &[(ProviderMetadata, ProviderType)],
+) -> Vec<String> {
+    let Some(name) = resolve_goose_provider_name(provider_id, entries) else {
+        return vec![];
+    };
+
+    entries
+        .iter()
+        .find(|(meta, _)| meta.name == name)
+        .map(|(meta, _)| {
+            meta.config_keys
+                .iter()
+                .filter(|k| k.oauth_flow)
+                .map(|k| k.name.clone())
+                .collect()
         })
+        .unwrap_or_default()
+}
+
+fn provider_connection_status(
+    provider: &Provider,
+    oauth_keys: &[String],
+    credential_provider_ids: &HashSet<String>,
+    credential_key_names: &HashSet<String>,
+) -> (bool, Vec<&'static str>) {
+    let credential_connected = credential_provider_ids.contains(&provider.id)
+        || provider
+            .env_vars
+            .iter()
+            .any(|env| credential_key_names.contains(env));
+
+    let oauth_connected = !oauth_keys.is_empty()
+        && oauth_keys
+            .iter()
+            .any(|key| GooseConfig::global().get_secret::<String>(key).is_ok());
+
+    let mut methods = Vec::new();
+    if credential_connected {
+        methods.push("credential");
+    }
+    if oauth_connected {
+        methods.push("oauth");
+    }
+    (!methods.is_empty(), methods)
+}
+
+pub(crate) async fn is_goose_builtin_provider(provider_id: &str) -> bool {
+    let entries = goose_provider_entries().await;
+    let Some(resolved_name) = resolve_goose_provider_name(provider_id, &entries) else {
+        return false;
+    };
+
+    entries.into_iter().any(|(meta, ty)| {
+        meta.name == resolved_name && matches!(ty, ProviderType::Builtin | ProviderType::Preferred)
+    })
 }
 
 fn is_provider_usable_by_goose(provider: &Provider, goose_ids: &HashSet<String>) -> bool {
@@ -104,6 +182,24 @@ pub struct ProviderModelsResponse {
     pub provider_id: String,
     pub models: Vec<AnyJson>,
     pub total: i64,
+}
+
+// ── provider_oauth_start ──────────────────────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ProviderOauthStartInput {
+    /// Provider ID to start OAuth for (accepts catalog/goose aliases, e.g. 'github-copilot').
+    pub provider_id: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProviderOauthStartResponse {
+    pub success: bool,
+    pub provider_id: String,
+    pub goose_provider_id: Option<String>,
+    pub oauth_supported: bool,
+    pub configured_keys: Vec<String>,
+    pub error: Option<String>,
 }
 
 // ── provider_model_lookup ─────────────────────────────────────────────────────
@@ -210,9 +306,9 @@ impl DjinnMcpServer {
                 } else {
                     Json(ModelHealthResponse {
                         action: "reset".into(),
-                        models: vec![
-                            AnyJson::from(serde_json::json!({"error": "model parameter required for reset"})),
-                        ],
+                        models: vec![AnyJson::from(
+                            serde_json::json!({"error": "model parameter required for reset"}),
+                        )],
                     })
                 }
             }
@@ -234,17 +330,17 @@ impl DjinnMcpServer {
                 } else {
                     Json(ModelHealthResponse {
                         action: "enable".into(),
-                        models: vec![
-                            AnyJson::from(serde_json::json!({"error": "model parameter required for enable"})),
-                        ],
+                        models: vec![AnyJson::from(
+                            serde_json::json!({"error": "model parameter required for enable"}),
+                        )],
                     })
                 }
             }
             _ => Json(ModelHealthResponse {
                 action: action.to_owned(),
-                models: vec![
-                    AnyJson::from(serde_json::json!({"error": format!("unknown action '{action}'; valid: status, reset, reset_all, enable")})),
-                ],
+                models: vec![AnyJson::from(
+                    serde_json::json!({"error": format!("unknown action '{action}'; valid: status, reset, reset_all, enable")}),
+                )],
             }),
         }
     }
@@ -257,13 +353,46 @@ impl DjinnMcpServer {
     )]
     pub async fn provider_catalog(&self) -> Json<ProviderCatalogResponse> {
         let goose_ids = goose_provider_ids().await;
+        let goose_entries = goose_provider_entries().await;
+        let credential_repo = CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
+        let (credential_provider_ids, credential_key_names) = match credential_repo.list().await {
+            Ok(creds) => {
+                let provider_ids = creds.iter().map(|c| c.provider_id.clone()).collect();
+                let key_names = creds.iter().map(|c| c.key_name.clone()).collect();
+                (provider_ids, key_names)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "provider_catalog: failed to load credentials");
+                (HashSet::new(), HashSet::new())
+            }
+        };
+
         let providers: Vec<AnyJson> = self
             .state
             .catalog()
             .list_providers()
             .iter()
             .filter(|p| is_provider_usable_by_goose(p, &goose_ids))
-            .map(|p| AnyJson::from(provider_to_json(p)))
+            .map(|p| {
+                let mut value = provider_to_json(p);
+                if let Some(obj) = value.as_object_mut() {
+                    let oauth_keys = oauth_keys_for_provider(&p.id, &goose_entries);
+                    let (connected, methods) = provider_connection_status(
+                        p,
+                        &oauth_keys,
+                        &credential_provider_ids,
+                        &credential_key_names,
+                    );
+                    obj.insert("connected".into(), serde_json::json!(connected));
+                    obj.insert(
+                        "oauth_supported".into(),
+                        serde_json::json!(!oauth_keys.is_empty()),
+                    );
+                    obj.insert("oauth_keys".into(), serde_json::json!(oauth_keys));
+                    obj.insert("connection_methods".into(), serde_json::json!(methods));
+                }
+                AnyJson::from(value)
+            })
             .collect();
         let total = i64::try_from(providers.len()).unwrap_or(i64::MAX);
         Json(ProviderCatalogResponse { providers, total })
@@ -313,6 +442,76 @@ impl DjinnMcpServer {
             models,
             total,
         })
+    }
+
+    /// Start OAuth authentication flow for a Goose provider that supports OAuth.
+    /// This is used by UI onboarding/settings flows to connect OAuth-backed providers.
+    #[tool(
+        description = "Start OAuth authentication flow for a provider that supports OAuth. Returns success when Goose stores the provider token."
+    )]
+    pub async fn provider_oauth_start(
+        &self,
+        Parameters(input): Parameters<ProviderOauthStartInput>,
+    ) -> Json<ProviderOauthStartResponse> {
+        let entries = goose_provider_entries().await;
+        let Some(goose_provider_id) = resolve_goose_provider_name(&input.provider_id, &entries)
+        else {
+            return Json(ProviderOauthStartResponse {
+                success: false,
+                provider_id: input.provider_id,
+                goose_provider_id: None,
+                oauth_supported: false,
+                configured_keys: vec![],
+                error: Some("provider is not registered in Goose".into()),
+            });
+        };
+
+        let oauth_keys = oauth_keys_for_provider(&goose_provider_id, &entries);
+        if oauth_keys.is_empty() {
+            return Json(ProviderOauthStartResponse {
+                success: false,
+                provider_id: input.provider_id,
+                goose_provider_id: Some(goose_provider_id),
+                oauth_supported: false,
+                configured_keys: vec![],
+                error: Some("provider does not support OAuth flow".into()),
+            });
+        }
+
+        let provider =
+            match goose::providers::create_with_default_model(&goose_provider_id, Vec::new()).await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    return Json(ProviderOauthStartResponse {
+                        success: false,
+                        provider_id: input.provider_id,
+                        goose_provider_id: Some(goose_provider_id),
+                        oauth_supported: true,
+                        configured_keys: vec![],
+                        error: Some(e.to_string()),
+                    });
+                }
+            };
+
+        match provider.configure_oauth().await {
+            Ok(()) => Json(ProviderOauthStartResponse {
+                success: true,
+                provider_id: input.provider_id,
+                goose_provider_id: Some(goose_provider_id),
+                oauth_supported: true,
+                configured_keys: oauth_keys,
+                error: None,
+            }),
+            Err(e) => Json(ProviderOauthStartResponse {
+                success: false,
+                provider_id: input.provider_id,
+                goose_provider_id: Some(goose_provider_id),
+                oauth_supported: true,
+                configured_keys: vec![],
+                error: Some(e.to_string()),
+            }),
+        }
     }
 
     /// Look up a single model by its full 'providerID/modelID' identifier.
@@ -493,5 +692,44 @@ mod tests {
         let p = provider("unknown", false);
         let ids = HashSet::new();
         assert!(!is_provider_usable_by_goose(&p, &ids));
+    }
+
+    #[test]
+    fn canonical_provider_id_removes_separators() {
+        assert_eq!(canonical_provider_id("github-copilot"), "githubcopilot");
+        assert_eq!(canonical_provider_id("github_copilot"), "githubcopilot");
+    }
+
+    #[test]
+    fn resolve_goose_provider_name_matches_canonical_alias() {
+        let entries = vec![
+            (
+                ProviderMetadata::new("githubcopilot", "", "", "", vec![], "", vec![]),
+                ProviderType::Builtin,
+            ),
+            (
+                ProviderMetadata::new("openai", "", "", "", vec![], "", vec![]),
+                ProviderType::Preferred,
+            ),
+        ];
+        assert_eq!(
+            resolve_goose_provider_name("github-copilot", &entries),
+            Some("githubcopilot".to_string())
+        );
+    }
+
+    #[test]
+    fn provider_connection_status_marks_credential_connection() {
+        let p = provider("openai", true);
+        let credential_provider_ids = HashSet::from(["openai".to_string()]);
+        let credential_key_names = HashSet::new();
+        let (connected, methods) = provider_connection_status(
+            &p,
+            &[],
+            &credential_provider_ids,
+            &credential_key_names,
+        );
+        assert!(connected);
+        assert_eq!(methods, vec!["credential"]);
     }
 }
