@@ -1,9 +1,11 @@
 import { useServerHealth } from "@/hooks/useServerHealth";
+import { useEventSource } from "@/hooks/useEventSource";
 import { LoadingScreen } from "@/components/LoadingScreen";
 import { Wizard } from "@/components/Wizard";
 import { WizardStep } from "@/components/WizardStep";
 import { ServerCheckStep } from "@/components/ServerCheckStep";
 import { ProviderSetupStep } from "@/components/ProviderSetupStep";
+import { ConnectionStatus } from "@/components/ConnectionStatus";
 import { useWizardStore, shouldShowWizard } from "@/stores/wizardStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
@@ -46,6 +48,9 @@ export default function App() {
   const { status, port, error, retry, isRetrying } = useServerHealth();
   const [showWizard, setShowWizard] = useState(() => shouldShowWizard());
   const { isCompleted } = useWizardStore();
+
+  // Initialize EventSource connection for SSE events
+  useEventSource();
 
   useEffect(() => {
     if (status === "connected") {
@@ -95,6 +100,14 @@ export default function App() {
 
   return (
     <main className="flex min-h-screen flex-col bg-background">
+      {/* App Bar with Connection Status */}
+      <header className="flex items-center justify-between border-b px-4 py-2">
+        <div className="flex items-center gap-2">
+          <h1 className="text-lg font-semibold">DjinnOS Desktop</h1>
+        </div>
+        <ConnectionStatus />
+      </header>
+      
       <div className="flex flex-1 items-center justify-center">
         <div className="flex flex-col items-center gap-4">
           <h1 className="text-4xl font-bold text-foreground">DjinnOS Desktop</h1>
