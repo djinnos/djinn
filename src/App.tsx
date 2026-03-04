@@ -1,49 +1,30 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { greet } from "./tauri";
+import { Button } from "@/components/ui/button";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Home01Icon } from "@hugeicons/core-free-icons";
 import "./App.css";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
-
-  async function handleGreet() {
-    // Use wrapper from src/tauri/ instead of direct invoke
-    setGreetMsg(await greet(name));
-  }
-
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+    <main className="container flex min-h-screen flex-col items-center justify-center gap-4">
+      <h1 className="text-4xl font-bold">DjinnOS Desktop</h1>
+      <p className="text-muted-foreground">
+        shadcn/ui with Base UI primitives, Geist font, and Huge Icons
+      </p>
+      <div className="flex gap-4">
+        <Button>Default Button</Button>
+        <Button variant="secondary">Secondary</Button>
+        <Button variant="outline">Outline</Button>
+        <Button variant="ghost">Ghost</Button>
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          handleGreet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
+      <div className="flex gap-4">
+        <Button size="sm">Small</Button>
+        <Button size="default">Default</Button>
+        <Button size="lg">Large</Button>
+      </div>
+      <div className="flex gap-4 items-center">
+        <HugeiconsIcon icon={Home01Icon} size={24} className="text-primary" />
+        <span className="text-sm text-muted-foreground">Huge Icons</span>
+      </div>
     </main>
   );
 }
