@@ -29,6 +29,8 @@ You have access to Djinn tools via the `djinn` extension.
 {{diff}}
 ```
 
+{{verification_section}}
+
 ## Review Process
 
 ### Step 1: Extract Acceptance Criteria

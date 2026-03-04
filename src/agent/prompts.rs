@@ -52,6 +52,12 @@ pub struct TaskContext {
     pub merge_base_branch: Option<String>,
     pub merge_target_branch: Option<String>,
     pub merge_failure_context: Option<String>,
+
+    // ── Project command fields ────────────────────────────────────────────
+    /// Newline-separated list of setup command names, or None if none configured.
+    pub setup_commands: Option<String>,
+    /// Newline-separated list of verification command names, or None if none configured.
+    pub verification_commands: Option<String>,
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -124,6 +130,23 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
         "{{merge_failure_context}}",
         ctx.merge_failure_context.as_deref().unwrap_or(""),
     );
+
+    // Project command sections — rendered as full markdown blocks or empty string
+    // so the section headings are absent when no commands are configured.
+    let setup_section = match &ctx.setup_commands {
+        Some(cmds) if !cmds.trim().is_empty() => format!(
+            "## Automated Commands\n\nThese commands run automatically before your session starts. **Do not run them yourself.**\n\n{cmds}\n"
+        ),
+        _ => String::new(),
+    };
+    let verification_section = match &ctx.verification_commands {
+        Some(cmds) if !cmds.trim().is_empty() => format!(
+            "## Automated Verification\n\nBuild/test verification commands passed before review. Focus on acceptance criteria and code quality.\n\n{cmds}\n"
+        ),
+        _ => String::new(),
+    };
+    out = out.replace("{{setup_commands_section}}", &setup_section);
+    out = out.replace("{{verification_section}}", &verification_section);
 
     out
 }
@@ -216,6 +239,8 @@ mod tests {
             merge_base_branch: None,
             merge_target_branch: None,
             merge_failure_context: None,
+            setup_commands: None,
+            verification_commands: None,
         }
     }
 
@@ -282,5 +307,67 @@ mod tests {
     #[test]
     fn format_labels_empty_array() {
         assert_eq!(format_labels("[]"), "");
+    }
+
+    #[test]
+    fn worker_prompt_includes_setup_commands_when_present() {
+        let task = make_task();
+        let ctx = TaskContext {
+            setup_commands: Some("- `npm install`\n- `npm run build`".into()),
+            verification_commands: Some("- `npm test`".into()),
+            ..make_ctx()
+        };
+        let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+        assert!(prompt.contains("Automated Commands"));
+        assert!(prompt.contains("Do not run them yourself"));
+        assert!(prompt.contains("npm install"));
+        assert!(!prompt.contains("{{setup_commands_section}}"));
+        assert!(!prompt.contains("{{verification_section}}"));
+    }
+
+    #[test]
+    fn worker_prompt_omits_setup_section_when_no_commands() {
+        let task = make_task();
+        let ctx = make_ctx(); // setup_commands: None
+        let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+        assert!(!prompt.contains("Automated Commands"));
+        assert!(!prompt.contains("{{setup_commands_section}}"));
+    }
+
+    #[test]
+    fn reviewer_prompt_includes_verification_section_when_present() {
+        let task = make_task();
+        let ctx = TaskContext {
+            diff: Some("+ fn foo() {}".into()),
+            commits: Some("abc1234 Add widget".into()),
+            start_commit: Some("abc0000".into()),
+            end_commit: Some("abc1234".into()),
+            verification_commands: Some("- `cargo test`".into()),
+            ..make_ctx()
+        };
+        let prompt = render_prompt(AgentType::TaskReviewer, &task, &ctx);
+
+        assert!(prompt.contains("Automated Verification"));
+        assert!(prompt.contains("Focus on acceptance criteria"));
+        assert!(prompt.contains("cargo test"));
+        assert!(!prompt.contains("{{verification_section}}"));
+    }
+
+    #[test]
+    fn reviewer_prompt_omits_verification_section_when_no_commands() {
+        let task = make_task();
+        let ctx = TaskContext {
+            diff: Some("+ fn foo() {}".into()),
+            commits: Some("abc1234 Add widget".into()),
+            start_commit: Some("abc0000".into()),
+            end_commit: Some("abc1234".into()),
+            ..make_ctx()
+        };
+        let prompt = render_prompt(AgentType::TaskReviewer, &task, &ctx);
+
+        assert!(!prompt.contains("Automated Verification"));
+        assert!(!prompt.contains("{{verification_section}}"));
     }
 }
