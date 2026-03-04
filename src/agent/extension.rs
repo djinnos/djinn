@@ -15,13 +15,12 @@ use super::workspace_guard;
 use crate::db::repositories::note::NoteRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
-use crate::models::task::{Task, TaskStatus, TransitionAction};
+use crate::models::task::Task;
 use crate::server::AppState;
 
 pub fn config(agent_type: AgentType) -> ExtensionConfig {
     let mut tool_values = vec![
         serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
-        serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
         serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
         serde_json::to_value(tool_memory_read()).expect("serialize tool_memory_read"),
         serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
@@ -29,7 +28,6 @@ pub fn config(agent_type: AgentType) -> ExtensionConfig {
 
     let mut available_tools = vec![
         "task_show".to_string(),
-        "task_transition".to_string(),
         "task_comment_add".to_string(),
         "memory_read".to_string(),
         "memory_search".to_string(),
@@ -126,7 +124,6 @@ where
     match call.name.as_str() {
         "task_show" => call_task_show(state, &call.arguments).await,
         "task_update" => call_task_update(state, &call.arguments).await,
-        "task_transition" => call_task_transition(state, &call.arguments).await,
         "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments).await,
@@ -153,16 +150,6 @@ struct TaskUpdateParams {
     acceptance_criteria: Option<Vec<serde_json::Value>>,
     memory_refs_add: Option<Vec<String>>,
     memory_refs_remove: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-struct TaskTransitionParams {
-    id: String,
-    action: String,
-    reason: Option<String>,
-    actor_id: Option<String>,
-    actor_role: Option<String>,
-    target_status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -300,41 +287,6 @@ async fn call_task_update(
             .map_err(|e| e.to_string())?;
         return Ok(task_to_value(&out));
     }
-
-    Ok(task_to_value(&updated))
-}
-
-async fn call_task_transition(
-    state: &AppState,
-    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
-) -> Result<serde_json::Value, String> {
-    let p: TaskTransitionParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.events().clone());
-
-    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
-        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
-    };
-
-    let action = TransitionAction::parse(&p.action).map_err(|e| e.to_string())?;
-    let target_override = match p.target_status {
-        Some(status) => Some(TaskStatus::parse(&status).map_err(|e| e.to_string())?),
-        None => None,
-    };
-
-    let actor_id = p.actor_id.as_deref().unwrap_or("goose-agent");
-    let actor_role = p.actor_role.as_deref().unwrap_or("system");
-
-    let updated = repo
-        .transition(
-            &task.id,
-            action,
-            actor_id,
-            actor_role,
-            p.reason.as_deref(),
-            target_override,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
 
     Ok(task_to_value(&updated))
 }
@@ -645,25 +597,6 @@ fn tool_task_update() -> RmcpTool {
                 "acceptance_criteria": {"type": "array", "items": {}},
                 "memory_refs_add": {"type": "array", "items": {"type": "string"}},
                 "memory_refs_remove": {"type": "array", "items": {"type": "string"}}
-            }
-        }),
-    )
-}
-
-fn tool_task_transition() -> RmcpTool {
-    RmcpTool::new(
-        "task_transition".to_string(),
-        "Transition a work item to a new status.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["id", "action"],
-            "properties": {
-                "id": {"type": "string"},
-                "action": {"type": "string"},
-                "reason": {"type": "string"},
-                "actor_id": {"type": "string"},
-                "actor_role": {"type": "string"},
-                "target_status": {"type": "string"}
             }
         }),
     )

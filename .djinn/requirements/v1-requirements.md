@@ -41,7 +41,7 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 |---|---|---|---|
 | TASK-01 | Epics as separate entities (own table, lifecycle: open → closed, no dependencies between epics) | v1 | Brief |
 | TASK-02 | Tasks under epics only (flat hierarchy — no subtasks, no subepics) | v1 | Brief |
-| TASK-03 | Task state machine: draft → open → in_progress → needs_task_review → in_task_review → approved → closed | v1 | Brief, Architecture Research §3 |
+| TASK-03 | Task state machine: draft → open → in_progress → needs_task_review → in_task_review → needs_epic_review → in_epic_review → approved → closed | v1 | Brief, Architecture Research §3 |
 | TASK-04 | Typestate pattern at service layer for compile-time task transition correctness | v1 | Architecture Research §3, Research Summary |
 | TASK-05 | Blocker dependencies between tasks (not epics) | v1 | Brief |
 | TASK-06 | Short IDs (4-char, collision-resistant) alongside UUIDv7 | v1 | Brief |
@@ -106,7 +106,7 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 
 | ID | Requirement | Classification | Source |
 |---|---|---|---|
-| GIT-01 | Task branches created locally from target branch (configurable, default: main); remote push is optional | v1 | Brief |
+| GIT-01 | Task branches created locally from target branch (configurable, default: main); when an existing task branch is reused, attempt a best-effort rebase onto target before dispatch; remote push is optional | v1 | Brief |
 | GIT-02 | Agent works in isolated worktree (user's checkout untouched) | v1 | Brief, Features Research |
 | GIT-03 | On task-review approval, create squash merge in a detached merge worktree and push commit directly to `origin/<target>` (avoids mutating the user's local checked-out branch) | v1 | Brief |
 | GIT-04 | GitActor: serialize all git operations through a single actor per repository | v1 | Architecture Research §4 |

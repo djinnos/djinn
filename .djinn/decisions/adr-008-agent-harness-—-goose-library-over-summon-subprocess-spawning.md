@@ -68,7 +68,7 @@ Each task's `JoinHandle` + `CancellationToken` replaces PID tracking. Graceful s
 
 ### Tool Access: Direct Function Calls
 
-Djinn's own tools (task_transition, memory_write, etc.) are exposed to agents via a custom Goose extension that calls Djinn's service layer directly — no MCP-over-localhost, no bridge. External tools (filesystem, web, user-provided MCPs) still go through Goose's MCP client.
+Djinn's own tools (task_show/task_update/task_comment_add, memory_read/search, guarded shell) are exposed to agents via a custom Goose extension that calls Djinn's service layer directly. State transitions remain supervisor-controlled (agents do not receive `task_transition`). No MCP-over-localhost bridge is used for these internal calls. External tools (filesystem, web, user-provided MCPs) still go through Goose's MCP client.
 
 ### Session Storage
 

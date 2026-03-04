@@ -1909,7 +1909,7 @@ mod tests {
             .unwrap();
         assert_eq!(t.status, "in_task_review");
 
-        // task_review_approve closes task directly (no phase review path).
+        // task_review_approve hands off to epic review.
         let t = repo
             .transition(
                 &t.id,
@@ -1919,6 +1919,43 @@ mod tests {
                 None,
                 None,
             )
+            .await
+            .unwrap();
+        assert_eq!(t.status, "needs_epic_review");
+        assert!(t.closed_at.is_none());
+        assert!(t.close_reason.is_none());
+
+        // epic_review_start
+        let t = repo
+            .transition(
+                &t.id,
+                TransitionAction::EpicReviewStart,
+                "",
+                "epic_reviewer",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(t.status, "in_epic_review");
+
+        // epic_review_approve
+        let t = repo
+            .transition(
+                &t.id,
+                TransitionAction::EpicReviewApprove,
+                "",
+                "epic_reviewer",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(t.status, "approved");
+
+        // close
+        let t = repo
+            .transition(&t.id, TransitionAction::Close, "", "system", None, None)
             .await
             .unwrap();
         assert_eq!(t.status, "closed");

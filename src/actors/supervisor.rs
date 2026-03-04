@@ -1620,6 +1620,7 @@ impl AgentSupervisor {
         task: &Task,
     ) -> Result<PathBuf, SupervisorError> {
         let branch = format!("task/{}", task.short_id);
+        let target_branch = self.default_target_branch(&task.project_id).await;
         let git = self
             .app_state
             .git_actor(project_dir)
@@ -1647,15 +1648,128 @@ impl AgentSupervisor {
         };
 
         if !branch_exists {
-            let target_branch = self.default_target_branch(&task.project_id).await;
             git.create_branch(&task.short_id, &target_branch)
                 .await
                 .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+        } else {
+            self.try_rebase_existing_task_branch(project_dir, &branch, &target_branch)
+                .await;
         }
 
         git.create_worktree(&task.short_id, &branch)
             .await
             .map_err(|e| SupervisorError::Goose(e.to_string()))
+    }
+
+    async fn try_rebase_existing_task_branch(
+        &self,
+        project_dir: &Path,
+        branch: &str,
+        target_branch: &str,
+    ) {
+        let git = match self.app_state.git_actor(project_dir).await {
+            Ok(git) => git,
+            Err(e) => {
+                tracing::warn!(branch = %branch, error = %e, "failed to open git actor for branch sync");
+                return;
+            }
+        };
+
+        let _ = git
+            .run_command(vec![
+                "fetch".into(),
+                "origin".into(),
+                target_branch.to_string(),
+            ])
+            .await;
+
+        let upstream = match git
+            .run_command(vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                format!("refs/remotes/origin/{target_branch}"),
+            ])
+            .await
+        {
+            Ok(_) => format!("origin/{target_branch}"),
+            Err(GitError::CommandFailed { code: 1, .. }) => target_branch.to_string(),
+            Err(e) => {
+                tracing::warn!(
+                    branch = %branch,
+                    target_branch = %target_branch,
+                    error = %e,
+                    "failed to resolve upstream for branch sync"
+                );
+                return;
+            }
+        };
+
+        let sync_name = format!(".sync-{}", branch.replace('/', "-"));
+        let sync_worktree_path = project_dir.join(".djinn").join("worktrees").join(sync_name);
+        let _ = git.remove_worktree(&sync_worktree_path).await;
+        if sync_worktree_path.exists() {
+            let _ = std::fs::remove_dir_all(&sync_worktree_path);
+        }
+
+        let sync_path = sync_worktree_path.to_str().unwrap_or_default().to_string();
+        if let Err(e) = git
+            .run_command(vec![
+                "worktree".into(),
+                "add".into(),
+                "--detach".into(),
+                sync_path.clone(),
+                branch.to_string(),
+            ])
+            .await
+        {
+            tracing::warn!(branch = %branch, error = %e, "failed to create sync worktree for branch rebase");
+            return;
+        }
+
+        let sync_git = match self.app_state.git_actor(&sync_worktree_path).await {
+            Ok(git) => git,
+            Err(e) => {
+                tracing::warn!(branch = %branch, error = %e, "failed to open sync worktree git actor");
+                let _ = git.remove_worktree(&sync_worktree_path).await;
+                if sync_worktree_path.exists() {
+                    let _ = std::fs::remove_dir_all(&sync_worktree_path);
+                }
+                return;
+            }
+        };
+
+        match sync_git
+            .run_command(vec!["rebase".into(), upstream.clone()])
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(branch = %branch, upstream = %upstream, "rebased existing task branch before dispatch");
+            }
+            Err(GitError::CommandFailed { .. }) => {
+                let _ = sync_git
+                    .run_command(vec!["rebase".into(), "--abort".into()])
+                    .await;
+                tracing::warn!(
+                    branch = %branch,
+                    upstream = %upstream,
+                    "existing task branch could not be rebased cleanly; continuing without rebase"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    branch = %branch,
+                    upstream = %upstream,
+                    error = %e,
+                    "failed to rebase existing task branch"
+                );
+            }
+        }
+
+        let _ = git.remove_worktree(&sync_worktree_path).await;
+        if sync_worktree_path.exists() {
+            let _ = std::fs::remove_dir_all(&sync_worktree_path);
+        }
     }
 
     async fn default_target_branch(&self, project_id: &str) -> String {

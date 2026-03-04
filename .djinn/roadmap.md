@@ -138,6 +138,7 @@ _Updated: 2026-03-03 (post-audit)_
 - GIT-06 (worktree lifecycle)
 - GIT-07 (hook awareness)
 - GIT-08 (target branch per project)
+- GIT-01 extension (best-effort rebase of reused task branches before dispatch)
 - CFG-03 (git settings per project)
 
 **Success criteria**:
@@ -204,7 +205,7 @@ _Updated: 2026-03-03 (post-audit)_
 1. ~~Task review Goose agent checks acceptance criteria against code diff; approves or rejects with feedback~~ ✓
 2. ~~Epic review Goose agent reviews aggregate diff for patterns/duplication~~ ✓
 3. ~~Rejected tasks return to agent with feedback; agent reworks and resubmits~~ ✓
-4. ~~Full review cycle: work → task review → approve/reject → close~~ ✓
+4. ~~Full review cycle: work → task review → epic review → approve/reject → close~~ ✓
 
 **Depends on**: Phase 5 (coordinator for agent dispatch), Phase 4 (git for diffs)
 
