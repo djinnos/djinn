@@ -37,7 +37,7 @@ use crate::db::repositories::git_settings::GitSettingsRepository;
 use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
-use crate::models::session::SessionStatus;
+use crate::models::session::{SessionRecord, SessionStatus};
 use crate::models::task::{Task, TransitionAction};
 use crate::server::AppState;
 
@@ -54,6 +54,26 @@ fn register_goose_builtin_extensions() {
                 .collect();
         goose::builtin_extension::register_builtin_extensions(builtins);
     });
+}
+
+/// Format a JSON array of `CommandSpec` objects into a markdown bullet list of names.
+/// Returns `None` if the array is empty or cannot be parsed.
+fn format_command_names(json: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct NameOnly {
+        name: String,
+    }
+    let specs: Vec<NameOnly> = serde_json::from_str(json).unwrap_or_default();
+    if specs.is_empty() {
+        return None;
+    }
+    Some(
+        specs
+            .into_iter()
+            .map(|s| format!("- `{}`", s.name))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 fn runtime_fs_diagnostics(project_path: &str, worktree_path: &Path) -> String {
@@ -216,6 +236,10 @@ enum SupervisorMessage {
         task_id: String,
         respond_to: Reply<()>,
     },
+    PauseSession {
+        task_id: String,
+        respond_to: Reply<()>,
+    },
     InterruptAll {
         reason: String,
         respond_to: Reply<()>,
@@ -242,6 +266,13 @@ enum SupervisorMessage {
         result: Result<(), String>,
         output: ParsedAgentOutput,
     },
+    ResumeSession {
+        task_id: String,
+        model_id: String,
+        goose_session_id: String,
+        worktree_path: PathBuf,
+        resume_prompt: String,
+    },
 }
 
 struct SessionClosure {
@@ -250,6 +281,264 @@ struct SessionClosure {
     goose_session_id: String,
     record_id: Option<String>,
     worktree_path: Option<PathBuf>,
+}
+
+/// Spawns the agent reply loop task. Used by both fresh dispatch and session resume.
+/// `reply_cancel` is a *clone* of the session's cancellation token (caller retains the original
+/// for the GooseSessionHandle). `kickoff` is the first message sent to the agent.
+#[allow(clippy::too_many_arguments)]
+fn spawn_reply_task(
+    agent: Arc<GooseAgent>,
+    session_id: String,
+    task_id: String,
+    project_path: String,
+    worktree_path: PathBuf,
+    agent_type: AgentType,
+    kickoff: GooseMessage,
+    reply_cancel: CancellationToken,
+    global_cancel: CancellationToken,
+    sender: mpsc::Sender<SupervisorMessage>,
+    app_state: AppState,
+) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    tokio::spawn(async move {
+        let mut output = ParsedAgentOutput::default();
+        let run_result: anyhow::Result<()> = async {
+            let mut pending_message = Some(kickoff);
+            let mut saw_any_event = false;
+            let mut saw_any_tool_use = false;
+            let assistant_role = GooseMessage::assistant().role;
+            let mut assistant_message_count: usize = 0;
+            let mut assistant_fragments: Vec<String> = Vec::new();
+
+            let push_fragment = |fragments: &mut Vec<String>, value: String| {
+                const MAX_FRAGMENTS: usize = 12;
+                let normalized = value.replace('\n', "\\n").trim().to_string();
+                if normalized.is_empty() {
+                    return;
+                }
+                let snippet: String = normalized.chars().take(160).collect();
+                if fragments.len() >= MAX_FRAGMENTS {
+                    fragments.remove(0);
+                }
+                fragments.push(snippet);
+            };
+
+            while let Some(next_message) = pending_message.take() {
+                let env_diag = runtime_env_diagnostics(
+                    &session_id,
+                    &project_path,
+                    &worktree_path,
+                );
+                tracing::info!(
+                    task_id = %task_id,
+                    session_id = %session_id,
+                    worktree = %worktree_path.display(),
+                    "Supervisor: starting Goose reply; {}",
+                    env_diag
+                );
+
+                let mut stream = agent
+                    .reply(
+                        next_message,
+                        GooseSessionConfig {
+                            id: session_id.clone(),
+                            schedule_id: None,
+                            max_turns: Some(300),
+                            retry_config: None,
+                        },
+                        Some(reply_cancel.clone()),
+                    )
+                    .await
+                    .map_err(|e| {
+                        let diag = runtime_fs_diagnostics(&project_path, &worktree_path);
+                        let env_diag = runtime_env_diagnostics(&session_id, &project_path, &worktree_path);
+                        anyhow::anyhow!(
+                            "agent reply init failed: display={} debug={:?}; {}; {}",
+                            e, e, diag, env_diag
+                        )
+                    })?;
+
+                let mut interrupted: Option<&'static str> = None;
+                let mut saw_round_event = false;
+                loop {
+                    tokio::select! {
+                        _ = reply_cancel.cancelled() => {
+                            interrupted = Some("session cancelled");
+                            break;
+                        }
+                        _ = global_cancel.cancelled() => {
+                            interrupted = Some("supervisor shutting down");
+                            break;
+                        }
+                        evt = stream.next() => {
+                            let Some(evt) = evt else { break; };
+                            let evt = evt.map_err(|e| {
+                                let diag = runtime_fs_diagnostics(&project_path, &worktree_path);
+                                let env_diag = runtime_env_diagnostics(&session_id, &project_path, &worktree_path);
+                                anyhow::anyhow!(
+                                    "agent stream event failed: display={} debug={:?}; {}; {}",
+                                    e, e, diag, env_diag
+                                )
+                            })?;
+                            saw_any_event = true;
+                            saw_round_event = true;
+                            if let goose::agents::AgentEvent::Message(msg) = &evt
+                                && msg.role == assistant_role
+                            {
+                                assistant_message_count += 1;
+                                for content in &msg.content {
+                                    match content {
+                                        MessageContent::Text(text) => {
+                                            output.ingest_text(&text.text);
+                                            push_fragment(&mut assistant_fragments, format!("text:{}", text.text));
+                                        }
+                                        MessageContent::ToolRequest(req) => {
+                                            push_fragment(&mut assistant_fragments, format!("tool_request:{}", req.id));
+                                            saw_any_tool_use = true;
+                                            output.ingest_text(&content.to_string());
+                                        }
+                                        MessageContent::FrontendToolRequest(req) => {
+                                            push_fragment(&mut assistant_fragments, format!("frontend_tool_request:{}", req.id));
+                                            saw_any_tool_use = true;
+                                            output.ingest_text(&content.to_string());
+                                        }
+                                        _ => {
+                                            push_fragment(&mut assistant_fragments, format!("{}", content));
+                                            output.ingest_text(&content.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            extension::handle_event(&app_state, &agent, &evt).await;
+                        }
+                    }
+                }
+
+                if let Some(reason) = interrupted {
+                    return Err(anyhow::anyhow!(reason));
+                }
+
+                if !saw_round_event {
+                    let diag = runtime_fs_diagnostics(&project_path, &worktree_path);
+                    return Err(anyhow::anyhow!(
+                        "agent stream ended without any events; {}",
+                        diag
+                    ));
+                }
+            }
+
+            if !saw_any_event {
+                let diag = runtime_fs_diagnostics(&project_path, &worktree_path);
+                return Err(anyhow::anyhow!("agent session produced no events; {}", diag));
+            }
+
+            // Session complete — send a single nudge if the marker is missing
+            if saw_any_tool_use && AgentSupervisor::missing_required_marker(agent_type, &output) {
+                if let Some(nudge) = AgentSupervisor::missing_marker_nudge(agent_type, &output) {
+                    tracing::info!(
+                        task_id = %task_id,
+                        agent_type = %agent_type.as_str(),
+                        "Supervisor: session ended without required marker; sending post-session nudge"
+                    );
+                    let nudge_msg = GooseMessage::user().with_text(nudge);
+                    let mut stream = agent
+                        .reply(
+                            nudge_msg,
+                            GooseSessionConfig {
+                                id: session_id.clone(),
+                                schedule_id: None,
+                                max_turns: Some(3),
+                                retry_config: None,
+                            },
+                            Some(reply_cancel.clone()),
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("nudge reply init failed: {e}"))?;
+
+                    while let Some(evt) = stream.next().await {
+                        let evt = evt.map_err(|e| anyhow::anyhow!("nudge stream error: {e}"))?;
+                        if let goose::agents::AgentEvent::Message(msg) = &evt
+                            && msg.role == assistant_role
+                        {
+                            for content in &msg.content {
+                                match content {
+                                    MessageContent::Text(text) => {
+                                        output.ingest_text(&text.text);
+                                    }
+                                    _ => {
+                                        output.ingest_text(&content.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        extension::handle_event(&app_state, &agent, &evt).await;
+                    }
+                }
+            }
+
+            if let Some(last_assistant_text) =
+                AgentSupervisor::last_assistant_text_from_goose_sqlite(&session_id).await
+            {
+                output.ingest_text(&last_assistant_text);
+                tracing::info!(
+                    task_id = %task_id,
+                    agent_type = %agent_type.as_str(),
+                    marker_present_after_persisted_check = !AgentSupervisor::missing_required_marker(agent_type, &output),
+                    "Supervisor: parsed persisted last assistant message before marker decision"
+                );
+            }
+
+            if AgentSupervisor::missing_required_marker(agent_type, &output) {
+                tracing::warn!(
+                    task_id = %task_id,
+                    agent_type = %agent_type.as_str(),
+                    saw_any_event,
+                    saw_any_tool_use,
+                    assistant_message_count,
+                    worker_signal = ?output.worker_signal,
+                    reviewer_verdict = ?output.reviewer_verdict,
+                    epic_verdict = ?output.epic_verdict,
+                    runtime_error = ?output.runtime_error,
+                    reviewer_feedback = ?output.reviewer_feedback,
+                    assistant_fragments = ?assistant_fragments,
+                    "Supervisor: required marker missing at session end"
+                );
+                let reason = if !saw_any_tool_use {
+                    match agent_type {
+                        AgentType::Worker | AgentType::ConflictResolver => "worker ended without any tool use (provider error?)",
+                        AgentType::TaskReviewer => "task reviewer ended without any tool use (provider error?)",
+                        AgentType::EpicReviewer => "epic reviewer ended without any tool use (provider error?)",
+                    }
+                } else {
+                    match agent_type {
+                        AgentType::Worker | AgentType::ConflictResolver => "worker ended without WORKER_RESULT marker",
+                        AgentType::TaskReviewer => "task reviewer ended without REVIEW_RESULT marker",
+                        AgentType::EpicReviewer => "epic reviewer ended without EPIC_REVIEW_RESULT marker",
+                    }
+                };
+                return Err(anyhow::anyhow!(reason));
+            }
+
+            Ok(())
+        }
+        .await;
+
+        let msg = match &run_result {
+            Ok(()) => SupervisorMessage::SessionCompleted {
+                task_id: task_id.clone(),
+                result: Ok(()),
+                output,
+            },
+            Err(e) => SupervisorMessage::SessionCompleted {
+                task_id: task_id.clone(),
+                result: Err(e.to_string()),
+                output,
+            },
+        };
+        let _ = sender.send(msg).await;
+
+        run_result
+    })
 }
 
 struct AgentSupervisor {
@@ -367,6 +656,12 @@ impl AgentSupervisor {
             } => {
                 let _ = respond_to.send(self.kill_session(task_id).await);
             }
+            SupervisorMessage::PauseSession {
+                task_id,
+                respond_to,
+            } => {
+                let _ = respond_to.send(self.pause_session(task_id).await);
+            }
             SupervisorMessage::GetStatus { respond_to } => {
                 let _ = respond_to.send(Ok(SupervisorStatus {
                     active_sessions: self.sessions.len(),
@@ -422,6 +717,20 @@ impl AgentSupervisor {
                 self.handle_session_result(&task_id, session, result, output)
                     .await;
             }
+            SupervisorMessage::ResumeSession {
+                task_id,
+                model_id,
+                goose_session_id,
+                worktree_path,
+                resume_prompt,
+            } => {
+                if let Err(e) = self
+                    .dispatch_resume(task_id, model_id, goose_session_id, worktree_path, resume_prompt)
+                    .await
+                {
+                    tracing::warn!(error = %e, "Supervisor: failed to dispatch resume session after verification failure");
+                }
+            }
         }
     }
 
@@ -452,6 +761,12 @@ impl AgentSupervisor {
                 active,
                 max,
             });
+        }
+
+        // Check for a paused session — resume it instead of starting fresh.
+        if let Some(paused) = self.find_paused_session_record(&task_id).await {
+            let context = self.resume_context_for_task(&task_id).await;
+            return self.resume_paused_session(task_id, project_path, model_id, paused, context).await;
         }
 
         if model_id == "test/mock" {
@@ -519,12 +834,23 @@ impl AgentSupervisor {
             )));
         }
 
+        // Load project commands once — used for both setup execution and prompt injection.
+        let project_repo = ProjectRepository::new(
+            self.app_state.db().clone(),
+            self.app_state.events().clone(),
+        );
+        let (prompt_setup_commands, prompt_verification_commands) = {
+            if let Ok(Some(ref p)) = project_repo.get(&task.project_id).await {
+                let setup_names = format_command_names(&p.setup_commands);
+                let verify_names = format_command_names(&p.verification_commands);
+                (setup_names, verify_names)
+            } else {
+                (None, None)
+            }
+        };
+
         // Run setup commands in the worktree before starting the agent session.
         {
-            let project_repo = ProjectRepository::new(
-                self.app_state.db().clone(),
-                self.app_state.events().clone(),
-            );
             if let Ok(Some(project)) = project_repo.get(&task.project_id).await {
                 let setup_specs: Vec<CommandSpec> =
                     serde_json::from_str(&project.setup_commands).unwrap_or_default();
@@ -725,6 +1051,8 @@ impl AgentSupervisor {
                 merge_base_branch: conflict_ctx.as_ref().map(|m| m.base_branch.clone()),
                 merge_target_branch: conflict_ctx.as_ref().map(|m| m.merge_target.clone()),
                 merge_failure_context: merge_validation_ctx,
+                setup_commands: prompt_setup_commands,
+                verification_commands: prompt_verification_commands,
             },
         );
         agent.override_system_prompt(prompt).await;
@@ -733,308 +1061,22 @@ impl AgentSupervisor {
             entry.active += 1;
         }
         let session_cancel = CancellationToken::new();
-        let session_cancel_for_reply = session_cancel.clone();
-        let global_cancel = self.cancel.clone();
-        let task_id_for_join = task_id.clone();
-        let session_id = session.id.clone();
-        let sender = self.sender.clone();
-        let app_state = self.app_state.clone();
-        let run_agent_type = agent_type;
-        let worktree_path_for_join = worktree_path.clone();
-        let project_path_for_join = project_path.clone();
-
-        let join = tokio::spawn(async move {
-            let kickoff = GooseMessage::user().with_text(
-                "Start by understanding the task context and execute it fully before stopping.",
-            );
-            let mut output = ParsedAgentOutput::default();
-            let run_result: anyhow::Result<()> = async {
-                let mut pending_message = Some(kickoff);
-                let mut saw_any_event = false;
-                let mut saw_any_tool_use = false;
-                let assistant_role = GooseMessage::assistant().role;
-                let mut assistant_message_count: usize = 0;
-                let mut assistant_fragments: Vec<String> = Vec::new();
-
-                let push_fragment = |fragments: &mut Vec<String>, value: String| {
-                    const MAX_FRAGMENTS: usize = 12;
-                    let normalized = value.replace('\n', "\\n").trim().to_string();
-                    if normalized.is_empty() {
-                        return;
-                    }
-                    let snippet: String = normalized.chars().take(160).collect();
-                    if fragments.len() >= MAX_FRAGMENTS {
-                        fragments.remove(0);
-                    }
-                    fragments.push(snippet);
-                };
-
-                while let Some(next_message) = pending_message.take() {
-                    let env_diag = runtime_env_diagnostics(
-                        &session_id,
-                        &project_path_for_join,
-                        &worktree_path_for_join,
-                    );
-                    tracing::info!(
-                        task_id = %task_id_for_join,
-                        session_id = %session_id,
-                        worktree = %worktree_path_for_join.display(),
-                        "Supervisor: starting Goose reply; {}",
-                        env_diag
-                    );
-
-                    let mut stream = agent
-                        .reply(
-                            next_message,
-                            GooseSessionConfig {
-                                id: session_id.clone(),
-                                schedule_id: None,
-                                max_turns: Some(300),
-                                retry_config: None,
-                            },
-                            Some(session_cancel_for_reply.clone()),
-                        )
-                        .await
-                        .map_err(|e| {
-                            let diag = runtime_fs_diagnostics(
-                                &project_path_for_join,
-                                &worktree_path_for_join,
-                            );
-                            let env_diag = runtime_env_diagnostics(
-                                &session_id,
-                                &project_path_for_join,
-                                &worktree_path_for_join,
-                            );
-                            anyhow::anyhow!(
-                                "agent reply init failed: display={} debug={:?}; {}; {}",
-                                e,
-                                e,
-                                diag,
-                                env_diag
-                            )
-                        })?;
-
-                    let mut interrupted: Option<&'static str> = None;
-                    let mut saw_round_event = false;
-                    loop {
-                        tokio::select! {
-                            _ = session_cancel_for_reply.cancelled() => {
-                                interrupted = Some("session cancelled");
-                                break;
-                            }
-                            _ = global_cancel.cancelled() => {
-                                interrupted = Some("supervisor shutting down");
-                                break;
-                            }
-                            evt = stream.next() => {
-                                let Some(evt) = evt else { break; };
-                                let evt = evt.map_err(|e| {
-                                    let diag = runtime_fs_diagnostics(
-                                        &project_path_for_join,
-                                        &worktree_path_for_join,
-                                    );
-                                    let env_diag = runtime_env_diagnostics(
-                                        &session_id,
-                                        &project_path_for_join,
-                                        &worktree_path_for_join,
-                                    );
-                                    anyhow::anyhow!(
-                                        "agent stream event failed: display={} debug={:?}; {}; {}",
-                                        e,
-                                        e,
-                                        diag,
-                                        env_diag
-                                    )
-                                })?;
-                                saw_any_event = true;
-                                saw_round_event = true;
-                                if let goose::agents::AgentEvent::Message(msg) = &evt
-                                    && msg.role == assistant_role
-                                {
-                                    assistant_message_count += 1;
-                                    for content in &msg.content {
-                                        match content {
-                                            MessageContent::Text(text) => {
-                                                output.ingest_text(&text.text);
-                                                push_fragment(&mut assistant_fragments, format!("text:{}", text.text));
-                                            }
-                                            MessageContent::ToolRequest(req) => {
-                                                push_fragment(
-                                                    &mut assistant_fragments,
-                                                    format!("tool_request:{}", req.id),
-                                                );
-                                                saw_any_tool_use = true;
-                                                output.ingest_text(&content.to_string());
-                                            }
-                                            MessageContent::FrontendToolRequest(req) => {
-                                                push_fragment(
-                                                    &mut assistant_fragments,
-                                                    format!("frontend_tool_request:{}", req.id),
-                                                );
-                                                saw_any_tool_use = true;
-                                                output.ingest_text(&content.to_string());
-                                            }
-                                            _ => {
-                                                push_fragment(
-                                                    &mut assistant_fragments,
-                                                    format!("{}", content),
-                                                );
-                                                output.ingest_text(&content.to_string());
-                                            }
-                                        }
-                                    }
-                                }
-                                extension::handle_event(&app_state, &agent, &evt).await;
-                            }
-                        }
-                    }
-
-                    if let Some(reason) = interrupted {
-                        return Err(anyhow::anyhow!(reason));
-                    }
-
-                    if !saw_round_event {
-                        let diag =
-                            runtime_fs_diagnostics(&project_path_for_join, &worktree_path_for_join);
-                        return Err(anyhow::anyhow!(
-                            "agent stream ended without any events; {}",
-                            diag
-                        ));
-                    }
-                }
-
-                if !saw_any_event {
-                    let diag =
-                        runtime_fs_diagnostics(&project_path_for_join, &worktree_path_for_join);
-                    return Err(anyhow::anyhow!(
-                        "agent session produced no events; {}",
-                        diag
-                    ));
-                }
-
-                // Session complete — send a single nudge if the marker is missing
-                // and the agent did real work (used tools). Skip nudge when the
-                // session only produced error text (e.g. provider 429).
-                if saw_any_tool_use
-                    && Self::missing_required_marker(run_agent_type, &output)
-                {
-                    if let Some(nudge) = Self::missing_marker_nudge(run_agent_type, &output) {
-                        tracing::info!(
-                            task_id = %task_id_for_join,
-                            agent_type = %run_agent_type.as_str(),
-                            "Supervisor: session ended without required marker; sending post-session nudge"
-                        );
-                        let nudge_msg = GooseMessage::user().with_text(nudge);
-                        let mut stream = agent
-                            .reply(
-                                nudge_msg,
-                                GooseSessionConfig {
-                                    id: session_id.clone(),
-                                    schedule_id: None,
-                                    max_turns: Some(3),
-                                    retry_config: None,
-                                },
-                                Some(session_cancel_for_reply.clone()),
-                            )
-                            .await
-                            .map_err(|e| anyhow::anyhow!("nudge reply init failed: {e}"))?;
-
-                        while let Some(evt) = stream.next().await {
-                            let evt = evt.map_err(|e| anyhow::anyhow!("nudge stream error: {e}"))?;
-                            if let goose::agents::AgentEvent::Message(msg) = &evt
-                                && msg.role == assistant_role
-                            {
-                                for content in &msg.content {
-                                    match content {
-                                        MessageContent::Text(text) => {
-                                            output.ingest_text(&text.text);
-                                        }
-                                        _ => {
-                                            output.ingest_text(&content.to_string());
-                                        }
-                                    }
-                                }
-                            }
-                            extension::handle_event(&app_state, &agent, &evt).await;
-                        }
-                    }
-                }
-
-                if let Some(last_assistant_text) =
-                    Self::last_assistant_text_from_goose_sqlite(&session_id).await
-                {
-                    output.ingest_text(&last_assistant_text);
-                    tracing::info!(
-                        task_id = %task_id_for_join,
-                        agent_type = %run_agent_type.as_str(),
-                        marker_present_after_persisted_check = !Self::missing_required_marker(run_agent_type, &output),
-                        "Supervisor: parsed persisted last assistant message before marker decision"
-                    );
-                }
-
-                if Self::missing_required_marker(run_agent_type, &output) {
-                    tracing::warn!(
-                        task_id = %task_id_for_join,
-                        agent_type = %run_agent_type.as_str(),
-                        saw_any_event,
-                        saw_any_tool_use,
-                        assistant_message_count,
-                        worker_signal = ?output.worker_signal,
-                        reviewer_verdict = ?output.reviewer_verdict,
-                        epic_verdict = ?output.epic_verdict,
-                        runtime_error = ?output.runtime_error,
-                        reviewer_feedback = ?output.reviewer_feedback,
-                        assistant_fragments = ?assistant_fragments,
-                        "Supervisor: required marker missing at session end"
-                    );
-                    let reason = if !saw_any_tool_use {
-                        match run_agent_type {
-                            AgentType::Worker | AgentType::ConflictResolver => {
-                                "worker ended without any tool use (provider error?)"
-                            }
-                            AgentType::TaskReviewer => {
-                                "task reviewer ended without any tool use (provider error?)"
-                            }
-                            AgentType::EpicReviewer => {
-                                "epic reviewer ended without any tool use (provider error?)"
-                            }
-                        }
-                    } else {
-                        match run_agent_type {
-                            AgentType::Worker | AgentType::ConflictResolver => {
-                                "worker ended without WORKER_RESULT marker"
-                            }
-                            AgentType::TaskReviewer => {
-                                "task reviewer ended without REVIEW_RESULT marker"
-                            }
-                            AgentType::EpicReviewer => {
-                                "epic reviewer ended without EPIC_REVIEW_RESULT marker"
-                            }
-                        }
-                    };
-                    return Err(anyhow::anyhow!(reason));
-                }
-
-                Ok(())
-            }
-            .await;
-
-            let msg = match &run_result {
-                Ok(()) => SupervisorMessage::SessionCompleted {
-                    task_id: task_id_for_join,
-                    result: Ok(()),
-                    output,
-                },
-                Err(e) => SupervisorMessage::SessionCompleted {
-                    task_id: task_id_for_join,
-                    result: Err(e.to_string()),
-                    output,
-                },
-            };
-            let _ = sender.send(msg).await;
-
-            run_result
-        });
+        let kickoff = GooseMessage::user().with_text(
+            "Start by understanding the task context and execute it fully before stopping.",
+        );
+        let join = spawn_reply_task(
+            agent,
+            session.id.clone(),
+            task_id.clone(),
+            project_path.clone(),
+            worktree_path.clone(),
+            agent_type,
+            kickoff,
+            session_cancel.clone(),
+            self.cancel.clone(),
+            self.sender.clone(),
+            self.app_state.clone(),
+        );
 
         self.sessions.insert(
             task_id.clone(),
@@ -1065,6 +1107,156 @@ impl AgentSupervisor {
                 "Supervisor: session registered"
             );
         }
+
+        Ok(())
+    }
+
+    async fn dispatch_resume(
+        &mut self,
+        task_id: String,
+        model_id: String,
+        goose_session_id: String,
+        worktree_path: PathBuf,
+        resume_prompt: String,
+    ) -> Result<(), SupervisorError> {
+        if self.sessions.contains_key(&task_id) {
+            return Err(SupervisorError::SessionAlreadyActive { task_id });
+        }
+
+        let max_for_model = self.max_for_model(&model_id);
+        let (active, max) = {
+            let entry = self
+                .capacity
+                .entry(model_id.clone())
+                .or_insert(ModelCapacity {
+                    active: 0,
+                    max: max_for_model,
+                });
+            (entry.active, entry.max)
+        };
+        if active >= max {
+            return Err(SupervisorError::ModelAtCapacity {
+                model_id,
+                active,
+                max,
+            });
+        }
+
+        let task = self.load_task(&task_id).await?;
+        let project_path = self
+            .project_path_for_id(&task.project_id)
+            .await
+            .unwrap_or_else(|| task.project_id.clone());
+
+        let (catalog_provider_id, model_name) = Self::parse_model_id(&model_id)?;
+        let goose_provider_id = self.resolve_goose_provider_id(&catalog_provider_id).await;
+
+        if !self
+            .provider_supports_oauth(&goose_provider_id)
+            .await
+            .unwrap_or(false)
+        {
+            let (key_name, api_key) = self.load_provider_api_key(&catalog_provider_id).await?;
+            GooseConfig::global()
+                .set_secret(&key_name, &api_key)
+                .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+        }
+
+        let session_repo =
+            SessionRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let session_record = session_repo
+            .create(
+                &task.project_id,
+                &task.id,
+                &model_id,
+                AgentType::Worker.as_str(),
+                worktree_path.to_str(),
+                Some(&goose_session_id),
+            )
+            .await
+            .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+
+        let goose_model = ModelConfig::new(&model_name)
+            .map_err(|e| SupervisorError::Goose(e.to_string()))?
+            .with_canonical_limits(&goose_provider_id);
+
+        let extensions = self.extensions_for(AgentType::Worker);
+
+        let provider = providers::create(&goose_provider_id, goose_model, extensions.clone())
+            .await
+            .map_err(|e| {
+                self.app_state.health_tracker().record_failure(&model_id);
+                SupervisorError::Goose(e.to_string())
+            })?;
+
+        let agent = Arc::new(GooseAgent::with_config(GooseAgentConfig::new(
+            self.session_manager.clone(),
+            PermissionManager::instance(),
+            None,
+            GooseMode::Auto,
+            true,
+            GoosePlatform::GooseCli,
+        )));
+
+        agent
+            .update_provider(provider, &goose_session_id)
+            .await
+            .map_err(|e| {
+                self.app_state.health_tracker().record_failure(&model_id);
+                SupervisorError::Goose(e.to_string())
+            })?;
+
+        for ext in extensions {
+            agent
+                .add_extension(ext, &goose_session_id)
+                .await
+                .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+        }
+
+        if let Some(entry) = self.capacity.get_mut(&model_id) {
+            entry.active += 1;
+        }
+
+        let session_cancel = CancellationToken::new();
+        let kickoff = GooseMessage::user().with_text(&resume_prompt);
+
+        let join = spawn_reply_task(
+            agent,
+            goose_session_id.clone(),
+            task_id.clone(),
+            project_path.clone(),
+            worktree_path.clone(),
+            AgentType::Worker,
+            kickoff,
+            session_cancel.clone(),
+            self.cancel.clone(),
+            self.sender.clone(),
+            self.app_state.clone(),
+        );
+
+        self.sessions.insert(
+            task_id.clone(),
+            GooseSessionHandle {
+                join,
+                cancel: session_cancel,
+                session_id: goose_session_id.clone(),
+                task_id: task_id.clone(),
+                worktree_path: Some(worktree_path),
+                started_at: Instant::now(),
+            },
+        );
+        self.session_models.insert(task_id.clone(), model_id);
+        self.session_projects
+            .insert(task_id.clone(), task.project_id.clone());
+        self.task_session_records
+            .insert(task_id.clone(), session_record.id);
+        self.session_agent_types.insert(task_id.clone(), AgentType::Worker);
+
+        tracing::info!(
+            task_id = %task.short_id,
+            task_uuid = %task.id,
+            "Supervisor: resume session dispatched after verification failure"
+        );
 
         Ok(())
     }
@@ -1154,6 +1346,362 @@ impl AgentSupervisor {
         .await;
 
         Ok(())
+    }
+
+    async fn pause_session(&mut self, task_id: String) -> Result<(), SupervisorError> {
+        let Some(mut handle) = self.sessions.remove(&task_id) else {
+            return Ok(());
+        };
+
+        self.interrupted_sessions.insert(task_id.clone());
+        let model_id = self.session_models.remove(&task_id);
+        let _agent_type = self
+            .session_agent_types
+            .remove(&task_id)
+            .unwrap_or(AgentType::Worker);
+        self.session_projects.remove(&task_id);
+        let session_record_id = self.task_session_records.remove(&task_id);
+        let goose_session_id = handle.session_id.clone();
+        let worktree_path = handle.worktree_path.take();
+
+        handle.cancel.cancel();
+
+        match tokio::time::timeout(Duration::from_secs(30), &mut handle.join).await {
+            Ok(_) => {}
+            Err(_) => {
+                tracing::warn!(task_id = %task_id, "session join timed out during pause; aborting");
+                handle.join.abort();
+                let _ = handle.join.await;
+            }
+        }
+
+        self.decrement_capacity_for_model(model_id.as_deref());
+
+        // Commit WIP but keep the worktree alive for resume.
+        if let Some(worktree_path) = worktree_path.as_ref() {
+            self.commit_wip_if_needed(&task_id, worktree_path).await;
+        }
+
+        let (tokens_in, tokens_out) = self.tokens_for_session(&goose_session_id).await;
+        self.update_session_record_paused(session_record_id.as_deref(), tokens_in, tokens_out)
+            .await;
+
+        tracing::info!(
+            task_id = %task_id,
+            worktree = ?worktree_path.as_ref().map(|p: &PathBuf| p.display().to_string()),
+            "Supervisor: session paused, worktree preserved"
+        );
+
+        Ok(())
+    }
+
+    async fn resume_paused_session(
+        &mut self,
+        task_id: String,
+        project_path: String,
+        _requested_model_id: String,
+        paused: SessionRecord,
+        context_message: String,
+    ) -> Result<(), SupervisorError> {
+        let goose_session_id = paused.goose_session_id.clone().ok_or_else(|| {
+            SupervisorError::Goose(format!(
+                "paused session {} has no goose_session_id",
+                paused.id
+            ))
+        })?;
+        let worktree_path = paused
+            .worktree_path
+            .as_deref()
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                SupervisorError::Goose(format!(
+                    "paused session {} has no worktree_path",
+                    paused.id
+                ))
+            })?;
+
+        // Use the model from the paused record (continuity — same model that wrote the code).
+        let model_id = paused.model_id.clone();
+
+        // Verify worktree still exists.
+        if !worktree_path.exists() || !worktree_path.is_dir() {
+            return Err(SupervisorError::Goose(format!(
+                "paused session worktree no longer exists: {}",
+                worktree_path.display()
+            )));
+        }
+
+        let max_for_model = self.max_for_model(&model_id);
+        let (active, max) = {
+            let entry = self
+                .capacity
+                .entry(model_id.clone())
+                .or_insert(ModelCapacity {
+                    active: 0,
+                    max: max_for_model,
+                });
+            (entry.active, entry.max)
+        };
+        if active >= max {
+            return Err(SupervisorError::ModelAtCapacity {
+                model_id,
+                active,
+                max,
+            });
+        }
+
+        let task = self.load_task(&task_id).await?;
+        let agent_type = self.agent_type_for_task(&task, false);
+
+        tracing::info!(
+            task_id = %task.short_id,
+            task_uuid = %task.id,
+            goose_session_id = %goose_session_id,
+            model_id = %model_id,
+            agent_type = %agent_type.as_str(),
+            worktree = %worktree_path.display(),
+            "Supervisor: resuming paused session"
+        );
+
+        self.transition_start(&task, agent_type).await?;
+
+        let (catalog_provider_id, model_name) = Self::parse_model_id(&model_id)?;
+        let goose_provider_id = self.resolve_goose_provider_id(&catalog_provider_id).await;
+
+        if !self
+            .provider_supports_oauth(&goose_provider_id)
+            .await
+            .unwrap_or(false)
+        {
+            let (key_name, api_key) = self.load_provider_api_key(&catalog_provider_id).await?;
+            GooseConfig::global()
+                .set_secret(&key_name, &api_key)
+                .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+        }
+
+        let goose_model = ModelConfig::new(&model_name)
+            .map_err(|e| SupervisorError::Goose(e.to_string()))?
+            .with_canonical_limits(&goose_provider_id);
+
+        let extensions = self.extensions_for(agent_type);
+
+        let provider = providers::create(&goose_provider_id, goose_model, extensions.clone())
+            .await
+            .map_err(|e| {
+                self.app_state.health_tracker().record_failure(&model_id);
+                SupervisorError::Goose(e.to_string())
+            })?;
+
+        let agent = Arc::new(GooseAgent::with_config(GooseAgentConfig::new(
+            self.session_manager.clone(),
+            PermissionManager::instance(),
+            None,
+            GooseMode::Auto,
+            true,
+            GoosePlatform::GooseCli,
+        )));
+
+        agent
+            .update_provider(provider, &goose_session_id)
+            .await
+            .map_err(|e| {
+                self.app_state.health_tracker().record_failure(&model_id);
+                SupervisorError::Goose(e.to_string())
+            })?;
+
+        for ext in extensions {
+            agent
+                .add_extension(ext, &goose_session_id)
+                .await
+                .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+        }
+
+        let prompt = render_prompt(
+            agent_type,
+            &task,
+            &TaskContext {
+                project_path: project_path.clone(),
+                workspace_path: worktree_path.display().to_string(),
+                diff: None,
+                commits: None,
+                start_commit: None,
+                end_commit: None,
+                batch_num: None,
+                task_count: None,
+                tasks_summary: None,
+                common_labels: None,
+                conflict_files: None,
+                merge_base_branch: None,
+                merge_target_branch: None,
+                merge_failure_context: None,
+                setup_commands: None,
+                verification_commands: None,
+            },
+        );
+        agent.override_system_prompt(prompt).await;
+
+        // Mark session record as running again.
+        let session_repo =
+            SessionRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        if let Err(e) = session_repo.set_running(&paused.id).await {
+            tracing::warn!(
+                record_id = %paused.id,
+                error = %e,
+                "failed to mark resumed session as running"
+            );
+        }
+
+        if let Some(entry) = self.capacity.get_mut(&model_id) {
+            entry.active += 1;
+        }
+
+        let session_cancel = CancellationToken::new();
+        let kickoff = GooseMessage::user().with_text(&context_message);
+        let join = spawn_reply_task(
+            agent,
+            goose_session_id.clone(),
+            task_id.clone(),
+            project_path.clone(),
+            worktree_path.clone(),
+            agent_type,
+            kickoff,
+            session_cancel.clone(),
+            self.cancel.clone(),
+            self.sender.clone(),
+            self.app_state.clone(),
+        );
+
+        self.sessions.insert(
+            task_id.clone(),
+            GooseSessionHandle {
+                join,
+                cancel: session_cancel,
+                session_id: goose_session_id,
+                task_id: task_id.clone(),
+                worktree_path: Some(worktree_path),
+                started_at: Instant::now(),
+            },
+        );
+        self.session_models.insert(task_id.clone(), model_id);
+        self.session_projects
+            .insert(task_id.clone(), task.project_id.clone());
+        self.task_session_records
+            .insert(task_id.clone(), paused.id);
+        self.session_agent_types.insert(task_id, agent_type);
+
+        tracing::info!(
+            task_id = %task.short_id,
+            agent_type = %agent_type.as_str(),
+            "Supervisor: resumed session registered"
+        );
+
+        Ok(())
+    }
+
+    async fn find_paused_session_record(
+        &self,
+        task_id: &str,
+    ) -> Option<SessionRecord> {
+        let repo =
+            SessionRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        repo.paused_for_task(task_id).await.ok().flatten()
+    }
+
+    async fn resume_context_for_task(&self, task_id: &str) -> String {
+        let repo =
+            TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
+
+        // Check for most recent task reviewer comment (reviewer rejection feedback).
+        for entry in activity.iter().rev() {
+            if entry.event_type == "comment" && entry.actor_role == "task_reviewer" {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
+                    && let Some(body) = payload.get("body").and_then(|v| v.as_str())
+                {
+                    return format!(
+                        "Your previous work was reviewed and returned with this feedback:\n\n{body}\n\nAddress this feedback, make the necessary changes, then emit:\nWORKER_RESULT: DONE"
+                    );
+                }
+            }
+        }
+
+        // Check for merge conflict context.
+        if let Some(context) = self.merge_validation_context_for_dispatch(task_id).await {
+            return context;
+        }
+
+        // Check for merge conflict info in activity.
+        for entry in activity.iter().rev() {
+            if entry.event_type == "merge_conflict" {
+                if let Ok(meta) =
+                    serde_json::from_str::<MergeConflictMetadata>(&entry.payload)
+                {
+                    let files = meta
+                        .conflicting_files
+                        .iter()
+                        .map(|f| format!("- {f}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return format!(
+                        "A merge conflict was detected when merging your branch into `{}`. Resolve the conflicts in these files:\n\n{files}\n\nAfter resolving, commit and emit:\nWORKER_RESULT: DONE",
+                        meta.merge_target
+                    );
+                }
+            }
+        }
+
+        // Default fallback.
+        "Your previous submission needs revision. Review your work, address any issues, then emit:\nWORKER_RESULT: DONE".to_string()
+    }
+
+    async fn cleanup_paused_worker_session(&self, task_id: &str) {
+        let repo =
+            SessionRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let Ok(Some(paused)) = repo.paused_for_task(task_id).await else {
+            return;
+        };
+
+        let (tokens_in, tokens_out) = if let Some(ref gsid) = paused.goose_session_id {
+            self.tokens_for_session(gsid).await
+        } else {
+            (paused.tokens_in, paused.tokens_out)
+        };
+
+        if let Err(e) = repo
+            .update(&paused.id, SessionStatus::Completed, tokens_in, tokens_out)
+            .await
+        {
+            tracing::warn!(
+                record_id = %paused.id,
+                error = %e,
+                "failed to finalize paused session record on task approval"
+            );
+        }
+
+        if let Some(worktree_path) = paused.worktree_path.as_deref().map(PathBuf::from) {
+            self.cleanup_worktree(task_id, &worktree_path).await;
+        }
+    }
+
+    async fn update_session_record_paused(
+        &self,
+        record_id: Option<&str>,
+        tokens_in: i64,
+        tokens_out: i64,
+    ) {
+        let Some(record_id) = record_id else {
+            return;
+        };
+
+        let repo =
+            SessionRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        if let Err(e) = repo.pause(record_id, tokens_in, tokens_out).await {
+            tracing::warn!(
+                record_id = %record_id,
+                error = %e,
+                "failed to pause session record"
+            );
+        }
     }
 
     fn remove_session(&mut self, task_id: &str) -> SessionClosure {
@@ -1382,40 +1930,65 @@ impl AgentSupervisor {
         }
 
         let (tokens_in, tokens_out) = self.tokens_for_session(&session.goose_session_id).await;
-        let session_status = if result.is_ok() {
-            SessionStatus::Completed
+
+        // Worker Done: pause session record (keep worktree alive for resume after review).
+        // All other cases: complete or fail the session record.
+        let is_worker_done = result.is_ok()
+            && matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver)
+            && matches!(output.worker_signal, Some(WorkerSignal::Done));
+
+        if is_worker_done {
+            self.update_session_record_paused(session.record_id.as_deref(), tokens_in, tokens_out)
+                .await;
         } else {
-            SessionStatus::Failed
-        };
-        self.update_session_record(
-            session.record_id.as_deref(),
-            session_status,
-            tokens_in,
-            tokens_out,
-        )
-        .await;
+            let session_status = if result.is_ok() {
+                SessionStatus::Completed
+            } else {
+                SessionStatus::Failed
+            };
+            self.update_session_record(
+                session.record_id.as_deref(),
+                session_status,
+                tokens_in,
+                tokens_out,
+            )
+            .await;
+        }
 
         if let Some(worktree_path) = session.worktree_path.as_ref() {
-            let should_persist_final = result.is_ok()
-                && matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver)
-                && matches!(output.worker_signal, Some(WorkerSignal::Done));
-
-            let mut allow_cleanup = true;
-            if should_persist_final
-                && let Err(e) = self
-                    .commit_final_work_if_needed(task_id, worktree_path)
-                    .await
-            {
-                allow_cleanup = false;
-                tracing::warn!(
-                    task_id = %task_id,
-                    worktree_path = %worktree_path.display(),
-                    error = %e,
-                    "failed to persist completed session changes; preserving worktree for recovery"
-                );
+            // Run verification commands after DONE signal, before committing.
+            if is_worker_done {
+                if let Some(feedback) =
+                    self.run_verification_commands(task_id, worktree_path).await
+                {
+                    // Verification failed — preserve worktree, resume the session.
+                    self.queue_resume_after_verification_failure(
+                        task_id,
+                        &session,
+                        worktree_path,
+                        &feedback,
+                    )
+                    .await;
+                    return;
+                }
             }
 
-            if allow_cleanup {
+            if is_worker_done {
+                // Commit final work and keep worktree alive for the review→resume cycle.
+                if let Err(e) = self
+                    .commit_final_work_if_needed(task_id, worktree_path)
+                    .await
+                {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        worktree_path = %worktree_path.display(),
+                        error = %e,
+                        "failed to commit work before pausing for review; preserving worktree"
+                    );
+                }
+                // Worktree intentionally kept — cleaned up in cleanup_paused_worker_session
+                // when the task is finally approved.
+            } else {
                 self.cleanup_worktree(task_id, worktree_path).await;
             }
         }
@@ -1539,6 +2112,98 @@ impl AgentSupervisor {
             let _ = coordinator
                 .trigger_dispatch_for_project(&task.project_id)
                 .await;
+        }
+    }
+
+    /// Runs the project's verification commands in the task worktree.
+    /// Returns `None` if all commands pass or there are no verification commands.
+    /// Returns `Some(feedback)` if any command fails, with the failure details.
+    async fn run_verification_commands(
+        &self,
+        task_id: &str,
+        worktree_path: &Path,
+    ) -> Option<String> {
+        let task = self.load_task(task_id).await.ok()?;
+        let project_repo =
+            ProjectRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let project = project_repo.get(&task.project_id).await.ok()??;
+        let specs: Vec<CommandSpec> =
+            serde_json::from_str(&project.verification_commands).unwrap_or_default();
+        if specs.is_empty() {
+            return None;
+        }
+        tracing::info!(
+            task_id = %task_id,
+            command_count = specs.len(),
+            "Supervisor: running verification commands"
+        );
+        match run_commands(&specs, worktree_path).await {
+            Ok(results) => {
+                let failed = results.iter().find(|r| r.exit_code != 0)?;
+                tracing::info!(
+                    task_id = %task_id,
+                    command = %failed.name,
+                    exit_code = failed.exit_code,
+                    "Supervisor: verification command failed"
+                );
+                Some(format!(
+                    "Verification command '{}' failed with exit code {}.\n\nFix the issue and signal WORKER_RESULT: DONE when complete.\n\nstdout:\n{}\nstderr:\n{}",
+                    failed.name,
+                    failed.exit_code,
+                    failed.stdout.trim(),
+                    failed.stderr.trim(),
+                ))
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "Supervisor: verification command system error");
+                Some(format!(
+                    "Verification commands could not run: {e}\n\nFix the issue and signal WORKER_RESULT: DONE when complete."
+                ))
+            }
+        }
+    }
+
+    /// Logs the verification failure as a task comment and queues a ResumeSession message.
+    async fn queue_resume_after_verification_failure(
+        &self,
+        task_id: &str,
+        session: &SessionClosure,
+        worktree_path: &Path,
+        feedback: &str,
+    ) {
+        let repo =
+            TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let payload = serde_json::json!({ "body": feedback }).to_string();
+        if let Err(e) = repo
+            .log_activity(
+                Some(task_id),
+                "agent-supervisor",
+                "verification",
+                "comment",
+                &payload,
+            )
+            .await
+        {
+            tracing::warn!(task_id = %task_id, error = %e, "failed to log verification failure comment");
+        }
+
+        let Some(model_id) = session.model_id.clone() else {
+            tracing::warn!(
+                task_id = %task_id,
+                "no model_id in session closure; cannot resume after verification failure"
+            );
+            return;
+        };
+
+        let msg = SupervisorMessage::ResumeSession {
+            task_id: task_id.to_owned(),
+            model_id,
+            goose_session_id: session.goose_session_id.clone(),
+            worktree_path: worktree_path.to_owned(),
+            resume_prompt: feedback.to_owned(),
+        };
+        if let Err(e) = self.sender.send(msg).await {
+            tracing::warn!(task_id = %task_id, error = %e, "failed to queue resume session after verification failure");
         }
     }
 
@@ -1981,6 +2646,8 @@ impl AgentSupervisor {
                         Some(format!("merged but failed to store merge SHA: {e}")),
                     ));
                 }
+                // Clean up the worker's paused session (worktree + record finalization).
+                self.cleanup_paused_worker_session(task_id).await;
                 Some((TransitionAction::TaskReviewApprove, None))
             }
             Err(GitError::MergeConflict { files, .. }) => {
@@ -2596,6 +3263,14 @@ impl AgentSupervisorHandle {
 
     pub async fn kill_session(&self, task_id: &str) -> Result<(), SupervisorError> {
         self.request(|tx| SupervisorMessage::KillSession {
+            task_id: task_id.to_owned(),
+            respond_to: tx,
+        })
+        .await
+    }
+
+    pub async fn pause_session(&self, task_id: &str) -> Result<(), SupervisorError> {
+        self.request(|tx| SupervisorMessage::PauseSession {
             task_id: task_id.to_owned(),
             respond_to: tx,
         })
