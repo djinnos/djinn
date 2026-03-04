@@ -31,6 +31,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v7"] }
+regex = "1.12.3"
 
 [dev-dependencies]
 http-body-util = "0.1"

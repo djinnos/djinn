@@ -2665,6 +2665,7 @@ dependencies = [
  "http-body-util",
  "libc",
  "refinery",
+ "regex",
  "reqwest 0.12.28",
  "ring",
  "rmcp 0.15.0",

@@ -2146,20 +2146,18 @@ impl AgentSupervisor {
                     exit_code = failed.exit_code,
                     "Supervisor: verification command failed"
                 );
-                // Extract file paths mentioned in stderr (e.g. "--> src/auth.rs:292")
+                // Extract file paths mentioned in stderr (e.g. "--> src/auth.rs:292:5")
                 // and include their contents so the agent can fix without re-reading.
                 let file_snippets = {
+                    let re = regex::Regex::new(r"--> ([\w./-]+\.\w+)").expect("valid regex");
                     let mut snippets = String::new();
                     let mut seen = std::collections::HashSet::new();
-                    for line in failed.stderr.lines() {
-                        let line = line.trim();
-                        if let Some(rest) = line.strip_prefix("--> ") {
-                            let rel = rest.split(':').next().unwrap_or("").trim();
-                            if !rel.is_empty() && seen.insert(rel.to_string()) {
-                                let abs = worktree_path.join(rel);
-                                if let Ok(contents) = std::fs::read_to_string(&abs) {
-                                    snippets.push_str(&format!("\n\n### {rel}\n```\n{contents}\n```"));
-                                }
+                    for cap in re.captures_iter(&failed.stderr) {
+                        let rel = &cap[1];
+                        if seen.insert(rel.to_string()) {
+                            let abs = worktree_path.join(rel);
+                            if let Ok(contents) = std::fs::read_to_string(&abs) {
+                                snippets.push_str(&format!("\n\n### {rel}\n```\n{contents}\n```"));
                             }
                         }
                     }
