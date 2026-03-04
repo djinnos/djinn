@@ -464,6 +464,8 @@ impl CoordinatorActor {
                 .then_with(|| a.created_at.cmp(&b.created_at))
         });
 
+        let mut exhausted_roles: HashSet<&'static str> = HashSet::new();
+
         for task in ready {
             if let Some(project_id) = project_filter
                 && task.project_id != project_id
@@ -475,6 +477,9 @@ impl CoordinatorActor {
             }
 
             let role = Self::role_for_task_status(&task.status);
+            if exhausted_roles.contains(role) {
+                continue;
+            }
             let Some(model_ids) = role_models.get(role) else {
                 tracing::debug!(task_id = %task.short_id, role, "CoordinatorActor: no model configured for task role");
                 continue;
@@ -503,6 +508,7 @@ impl CoordinatorActor {
             };
 
             let mut dispatched = false;
+            let mut role_at_capacity = false;
             for model_id in model_ids {
                 if !self.health.is_available(model_id) {
                     tracing::debug!(
@@ -513,18 +519,19 @@ impl CoordinatorActor {
                     continue;
                 }
 
-                tracing::info!(task_id = %task.short_id, model_id = %model_id, "CoordinatorActor: dispatching task");
                 match self
                     .supervisor
                     .dispatch(&task.id, &project_path, model_id)
                     .await
                 {
                     Ok(()) => {
+                        tracing::info!(task_id = %task.short_id, model_id = %model_id, "CoordinatorActor: task dispatched");
                         self.dispatched += 1;
                         dispatched = true;
                         break;
                     }
                     Err(SupervisorError::ModelAtCapacity { .. }) => {
+                        role_at_capacity = true;
                         tracing::debug!(
                             task_id = %task.short_id,
                             model_id = %model_id,
@@ -553,6 +560,9 @@ impl CoordinatorActor {
                     role,
                     "CoordinatorActor: no model with available capacity for task"
                 );
+                if role_at_capacity {
+                    exhausted_roles.insert(role);
+                }
             }
         }
     }

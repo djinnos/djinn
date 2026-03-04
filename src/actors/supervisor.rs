@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use goose::agents::{
@@ -37,6 +38,18 @@ use crate::models::task::{Task, TransitionAction};
 use crate::server::AppState;
 
 const MERGE_CONFLICT_PREFIX: &str = "merge_conflict:";
+static GOOSE_BUILTINS_REGISTERED: Once = Once::new();
+
+fn register_goose_builtin_extensions() {
+    GOOSE_BUILTINS_REGISTERED.call_once(|| {
+        let builtins: HashMap<&'static str, goose::builtin_extension::SpawnServerFn> =
+            goose_mcp::BUILTIN_EXTENSIONS
+                .iter()
+                .map(|(name, spawn)| (*name, *spawn))
+                .collect();
+        goose::builtin_extension::register_builtin_extensions(builtins);
+    });
+}
 
 fn runtime_fs_diagnostics(project_path: &str, worktree_path: &Path) -> String {
     let project = Path::new(project_path);
@@ -215,6 +228,7 @@ impl AgentSupervisor {
         session_manager: Arc<SessionManager>,
         cancel: CancellationToken,
     ) -> Self {
+        register_goose_builtin_extensions();
         Self {
             receiver,
             sessions: HashMap::new(),
@@ -407,6 +421,15 @@ impl AgentSupervisor {
         let session_name = format!("{} {}", task.short_id, task.title);
         let project_dir = PathBuf::from(&project_path);
         let worktree_path = self.prepare_worktree(&project_dir, &task).await?;
+        let goose_logs_dir = goose::config::paths::Paths::in_state_dir("logs");
+        if let Err(e) = std::fs::create_dir_all(&goose_logs_dir) {
+            tracing::warn!(
+                task_id = %task.short_id,
+                path = %goose_logs_dir.display(),
+                error = %e,
+                "failed to ensure Goose state logs directory"
+            );
+        }
         if !worktree_path.exists() || !worktree_path.is_dir() {
             let diag = runtime_fs_diagnostics(&project_path, &worktree_path);
             return Err(SupervisorError::Goose(format!(
@@ -483,6 +506,7 @@ impl AgentSupervisor {
             &task,
             &TaskContext {
                 project_path: project_path.clone(),
+                workspace_path: worktree_path.display().to_string(),
                 diff: None,
                 commits: None,
                 start_commit: None,
@@ -1509,7 +1533,23 @@ impl AgentSupervisor {
     }
 
     fn extensions_for(&self, agent_type: AgentType) -> Vec<goose::config::ExtensionConfig> {
-        vec![extension::config(agent_type)]
+        let mut extensions = vec![extension::config(agent_type)];
+
+        if matches!(
+            agent_type,
+            AgentType::Worker | AgentType::ConflictResolver | AgentType::TaskReviewer
+        ) {
+            extensions.push(goose::config::ExtensionConfig::Builtin {
+                name: "developer".to_string(),
+                description: "Developer tools for project execution".to_string(),
+                display_name: Some("Developer".to_string()),
+                timeout: Some(300),
+                bundled: Some(true),
+                available_tools: vec!["shell".to_string(), "text_editor".to_string()],
+            });
+        }
+
+        extensions
     }
 
     async fn prepare_worktree(

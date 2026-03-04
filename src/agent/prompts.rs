@@ -25,6 +25,8 @@ const EPIC_REVIEWER_TEMPLATE: &str = include_str!("prompts/epic-reviewer-batch.m
 pub struct TaskContext {
     /// Absolute path to the project root (passed to Djinn tools as `project`).
     pub project_path: String,
+    /// Absolute path to the active execution workspace (task worktree).
+    pub workspace_path: String,
 
     // ── Task reviewer fields ──────────────────────────────────────────────────
     /// Formatted git diff for the task branch (start_commit..end_commit).
@@ -81,6 +83,7 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
 
     // Context fields
     out = out.replace("{{project_path}}", &ctx.project_path);
+    out = out.replace("{{workspace_path}}", &ctx.workspace_path);
     out = out.replace("{{diff}}", ctx.diff.as_deref().unwrap_or(""));
     out = out.replace("{{commits}}", ctx.commits.as_deref().unwrap_or(""));
     out = out.replace(
@@ -195,6 +198,7 @@ mod tests {
     fn make_ctx() -> TaskContext {
         TaskContext {
             project_path: "/home/user/project".into(),
+            workspace_path: "/home/user/project/.djinn/worktrees/t123".into(),
             diff: None,
             commits: None,
             start_commit: None,
@@ -223,6 +227,7 @@ mod tests {
         assert!(prompt.contains("- [ ] Widget exists"));
         assert!(prompt.contains("- [x] Tests pass"));
         assert!(prompt.contains("/home/user/project"));
+        assert!(prompt.contains("/home/user/project/.djinn/worktrees/t123"));
         // No un-substituted placeholders
         assert!(!prompt.contains("{{"));
     }

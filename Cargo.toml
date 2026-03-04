@@ -7,6 +7,7 @@ edition = "2024"
 # Goose: in-process agent harness (ADR-008). default-features=false excludes V8/Deno.
 # Pinned to latest stable release tag for reproducible runtime behavior.
 goose = { git = "https://github.com/block/goose.git", tag = "v1.26.1", default-features = false }
+goose-mcp = { git = "https://github.com/block/goose.git", tag = "v1.26.1" }
 anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }

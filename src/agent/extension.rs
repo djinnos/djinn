@@ -426,13 +426,41 @@ async fn project_id_for_path(state: &AppState, project_path: &str) -> Result<Str
         .await
         .map_err(|e| e.to_string())?;
 
+    let normalized = project_path.trim_end_matches('/');
+
     let project_id = sqlx::query_scalar::<_, String>("SELECT id FROM projects WHERE path = ?1")
-        .bind(project_path)
+        .bind(normalized)
         .fetch_optional(state.db().pool())
         .await
         .map_err(|e| e.to_string())?;
 
-    project_id.ok_or_else(|| format!("project not found: {project_path}"))
+    if let Some(project_id) = project_id {
+        return Ok(project_id);
+    }
+
+    let all_projects = sqlx::query_as::<_, (String, String)>("SELECT id, path FROM projects")
+        .fetch_all(state.db().pool())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut best: Option<(String, usize)> = None;
+    for (id, path) in all_projects {
+        let root = path.trim_end_matches('/');
+        let matches = normalized == root
+            || normalized
+                .strip_prefix(root)
+                .map(|suffix| suffix.starts_with('/'))
+                .unwrap_or(false);
+        if matches {
+            let len = root.len();
+            if best.as_ref().map(|(_, best_len)| len > *best_len).unwrap_or(true) {
+                best = Some((id, len));
+            }
+        }
+    }
+
+    best.map(|(id, _)| id)
+        .ok_or_else(|| format!("project not found: {project_path}"))
 }
 
 fn resolve_project_path(project: Option<String>) -> String {

@@ -22,7 +22,11 @@ You have access to Djinn tools via the `djinn` extension. Use them during implem
 
 - **Progress notes** — Add comments at key milestones so any agent can resume your work: `task_comment_add(id="{{task_id}}", body="[PROGRESS] Done: X. Next: Y.")`
 - **Memory lookups** — Search for ADRs, patterns, and design decisions: `memory_search(query="...")`, `memory_build_context(url="...")`
-- **Task memory refs** — Check linked memory notes: `task_memory_refs(id="{{task_id}}", project="{{project_path}}")`
+- **Task memory refs** — Check linked memory notes: `task_memory_refs(id="{{task_id}}")`
+
+## Workspace
+
+- **Active workspace (where code edits and shell commands must run):** `{{workspace_path}}`
 
 ## Instructions
 
@@ -45,4 +49,5 @@ You have access to Djinn tools via the `djinn` extension. Use them during implem
 - **Never run destructive git commands.** No `git stash`, `git checkout .`, `git reset --hard`, `git clean`.
 - **Verify before committing.** Run build/test commands to confirm your changes work.
 - **Install dependencies if needed.** You are in a fresh worktree — check for lockfiles and install before building.
+- **Operate only in the active workspace.** Use relative paths and do not target parent repo paths directly.
 - **Always emit a result marker.** The supervisor reads your final `WORKER_RESULT` line to transition task state.
