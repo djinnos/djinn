@@ -409,7 +409,7 @@ fn spawn_reply_task(
                                     }
                                 }
                             }
-                            extension::handle_event(&app_state, &agent, &evt).await;
+                            extension::handle_event(&app_state, &agent, &evt, &worktree_path).await;
                         }
                     }
                 }
@@ -471,7 +471,7 @@ fn spawn_reply_task(
                                 }
                             }
                         }
-                        extension::handle_event(&app_state, &agent, &evt).await;
+                        extension::handle_event(&app_state, &agent, &evt, &worktree_path).await;
                     }
                 }
             }
@@ -817,7 +817,13 @@ impl AgentSupervisor {
 
         let session_name = format!("{} {}", task.short_id, task.title);
         let project_dir = PathBuf::from(&project_path);
-        let worktree_path = self.prepare_worktree(&project_dir, &task).await?;
+        let worktree_path = if agent_type == AgentType::EpicReviewer {
+            let batch_id = active_batch.as_deref().unwrap_or_default();
+            self.prepare_epic_reviewer_worktree(&project_dir, batch_id)
+                .await?
+        } else {
+            self.prepare_worktree(&project_dir, &task).await?
+        };
         let goose_logs_dir = goose::config::paths::Paths::in_state_dir("logs");
         if let Err(e) = std::fs::create_dir_all(&goose_logs_dir) {
             tracing::warn!(
@@ -2993,6 +2999,32 @@ impl AgentSupervisor {
         }
 
         git.create_worktree(&task.short_id, &branch, false)
+            .await
+            .map_err(|e| SupervisorError::Goose(e.to_string()))
+    }
+
+    async fn prepare_epic_reviewer_worktree(
+        &self,
+        project_dir: &PathBuf,
+        batch_id: &str,
+    ) -> Result<PathBuf, SupervisorError> {
+        let git = self
+            .app_state
+            .git_actor(project_dir)
+            .await
+            .map_err(|e| SupervisorError::Goose(e.to_string()))?;
+
+        let folder_name = format!("batch-{batch_id}");
+        let stale_path = project_dir
+            .join(".djinn")
+            .join("worktrees")
+            .join(&folder_name);
+        let _ = git.remove_worktree(&stale_path).await;
+        if stale_path.exists() {
+            let _ = std::fs::remove_dir_all(&stale_path);
+        }
+
+        git.create_worktree(&folder_name, "HEAD", true)
             .await
             .map_err(|e| SupervisorError::Goose(e.to_string()))
     }
