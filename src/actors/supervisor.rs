@@ -38,6 +38,49 @@ use crate::server::AppState;
 
 const MERGE_CONFLICT_PREFIX: &str = "merge_conflict:";
 
+fn runtime_fs_diagnostics(project_path: &str, worktree_path: &Path) -> String {
+    let project = Path::new(project_path);
+    let worktree_git = worktree_path.join(".git");
+    format!(
+        "project_exists={} worktree_exists={} worktree_is_dir={} worktree_git_exists={} worktree_path={} project_path={}",
+        project.exists(),
+        worktree_path.exists(),
+        worktree_path.is_dir(),
+        worktree_git.exists(),
+        worktree_path.display(),
+        project.display(),
+    )
+}
+
+fn runtime_env_diagnostics(session_id: &str, project_path: &str, worktree_path: &Path) -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unavailable>".to_string());
+    let home = std::env::var("HOME").unwrap_or_else(|_| "<unset>".to_string());
+    let xdg_config = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| "<unset>".to_string());
+    let xdg_data = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| "<unset>".to_string());
+    let path = std::env::var("PATH").unwrap_or_else(|_| "<unset>".to_string());
+
+    let sessions_dir = PathBuf::from(&home).join(".djinn").join("sessions");
+    let sessions_db = sessions_dir.join("sessions").join("sessions.db");
+    format!(
+        "session_id={} cwd={} home={} xdg_config_home={} xdg_data_home={} project_exists={} worktree_exists={} worktree_git_exists={} sessions_dir_exists={} sessions_db_exists={} worktree_path={} project_path={} path={}",
+        session_id,
+        cwd,
+        home,
+        xdg_config,
+        xdg_data,
+        Path::new(project_path).exists(),
+        worktree_path.exists(),
+        worktree_path.join(".git").exists(),
+        sessions_dir.exists(),
+        sessions_db.exists(),
+        worktree_path.display(),
+        project_path,
+        path,
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MergeConflictMetadata {
     conflicting_files: Vec<String>,
@@ -364,6 +407,12 @@ impl AgentSupervisor {
         let session_name = format!("{} {}", task.short_id, task.title);
         let project_dir = PathBuf::from(&project_path);
         let worktree_path = self.prepare_worktree(&project_dir, &task).await?;
+        if !worktree_path.exists() || !worktree_path.is_dir() {
+            let diag = runtime_fs_diagnostics(&project_path, &worktree_path);
+            return Err(SupervisorError::Goose(format!(
+                "worktree preflight failed before session creation: {diag}"
+            )));
+        }
         let session = self
             .session_manager
             .create_session(worktree_path.clone(), session_name, SessionType::SubAgent)
@@ -460,6 +509,8 @@ impl AgentSupervisor {
         let sender = self.sender.clone();
         let app_state = self.app_state.clone();
         let run_agent_type = agent_type;
+        let worktree_path_for_join = worktree_path.clone();
+        let project_path_for_join = project_path.clone();
 
         let join = tokio::spawn(async move {
             let kickoff = GooseMessage::user().with_text(
@@ -469,8 +520,22 @@ impl AgentSupervisor {
             let run_result: anyhow::Result<()> = async {
                 let mut prompts = vec![kickoff];
                 let mut nudged_reviewer = false;
+                let mut saw_any_event = false;
 
                 while let Some(next_message) = prompts.pop() {
+                    let env_diag = runtime_env_diagnostics(
+                        &session_id,
+                        &project_path_for_join,
+                        &worktree_path_for_join,
+                    );
+                    tracing::info!(
+                        task_id = %task_id_for_join,
+                        session_id = %session_id,
+                        worktree = %worktree_path_for_join.display(),
+                        "Supervisor: starting Goose reply; {}",
+                        env_diag
+                    );
+
                     let mut stream = agent
                         .reply(
                             next_message,
@@ -483,9 +548,27 @@ impl AgentSupervisor {
                             Some(session_cancel_for_reply.clone()),
                         )
                         .await
-                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                        .map_err(|e| {
+                            let diag = runtime_fs_diagnostics(
+                                &project_path_for_join,
+                                &worktree_path_for_join,
+                            );
+                            let env_diag = runtime_env_diagnostics(
+                                &session_id,
+                                &project_path_for_join,
+                                &worktree_path_for_join,
+                            );
+                            anyhow::anyhow!(
+                                "agent reply init failed: display={} debug={:?}; {}; {}",
+                                e,
+                                e,
+                                diag,
+                                env_diag
+                            )
+                        })?;
 
                     let mut interrupted: Option<&'static str> = None;
+                    let mut saw_round_event = false;
                     loop {
                         tokio::select! {
                             _ = session_cancel_for_reply.cancelled() => {
@@ -498,7 +581,26 @@ impl AgentSupervisor {
                             }
                             evt = stream.next() => {
                                 let Some(evt) = evt else { break; };
-                                let evt = evt.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                                let evt = evt.map_err(|e| {
+                                    let diag = runtime_fs_diagnostics(
+                                        &project_path_for_join,
+                                        &worktree_path_for_join,
+                                    );
+                                    let env_diag = runtime_env_diagnostics(
+                                        &session_id,
+                                        &project_path_for_join,
+                                        &worktree_path_for_join,
+                                    );
+                                    anyhow::anyhow!(
+                                        "agent stream event failed: display={} debug={:?}; {}; {}",
+                                        e,
+                                        e,
+                                        diag,
+                                        env_diag
+                                    )
+                                })?;
+                                saw_any_event = true;
+                                saw_round_event = true;
                                 output.ingest_event(&evt);
                                 extension::handle_event(&app_state, &agent, &evt).await;
                             }
@@ -507,6 +609,17 @@ impl AgentSupervisor {
 
                     if let Some(reason) = interrupted {
                         return Err(anyhow::anyhow!(reason));
+                    }
+
+                    if !saw_round_event {
+                        let diag = runtime_fs_diagnostics(
+                            &project_path_for_join,
+                            &worktree_path_for_join,
+                        );
+                        return Err(anyhow::anyhow!(
+                            "agent stream ended without any events; {}",
+                            diag
+                        ));
                     }
 
                     if run_agent_type == AgentType::TaskReviewer
@@ -519,6 +632,14 @@ impl AgentSupervisor {
                         ));
                         continue;
                     }
+                }
+
+                if !saw_any_event {
+                    let diag = runtime_fs_diagnostics(&project_path_for_join, &worktree_path_for_join);
+                    return Err(anyhow::anyhow!(
+                        "agent session produced no events; {}",
+                        diag
+                    ));
                 }
 
                 if run_agent_type == AgentType::TaskReviewer && output.reviewer_verdict.is_none() {
@@ -869,6 +990,48 @@ impl AgentSupervisor {
             }
         }
 
+        if let Err(reason) = &result {
+            let payload = serde_json::json!({
+                "error": reason,
+                "agent_type": agent_type.as_str(),
+            })
+            .to_string();
+            if let Err(e) = repo
+                .log_activity(
+                    Some(task_id),
+                    "agent-supervisor",
+                    "system",
+                    "session_error",
+                    &payload,
+                )
+                .await
+            {
+                tracing::warn!(task_id = %task_id, error = %e, "failed to store session error activity");
+            }
+        }
+
+        if result.is_ok()
+            && let Some(reason) = output.runtime_error.as_deref()
+        {
+            let payload = serde_json::json!({
+                "error": reason,
+                "agent_type": agent_type.as_str(),
+            })
+            .to_string();
+            if let Err(e) = repo
+                .log_activity(
+                    Some(task_id),
+                    "agent-supervisor",
+                    "system",
+                    "session_error",
+                    &payload,
+                )
+                .await
+            {
+                tracing::warn!(task_id = %task_id, error = %e, "failed to store session error activity");
+            }
+        }
+
         let transition = match result {
             Ok(()) => self.success_transition(task_id, agent_type, &output).await,
             Err(reason) => match agent_type {
@@ -921,10 +1084,13 @@ impl AgentSupervisor {
                     Some("worker session ended with PROGRESS signal".to_string()),
                 )),
                 None => {
-                    tracing::warn!("worker session completed without structured result marker");
+                    let reason = output.runtime_error.clone().unwrap_or_else(|| {
+                        "worker session completed without DONE/BLOCKED marker".to_string()
+                    });
+                    tracing::warn!(reason = %reason, "worker session completed without structured result marker");
                     Some((
                         TransitionAction::Release,
-                        Some("worker session completed without DONE/BLOCKED marker".to_string()),
+                        Some(reason),
                     ))
                 }
             },

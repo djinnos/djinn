@@ -1668,7 +1668,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3684,8 +3684,8 @@ dependencies = [
 
 [[package]]
 name = "goose"
-version = "1.26.0"
-source = "git+https://github.com/block/goose.git?rev=bc50d110004cec83f1ce72a68d87c0f7688b39ea#bc50d110004cec83f1ce72a68d87c0f7688b39ea"
+version = "1.26.1"
+source = "git+https://github.com/block/goose.git?tag=v1.26.1#d07cd686c7ae0de86c99eb85179a665854a1335b"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3776,8 +3776,8 @@ dependencies = [
 
 [[package]]
 name = "goose-mcp"
-version = "1.26.0"
-source = "git+https://github.com/block/goose.git?rev=bc50d110004cec83f1ce72a68d87c0f7688b39ea#bc50d110004cec83f1ce72a68d87c0f7688b39ea"
+version = "1.26.1"
+source = "git+https://github.com/block/goose.git?tag=v1.26.1#d07cd686c7ae0de86c99eb85179a665854a1335b"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4698,7 +4698,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7543,7 +7543,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8419,7 +8419,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.52.0",
  "windows-sys 0.59.0",
 ]
 

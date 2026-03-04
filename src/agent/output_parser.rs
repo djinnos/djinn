@@ -24,6 +24,7 @@ pub enum EpicReviewVerdict {
 pub struct ParsedAgentOutput {
     pub worker_signal: Option<WorkerSignal>,
     pub worker_reason: Option<String>,
+    pub runtime_error: Option<String>,
     pub reviewer_verdict: Option<ReviewerVerdict>,
     pub reviewer_feedback: Option<String>,
     pub epic_verdict: Option<EpicReviewVerdict>,
@@ -61,6 +62,12 @@ impl ParsedAgentOutput {
 
             if let Some(payload) = marker_payload(&line, "EPIC_REVIEW_RESULT") {
                 self.parse_epic_verdict(payload);
+            }
+
+            if self.runtime_error.is_none() {
+                if let Some(error) = extract_runtime_error(&line) {
+                    self.runtime_error = Some(error.to_string());
+                }
             }
         }
     }
@@ -159,6 +166,17 @@ fn split_reason(payload: &str) -> Option<String> {
     }
 }
 
+fn extract_runtime_error(line: &str) -> Option<&str> {
+    let marker = "Execution error:";
+    let idx = line.find(marker)?;
+    let value = line[idx + marker.len()..].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +218,15 @@ mod tests {
 
         assert_eq!(out.reviewer_verdict, None);
         assert_eq!(out.epic_verdict, None);
+    }
+
+    #[test]
+    fn extracts_runtime_execution_errors() {
+        let mut out = ParsedAgentOutput::default();
+        out.ingest_text("Error: Execution error: No such file or directory (os error 2)");
+        assert_eq!(
+            out.runtime_error.as_deref(),
+            Some("No such file or directory (os error 2)")
+        );
     }
 }
