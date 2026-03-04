@@ -1,8 +1,3 @@
-// DjinnOS Desktop - Tauri Application
-// 
-// Architecture: All Rust logic lives here in lib.rs
-// main.rs is a thin shim that calls run()
-
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -25,20 +20,41 @@ pub fn run() {
                 .expect("no main window")
                 .set_focus();
         }))
-        
+
         // Managed state
         .manage(Mutex::new(server::init_server_state()))
-        
+
         // Setup hook - spawn server sidecar
         .setup(|app| {
             let app_handle = app.handle().clone();
-            
+
             // Spawn server in background
             tauri::async_runtime::spawn(async move {
-                match server::spawn_server(&app_handle, 30).await {
+                let startup_result = if let Some(port) = server::discover_server_for_app(&app_handle) {
+                    if server::health_check(port).await {
+                        log::info!("Discovered healthy existing server on port {}", port);
+                        Ok(port)
+                    } else {
+                        log::warn!(
+                            "Discovered existing server on port {} but health check failed; spawning new server",
+                            port
+                        );
+                        server::spawn_server(&app_handle, 30).await
+                    }
+                } else {
+                    server::spawn_server(&app_handle, 30).await
+                };
+
+                match startup_result {
                     Ok(port) => {
-                        log::info!("Server started successfully on port {}", port);
-                        
+                        log::info!("Server ready on port {}", port);
+                        if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
+                            if let Ok(mut state) = state.lock() {
+                                state.port = Some(port);
+                                state.mark_healthy();
+                            }
+                        }
+
                         // Show the main window now that server is ready
                         if let Some(window) = app_handle.get_webview_window("main") {
                             let _ = window.show();
@@ -55,10 +71,10 @@ pub fn run() {
                     }
                 }
             });
-            
+
             Ok(())
         })
-        
+
         // Run event handler - do NOT kill server on exit
         .on_window_event(|_window, event| {
             match event {
@@ -68,7 +84,7 @@ pub fn run() {
                 _ => {}
             }
         })
-        
+
         // Tauri command handlers
         .invoke_handler(tauri::generate_handler![
             commands::greet,
@@ -80,7 +96,7 @@ pub fn run() {
             commands::get_pkce_code_verifier,
             commands::clear_pkce_params,
         ])
-        
+
         // Run the application
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

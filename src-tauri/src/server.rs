@@ -1,7 +1,7 @@
-use std::path::PathBuf;
-use std::time::Duration;
-use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
@@ -77,9 +77,14 @@ pub async fn spawn_server<R: Runtime>(
     // Get the daemon.json path
     let daemon_json_path = get_daemon_json_path(app)?;
 
-    // Remove any existing daemon.json from previous runs
+    // Remove stale daemon.json from previous runs.
+    // Keep it when it points to a live process so an already-running daemon can be reused.
     if daemon_json_path.exists() {
-        let _ = std::fs::remove_file(&daemon_json_path);
+        if let Some(daemon_info) = read_daemon_info(&daemon_json_path) {
+            if !is_process_running(daemon_info.pid) {
+                let _ = std::fs::remove_file(&daemon_json_path);
+            }
+        }
     }
 
     // Spawn the server sidecar as a detached process
@@ -101,7 +106,17 @@ pub async fn spawn_server<R: Runtime>(
                     eprintln!("[djinn-server stdout] {}", String::from_utf8_lossy(&line));
                 }
                 CommandEvent::Stderr(line) => {
-                    eprintln!("[djinn-server stderr] {}", String::from_utf8_lossy(&line));
+                    let message = String::from_utf8_lossy(&line);
+                    if message
+                        .to_ascii_lowercase()
+                        .contains("another djinn-server is already running")
+                    {
+                        eprintln!(
+                            "[djinn-server info] Existing daemon already running; reusing it"
+                        );
+                    } else {
+                        eprintln!("[djinn-server stderr] {}", message);
+                    }
                 }
                 CommandEvent::Error(e) => {
                     eprintln!("[djinn-server error] {}", e);
@@ -112,7 +127,26 @@ pub async fn spawn_server<R: Runtime>(
     });
 
     // Wait for daemon.json to appear with timeout
-    let port = wait_for_daemon_json(&daemon_json_path, timeout_secs).await?;
+    let port = match wait_for_daemon_json(&daemon_json_path, timeout_secs).await {
+        Ok(port) => port,
+        Err(wait_err) => {
+            // If another instance is already running, lock acquisition can fail.
+            // Fall back to daemon discovery instead of treating this as fatal.
+            if let Some(port) = discover_server_for_app(app) {
+                if health_check(port).await {
+                    log::info!(
+                        "Detected existing server on port {} after spawn attempt; reusing it",
+                        port
+                    );
+                    port
+                } else {
+                    return Err(wait_err);
+                }
+            } else {
+                return Err(wait_err);
+            }
+        }
+    };
 
     // Update the server state
     let state = app.state::<Mutex<ServerState>>();
@@ -127,10 +161,7 @@ pub async fn spawn_server<R: Runtime>(
 /// Wait for daemon.json to appear, reading the port from it
 ///
 /// Polls every 100ms until the file appears or timeout is reached
-async fn wait_for_daemon_json(
-    path: &PathBuf,
-    timeout_secs: u64,
-) -> Result<u16, String> {
+async fn wait_for_daemon_json(path: &PathBuf, timeout_secs: u64) -> Result<u16, String> {
     let interval = Duration::from_millis(100);
     let timeout = Duration::from_secs(timeout_secs);
     let start = std::time::Instant::now();
@@ -145,10 +176,13 @@ async fn wait_for_daemon_json(
                     // Parse daemon.json to extract port
                     match serde_json::from_str::<DaemonInfo>(&content) {
                         Ok(daemon_info) => {
-                            if daemon_info.port > 0 && daemon_info.port <= 65535 {
+                            if daemon_info.port > 0 {
                                 return Ok(daemon_info.port);
                             }
-                            return Err(format!("Invalid port in daemon.json: {}", daemon_info.port));
+                            return Err(format!(
+                                "Invalid port in daemon.json: {}",
+                                daemon_info.port
+                            ));
                         }
                         Err(e) => {
                             // Try parsing as simple JSON with port field
@@ -159,7 +193,10 @@ async fn wait_for_daemon_json(
                                             return Ok(port as u16);
                                         }
                                     }
-                                    return Err(format!("Invalid port in daemon.json: {}", content));
+                                    return Err(format!(
+                                        "Invalid port in daemon.json: {}",
+                                        content
+                                    ));
                                 }
                                 Err(_) => {
                                     return Err(format!("Failed to parse daemon.json: {}", e));
@@ -206,48 +243,61 @@ fn get_daemon_json_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, Strin
 ///
 /// Returns the port if a valid daemon.json exists, None otherwise
 pub fn discover_server() -> Option<u16> {
-    // Get the app data directory
+    // Keep this helper for contexts where AppHandle is not available.
     let app_data_dir = dirs::data_dir()?.join("com.djinnos.desktop");
     let daemon_json_path = app_data_dir.join("daemon.json");
 
+    discover_server_from_path(&daemon_json_path)
+}
+
+/// Discover an existing server using Tauri's app data directory
+pub fn discover_server_for_app<R: Runtime>(app: &AppHandle<R>) -> Option<u16> {
+    let daemon_json_path = get_daemon_json_path(app).ok()?;
+    discover_server_from_path(&daemon_json_path)
+}
+
+fn discover_server_from_path(daemon_json_path: &PathBuf) -> Option<u16> {
     if !daemon_json_path.exists() {
         return None;
     }
 
-    match std::fs::read_to_string(&daemon_json_path) {
-        Ok(content) => {
-            match serde_json::from_str::<DaemonInfo>(&content) {
-                Ok(daemon_info) => {
-                    // Validate PID is still running
-                    if is_process_running(daemon_info.pid) {
-                        Some(daemon_info.port)
-                    } else {
-                        // Process is dead, remove stale daemon.json
-                        let _ = std::fs::remove_file(&daemon_json_path);
-                        None
-                    }
-                }
-                Err(_) => {
-                    // Try simple JSON parsing
-                    match serde_json::from_str::<serde_json::Value>(&content) {
-                        Ok(json) => {
-                            json.get("port").and_then(|p| p.as_u64()).map(|p| p as u16)
-                        }
-                        Err(_) => None,
-                    }
-                }
-            }
+    if let Some(daemon_info) = read_daemon_info(daemon_json_path) {
+        if is_process_running(daemon_info.pid) {
+            Some(daemon_info.port)
+        } else {
+            let _ = std::fs::remove_file(daemon_json_path);
+            None
         }
-        Err(_) => None,
+    } else {
+        None
     }
+}
+
+fn read_daemon_info(path: &PathBuf) -> Option<DaemonInfo> {
+    let content = std::fs::read_to_string(path).ok()?;
+
+    if let Ok(daemon_info) = serde_json::from_str::<DaemonInfo>(&content) {
+        return Some(daemon_info);
+    }
+
+    let json = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    let port = json.get("port").and_then(|p| p.as_u64())?;
+    let pid = json.get("pid").and_then(|p| p.as_u64())?;
+
+    if !(1..=65535).contains(&port) {
+        return None;
+    }
+
+    Some(DaemonInfo {
+        port: port as u16,
+        pid: pid as u32,
+    })
 }
 
 /// Check if a process is running by PID
 #[cfg(unix)]
 fn is_process_running(pid: u32) -> bool {
-    unsafe {
-        libc::kill(pid as libc::pid_t, 0) == 0
-    }
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
 #[cfg(windows)]
@@ -296,9 +346,7 @@ pub fn get_server_port<R: Runtime>(app: &AppHandle<R>) -> Option<u16> {
 /// Retry server discovery
 ///
 /// This is called from the frontend when user clicks retry button
-pub async fn retry_server_discovery<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Result<u16, String> {
+pub async fn retry_server_discovery<R: Runtime>(app: &AppHandle<R>) -> Result<u16, String> {
     // Clear any existing error state
     if let Some(state) = app.try_state::<Mutex<ServerState>>() {
         if let Ok(mut state) = state.lock() {
@@ -307,7 +355,7 @@ pub async fn retry_server_discovery<R: Runtime>(
     }
 
     // Try to discover an existing server
-    if let Some(port) = discover_server() {
+    if let Some(port) = discover_server_for_app(app) {
         log::info!("Retry: Discovered existing server on port {}", port);
 
         // Verify it's healthy
