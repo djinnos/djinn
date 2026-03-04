@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +18,7 @@ use crate::agent::init_session_manager;
 use crate::db::connection::Database;
 use crate::db::repositories::note::NoteRepository;
 use crate::db::repositories::project::ProjectRepository;
+use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::settings::SettingsRepository;
 use crate::events::DjinnEvent;
 use crate::mcp;
@@ -263,12 +264,62 @@ impl AppState {
     pub async fn apply_settings_raw(&self, raw: &str) -> Result<(), String> {
         let json: serde_json::Value =
             serde_json::from_str(raw).map_err(|e| format!("parse settings JSON: {e}"))?;
+        self.validate_model_priority_providers_connected(&json)
+            .await?;
         let repo = SettingsRepository::new(self.db().clone(), self.events().clone());
         repo.set(SETTINGS_RAW_KEY, raw)
             .await
             .map_err(|e| e.to_string())?;
         self.apply_runtime_settings(&json).await;
         Ok(())
+    }
+
+    async fn validate_model_priority_providers_connected(
+        &self,
+        settings: &serde_json::Value,
+    ) -> Result<(), String> {
+        let priorities = read_model_priorities(settings).unwrap_or_default();
+        if priorities.is_empty() {
+            return Ok(());
+        }
+
+        let configured_provider_ids: HashSet<String> = priorities
+            .values()
+            .flat_map(|models| models.iter())
+            .map(|model| {
+                model
+                    .split_once('/')
+                    .map(|(provider_id, _)| provider_id)
+                    .unwrap_or(model.as_str())
+                    .to_string()
+            })
+            .collect();
+        if configured_provider_ids.is_empty() {
+            return Ok(());
+        }
+
+        let repo = CredentialRepository::new(self.db().clone(), self.events().clone());
+        let credentials = repo
+            .list()
+            .await
+            .map_err(|e| format!("list credentials: {e}"))?;
+        let connected_provider_ids: HashSet<String> =
+            credentials.into_iter().map(|c| c.provider_id).collect();
+
+        let mut missing_provider_ids: Vec<String> = configured_provider_ids
+            .difference(&connected_provider_ids)
+            .cloned()
+            .collect();
+        missing_provider_ids.sort();
+
+        if missing_provider_ids.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "model_priority references disconnected providers: {}",
+                missing_provider_ids.join(", ")
+            ))
+        }
     }
 
     pub async fn reset_runtime_settings(&self) {
@@ -550,7 +601,10 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{read_max_sessions, read_model_priorities};
+    use crate::db::repositories::credential::CredentialRepository;
+    use crate::server::AppState;
     use crate::test_helpers;
+    use tokio_util::sync::CancellationToken;
 
     /// Integration test: hit /health via tower::ServiceExt::oneshot().
     #[tokio::test]
@@ -916,5 +970,40 @@ mod tests {
         });
         let parsed = read_model_priorities(&settings).unwrap();
         assert_eq!(parsed.get("epic_reviewer").unwrap(), &vec!["openai/o3"]);
+    }
+
+    #[tokio::test]
+    async fn apply_settings_raw_rejects_disconnected_model_priority_provider() {
+        let db = test_helpers::create_test_db();
+        let state = AppState::new(db, CancellationToken::new());
+
+        let err = state
+            .apply_settings_raw(
+                r#"{"coordinator":{"model_priority":{"worker":["nvidia/moonshotai/kimi-k2-instruct"]}}}"#,
+            )
+            .await
+            .expect_err("should reject disconnected provider");
+
+        assert!(err.contains("disconnected providers"));
+        assert!(err.contains("nvidia"));
+    }
+
+    #[tokio::test]
+    async fn apply_settings_raw_accepts_connected_model_priority_provider() {
+        let db = test_helpers::create_test_db();
+        let state = AppState::new(db, CancellationToken::new());
+
+        let cred_repo = CredentialRepository::new(state.db().clone(), state.events().clone());
+        cred_repo
+            .set("synthetic", "SYNTHETIC_API_KEY", "sk-test")
+            .await
+            .unwrap();
+
+        state
+            .apply_settings_raw(
+                r#"{"coordinator":{"model_priority":{"worker":["synthetic/hf:moonshotai/Kimi-K2.5"]}}}"#,
+            )
+            .await
+            .expect("connected provider should be accepted");
     }
 }

@@ -4,9 +4,9 @@
 PRAGMA foreign_keys = OFF;
 
 -- Backfill strategy:
--- - If no project exists, create one.
--- - If multiple projects exist and scoped tables already have rows, create a
---   dedicated legacy project and attach all pre-scoped rows to it.
+-- - If projects already exist, attach legacy rows to the first project.
+-- - If no project exists and there is pre-scoped data, create one migration
+--   project so project_id FKs can be satisfied.
 CREATE TEMP TABLE _migration_project (
     id TEXT NOT NULL
 );
@@ -14,20 +14,14 @@ CREATE TEMP TABLE _migration_project (
 INSERT INTO projects (id, name, path)
 SELECT lower(hex(randomblob(16))), 'legacy-migrated', 'legacy://migration'
 WHERE (SELECT COUNT(*) FROM projects) = 0
-   OR (
-        (SELECT COUNT(*) FROM projects) > 1
-        AND (
-            (SELECT COUNT(*) FROM epics)
-          + (SELECT COUNT(*) FROM tasks)
-          + (SELECT COUNT(*) FROM sessions)
-        ) > 0
-   );
+  AND (
+      (SELECT COUNT(*) FROM epics)
+    + (SELECT COUNT(*) FROM tasks)
+    + (SELECT COUNT(*) FROM sessions)
+  ) > 0;
 
 INSERT INTO _migration_project(id)
-SELECT COALESCE(
-    (SELECT id FROM projects WHERE path = 'legacy://migration' LIMIT 1),
-    (SELECT id FROM projects ORDER BY created_at LIMIT 1)
-);
+SELECT id FROM projects ORDER BY created_at LIMIT 1;
 
 -- EPICS -----------------------------------------------------------------------
 CREATE TABLE epics_new (
