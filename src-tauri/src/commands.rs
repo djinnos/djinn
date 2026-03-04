@@ -11,11 +11,11 @@ pub fn greet(name: &str) -> String {
 /// Get server port from app state
 /// 
 /// Reads the port from the ServerState managed by Tauri.
-/// This returns the port that the backend server is expected to be running on.
+/// This returns the port that the backend server is running on.
 #[tauri::command]
 pub fn get_server_port(state: State<Mutex<ServerState>>) -> Result<u16, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
-    Ok(state.port)
+    state.port.ok_or_else(|| "Server not ready".to_string())
 }
 
 /// Get authentication token

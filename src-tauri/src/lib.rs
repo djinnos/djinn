@@ -27,77 +27,42 @@ pub fn run() {
         }))
         
         // Managed state
-        .manage(Mutex::new(server::init_server_state(8080)))
+        .manage(Mutex::new(server::init_server_state()))
         
-        // Setup hook - spawn server sidecar, run health check loop
+        // Setup hook - spawn server sidecar
         .setup(|app| {
             let app_handle = app.handle().clone();
             
-            // Spawn server discovery and health check in background
+            // Spawn server in background
             tauri::async_runtime::spawn(async move {
-                // First try to discover an existing server
-                let mut port = 8080;
-                
-                if let Some(discovered_port) = server::discover_server() {
-                    log::info!("Discovered existing server on port {}", discovered_port);
-                    port = discovered_port;
-                    
-                    // Update state with discovered port
-                    if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
-                        if let Ok(mut state) = state.lock() {
-                            state.port = port;
-                        }
-                    }
-                }
-                
-                // Run health check loop with exponential backoff
-                let max_retries = 10;
-                let mut retries = 0;
-                let mut interval_ms = 2000u64; // Start with 2 seconds
-                
-                log::info!("Starting health check loop for port {}", port);
-                
-                loop {
-                    if server::health_check(port).await {
-                        log::info!("Server on port {} is healthy", port);
+                match server::spawn_server(&app_handle, 30).await {
+                    Ok(port) => {
+                        log::info!("Server started successfully on port {}", port);
                         
-                        // Update state to mark as healthy
-                        if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
-                            if let Ok(mut state) = state.lock() {
-                                state.port = port;
-                            }
-                        }
-                        
-                        // Show the main window once server is healthy
+                        // Show the main window now that server is ready
                         if let Some(window) = app_handle.get_webview_window("main") {
                             let _ = window.show();
-                            let _ = window.set_focus();
                         }
-                        
-                        break;
                     }
-                    
-                    retries += 1;
-                    if retries >= max_retries {
-                        log::error!("Health check failed after {} retries", max_retries);
-                        break;
+                    Err(e) => {
+                        log::error!("Failed to spawn server: {}", e);
+                        // Could show an error dialog here
                     }
-                    
-                    log::debug!(
-                        "Health check failed, retrying in {}ms (attempt {}/{ })",
-                        interval_ms,
-                        retries,
-                        max_retries
-                    );
-                    
-                    tokio::time::sleep(tokio::time::Duration::from_millis(interval_ms)).await;
-                    
-                    // Exponential backoff: double the interval, cap at 30 seconds
-                    interval_ms = (interval_ms * 2).min(30000);
                 }
             });
             
             Ok(())
+        })
+        
+        // Run event handler - do NOT kill server on exit
+        .on_window_event(|_window, event| {
+            match event {
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    // Window close requested - do nothing to server
+                    // Server continues running as independent daemon
+                }
+                _ => {}
+            }
         })
         
         // Tauri command handlers
