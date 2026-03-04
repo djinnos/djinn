@@ -56,9 +56,6 @@ pub enum TaskStatus {
     InProgress,
     NeedsTaskReview,
     InTaskReview,
-    NeedsEpicReview,
-    InEpicReview,
-    Approved,
     Closed,
     Blocked,
 }
@@ -72,9 +69,6 @@ impl TaskStatus {
             Self::InProgress => "in_progress",
             Self::NeedsTaskReview => "needs_task_review",
             Self::InTaskReview => "in_task_review",
-            Self::NeedsEpicReview => "needs_epic_review",
-            Self::InEpicReview => "in_epic_review",
-            Self::Approved => "approved",
             Self::Closed => "closed",
             Self::Blocked => "blocked",
         }
@@ -88,9 +82,6 @@ impl TaskStatus {
             "in_progress" => Ok(Self::InProgress),
             "needs_task_review" => Ok(Self::NeedsTaskReview),
             "in_task_review" => Ok(Self::InTaskReview),
-            "needs_epic_review" => Ok(Self::NeedsEpicReview),
-            "in_epic_review" => Ok(Self::InEpicReview),
-            "approved" => Ok(Self::Approved),
             "closed" => Ok(Self::Closed),
             "blocked" => Ok(Self::Blocked),
             other => Err(Error::Internal(format!("unknown task status: {other}"))),
@@ -115,14 +106,10 @@ pub enum TransitionAction {
     TaskReviewReject,
     TaskReviewRejectConflict,
     TaskReviewApprove,
-    EpicReviewStart,
-    EpicReviewReject,
-    EpicReviewApprove,
     Close,
     Reopen,
     Release,
     ReleaseTaskReview,
-    ReleaseEpicReview,
     Block,
     Unblock,
     ForceClose,
@@ -136,11 +123,9 @@ impl TransitionAction {
             self,
             Self::TaskReviewReject
                 | Self::TaskReviewRejectConflict
-                | Self::EpicReviewReject
                 | Self::Reopen
                 | Self::Release
                 | Self::ReleaseTaskReview
-                | Self::ReleaseEpicReview
                 | Self::Block
                 | Self::ForceClose
         )
@@ -156,14 +141,10 @@ impl TransitionAction {
             "task_review_reject" => Ok(Self::TaskReviewReject),
             "task_review_reject_conflict" => Ok(Self::TaskReviewRejectConflict),
             "task_review_approve" => Ok(Self::TaskReviewApprove),
-            "epic_review_start" => Ok(Self::EpicReviewStart),
-            "epic_review_reject" => Ok(Self::EpicReviewReject),
-            "epic_review_approve" => Ok(Self::EpicReviewApprove),
             "close" => Ok(Self::Close),
             "reopen" => Ok(Self::Reopen),
             "release" => Ok(Self::Release),
             "release_task_review" => Ok(Self::ReleaseTaskReview),
-            "release_epic_review" => Ok(Self::ReleaseEpicReview),
             "block" => Ok(Self::Block),
             "unblock" => Ok(Self::Unblock),
             "force_close" => Ok(Self::ForceClose),
@@ -302,40 +283,9 @@ pub fn compute_transition(
             }
         }
 
-        TransitionAction::EpicReviewStart => {
-            if *from != TaskStatus::NeedsEpicReview {
-                return bad("epic_review_start is only valid from needs_epic_review");
-            }
-            TransitionApply::simple(TaskStatus::InEpicReview)
-        }
-
-        TransitionAction::EpicReviewReject => {
-            if *from != TaskStatus::InEpicReview {
-                return bad("epic_review_reject is only valid from in_epic_review");
-            }
-            TransitionApply {
-                to_status: Some(TaskStatus::Open),
-                increment_reopen: true,
-                reset_continuation: true,
-                ..Default::default()
-            }
-        }
-
-        TransitionAction::EpicReviewApprove => {
-            if *from != TaskStatus::InEpicReview {
-                return bad("epic_review_approve is only valid from in_epic_review");
-            }
-            TransitionApply {
-                to_status: Some(TaskStatus::Closed),
-                set_closed_at: true,
-                close_reason: Some("completed"),
-                ..Default::default()
-            }
-        }
-
         TransitionAction::Close => {
-            if *from != TaskStatus::Approved {
-                return bad("close is only valid from approved");
+            if *from == TaskStatus::Closed {
+                return bad("task is already closed");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::Closed),
@@ -375,13 +325,6 @@ pub fn compute_transition(
                 return bad("release_task_review is only valid from in_task_review");
             }
             TransitionApply::simple(TaskStatus::NeedsTaskReview)
-        }
-
-        TransitionAction::ReleaseEpicReview => {
-            if *from != TaskStatus::InEpicReview {
-                return bad("release_epic_review is only valid from in_epic_review");
-            }
-            TransitionApply::simple(TaskStatus::NeedsEpicReview)
         }
 
         TransitionAction::Block => {

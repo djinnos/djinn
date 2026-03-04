@@ -309,10 +309,7 @@ impl CoordinatorActor {
         match &evt {
             // A task became dispatch-ready for any role → check dispatch.
             DjinnEvent::TaskCreated(t) | DjinnEvent::TaskUpdated(t)
-                if matches!(
-                    t.status.as_str(),
-                    "open" | "needs_task_review" | "needs_epic_review"
-                ) =>
+                if matches!(t.status.as_str(), "open" | "needs_task_review" | "closed") =>
             {
                 tracing::debug!(
                     task_id = %t.short_id,
@@ -424,7 +421,6 @@ impl CoordinatorActor {
     fn role_for_task_status(status: &str) -> &'static str {
         match status {
             "needs_task_review" | "in_task_review" => "task_reviewer",
-            "needs_epic_review" | "in_epic_review" => "epic_reviewer",
             _ => "worker",
         }
     }
@@ -460,7 +456,7 @@ impl CoordinatorActor {
             }
         };
 
-        for status in ["needs_task_review", "needs_epic_review"] {
+        for status in ["needs_task_review"] {
             match repo.list_by_status(status).await {
                 Ok(mut tasks) => ready.append(&mut tasks),
                 Err(e) => {
@@ -580,6 +576,78 @@ impl CoordinatorActor {
                 }
             }
         }
+
+        let (batch_events_tx, _batch_events_rx) = broadcast::channel(1);
+        let batch_repo = crate::db::repositories::epic_review_batch::EpicReviewBatchRepository::new(
+            self.db.clone(),
+            batch_events_tx,
+        );
+        let queued_anchors = match batch_repo
+            .list_queued_anchors(project_filter, self.dispatch_limit as i64)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: list_queued_anchors failed");
+                return;
+            }
+        };
+
+        let Some(epic_models) = role_models.get("epic_reviewer") else {
+            return;
+        };
+
+        for anchor in queued_anchors {
+            if !self.is_project_dispatch_enabled(&anchor.project_id) {
+                continue;
+            }
+
+            match self.supervisor.has_session(&anchor.task_id).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(SupervisorError::ActorDead) => {
+                    tracing::error!("CoordinatorActor: supervisor actor dead, aborting dispatch");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %anchor.task_id, error = %e, "CoordinatorActor: has_session failed for epic batch anchor");
+                    continue;
+                }
+            }
+
+            let Some(project_path) = self.project_path_for_id(&anchor.project_id).await else {
+                continue;
+            };
+
+            for model_id in epic_models {
+                if !self.health.is_available(model_id) {
+                    continue;
+                }
+
+                match self
+                    .supervisor
+                    .dispatch(&anchor.task_id, &project_path, model_id)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(batch_id = %anchor.batch_id, epic_id = %anchor.epic_id, task_id = %anchor.task_id, model_id = %model_id, "CoordinatorActor: epic review batch dispatched");
+                        self.dispatched += 1;
+                        break;
+                    }
+                    Err(SupervisorError::ModelAtCapacity { .. }) => continue,
+                    Err(SupervisorError::ActorDead) => {
+                        tracing::error!(
+                            "CoordinatorActor: supervisor actor dead, aborting dispatch"
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(batch_id = %anchor.batch_id, task_id = %anchor.task_id, model_id = %model_id, error = %e, "CoordinatorActor: epic batch dispatch failed");
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// On each tick: find tasks in active execution states with no active session
@@ -591,7 +659,6 @@ impl CoordinatorActor {
         for (status, action) in [
             ("in_progress", TransitionAction::Release),
             ("in_task_review", TransitionAction::ReleaseTaskReview),
-            ("in_epic_review", TransitionAction::ReleaseEpicReview),
         ] {
             let tasks = match repo.list_by_status(status).await {
                 Ok(tasks) => tasks,
@@ -660,6 +727,50 @@ impl CoordinatorActor {
                             "CoordinatorActor: recovery transition failed"
                         );
                     }
+                }
+            }
+        }
+
+        let (batch_events_tx, _batch_events_rx) = broadcast::channel(1);
+        let batch_repo = crate::db::repositories::epic_review_batch::EpicReviewBatchRepository::new(
+            self.db.clone(),
+            batch_events_tx,
+        );
+        let in_review = match batch_repo.list_in_review_anchors(project_filter).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: list_in_review_anchors failed during stuck check");
+                Vec::new()
+            }
+        };
+
+        for batch in in_review {
+            if !self.is_project_dispatch_enabled(&batch.project_id) {
+                continue;
+            }
+            match self.supervisor.has_session(&batch.task_id).await {
+                Ok(true) => continue,
+                Ok(false) => {
+                    if let Err(e) = batch_repo
+                        .requeue(
+                            &batch.batch_id,
+                            Some("stuck batch review — no active session detected"),
+                        )
+                        .await
+                    {
+                        tracing::warn!(batch_id = %batch.batch_id, error = %e, "CoordinatorActor: failed to requeue stuck epic review batch");
+                    } else {
+                        any_recovered = true;
+                    }
+                }
+                Err(SupervisorError::ActorDead) => {
+                    tracing::error!(
+                        "CoordinatorActor: supervisor actor dead during batch stuck check"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(batch_id = %batch.batch_id, error = %e, "CoordinatorActor: has_session failed during batch stuck check");
                 }
             }
         }

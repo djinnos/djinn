@@ -1,10 +1,9 @@
 ---
-tags:
-    - planning
-    - roadmap
 title: Roadmap
 type: roadmap
+tags: []
 ---
+
 # Roadmap — Djinn Server Rust Rewrite
 
 Phased delivery plan for v1 requirements. Each phase builds on the previous and has testable success criteria. Phases are sequenced by real dependencies — later phases require earlier foundations.
@@ -194,7 +193,7 @@ _Updated: 2026-03-03 (post-audit)_
 
 **Goal**: Task review and epic review agents verify quality before approval. **Runs as Goose sessions per ADR-008.**
 
-**Progress**: COMPLETE. Review agents (`lm7a`) closed. Scaffold system (`1nby`) dropped per ADR-008. Coordinator dispatches review agents for tasks in `needs_task_review` and `needs_epic_review` states. Supervisor handles transitions for all three agent types (worker, task_reviewer, epic_reviewer).
+**Progress**: COMPLETE. Review agents (`lm7a`) closed. Scaffold system (`1nby`) dropped per ADR-008. Coordinator dispatches task-review agents for tasks in `needs_task_review`; epic review now dispatches from persisted epic review batches when epics move to `in_review`. Supervisor handles all three agent types (worker, task_reviewer, epic_reviewer).
 
 **Requirements addressed**:
 - REVIEW-01 (task review: AC verification + code nitpicks)

@@ -1,6 +1,6 @@
 -- Canonical schema — ground truth. Matches result of running all migrations.
 -- Updated manually after each migration is added.
--- Last updated: V20260304130000__epic_review_batches.sql
+-- Last updated: V20260304170000__remove_legacy_epic_review_statuses.sql
 
 CREATE TABLE settings (
     key        TEXT NOT NULL PRIMARY KEY,
@@ -74,8 +74,7 @@ CREATE TABLE tasks (
                              CHECK(status IN (
                                  'draft', 'open', 'in_progress',
                                  'needs_task_review', 'in_task_review',
-                                 'needs_epic_review', 'in_epic_review',
-                                 'approved', 'closed', 'blocked'
+                                 'closed', 'blocked'
                              )),
     priority            INTEGER NOT NULL DEFAULT 0,
     owner               TEXT NOT NULL DEFAULT '',

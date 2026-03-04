@@ -405,8 +405,13 @@ impl AgentSupervisor {
         }
 
         let task = self.load_task(&task_id).await?;
+        let active_batch = self.active_epic_batch_for_task(&task.id).await;
         let conflict_ctx = self.conflict_context_for_dispatch(&task.id).await;
-        let agent_type = self.agent_type_for_task(&task, conflict_ctx.is_some());
+        let agent_type = if active_batch.is_some() {
+            AgentType::EpicReviewer
+        } else {
+            self.agent_type_for_task(&task, conflict_ctx.is_some())
+        };
         self.transition_start(&task, agent_type).await?;
 
         let (catalog_provider_id, model_name) = Self::parse_model_id(&model_id)?;
@@ -461,7 +466,7 @@ impl AgentSupervisor {
             .map_err(|e| SupervisorError::Goose(e.to_string()))?;
 
         if agent_type == AgentType::EpicReviewer
-            && let Some(batch_id) = self.active_epic_batch_for_task(&task.id).await
+            && let Some(batch_id) = active_batch
         {
             let batch_repo = EpicReviewBatchRepository::new(
                 self.app_state.db().clone(),
@@ -1003,9 +1008,13 @@ impl AgentSupervisor {
 
     async fn transition_interrupted(&self, task_id: &str, agent_type: AgentType, reason: &str) {
         let action = match agent_type {
-            AgentType::Worker | AgentType::ConflictResolver => TransitionAction::Release,
-            AgentType::TaskReviewer => TransitionAction::ReleaseTaskReview,
-            AgentType::EpicReviewer => TransitionAction::ReleaseEpicReview,
+            AgentType::Worker | AgentType::ConflictResolver => Some(TransitionAction::Release),
+            AgentType::TaskReviewer => Some(TransitionAction::ReleaseTaskReview),
+            AgentType::EpicReviewer => None,
+        };
+
+        let Some(action) = action else {
+            return;
         };
 
         let repo =
@@ -1141,6 +1150,7 @@ impl AgentSupervisor {
             }
         }
 
+        let epic_error = result.as_ref().err().cloned();
         let transition = match result {
             Ok(()) => self.success_transition(task_id, agent_type, &output).await,
             Err(reason) => match agent_type {
@@ -1150,14 +1160,16 @@ impl AgentSupervisor {
                 AgentType::TaskReviewer => {
                     Some((TransitionAction::ReleaseTaskReview, Some(reason)))
                 }
-                AgentType::EpicReviewer => {
-                    Some((TransitionAction::ReleaseEpicReview, Some(reason)))
-                }
+                AgentType::EpicReviewer => None,
             },
         };
 
+        if agent_type == AgentType::EpicReviewer {
+            self.finalize_epic_batch(task_id, &output, epic_error.as_deref())
+                .await;
+        }
+
         if let Some((action, reason)) = transition {
-            let followup_action = action.clone();
             if let Err(e) = repo
                 .transition(
                     task_id,
@@ -1170,12 +1182,6 @@ impl AgentSupervisor {
                 .await
             {
                 tracing::warn!(task_id = %task_id, error = %e, "failed to transition task after session");
-            } else if matches!(
-                followup_action,
-                TransitionAction::EpicReviewApprove | TransitionAction::EpicReviewReject
-            ) {
-                self.finalize_epic_batch(task_id, followup_action, reason.as_deref())
-                    .await;
             }
         }
 
@@ -1250,21 +1256,13 @@ impl AgentSupervisor {
                 }
             },
             AgentType::EpicReviewer => match output.epic_verdict {
-                Some(EpicReviewVerdict::Clean) => Some((TransitionAction::EpicReviewApprove, None)),
-                Some(EpicReviewVerdict::IssuesFound) => Some((
-                    TransitionAction::EpicReviewReject,
-                    Some("epic reviewer reported EPIC_REVIEW_RESULT: ISSUES_FOUND".to_string()),
-                )),
+                Some(EpicReviewVerdict::Clean) => None,
+                Some(EpicReviewVerdict::IssuesFound) => None,
                 None => {
                     tracing::warn!(
                         "epic reviewer session completed without EPIC_REVIEW_RESULT marker"
                     );
-                    Some((
-                        TransitionAction::ReleaseEpicReview,
-                        Some(
-                            "epic reviewer completed without EPIC_REVIEW_RESULT marker".to_string(),
-                        ),
-                    ))
+                    None
                 }
             },
         }
@@ -1395,9 +1393,6 @@ impl AgentSupervisor {
             (AgentType::TaskReviewer, "needs_task_review") => {
                 Some(TransitionAction::TaskReviewStart)
             }
-            (AgentType::EpicReviewer, "needs_epic_review") => {
-                Some(TransitionAction::EpicReviewStart)
-            }
             _ => None,
         };
 
@@ -1454,28 +1449,15 @@ impl AgentSupervisor {
     }
 
     async fn active_epic_batch_for_task(&self, task_id: &str) -> Option<String> {
-        let repo =
-            TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
-        let activity = repo.list_activity(task_id).await.ok()?;
-        let marker = "epic_review_batch:";
-        for entry in activity.iter().rev() {
-            if entry.event_type != "status_changed" {
-                continue;
-            }
-            let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload) else {
-                continue;
-            };
-            let reason = payload
-                .get("reason")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            if let Some(id) = reason.strip_prefix(marker)
-                && !id.trim().is_empty()
-            {
-                return Some(id.trim().to_string());
-            }
-        }
-        None
+        let repo = EpicReviewBatchRepository::new(
+            self.app_state.db().clone(),
+            self.app_state.events().clone(),
+        );
+        repo.active_batch_for_task(task_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|b| b.id)
     }
 
     fn parse_conflict_metadata(reason: &str) -> Option<MergeConflictMetadata> {
@@ -1616,8 +1598,8 @@ impl AgentSupervisor {
     async fn finalize_epic_batch(
         &self,
         task_id: &str,
-        action: TransitionAction,
-        reason: Option<&str>,
+        output: &ParsedAgentOutput,
+        error_reason: Option<&str>,
     ) {
         let Some(batch_id) = self.active_epic_batch_for_task(task_id).await else {
             return;
@@ -1638,8 +1620,8 @@ impl AgentSupervisor {
         let epic_repo =
             EpicRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
 
-        match action {
-            TransitionAction::EpicReviewApprove => {
+        match output.epic_verdict {
+            Some(EpicReviewVerdict::Clean) => {
                 if let Err(e) = batch_repo.mark_clean(&batch_id).await {
                     tracing::warn!(batch_id = %batch_id, error = %e, "failed to mark epic review batch clean");
                     return;
@@ -1656,8 +1638,8 @@ impl AgentSupervisor {
                     let _ = epic_repo.close(epic_id).await;
                 }
             }
-            TransitionAction::EpicReviewReject => {
-                let verdict = reason.unwrap_or("epic reviewer reported issues_found");
+            Some(EpicReviewVerdict::IssuesFound) => {
+                let verdict = "epic reviewer reported EPIC_REVIEW_RESULT: ISSUES_FOUND";
                 let _ = batch_repo.mark_issues_found(&batch_id, verdict).await;
                 if let Ok(Some(epic)) = epic_repo.get(epic_id).await
                     && epic.status == "in_review"
@@ -1665,14 +1647,22 @@ impl AgentSupervisor {
                     let _ = epic_repo.reopen(epic_id).await;
                 }
             }
-            _ => {}
+            None => {
+                let verdict = error_reason
+                    .unwrap_or("epic reviewer ended without required EPIC_REVIEW_RESULT marker");
+                let _ = batch_repo.mark_issues_found(&batch_id, verdict).await;
+                if let Ok(Some(epic)) = epic_repo.get(epic_id).await
+                    && epic.status == "in_review"
+                {
+                    let _ = epic_repo.reopen(epic_id).await;
+                }
+            }
         }
     }
 
     fn agent_type_for_task(&self, task: &Task, has_conflict_context: bool) -> AgentType {
         match task.status.as_str() {
             "needs_task_review" | "in_task_review" => AgentType::TaskReviewer,
-            "needs_epic_review" | "in_epic_review" => AgentType::EpicReviewer,
             "open" if has_conflict_context => AgentType::ConflictResolver,
             _ => AgentType::Worker,
         }

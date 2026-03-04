@@ -256,17 +256,16 @@ pub struct TaskTransitionParams {
     pub id: String,
     /// Transition action: accept, start, submit_task_review, task_review_start,
     /// task_review_reject, task_review_reject_conflict, task_review_approve,
-    /// epic_review_start, epic_review_reject, epic_review_approve, reopen, close,
-    /// release, release_task_review, release_epic_review, block, unblock, force_close,
+    /// reopen, close, release, release_task_review, block, unblock, force_close,
     /// user_override.
     pub action: String,
-    /// Required for: task_review_reject, task_review_reject_conflict, epic_review_reject,
-    /// reopen, release, release_task_review, release_epic_review, block, force_close.
+    /// Required for: task_review_reject, task_review_reject_conflict,
+    /// reopen, release, release_task_review, block, force_close.
     pub reason: Option<String>,
     pub actor_id: Option<String>,
     pub actor_role: Option<String>,
     /// Required when action = "user_override". Allowed values: draft, open, needs_task_review,
-    /// needs_epic_review, approved, closed.
+    /// in_task_review, in_progress, blocked, closed.
     pub target_status: Option<String>,
 }
 
@@ -851,10 +850,7 @@ impl DjinnMcpServer {
                 let blockers: Vec<_> = refs
                     .iter()
                     .map(|b| {
-                        let resolved = matches!(
-                            b.status.as_str(),
-                            "needs_epic_review" | "in_epic_review" | "approved" | "closed"
-                        );
+                        let resolved = b.status == "closed";
                         serde_json::json!({
                             "blocking_task_id":       b.task_id,
                             "blocking_task_short_id": b.short_id,

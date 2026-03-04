@@ -346,7 +346,7 @@ impl TaskRepository {
                 "SELECT COUNT(*) FROM blockers b
                  JOIN tasks bt ON b.blocking_task_id = bt.id
                  WHERE b.task_id = ?1
-                   AND bt.status NOT IN ('needs_epic_review', 'in_epic_review', 'approved', 'closed')",
+                   AND bt.status != 'closed'",
             )
             .bind(id)
             .fetch_one(&mut *tx)
@@ -438,18 +438,15 @@ impl TaskRepository {
             .await?;
         tx.commit().await?;
 
-        let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
-
         if task.status == "closed" {
             self.maybe_queue_epic_review_batch(&task).await?;
         }
 
+        let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
+
         // Blocker resolution: when a task reaches post-merge/closed states, notify any tasks
         // it was blocking that are now fully unblocked, so coordinators can dispatch them.
-        if matches!(
-            task.status.as_str(),
-            "needs_epic_review" | "in_epic_review" | "approved" | "closed"
-        ) {
+        if task.status == "closed" {
             self.emit_unblocked_tasks(&task.id).await?;
         }
 
@@ -556,66 +553,10 @@ impl TaskRepository {
             let _ = epic_repo.mark_in_review(epic_id).await?;
         }
 
-        let batch = batch_repo
+        let _batch = batch_repo
             .create_batch(&task.project_id, epic_id, &reviewable_task_ids)
             .await?;
 
-        if let Some(anchor_task_id) = reviewable_task_ids.first() {
-            self.queue_anchor_for_epic_review(anchor_task_id, &batch.id)
-                .await?;
-        }
-
-        Ok(())
-    }
-
-    async fn queue_anchor_for_epic_review(&self, task_id: &str, batch_id: &str) -> Result<()> {
-        self.db.ensure_initialized().await?;
-        let mut tx = self.db.pool().begin().await?;
-
-        let current: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(task_id)
-            .fetch_one(&mut *tx)
-            .await?;
-
-        sqlx::query(
-            "UPDATE tasks SET
-                status = 'needs_epic_review',
-                continuation_count = 0,
-                closed_at = NULL,
-                blocked_from_status = NULL,
-                close_reason = NULL,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
-        )
-        .bind(task_id)
-        .execute(&mut *tx)
-        .await?;
-
-        let payload = serde_json::json!({
-            "from_status": current.status,
-            "to_status": "needs_epic_review",
-            "reason": format!("epic_review_batch:{batch_id}"),
-        })
-        .to_string();
-
-        sqlx::query(
-            "INSERT INTO activity_log
-                (id, task_id, actor_id, actor_role, event_type, payload)
-             VALUES (?1, ?2, 'agent-supervisor', 'system', 'status_changed', ?3)",
-        )
-        .bind(uuid::Uuid::now_v7().to_string())
-        .bind(task_id)
-        .bind(payload)
-        .execute(&mut *tx)
-        .await?;
-
-        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(task_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        tx.commit().await?;
-
-        let _ = self.events.send(DjinnEvent::TaskUpdated(task));
         Ok(())
     }
 
@@ -721,7 +662,7 @@ impl TaskRepository {
                  SELECT 1 FROM blockers b2
                  JOIN tasks bt ON bt.id = b2.blocking_task_id
                  WHERE b2.task_id = t.id
-                    AND bt.status NOT IN ('needs_epic_review', 'in_epic_review', 'approved', 'closed')
+                    AND bt.status != 'closed'
              )"
             .to_owned(),
         ];
@@ -800,7 +741,7 @@ impl TaskRepository {
                  SELECT 1 FROM blockers b2
                  JOIN tasks bt ON bt.id = b2.blocking_task_id
                  WHERE b2.task_id = t.id
-                    AND bt.status NOT IN ('needs_epic_review', 'in_epic_review', 'approved', 'closed')
+                    AND bt.status != 'closed'
              )"
             .to_owned(),
         ];
@@ -922,9 +863,9 @@ impl TaskRepository {
                AND NOT EXISTS (
                    SELECT 1 FROM blockers b2
                    JOIN tasks bt ON bt.id = b2.blocking_task_id
-                   WHERE b2.task_id = t.id
-                      AND bt.status NOT IN ('needs_epic_review', 'in_epic_review', 'approved', 'closed')
-               )",
+                    WHERE b2.task_id = t.id
+                       AND bt.status != 'closed'
+                )",
         )
         .bind(completed_task_id)
         .fetch_all(self.db.pool())
@@ -1046,12 +987,10 @@ impl TaskRepository {
                     COUNT(t.id) AS total,
                     SUM(CASE WHEN t.status = 'closed' THEN 1 ELSE 0 END) AS closed,
                     SUM(CASE WHEN t.status IN (
-                        'needs_task_review','in_task_review',
-                        'needs_epic_review','in_epic_review'
+                        'needs_task_review','in_task_review','closed'
                     ) THEN 1 ELSE 0 END) AS in_review,
                     MIN(CASE WHEN t.status IN (
-                        'needs_task_review','in_task_review',
-                        'needs_epic_review','in_epic_review'
+                        'needs_task_review','in_task_review','closed'
                     ) THEN t.updated_at ELSE NULL END) AS oldest_review_at
              FROM epics e
              LEFT JOIN tasks t ON t.epic_id = e.id
@@ -1117,10 +1056,7 @@ impl TaskRepository {
                     e.short_id AS epic_short_id
              FROM tasks t
              JOIN epics e ON t.epic_id = e.id
-             WHERE t.status IN (
-                 'needs_task_review','in_task_review',
-                 'needs_epic_review','in_epic_review'
-             )
+             WHERE t.status IN ('needs_task_review','in_task_review','closed')
              ORDER BY t.updated_at ASC",
         )
         .fetch_all(self.db.pool())
@@ -1804,10 +1740,7 @@ mod tests {
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].task_id, t1.id);
         assert_eq!(blockers[0].status, "open");
-        assert!(!matches!(
-            blockers[0].status.as_str(),
-            "needs_epic_review" | "in_epic_review" | "approved" | "closed"
-        ));
+        assert!(!matches!(blockers[0].status.as_str(), "closed"));
 
         // inverse: t1 blocks t2
         let blocked = repo.list_blocked_by(&t1.id).await.unwrap();
@@ -1996,9 +1929,6 @@ mod tests {
             "in_progress",
             "needs_task_review",
             "in_task_review",
-            "needs_epic_review",
-            "in_epic_review",
-            "approved",
             "closed",
             "blocked",
         ];
@@ -2354,7 +2284,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_allowed_when_blocker_is_in_epic_review() {
+    async fn start_allowed_when_blocker_is_closed() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let epic = make_epic(&db, tx.clone()).await;
@@ -2364,10 +2294,8 @@ mod tests {
         let blocked = open_task(&repo, &epic.id).await;
         repo.add_blocker(&blocked.id, &blocker.id).await.unwrap();
 
-        // Post-merge review state should be considered resolved for blockers.
-        repo.set_status(&blocker.id, "needs_epic_review")
-            .await
-            .unwrap();
+        // Closed blockers are considered resolved.
+        repo.set_status(&blocker.id, "closed").await.unwrap();
 
         let started = repo
             .transition(
