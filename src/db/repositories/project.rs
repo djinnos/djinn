@@ -18,7 +18,7 @@ impl ProjectRepository {
     pub async fn list(&self) -> Result<Vec<Project>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at FROM projects ORDER BY name",
+            "SELECT id, name, path, created_at, setup_commands, verification_commands FROM projects ORDER BY name",
         )
         .fetch_all(self.db.pool())
         .await?)
@@ -27,7 +27,7 @@ impl ProjectRepository {
     pub async fn get(&self, id: &str) -> Result<Option<Project>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at FROM projects WHERE id = ?1",
+            "SELECT id, name, path, created_at, setup_commands, verification_commands FROM projects WHERE id = ?1",
         )
         .bind(id)
         .fetch_optional(self.db.pool())
@@ -37,7 +37,7 @@ impl ProjectRepository {
     pub async fn get_by_path(&self, path: &str) -> Result<Option<Project>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at FROM projects WHERE path = ?1",
+            "SELECT id, name, path, created_at, setup_commands, verification_commands FROM projects WHERE path = ?1",
         )
         .bind(path)
         .fetch_optional(self.db.pool())
@@ -54,7 +54,7 @@ impl ProjectRepository {
             .execute(self.db.pool())
             .await?;
         let project = sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at FROM projects WHERE id = ?1",
+            "SELECT id, name, path, created_at, setup_commands, verification_commands FROM projects WHERE id = ?1",
         )
         .bind(&id)
         .fetch_one(self.db.pool())
@@ -75,7 +75,7 @@ impl ProjectRepository {
             .execute(self.db.pool())
             .await?;
         let project = sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at FROM projects WHERE id = ?1",
+            "SELECT id, name, path, created_at, setup_commands, verification_commands FROM projects WHERE id = ?1",
         )
         .bind(id)
         .fetch_one(self.db.pool())

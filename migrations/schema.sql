@@ -1,6 +1,6 @@
 -- Canonical schema — ground truth. Matches result of running all migrations.
 -- Updated manually after each migration is added.
--- Last updated: V20260304170000__remove_legacy_epic_review_statuses.sql
+-- Last updated: V20260305000002__add_session_goose_id_and_paused.sql
 
 CREATE TABLE settings (
     key        TEXT NOT NULL PRIMARY KEY,
@@ -9,10 +9,12 @@ CREATE TABLE settings (
 );
 
 CREATE TABLE projects (
-    id         TEXT NOT NULL PRIMARY KEY,
-    name       TEXT NOT NULL UNIQUE,
-    path       TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    id                    TEXT NOT NULL PRIMARY KEY,
+    name                  TEXT NOT NULL UNIQUE,
+    path                  TEXT NOT NULL UNIQUE,
+    created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    setup_commands        TEXT NOT NULL DEFAULT '[]',
+    verification_commands TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE epics (
@@ -116,17 +118,18 @@ CREATE TABLE activity_log (
 CREATE INDEX activity_log_task_id ON activity_log(task_id);
 
 CREATE TABLE sessions (
-    id            TEXT NOT NULL PRIMARY KEY,
-    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    model_id      TEXT NOT NULL,
-    agent_type    TEXT NOT NULL,
-    started_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    ended_at      TEXT,
-    status        TEXT NOT NULL CHECK(status IN ('running', 'completed', 'interrupted', 'failed')),
-    tokens_in     INTEGER NOT NULL DEFAULT 0,
-    tokens_out    INTEGER NOT NULL DEFAULT 0,
-    worktree_path TEXT
+    id               TEXT NOT NULL PRIMARY KEY,
+    project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    task_id          TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    model_id         TEXT NOT NULL,
+    agent_type       TEXT NOT NULL,
+    started_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    ended_at         TEXT,
+    status           TEXT NOT NULL CHECK(status IN ('running', 'completed', 'interrupted', 'failed', 'paused')),
+    tokens_in        INTEGER NOT NULL DEFAULT 0,
+    tokens_out       INTEGER NOT NULL DEFAULT 0,
+    worktree_path    TEXT,
+    goose_session_id TEXT
 );
 
 CREATE INDEX sessions_project_id ON sessions(project_id);

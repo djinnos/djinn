@@ -7,4 +7,6 @@ pub struct Project {
     pub name: String,
     pub path: String,
     pub created_at: String,
+    pub setup_commands: String,
+    pub verification_commands: String,
 }
