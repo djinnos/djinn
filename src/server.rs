@@ -351,7 +351,7 @@ impl AppState {
                 .await;
         }
         if let Some(supervisor) = self.supervisor().await {
-            let _ = supervisor.update_max_sessions(1).await;
+            let _ = supervisor.update_session_limits(std::collections::HashMap::new(), 1).await;
         }
     }
 
@@ -474,7 +474,7 @@ impl AppState {
         if let Some(supervisor) = self.supervisor().await {
             let model_limits = read_model_session_limits(json).unwrap_or_default();
             let _ = supervisor
-                .update_session_limits(model_limits, read_default_max_sessions(json).unwrap_or(1))
+                .update_session_limits(model_limits, 1)
                 .await;
         }
 
@@ -534,19 +534,6 @@ fn read_dispatch_limit(settings: &serde_json::Value) -> Option<usize> {
         })
         .and_then(serde_json::Value::as_u64)
         .map(|v| v as usize)
-}
-
-fn read_default_max_sessions(settings: &serde_json::Value) -> Option<u32> {
-    settings
-        .get("supervisor")
-        .and_then(|v| v.get("max_sessions"))
-        .or_else(|| {
-            settings
-                .get("execution")
-                .and_then(|v| v.get("max_sessions"))
-        })
-        .and_then(serde_json::Value::as_u64)
-        .map(|v| v as u32)
 }
 
 fn read_model_session_limits(settings: &serde_json::Value) -> Option<HashMap<String, u32>> {
@@ -658,7 +645,7 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
 
-    use super::{read_default_max_sessions, read_model_priorities, read_model_session_limits};
+    use super::{read_model_priorities, read_model_session_limits};
     use crate::db::repositories::credential::CredentialRepository;
     use crate::server::AppState;
     use crate::test_helpers;
@@ -995,15 +982,6 @@ mod tests {
 
         // With start_paused, the 60s sleep advances virtual time instantly.
         assert_eq!(elapsed.as_secs(), 60);
-    }
-
-    #[test]
-    fn reads_default_max_sessions_from_supervisor_or_execution() {
-        let settings = serde_json::json!({"supervisor": {"max_sessions": 4}});
-        assert_eq!(read_default_max_sessions(&settings), Some(4));
-
-        let settings = serde_json::json!({"execution": {"max_sessions": 2}});
-        assert_eq!(read_default_max_sessions(&settings), Some(2));
     }
 
     #[test]

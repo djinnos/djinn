@@ -230,10 +230,6 @@ enum SupervisorMessage {
         task_id: String,
         respond_to: Reply<Option<RunningSessionInfo>>,
     },
-    UpdateMaxSessions {
-        max: u32,
-        respond_to: Reply<()>,
-    },
     UpdateSessionLimits {
         max_sessions: HashMap<String, u32>,
         default_max: u32,
@@ -396,10 +392,6 @@ impl AgentSupervisor {
                 respond_to,
             } => {
                 self.interrupt_project_sessions(&project_id, &reason).await;
-                let _ = respond_to.send(Ok(()));
-            }
-            SupervisorMessage::UpdateMaxSessions { max, respond_to } => {
-                self.apply_session_limits(self.configured_model_limits.clone(), max);
                 let _ = respond_to.send(Ok(()));
             }
             SupervisorMessage::UpdateSessionLimits {
@@ -2411,14 +2403,6 @@ impl AgentSupervisorHandle {
     pub async fn interrupt_all(&self, reason: &str) -> Result<(), SupervisorError> {
         self.request(|tx| SupervisorMessage::InterruptAll {
             reason: reason.to_owned(),
-            respond_to: tx,
-        })
-        .await
-    }
-
-    pub async fn update_max_sessions(&self, max: u32) -> Result<(), SupervisorError> {
-        self.request(|tx| SupervisorMessage::UpdateMaxSessions {
-            max: max.max(1),
             respond_to: tx,
         })
         .await
