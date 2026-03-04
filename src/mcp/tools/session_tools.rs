@@ -76,6 +76,7 @@ impl DjinnMcpServer {
         let Some(supervisor) = self.state.supervisor().await else {
             return json_object(serde_json::json!({ "error": "supervisor actor not initialized" }));
         };
+        let coordinator = self.state.coordinator().await;
         let repo = SessionRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.list_active_in_project(&project_id).await {
             Ok(sessions) => {
@@ -90,9 +91,23 @@ impl DjinnMcpServer {
                     }
                 }
 
+                let mut recovery_triggered = false;
+                if !stale_sessions.is_empty()
+                    && let Some(coordinator) = coordinator
+                    && let Ok(status) = coordinator.get_project_status(&project_id).await
+                    && !status.paused
+                    && coordinator
+                        .trigger_dispatch_for_project(&project_id)
+                        .await
+                        .is_ok()
+                {
+                    recovery_triggered = true;
+                }
+
                 json_object(serde_json::json!({
                     "sessions": runtime_sessions,
                     "stale_sessions": stale_sessions,
+                    "recovery_triggered": recovery_triggered,
                 }))
             }
             Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),

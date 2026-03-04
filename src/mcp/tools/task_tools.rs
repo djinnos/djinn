@@ -16,6 +16,7 @@ use crate::mcp::tools::validation::{
     validate_title,
 };
 use crate::mcp::tools::{AnyJson, ObjectJson, json_object};
+use crate::models::session::SessionStatus;
 use crate::models::task::{Task, TaskStatus, TransitionAction};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1172,13 +1173,78 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<BoardReconcileParams>,
     ) -> Json<ObjectJson> {
-        if let Err(e) = self.require_project_id(&p.project).await {
-            return e;
-        }
+        let project_id = match self.require_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
         let stale_hours = p.stale_threshold_hours.unwrap_or(24).max(1);
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let Some(supervisor) = self.state.supervisor().await else {
+            return json_object(serde_json::json!({ "error": "supervisor actor not initialized" }));
+        };
+        let Some(coordinator) = self.state.coordinator().await else {
+            return json_object(serde_json::json!({ "error": "coordinator actor not initialized" }));
+        };
+        let session_repo = SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+
         match repo.reconcile(stale_hours).await {
-            Ok(result) => json_object(result),
+            Ok(mut result) => {
+                let running_sessions = match session_repo.list_active_in_project(&project_id).await {
+                    Ok(sessions) => sessions,
+                    Err(e) => return json_object(serde_json::json!({ "error": e.to_string() })),
+                };
+
+                let mut finalized_stale_session_ids = Vec::new();
+                for session in running_sessions {
+                    let has_runtime_session = match supervisor.has_session(&session.task_id).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return json_object(serde_json::json!({ "error": e.to_string() }));
+                        }
+                    };
+                    if has_runtime_session {
+                        continue;
+                    }
+                    if session_repo
+                        .update(
+                            &session.id,
+                            SessionStatus::Interrupted,
+                            session.tokens_in,
+                            session.tokens_out,
+                        )
+                        .await
+                        .is_ok()
+                    {
+                        finalized_stale_session_ids.push(session.id);
+                    }
+                }
+
+                let recovery_triggered = if finalized_stale_session_ids.is_empty() {
+                    false
+                } else {
+                    coordinator
+                        .trigger_dispatch_for_project(&project_id)
+                        .await
+                        .is_ok()
+                };
+
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert(
+                        "stale_sessions_finalized".to_string(),
+                        serde_json::json!(finalized_stale_session_ids.len()),
+                    );
+                    obj.insert(
+                        "stale_session_ids".to_string(),
+                        serde_json::json!(finalized_stale_session_ids),
+                    );
+                    obj.insert(
+                        "recovery_triggered".to_string(),
+                        serde_json::json!(recovery_triggered),
+                    );
+                }
+
+                json_object(result)
+            }
             Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
         }
     }
