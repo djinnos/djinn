@@ -747,12 +747,16 @@ dependencies = [
 name = "djinnos-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "dirs 5.0.1",
  "libc",
  "log",
+ "once_cell",
+ "rand 0.8.5",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
@@ -760,6 +764,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
  "tokio",
+ "url",
  "windows-sys 0.59.0",
 ]
 
