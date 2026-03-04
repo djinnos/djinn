@@ -12,6 +12,7 @@
     "shell:allow-kill",
     "process:default",
     "process:allow-restart",
-    "process:allow-exit"
+    "process:allow-exit",
+    "core:window:allow-show"
   ]
 }
