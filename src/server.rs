@@ -449,8 +449,12 @@ impl AppState {
         }
 
         if let Some(supervisor) = self.supervisor().await {
+            let model_limits = read_model_session_limits(json).unwrap_or_default();
             let _ = supervisor
-                .update_max_sessions(read_max_sessions(json).unwrap_or(1))
+                .update_session_limits(
+                    model_limits,
+                    read_default_max_sessions(json).unwrap_or(1),
+                )
                 .await;
         }
     }
@@ -506,7 +510,7 @@ fn read_dispatch_limit(settings: &serde_json::Value) -> Option<usize> {
         .map(|v| v as usize)
 }
 
-fn read_max_sessions(settings: &serde_json::Value) -> Option<u32> {
+fn read_default_max_sessions(settings: &serde_json::Value) -> Option<u32> {
     settings
         .get("supervisor")
         .and_then(|v| v.get("max_sessions"))
@@ -517,6 +521,34 @@ fn read_max_sessions(settings: &serde_json::Value) -> Option<u32> {
         })
         .and_then(serde_json::Value::as_u64)
         .map(|v| v as u32)
+}
+
+fn read_model_session_limits(settings: &serde_json::Value) -> Option<HashMap<String, u32>> {
+    let map = settings
+        .get("max_sessions")
+        .or_else(|| {
+            settings
+                .get("execution")
+                .and_then(|v| v.get("max_sessions"))
+        })
+        .or_else(|| {
+            settings
+                .get("supervisor")
+                .and_then(|v| v.get("max_sessions"))
+        })
+        .and_then(serde_json::Value::as_object)?;
+
+    let mut out = HashMap::new();
+    for (model_id, max) in map {
+        let Some(max) = max.as_u64() else {
+            continue;
+        };
+        if max == 0 {
+            continue;
+        }
+        out.insert(model_id.clone(), max as u32);
+    }
+    Some(out)
 }
 
 fn read_model_priorities(
@@ -600,7 +632,7 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
 
-    use super::{read_max_sessions, read_model_priorities};
+    use super::{read_default_max_sessions, read_model_priorities, read_model_session_limits};
     use crate::db::repositories::credential::CredentialRepository;
     use crate::server::AppState;
     use crate::test_helpers;
@@ -940,12 +972,41 @@ mod tests {
     }
 
     #[test]
-    fn reads_max_sessions_from_supervisor_or_execution() {
+    fn reads_default_max_sessions_from_supervisor_or_execution() {
         let settings = serde_json::json!({"supervisor": {"max_sessions": 4}});
-        assert_eq!(read_max_sessions(&settings), Some(4));
+        assert_eq!(read_default_max_sessions(&settings), Some(4));
 
         let settings = serde_json::json!({"execution": {"max_sessions": 2}});
-        assert_eq!(read_max_sessions(&settings), Some(2));
+        assert_eq!(read_default_max_sessions(&settings), Some(2));
+    }
+
+    #[test]
+    fn reads_model_session_limits_from_top_level_and_nested_paths() {
+        let settings = serde_json::json!({
+            "max_sessions": {
+                "synthetic/hf:nvidia/Kimi-K2.5-NVFP4": 4,
+                "openai/gpt-5.3-codex": 2
+            }
+        });
+        let parsed = read_model_session_limits(&settings).unwrap();
+        assert_eq!(
+            parsed.get("synthetic/hf:nvidia/Kimi-K2.5-NVFP4"),
+            Some(&4)
+        );
+        assert_eq!(parsed.get("openai/gpt-5.3-codex"), Some(&2));
+
+        let settings = serde_json::json!({
+            "execution": {
+                "max_sessions": {
+                    "synthetic/hf:nvidia/Kimi-K2.5-NVFP4": 3
+                }
+            }
+        });
+        let parsed = read_model_session_limits(&settings).unwrap();
+        assert_eq!(
+            parsed.get("synthetic/hf:nvidia/Kimi-K2.5-NVFP4"),
+            Some(&3)
+        );
     }
 
     #[test]

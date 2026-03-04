@@ -193,6 +193,7 @@ impl DjinnMcpServer {
                 )
             })
             .collect::<serde_json::Map<String, serde_json::Value>>();
+        let max_sessions: u32 = supervisor_status.capacity.values().map(|c| c.max).sum();
 
         let sessions = supervisor_status
             .running_sessions
@@ -211,6 +212,7 @@ impl DjinnMcpServer {
         json_object(serde_json::json!({
             "state": if coordinator_status.paused { "paused" } else { "active" },
             "running_sessions": supervisor_status.active_sessions,
+            "max_sessions": max_sessions,
             "capacity": capacity,
             "sessions": sessions,
             "metrics": {

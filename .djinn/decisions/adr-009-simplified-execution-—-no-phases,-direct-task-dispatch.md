@@ -51,6 +51,12 @@ The 26-tool execution surface collapses to ~6 tools:
 - Desktop has less control over ordering (can't say "do these 3 first, then those 2")
 - Phase-level review (architect batch review) needs rethinking without phases as a grouping unit
 
+## Implementation Clarification (2026-03-03)
+
+- Session capacity is configured per model via `max_sessions` (map of `provider/model` -> integer).
+- Total executor capacity is the sum of all configured model capacities.
+- Coordinator routing uses per-role model priority lists and attempts fallback models in order when a higher-priority model is at capacity or unavailable.
+
 ## Relations
 
 - [[Roadmap]] — Eliminates Phase system from all phases

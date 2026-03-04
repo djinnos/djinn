@@ -128,6 +128,11 @@ enum SupervisorMessage {
         max: u32,
         respond_to: Reply<()>,
     },
+    UpdateSessionLimits {
+        max_sessions: HashMap<String, u32>,
+        default_max: u32,
+        respond_to: Reply<()>,
+    },
     SessionCompleted {
         task_id: String,
         result: Result<(), String>,
@@ -151,6 +156,7 @@ struct AgentSupervisor {
     task_session_records: HashMap<String, String>,
     interrupted_sessions: HashSet<String>,
     default_max_sessions: u32,
+    configured_model_limits: HashMap<String, u32>,
     session_manager: Arc<SessionManager>,
     app_state: AppState,
     cancel: CancellationToken,
@@ -174,10 +180,40 @@ impl AgentSupervisor {
             task_session_records: HashMap::new(),
             interrupted_sessions: HashSet::new(),
             default_max_sessions: 1,
+            configured_model_limits: HashMap::new(),
             session_manager,
             app_state,
             cancel,
             sender,
+        }
+    }
+
+    fn max_for_model(&self, model_id: &str) -> u32 {
+        self.configured_model_limits
+            .get(model_id)
+            .copied()
+            .unwrap_or(self.default_max_sessions)
+    }
+
+    fn apply_session_limits(&mut self, max_sessions: HashMap<String, u32>, default_max: u32) {
+        self.default_max_sessions = default_max.max(1);
+        self.configured_model_limits = max_sessions
+            .into_iter()
+            .filter(|(_, max)| *max > 0)
+            .collect();
+
+        for (model_id, max) in &self.configured_model_limits {
+            let entry = self
+                .capacity
+                .entry(model_id.clone())
+                .or_insert(ModelCapacity { active: 0, max: *max });
+            entry.max = *max;
+        }
+
+        let configured = self.configured_model_limits.clone();
+        let default_max = self.default_max_sessions;
+        for (model_id, entry) in &mut self.capacity {
+            entry.max = configured.get(model_id).copied().unwrap_or(default_max);
         }
     }
 
@@ -242,10 +278,15 @@ impl AgentSupervisor {
                 let _ = respond_to.send(Ok(()));
             }
             SupervisorMessage::UpdateMaxSessions { max, respond_to } => {
-                self.default_max_sessions = max.max(1);
-                for capacity in self.capacity.values_mut() {
-                    capacity.max = self.default_max_sessions;
-                }
+                self.apply_session_limits(self.configured_model_limits.clone(), max);
+                let _ = respond_to.send(Ok(()));
+            }
+            SupervisorMessage::UpdateSessionLimits {
+                max_sessions,
+                default_max,
+                respond_to,
+            } => {
+                self.apply_session_limits(max_sessions, default_max);
                 let _ = respond_to.send(Ok(()));
             }
             SupervisorMessage::SessionCompleted {
@@ -273,13 +314,14 @@ impl AgentSupervisor {
             return Err(SupervisorError::SessionAlreadyActive { task_id });
         }
 
+        let max_for_model = self.max_for_model(&model_id);
         let (active, max) = {
             let entry = self
                 .capacity
                 .entry(model_id.clone())
                 .or_insert(ModelCapacity {
                     active: 0,
-                    max: self.default_max_sessions,
+                    max: max_for_model,
                 });
             (entry.active, entry.max)
         };
@@ -1476,10 +1518,24 @@ impl AgentSupervisorHandle {
         })
         .await
     }
+
+    pub async fn update_session_limits(
+        &self,
+        max_sessions: HashMap<String, u32>,
+        default_max: u32,
+    ) -> Result<(), SupervisorError> {
+        self.request(|tx| SupervisorMessage::UpdateSessionLimits {
+            max_sessions,
+            default_max: default_max.max(1),
+            respond_to: tx,
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -1554,6 +1610,40 @@ mod tests {
         let model = status.capacity.get("test/mock").unwrap();
         assert_eq!(model.active, 1);
         assert_eq!(model.max, 1);
+    }
+
+    #[tokio::test]
+    async fn applies_per_model_session_limits_from_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let supervisor = spawn_supervisor(&temp);
+        let project_path = temp.path().to_str().unwrap();
+
+        let mut limits = HashMap::new();
+        limits.insert("test/mock".to_string(), 4);
+        limits.insert("synthetic/hf:nvidia/Kimi-K2.5-NVFP4".to_string(), 2);
+        supervisor.update_session_limits(limits, 1).await.unwrap();
+
+        for task_id in ["task-1", "task-2", "task-3", "task-4"] {
+            supervisor
+                .dispatch(task_id, project_path, "test/mock")
+                .await
+                .unwrap();
+        }
+
+        let err = supervisor
+            .dispatch("task-5", project_path, "test/mock")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SupervisorError::ModelAtCapacity { .. }));
+
+        let status = supervisor.get_status().await.unwrap();
+        let mock = status.capacity.get("test/mock").unwrap();
+        assert_eq!(mock.max, 4);
+        assert_eq!(mock.active, 4);
+
+        let kimi = status.capacity.get("synthetic/hf:nvidia/Kimi-K2.5-NVFP4").unwrap();
+        assert_eq!(kimi.max, 2);
+        assert_eq!(kimi.active, 0);
     }
 
     #[tokio::test]

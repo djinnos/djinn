@@ -270,12 +270,12 @@ impl CoordinatorActor {
         }
     }
 
-    /// Resolve dispatch model for a given role from configured priorities,
-    /// falling back to first credential-backed tool-capable model.
-    async fn resolve_dispatch_model_for_role(&self, _role: &str) -> Option<String> {
+    /// Resolve dispatch models for a given role from configured priorities,
+    /// falling back to credential-backed tool-capable models.
+    async fn resolve_dispatch_models_for_role(&self, _role: &str) -> Vec<String> {
         #[cfg(test)]
         {
-            return Some(DEFAULT_MODEL_ID.to_owned());
+            return vec![DEFAULT_MODEL_ID.to_owned()];
         }
 
         #[cfg(not(test))]
@@ -284,13 +284,18 @@ impl CoordinatorActor {
                 self.db.clone(),
                 self.events_tx.clone(),
             );
-            let credentials = cred_repo.list().await.ok()?;
+            let credentials = match cred_repo.list().await {
+                Ok(credentials) => credentials,
+                Err(_) => return Vec::new(),
+            };
             if credentials.is_empty() {
-                return None;
+                return Vec::new();
             }
 
             let credential_provider_ids: HashSet<String> =
                 credentials.iter().map(|c| c.provider_id.clone()).collect();
+            let mut selected = Vec::new();
+            let mut seen = HashSet::new();
 
             if let Some(priority_models) = self.model_priorities.get(_role) {
                 for configured in priority_models {
@@ -303,8 +308,8 @@ impl CoordinatorActor {
                             .list_models(provider_id)
                             .iter()
                             .any(|m| m.id == model_name);
-                        if exists {
-                            return Some(configured.clone());
+                        if exists && seen.insert(configured.clone()) {
+                            selected.push(configured.clone());
                         }
                         continue;
                     }
@@ -312,28 +317,44 @@ impl CoordinatorActor {
                     if credential_provider_ids.contains(configured) {
                         let models = self.catalog.list_models(configured);
                         if let Some(model) = models.iter().find(|m| m.tool_call) {
-                            return Some(format!("{configured}/{}", model.id));
+                            let model_id = format!("{configured}/{}", model.id);
+                            if seen.insert(model_id.clone()) {
+                                selected.push(model_id);
+                            }
                         }
-                        if let Some(model) = models.first() {
-                            return Some(format!("{configured}/{}", model.id));
+                        for model in models {
+                            let model_id = format!("{configured}/{}", model.id);
+                            if seen.insert(model_id.clone()) {
+                                selected.push(model_id);
+                            }
                         }
                     }
                 }
+            }
+
+            if !selected.is_empty() {
+                return selected;
             }
 
             for cred in &credentials {
                 let models = self.catalog.list_models(&cred.provider_id);
                 // Prefer a model with tool_call capability.
                 if let Some(model) = models.iter().find(|m| m.tool_call) {
-                    return Some(format!("{}/{}", cred.provider_id, model.id));
+                    let model_id = format!("{}/{}", cred.provider_id, model.id);
+                    if seen.insert(model_id.clone()) {
+                        selected.push(model_id);
+                    }
                 }
-                // Fall back to first model if none has tool_call.
-                if let Some(model) = models.first() {
-                    return Some(format!("{}/{}", cred.provider_id, model.id));
+
+                for model in models {
+                    let model_id = format!("{}/{}", cred.provider_id, model.id);
+                    if seen.insert(model_id.clone()) {
+                        selected.push(model_id);
+                    }
                 }
             }
 
-            None
+            selected
         }
     }
 
@@ -348,10 +369,11 @@ impl CoordinatorActor {
     /// Find all ready tasks (open, no unresolved blockers, non-epic) and dispatch
     /// those that don't already have an active session.
     async fn dispatch_ready_tasks(&mut self) {
-        let mut role_models: HashMap<&'static str, String> = HashMap::new();
+        let mut role_models: HashMap<&'static str, Vec<String>> = HashMap::new();
         for role in ["worker", "task_reviewer", "epic_reviewer"] {
-            if let Some(model_id) = self.resolve_dispatch_model_for_role(role).await {
-                role_models.insert(role, model_id);
+            let model_ids = self.resolve_dispatch_models_for_role(role).await;
+            if !model_ids.is_empty() {
+                role_models.insert(role, model_ids);
             }
         }
         if role_models.is_empty() {
@@ -394,19 +416,10 @@ impl CoordinatorActor {
 
         for task in ready {
             let role = Self::role_for_task_status(&task.status);
-            let Some(model_id) = role_models.get(role) else {
+            let Some(model_ids) = role_models.get(role) else {
                 tracing::debug!(task_id = %task.short_id, role, "CoordinatorActor: no model configured for task role");
                 continue;
             };
-
-            if !self.health.is_available(&model_id) {
-                tracing::warn!(
-                    model_id = %model_id,
-                    task_id = %task.short_id,
-                    "CoordinatorActor: model unavailable by health tracker, skipping dispatch"
-                );
-                continue;
-            }
 
             match self.supervisor.has_session(&task.id).await {
                 Ok(true) => continue, // session already active
@@ -425,24 +438,62 @@ impl CoordinatorActor {
                 }
             }
 
-            tracing::info!(task_id = %task.short_id, model_id = %model_id, "CoordinatorActor: dispatching task");
             let Some(project_path) = self.project_path_for_id(&task.project_id).await else {
                 tracing::warn!(task_id = %task.short_id, project_id = %task.project_id, "CoordinatorActor: project path not found, skipping dispatch");
                 continue;
             };
-            match self
-                .supervisor
-                .dispatch(&task.id, &project_path, model_id)
-                .await
-            {
-                Ok(()) => self.dispatched += 1,
-                Err(e) => {
-                    tracing::warn!(
+
+            let mut dispatched = false;
+            for model_id in model_ids {
+                if !self.health.is_available(model_id) {
+                    tracing::debug!(
+                        model_id = %model_id,
                         task_id = %task.short_id,
-                        error = %e,
-                        "CoordinatorActor: dispatch failed"
+                        "CoordinatorActor: model unavailable by health tracker"
                     );
+                    continue;
                 }
+
+                tracing::info!(task_id = %task.short_id, model_id = %model_id, "CoordinatorActor: dispatching task");
+                match self
+                    .supervisor
+                    .dispatch(&task.id, &project_path, model_id)
+                    .await
+                {
+                    Ok(()) => {
+                        self.dispatched += 1;
+                        dispatched = true;
+                        break;
+                    }
+                    Err(SupervisorError::ModelAtCapacity { .. }) => {
+                        tracing::debug!(
+                            task_id = %task.short_id,
+                            model_id = %model_id,
+                            "CoordinatorActor: model at capacity, trying next model"
+                        );
+                    }
+                    Err(SupervisorError::ActorDead) => {
+                        tracing::error!("CoordinatorActor: supervisor actor dead, aborting dispatch");
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            model_id = %model_id,
+                            error = %e,
+                            "CoordinatorActor: dispatch failed"
+                        );
+                        break;
+                    }
+                }
+            }
+
+            if !dispatched {
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    role,
+                    "CoordinatorActor: no model with available capacity for task"
+                );
             }
         }
     }
