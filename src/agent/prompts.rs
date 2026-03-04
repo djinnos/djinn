@@ -51,6 +51,7 @@ pub struct TaskContext {
     pub conflict_files: Option<String>,
     pub merge_base_branch: Option<String>,
     pub merge_target_branch: Option<String>,
+    pub merge_failure_context: Option<String>,
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -118,6 +119,10 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
     out = out.replace(
         "{{merge_target_branch}}",
         ctx.merge_target_branch.as_deref().unwrap_or(""),
+    );
+    out = out.replace(
+        "{{merge_failure_context}}",
+        ctx.merge_failure_context.as_deref().unwrap_or(""),
     );
 
     out
@@ -210,6 +215,7 @@ mod tests {
             conflict_files: None,
             merge_base_branch: None,
             merge_target_branch: None,
+            merge_failure_context: None,
         }
     }
 

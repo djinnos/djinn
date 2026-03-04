@@ -19,13 +19,29 @@ pub enum GitError {
     #[error("git2: {0}")]
     Git(#[from] git2::Error),
 
-    #[error("git command failed (exit {code}): {stderr}")]
-    CommandFailed { code: i32, stderr: String },
+    #[error(
+        "git command failed (exit {code}) in {cwd}: git {command}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    )]
+    CommandFailed {
+        code: i32,
+        command: String,
+        cwd: String,
+        stdout: String,
+        stderr: String,
+    },
 
-    /// A git hook (pre-commit, commit-msg, etc.) rejected the commit (GIT-07).
-    /// `output` contains the hook's stdout/stderr for surfacing in the activity log.
-    #[error("git hook failed (exit {code}): {output}")]
-    HookFailed { code: i32, output: String },
+    /// `git commit` failed after squash staging.
+    /// Contains the exact command and outputs for deterministic routing.
+    #[error(
+        "git commit rejected (exit {code}) in {cwd}: git {command}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    )]
+    CommitRejected {
+        code: i32,
+        command: String,
+        cwd: String,
+        stdout: String,
+        stderr: String,
+    },
 
     /// Squash merge encountered file-level conflicts.
     #[error("merge conflict while squashing into {target_branch}: {files:?}")]
@@ -104,7 +120,7 @@ enum GitMessage {
         respond_to: Reply<()>,
     },
     /// Squash-merge `branch` into `target_branch` with `message` (GIT-03).
-    /// Returns `Err(HookFailed)` if a git hook rejects the commit.
+    /// Returns `Err(CommitRejected)` when `git commit` fails.
     SquashMerge {
         branch: String,
         target_branch: String,
@@ -295,7 +311,13 @@ impl GitActor {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         if !output.status.success() {
-            return Err(GitError::CommandFailed { code, stderr });
+            return Err(GitError::CommandFailed {
+                code,
+                command: args.join(" "),
+                cwd: path.display().to_string(),
+                stdout,
+                stderr,
+            });
         }
 
         Ok(CommandOutput {
@@ -342,8 +364,8 @@ impl GitActor {
 
     /// Squash-merge `branch` into `target_branch` with `message` (GIT-03).
     ///
-    /// Hook awareness (GIT-07): any non-zero exit from `git commit` is wrapped
-    /// in `GitError::HookFailed` so the coordinator can log it to the activity log.
+    /// Commit-failure awareness (GIT-07): any non-zero exit from `git commit`
+    /// is wrapped in `GitError::CommitRejected` with exact stdout/stderr.
     async fn squash_merge_impl(
         path: PathBuf,
         branch: String,
@@ -433,23 +455,48 @@ impl GitActor {
                     .unwrap_or_default();
                 let _ =
                     Self::run_git_command(wt_path, vec!["merge".into(), "--abort".into()]).await;
-                return Err(GitError::MergeConflict {
-                    target_branch,
-                    files,
-                });
+                if !files.is_empty() {
+                    return Err(GitError::MergeConflict {
+                        target_branch,
+                        files,
+                    });
+                }
             }
             return Err(err);
         }
 
-        // Commit — hooks run here. Any failure → HookFailed (GIT-07).
+        let staged = Self::run_git_command(
+            wt_path.clone(),
+            vec!["diff".into(), "--cached".into(), "--name-only".into()],
+        )
+        .await?;
+        if staged.stdout.trim().is_empty() {
+            let out =
+                Self::run_git_command(wt_path.clone(), vec!["rev-parse".into(), "HEAD".into()])
+                    .await?;
+            return Ok(MergeResult {
+                commit_sha: out.stdout.trim().to_string(),
+            });
+        }
+
+        // Commit.
         match Self::run_git_command(wt_path.clone(), vec!["commit".into(), "-m".into(), message])
             .await
         {
             Ok(_) => {}
-            Err(GitError::CommandFailed { code, stderr }) => {
-                return Err(GitError::HookFailed {
+            Err(GitError::CommandFailed {
+                code,
+                command,
+                cwd,
+                stdout,
+                stderr,
+            }) => {
+                return Err(GitError::CommitRejected {
                     code,
-                    output: stderr,
+                    command,
+                    cwd,
+                    stdout,
+                    stderr,
                 });
             }
             Err(e) => return Err(e),
@@ -679,7 +726,7 @@ impl GitActorHandle {
 
     /// Squash-merge `branch` into `target_branch` with `message` (GIT-03).
     ///
-    /// Returns `Err(GitError::HookFailed)` if a git hook rejects the commit (GIT-07).
+    /// Returns `Err(GitError::CommitRejected)` if `git commit` fails (GIT-07).
     pub async fn squash_merge(
         &self,
         branch: &str,
@@ -958,9 +1005,9 @@ mod tests {
         assert!(out.stdout.trim().is_empty(), "branch should be deleted");
     }
 
-    /// `squash_merge` returns `HookFailed` when a git hook rejects the commit (GIT-07).
+    /// `squash_merge` returns `CommitRejected` when `git commit` is rejected (GIT-07).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn squash_merge_surfaces_hook_failure() {
+    async fn squash_merge_surfaces_commit_rejection() {
         let (local, _remote) = setup_git_repo();
         let path = local.path();
 
@@ -1001,15 +1048,45 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(err, GitError::HookFailed { .. }),
-            "expected HookFailed, got: {err}"
+            matches!(err, GitError::CommitRejected { .. }),
+            "expected CommitRejected, got: {err}"
         );
-        if let GitError::HookFailed { output, .. } = err {
+        if let GitError::CommitRejected { stdout, stderr, .. } = err {
+            let output = format!("{stdout}\n{stderr}");
             assert!(
                 output.contains("lint failed"),
                 "hook output should be surfaced"
             );
         }
+    }
+
+    /// `squash_merge` is idempotent when task branch has no delta vs target.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn squash_merge_returns_head_when_no_changes_to_commit() {
+        let (local, _remote) = setup_git_repo();
+        let path = local.path();
+
+        std::process::Command::new("git")
+            .args(["branch", "task/noop1", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
+        let before = handle
+            .run_command(vec!["rev-parse".into(), "main".into()])
+            .await
+            .unwrap()
+            .stdout
+            .trim()
+            .to_string();
+
+        let merged = handle
+            .squash_merge("task/noop1", "main", "chore: noop merge")
+            .await
+            .unwrap();
+
+        assert_eq!(merged.commit_sha, before);
     }
 
     /// `squash_merge` returns `MergeConflict` and conflicting files when conflicts occur.

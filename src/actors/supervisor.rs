@@ -40,6 +40,7 @@ use crate::models::task::{Task, TransitionAction};
 use crate::server::AppState;
 
 const MERGE_CONFLICT_PREFIX: &str = "merge_conflict:";
+const MERGE_VALIDATION_PREFIX: &str = "merge_validation_failed:";
 static GOOSE_BUILTINS_REGISTERED: Once = Once::new();
 
 fn register_goose_builtin_extensions() {
@@ -101,6 +102,32 @@ struct MergeConflictMetadata {
     conflicting_files: Vec<String>,
     base_branch: String,
     merge_target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MergeValidationFailureMetadata {
+    base_branch: String,
+    merge_target: String,
+    command: String,
+    cwd: String,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl MergeValidationFailureMetadata {
+    fn as_prompt_context(&self) -> String {
+        format!(
+            "Post-review merge validation failed. Fix the underlying issue, rerun verification, and commit the fix.\n\nmerge_base_branch: {}\nmerge_target_branch: {}\ncommand: git {}\nexit_code: {}\ncwd: {}\nstdout:\n{}\nstderr:\n{}",
+            self.base_branch,
+            self.merge_target,
+            self.command,
+            self.exit_code,
+            self.cwd,
+            self.stdout,
+            self.stderr,
+        )
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -407,6 +434,7 @@ impl AgentSupervisor {
         let task = self.load_task(&task_id).await?;
         let active_batch = self.active_epic_batch_for_task(&task.id).await;
         let conflict_ctx = self.conflict_context_for_dispatch(&task.id).await;
+        let merge_validation_ctx = self.merge_validation_context_for_dispatch(&task.id).await;
         let agent_type = if active_batch.is_some() {
             AgentType::EpicReviewer
         } else {
@@ -545,6 +573,7 @@ impl AgentSupervisor {
                 conflict_files,
                 merge_base_branch: conflict_ctx.as_ref().map(|m| m.base_branch.clone()),
                 merge_target_branch: conflict_ctx.as_ref().map(|m| m.merge_target.clone()),
+                merge_failure_context: merge_validation_ctx,
             },
         );
         agent.override_system_prompt(prompt).await;
@@ -1448,6 +1477,34 @@ impl AgentSupervisor {
         Self::parse_conflict_metadata(reason)
     }
 
+    async fn merge_validation_context_for_dispatch(&self, task_id: &str) -> Option<String> {
+        let repo =
+            TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let activity = repo.list_activity(task_id).await.ok()?;
+        let last_status = activity
+            .iter()
+            .rev()
+            .find(|e| e.event_type == "status_changed")?;
+        let payload: serde_json::Value = serde_json::from_str(&last_status.payload).ok()?;
+        let from_status = payload
+            .get("from_status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let to_status = payload
+            .get("to_status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if from_status != "in_task_review" || to_status != "open" {
+            return None;
+        }
+        let reason = payload
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let metadata = Self::parse_merge_validation_metadata(reason)?;
+        Some(metadata.as_prompt_context())
+    }
+
     async fn active_epic_batch_for_task(&self, task_id: &str) -> Option<String> {
         let repo = EpicReviewBatchRepository::new(
             self.app_state.db().clone(),
@@ -1462,6 +1519,11 @@ impl AgentSupervisor {
 
     fn parse_conflict_metadata(reason: &str) -> Option<MergeConflictMetadata> {
         let raw = reason.strip_prefix(MERGE_CONFLICT_PREFIX)?;
+        serde_json::from_str(raw).ok()
+    }
+
+    fn parse_merge_validation_metadata(reason: &str) -> Option<MergeValidationFailureMetadata> {
+        let raw = reason.strip_prefix(MERGE_VALIDATION_PREFIX)?;
         serde_json::from_str(raw).ok()
     }
 
@@ -1550,6 +1612,36 @@ impl AgentSupervisor {
                         "system",
                         "merge_conflict",
                         &payload,
+                    )
+                    .await;
+                Some((TransitionAction::TaskReviewRejectConflict, Some(reason)))
+            }
+            Err(GitError::CommitRejected {
+                code,
+                command,
+                cwd,
+                stdout,
+                stderr,
+            }) => {
+                let metadata = MergeValidationFailureMetadata {
+                    base_branch,
+                    merge_target,
+                    command,
+                    cwd,
+                    exit_code: code,
+                    stdout,
+                    stderr,
+                };
+                let reason_payload =
+                    serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+                let reason = format!("{MERGE_VALIDATION_PREFIX}{reason_payload}");
+                let _ = repo
+                    .log_activity(
+                        Some(task_id),
+                        "agent-supervisor",
+                        "system",
+                        "merge_validation_failed",
+                        &reason_payload,
                     )
                     .await;
                 Some((TransitionAction::TaskReviewRejectConflict, Some(reason)))

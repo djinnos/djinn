@@ -30,6 +30,10 @@ You have access to Djinn tools via the `djinn` extension. Use them during implem
 - **Shell tool rule:** Always pass `workdir="{{workspace_path}}"`.
 - **Outside access escape hatch:** only set `external_dir=true` when intentional; default behavior blocks commands that touch paths outside workspace and `/tmp`.
 
+## Merge Validation Context
+
+{{merge_failure_context}}
+
 ## Instructions
 
 1. **Read the task** — understand what needs to be done from the description, design, and acceptance criteria
