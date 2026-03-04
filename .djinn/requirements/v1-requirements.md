@@ -1,10 +1,9 @@
 ---
-tags:
-    - planning
-    - requirements
 title: V1 Requirements
 type: requirement
+tags: []
 ---
+
 # V1 Requirements — Djinn Desktop
 
 ## Requirement Categories
@@ -116,7 +115,10 @@ type: requirement
 | SETTINGS-07 | Per-project git config: target branch, auto-merge toggle | v1 |
 | SETTINGS-08 | General settings: default project selection | v1 |
 | SETTINGS-09 | Auto-save on change (no explicit save button), brief "Saved" toast confirmation | v1 |
-| SETTINGS-10 | Agent configuration: per-model session limits, default model selection | v2 |
+| SETTINGS-10 | Agent configuration: per-role model priority lists (worker, task-reviewer, epic-reviewer), per-model session limits, configurable via settings MCP tools and desktop UI | v1 |
+| SETTINGS-12 | Server exposes settings_get, settings_set, settings_reload, settings_reset MCP tools for execution configuration | v1 |
+| SETTINGS-13 | Coordinator reads per-role model priority from settings; supervisor reads per-model max_sessions from settings (default 1) | v1 |
+| SETTINGS-14 | Model health state (circuit breaker) persisted to settings, survives server restarts | v1 |
 | SETTINGS-11 | Keyboard shortcuts viewer/remapper | v2 |
 
 ## ONBOARD — Onboarding Wizard
