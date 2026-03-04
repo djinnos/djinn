@@ -1,17 +1,21 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
+use tauri_plugin_deep_link::DeepLinkExt;
 
 mod auth;
+mod auth_callback;
 mod commands;
+mod dev_server;
 mod server;
 
-/// Server state managed by Tauri
+pub use auth_callback::AuthCallbackManager;
 pub use server::ServerState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let auth_callback_manager = Arc::new(AuthCallbackManager::new());
+
     tauri::Builder::default()
-        // Plugin registration
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
@@ -20,13 +24,12 @@ pub fn run() {
                 .expect("no main window")
                 .set_focus();
         }))
-
-        // Managed state
+        .plugin(tauri_plugin_deep_link::init())
         .manage(Mutex::new(server::init_server_state()))
-
-        // Setup hook - spawn server sidecar
-        .setup(|app| {
+        .manage(auth_callback_manager.clone())
+        .setup(move |app| {
             let app_handle = app.handle().clone();
+            let auth_manager = auth_callback_manager.clone();
 
             // Spawn server in background
             tauri::async_runtime::spawn(async move {
@@ -62,11 +65,8 @@ pub fn run() {
                     }
                     Err(e) => {
                         log::error!("Failed to spawn server: {}", e);
-                        // Update state with error
-                        if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
-                            if let Ok(mut state) = state.lock() {
-                                state.mark_error(&e);
-                            }
+                        if let Ok(mut state) = app_handle.state::<Mutex<ServerState>>().lock() {
+                            state.mark_error(&e);
                         }
 
                         // Show the main window so the frontend can render error/retry UI
@@ -77,10 +77,61 @@ pub fn run() {
                 }
             });
 
+            // Register deep link handler for djinn:// protocol
+            let deep_link_app = app.handle().clone();
+            let deep_link_manager = auth_manager.clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    let url_str = url.as_str();
+                    log::info!("Received deep link: {}", url_str);
+                    
+                    if url_str.starts_with("djinn://auth/callback") {
+                        match deep_link_manager.handle_callback_url(url_str) {
+                            Ok(data) => {
+                                if let Err(e) = deep_link_manager.process_callback(&deep_link_app, data) {
+                                    log::error!("Failed to process deep link callback: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Failed to handle deep link: {}", e);
+                            }
+                        }
+
+                        // Show the main window so the frontend can render error/retry UI
+                        if let Some(window) = deep_link_app.get_webview_window("main") {
+                            let _ = window.show();
+                        }
+                    }
+                }
+            });
+
+            // Spawn dev-mode callback server (only in dev builds)
+            #[cfg(debug_assertions)]
+            {
+                let dev_app = app.handle().clone();
+                let dev_manager = auth_manager.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = dev_server::spawn_dev_server(dev_app, dev_manager).await {
+                        log::error!("Failed to spawn dev callback server: {}", e);
+                    }
+                });
+            }
+
+            // On macOS, set up window close handler
+            #[cfg(target_os = "macos")]
+            {
+                let window = app.get_webview_window("main").expect("no main window");
+                let app_handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        app_handle.exit(0);
+                    }
+                });
+            }
+
             Ok(())
         })
-
-        // Run event handler - do NOT kill server on exit
         .on_window_event(|_window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { .. } => {
@@ -89,8 +140,6 @@ pub fn run() {
                 _ => {}
             }
         })
-
-        // Tauri command handlers
         .invoke_handler(tauri::generate_handler![
             commands::greet,
             commands::get_server_port,
@@ -103,8 +152,6 @@ pub fn run() {
             commands::get_pkce_code_verifier,
             commands::clear_pkce_params,
         ])
-
-        // Run the application
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

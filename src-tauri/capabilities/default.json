@@ -13,6 +13,8 @@
     "process:default",
     "process:allow-restart",
     "process:allow-exit",
-    "core:window:allow-show"
+    "core:window:allow-show",
+    "deep-link:default",
+    "deep-link:allow-get-current"
   ]
 }

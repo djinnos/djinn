@@ -1,23 +1,21 @@
 use crate::auth::{build_authorize_url, generate_pkce, PkceParams};
 use crate::server::ServerState;
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::Mutex as StdMutex;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
+
 /// Global storage for PKCE params during OAuth flow
 static PKCE_PARAMS: Lazy<StdMutex<Option<PkceParams>>> = Lazy::new(|| StdMutex::new(None));
 
 /// Greet command - sample command for testing
 #[tauri::command]
 pub fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+    format!("Hello, {}! You have been greeted from Rust!", name)
 }
 
 /// Get server port from app state
-///
-/// Reads the port from the ServerState managed by Tauri.
-/// This returns the port that the backend server is running on.
 #[tauri::command]
 pub fn get_server_port(state: State<Mutex<ServerState>>) -> Result<u16, String> {
     let state = state
@@ -26,7 +24,7 @@ pub fn get_server_port(state: State<Mutex<ServerState>>) -> Result<u16, String> 
     state.port.ok_or_else(|| "Server not ready".to_string())
 }
 
-/// Get server status from app state
+/// Server status response
 #[derive(serde::Serialize)]
 pub struct ServerStatus {
     pub port: Option<u16>,
@@ -35,6 +33,7 @@ pub struct ServerStatus {
     pub error_message: Option<String>,
 }
 
+/// Get server status from app state
 #[tauri::command]
 pub fn get_server_status(state: State<Mutex<ServerState>>) -> Result<ServerStatus, String> {
     let state = state
