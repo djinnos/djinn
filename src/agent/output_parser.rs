@@ -170,11 +170,7 @@ fn extract_runtime_error(line: &str) -> Option<&str> {
     let marker = "Execution error:";
     let idx = line.find(marker)?;
     let value = line[idx + marker.len()..].trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 #[cfg(test)]

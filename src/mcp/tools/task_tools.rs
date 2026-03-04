@@ -475,13 +475,19 @@ impl DjinnMcpServer {
             Err(e) => return e,
         };
 
-        let Some(task) = repo.resolve_in_project(&project_id, &p.id).await.ok().flatten() else {
+        let Some(task) = repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        else {
             return json_object(not_found(&p.id));
         };
 
         // Resolve new parent epic if provided.
         let epic_id: Option<String> = if let Some(ref par) = p.epic_id {
-            let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+            let epic_repo =
+                EpicRepository::new(self.state.db().clone(), self.state.events().clone());
             let Some(epic) = epic_repo
                 .resolve_in_project(&project_id, par)
                 .await
@@ -970,7 +976,12 @@ impl DjinnMcpServer {
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
 
-        let Some(task) = repo.resolve_in_project(&project_id, &p.id).await.ok().flatten() else {
+        let Some(task) = repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        else {
             return json_object(not_found(&p.id));
         };
 
@@ -1064,7 +1075,12 @@ impl DjinnMcpServer {
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
 
-        let Some(task) = repo.resolve_in_project(&project_id, &p.id).await.ok().flatten() else {
+        let Some(task) = repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        else {
             return json_object(not_found(&p.id));
         };
 
@@ -1183,13 +1199,17 @@ impl DjinnMcpServer {
             return json_object(serde_json::json!({ "error": "supervisor actor not initialized" }));
         };
         let Some(coordinator) = self.state.coordinator().await else {
-            return json_object(serde_json::json!({ "error": "coordinator actor not initialized" }));
+            return json_object(
+                serde_json::json!({ "error": "coordinator actor not initialized" }),
+            );
         };
-        let session_repo = SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+        let session_repo =
+            SessionRepository::new(self.state.db().clone(), self.state.events().clone());
 
         match repo.reconcile(stale_hours).await {
             Ok(mut result) => {
-                let running_sessions = match session_repo.list_active_in_project(&project_id).await {
+                let running_sessions = match session_repo.list_active_in_project(&project_id).await
+                {
                     Ok(sessions) => sessions,
                     Err(e) => return json_object(serde_json::json!({ "error": e.to_string() })),
                 };
@@ -1312,5 +1332,4 @@ impl DjinnMcpServer {
         }
         Err(serde_json::json!({ "error": format!("task not found: {id}") }))
     }
-
 }

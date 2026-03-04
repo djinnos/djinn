@@ -16,9 +16,9 @@ use crate::actors::git::{GitActorHandle, GitError};
 use crate::actors::supervisor::AgentSupervisorHandle;
 use crate::agent::init_session_manager;
 use crate::db::connection::Database;
+use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::note::NoteRepository;
 use crate::db::repositories::project::ProjectRepository;
-use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::settings::SettingsRepository;
 use crate::events::DjinnEvent;
 use crate::mcp;
@@ -453,10 +453,7 @@ impl AppState {
         if let Some(supervisor) = self.supervisor().await {
             let model_limits = read_model_session_limits(json).unwrap_or_default();
             let _ = supervisor
-                .update_session_limits(
-                    model_limits,
-                    read_default_max_sessions(json).unwrap_or(1),
-                )
+                .update_session_limits(model_limits, read_default_max_sessions(json).unwrap_or(1))
                 .await;
         }
 
@@ -997,10 +994,7 @@ mod tests {
             }
         });
         let parsed = read_model_session_limits(&settings).unwrap();
-        assert_eq!(
-            parsed.get("synthetic/hf:nvidia/Kimi-K2.5-NVFP4"),
-            Some(&4)
-        );
+        assert_eq!(parsed.get("synthetic/hf:nvidia/Kimi-K2.5-NVFP4"), Some(&4));
         assert_eq!(parsed.get("openai/gpt-5.3-codex"), Some(&2));
 
         let settings = serde_json::json!({
@@ -1011,10 +1005,7 @@ mod tests {
             }
         });
         let parsed = read_model_session_limits(&settings).unwrap();
-        assert_eq!(
-            parsed.get("synthetic/hf:nvidia/Kimi-K2.5-NVFP4"),
-            Some(&3)
-        );
+        assert_eq!(parsed.get("synthetic/hf:nvidia/Kimi-K2.5-NVFP4"), Some(&3));
     }
 
     #[test]

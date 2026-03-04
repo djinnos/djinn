@@ -195,7 +195,8 @@ impl CoordinatorActor {
                 }
             }
             CoordinatorMessage::TriggerProjectDispatch { project_id } => {
-                self.detect_and_recover_stuck_filtered(Some(&project_id)).await;
+                self.detect_and_recover_stuck_filtered(Some(&project_id))
+                    .await;
                 self.dispatch_ready_tasks(Some(&project_id)).await;
             }
             CoordinatorMessage::Pause {
@@ -236,7 +237,8 @@ impl CoordinatorActor {
                 } else {
                     self.paused_projects.remove(&project_id);
                 }
-                self.detect_and_recover_stuck_filtered(Some(&project_id)).await;
+                self.detect_and_recover_stuck_filtered(Some(&project_id))
+                    .await;
                 self.dispatch_ready_tasks(Some(&project_id)).await;
             }
             CoordinatorMessage::GetStatus {
@@ -306,8 +308,7 @@ impl CoordinatorActor {
         }
         match &evt {
             // A task became dispatch-ready for any role → check dispatch.
-            DjinnEvent::TaskCreated(t)
-            | DjinnEvent::TaskUpdated(t)
+            DjinnEvent::TaskCreated(t) | DjinnEvent::TaskUpdated(t)
                 if matches!(
                     t.status.as_str(),
                     "open" | "needs_task_review" | "needs_epic_review"
@@ -551,7 +552,9 @@ impl CoordinatorActor {
                         );
                     }
                     Err(SupervisorError::ActorDead) => {
-                        tracing::error!("CoordinatorActor: supervisor actor dead, aborting dispatch");
+                        tracing::error!(
+                            "CoordinatorActor: supervisor actor dead, aborting dispatch"
+                        );
                         return;
                     }
                     Err(e) => {
@@ -613,7 +616,9 @@ impl CoordinatorActor {
                     Ok(true) => continue, // healthy — session is active
                     Ok(false) => {}
                     Err(SupervisorError::ActorDead) => {
-                        tracing::error!("CoordinatorActor: supervisor actor dead during stuck check");
+                        tracing::error!(
+                            "CoordinatorActor: supervisor actor dead during stuck check"
+                        );
                         return;
                     }
                     Err(e) => {
@@ -783,7 +788,7 @@ impl CoordinatorHandle {
             project_id: Some(project_id.to_owned()),
             respond_to: tx,
         })
-            .await?;
+        .await?;
         rx.await.map_err(|_| CoordinatorError::NoResponse)
     }
 

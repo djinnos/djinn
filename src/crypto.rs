@@ -122,7 +122,10 @@ mod tests {
     fn system_hostname_returns_nonempty() {
         let hostname = system_hostname();
         assert!(!hostname.is_empty());
-        assert_ne!(hostname, "localhost", "should resolve real hostname via syscall, not fallback");
+        assert_ne!(
+            hostname, "localhost",
+            "should resolve real hostname via syscall, not fallback"
+        );
     }
 
     #[test]
@@ -133,7 +136,10 @@ mod tests {
             .expect("failed to run hostname command");
         let expected = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let actual = system_hostname();
-        assert_eq!(actual, expected, "syscall hostname should match `hostname` command output");
+        assert_eq!(
+            actual, expected,
+            "syscall hostname should match `hostname` command output"
+        );
     }
 
     #[test]

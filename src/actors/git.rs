@@ -325,22 +325,14 @@ impl GitActor {
         let remote_ref = format!("origin/{target_branch}");
         let create = Self::run_git_command(
             path.clone(),
-            vec![
-                "branch".into(),
-                branch_name.clone(),
-                remote_ref,
-            ],
+            vec!["branch".into(), branch_name.clone(), remote_ref],
         )
         .await;
 
         if create.is_err() {
             Self::run_git_command(
                 path.clone(),
-                vec![
-                    "branch".into(),
-                    branch_name.clone(),
-                    target_branch,
-                ],
+                vec!["branch".into(), branch_name.clone(), target_branch],
             )
             .await?;
         }
@@ -429,13 +421,18 @@ impl GitActor {
         message: String,
     ) -> Result<MergeResult, GitError> {
         // Stage all changes from the task branch as a squash (no commit yet).
-        if let Err(err) =
-            Self::run_git_command(wt_path.clone(), vec!["merge".into(), "--squash".into(), branch])
-                .await
+        if let Err(err) = Self::run_git_command(
+            wt_path.clone(),
+            vec!["merge".into(), "--squash".into(), branch],
+        )
+        .await
         {
             if matches!(err, GitError::CommandFailed { .. }) {
-                let files = Self::unmerged_files(wt_path.clone()).await.unwrap_or_default();
-                let _ = Self::run_git_command(wt_path, vec!["merge".into(), "--abort".into()]).await;
+                let files = Self::unmerged_files(wt_path.clone())
+                    .await
+                    .unwrap_or_default();
+                let _ =
+                    Self::run_git_command(wt_path, vec!["merge".into(), "--abort".into()]).await;
                 return Err(GitError::MergeConflict {
                     target_branch,
                     files,
@@ -445,7 +442,8 @@ impl GitActor {
         }
 
         // Commit — hooks run here. Any failure → HookFailed (GIT-07).
-        match Self::run_git_command(wt_path.clone(), vec!["commit".into(), "-m".into(), message]).await
+        match Self::run_git_command(wt_path.clone(), vec!["commit".into(), "-m".into(), message])
+            .await
         {
             Ok(_) => {}
             Err(GitError::CommandFailed { code, stderr }) => {
@@ -458,7 +456,8 @@ impl GitActor {
         }
 
         // Read the resulting commit SHA.
-        let out = Self::run_git_command(wt_path.clone(), vec!["rev-parse".into(), "HEAD".into()]).await?;
+        let out =
+            Self::run_git_command(wt_path.clone(), vec!["rev-parse".into(), "HEAD".into()]).await?;
         let commit_sha = out.stdout.trim().to_string();
 
         // Push merge commit directly to upstream target branch.

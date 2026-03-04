@@ -226,7 +226,6 @@ fn read_daemon_info() -> Option<daemon::DaemonInfo> {
     serde_json::from_str::<daemon::DaemonInfo>(&raw).ok()
 }
 
-
 fn init_logging() -> (WorkerGuard, WorkerGuard) {
     logging::setup_log_dir_and_retention();
 

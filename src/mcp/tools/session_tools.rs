@@ -87,7 +87,9 @@ impl DjinnMcpServer {
                     match supervisor.has_session(&session.task_id).await {
                         Ok(true) => runtime_sessions.push(session),
                         Ok(false) => stale_sessions.push(session),
-                        Err(e) => return json_object(serde_json::json!({ "error": e.to_string() })),
+                        Err(e) => {
+                            return json_object(serde_json::json!({ "error": e.to_string() }));
+                        }
                     }
                 }
 
