@@ -3,34 +3,31 @@
 
 PRAGMA foreign_keys = OFF;
 
--- Backfill strategy: if any scoped table has rows, there must be exactly one
--- project to attach those rows to.
-CREATE TEMP TABLE _migration_guard (
-    ok INTEGER NOT NULL CHECK (ok = 1)
+-- Backfill strategy:
+-- - If no project exists, create one.
+-- - If multiple projects exist and scoped tables already have rows, create a
+--   dedicated legacy project and attach all pre-scoped rows to it.
+CREATE TEMP TABLE _migration_project (
+    id TEXT NOT NULL
 );
 
-INSERT INTO _migration_guard(ok)
-SELECT CASE
-    WHEN (SELECT COUNT(*) FROM epics) = 0 THEN 1
-    WHEN (SELECT COUNT(*) FROM projects) = 1 THEN 1
-    ELSE 0
-END;
+INSERT INTO projects (id, name, path)
+SELECT lower(hex(randomblob(16))), 'legacy-migrated', 'legacy://migration'
+WHERE (SELECT COUNT(*) FROM projects) = 0
+   OR (
+        (SELECT COUNT(*) FROM projects) > 1
+        AND (
+            (SELECT COUNT(*) FROM epics)
+          + (SELECT COUNT(*) FROM tasks)
+          + (SELECT COUNT(*) FROM sessions)
+        ) > 0
+   );
 
-INSERT INTO _migration_guard(ok)
-SELECT CASE
-    WHEN (SELECT COUNT(*) FROM tasks) = 0 THEN 1
-    WHEN (SELECT COUNT(*) FROM projects) = 1 THEN 1
-    ELSE 0
-END;
-
-INSERT INTO _migration_guard(ok)
-SELECT CASE
-    WHEN (SELECT COUNT(*) FROM sessions) = 0 THEN 1
-    WHEN (SELECT COUNT(*) FROM projects) = 1 THEN 1
-    ELSE 0
-END;
-
-DROP TABLE _migration_guard;
+INSERT INTO _migration_project(id)
+SELECT COALESCE(
+    (SELECT id FROM projects WHERE path = 'legacy://migration' LIMIT 1),
+    (SELECT id FROM projects ORDER BY created_at LIMIT 1)
+);
 
 -- EPICS -----------------------------------------------------------------------
 CREATE TABLE epics_new (
@@ -56,7 +53,7 @@ INSERT INTO epics_new (
 )
 SELECT
     e.id,
-    COALESCE((SELECT id FROM projects LIMIT 1), ''),
+    (SELECT id FROM _migration_project LIMIT 1),
     e.short_id,
     e.title,
     e.description,
@@ -116,7 +113,7 @@ INSERT INTO tasks_new (
 )
 SELECT
     t.id,
-    COALESCE((SELECT id FROM projects LIMIT 1), ''),
+    (SELECT id FROM _migration_project LIMIT 1),
     t.short_id,
     t.epic_id,
     t.title,
@@ -168,7 +165,7 @@ INSERT INTO sessions_new (
 )
 SELECT
     s.id,
-    COALESCE(t.project_id, (SELECT id FROM projects LIMIT 1)),
+    COALESCE(t.project_id, (SELECT id FROM _migration_project LIMIT 1)),
     s.task_id,
     s.model_id,
     s.agent_type,
@@ -187,5 +184,7 @@ ALTER TABLE sessions_new RENAME TO sessions;
 CREATE INDEX sessions_project_id ON sessions(project_id);
 CREATE INDEX sessions_task_id ON sessions(task_id);
 CREATE INDEX sessions_status ON sessions(status);
+
+DROP TABLE _migration_project;
 
 PRAGMA foreign_keys = ON;
