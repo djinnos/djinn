@@ -1,11 +1,9 @@
 ---
-tags:
-    - planning
-    - requirements
-    - v1
 title: V1 Requirements
 type: requirement
+tags: []
 ---
+
 # V1 Requirements — Djinn Server Rust Rewrite
 
 Requirements derived from [[Project Brief]], [[Research Summary]], and the four research dimension notes. Each requirement traces to its source.
@@ -39,9 +37,9 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 
 | ID | Requirement | Classification | Source |
 |---|---|---|---|
-| TASK-01 | Epics as separate entities (own table, lifecycle: open → closed, no dependencies between epics) | v1 | Brief |
+| TASK-01 | Epics as separate entities (own table, lifecycle: open → in_review → closed, no dependencies between epics) | v1 | Brief |
 | TASK-02 | Tasks under epics only (flat hierarchy — no subtasks, no subepics) | v1 | Brief |
-| TASK-03 | Task state machine: draft → open → in_progress → needs_task_review → in_task_review → needs_epic_review → in_epic_review → approved → closed | v1 | Brief, Architecture Research §3 |
+| TASK-03 | Task state machine: draft → open → in_progress → needs_task_review → in_task_review → closed (epic review is non-blocking at task level) | v1 | Brief, ADR-012 |
 | TASK-04 | Typestate pattern at service layer for compile-time task transition correctness | v1 | Architecture Research §3, Research Summary |
 | TASK-05 | Blocker dependencies between tasks (not epics) | v1 | Brief |
 | TASK-06 | Short IDs (4-char, collision-resistant) alongside UUIDv7 | v1 | Brief |

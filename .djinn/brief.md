@@ -1,10 +1,9 @@
 ---
-tags:
-    - planning
-    - brief
 title: Project Brief
 type: brief
+tags: []
 ---
+
 # Djinn Server — Rust Rewrite
 
 ## Vision
@@ -60,9 +59,9 @@ The current Go server has accumulated significant complexity:
 - Settings stored in DB (replaces JSON files): projects, model config, git settings, sync config
 
 **Task Board:**
-- Epics as separate entities (own table, simplified lifecycle: open → closed, no dependencies)
+- Epics as separate entities (own table, lifecycle: open → in_review → closed, no dependencies)
 - Tasks under epics only (flat hierarchy, no subtasks, no subepics)
-- Task state machine: draft → open → in_progress → needs_task_review → in_task_review → approved → closed
+- Task state machine: draft → open → in_progress → needs_task_review → in_task_review → closed (epic review is non-blocking)
 - Blocker dependencies between tasks (not epics)
 - Short IDs (4-char, collision-resistant)
 - Activity log (structured, in DB — task lifecycle, comments, agent metadata)

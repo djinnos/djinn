@@ -30,6 +30,8 @@ use crate::agent::output_parser::{
 use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::{AgentType, GooseSessionHandle, SessionManager, SessionType};
 use crate::db::repositories::credential::CredentialRepository;
+use crate::db::repositories::epic::EpicRepository;
+use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
 use crate::db::repositories::git_settings::GitSettingsRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
@@ -264,7 +266,10 @@ impl AgentSupervisor {
             let entry = self
                 .capacity
                 .entry(model_id.clone())
-                .or_insert(ModelCapacity { active: 0, max: *max });
+                .or_insert(ModelCapacity {
+                    active: 0,
+                    max: *max,
+                });
             entry.max = *max;
         }
 
@@ -455,6 +460,23 @@ impl AgentSupervisor {
             .await
             .map_err(|e| SupervisorError::Goose(e.to_string()))?;
 
+        if agent_type == AgentType::EpicReviewer
+            && let Some(batch_id) = self.active_epic_batch_for_task(&task.id).await
+        {
+            let batch_repo = EpicReviewBatchRepository::new(
+                self.app_state.db().clone(),
+                self.app_state.events().clone(),
+            );
+            if let Err(e) = batch_repo.mark_in_review(&batch_id, &session.id).await {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    batch_id = %batch_id,
+                    error = %e,
+                    "failed to mark epic review batch in_review"
+                );
+            }
+        }
+
         let goose_model = ModelConfig::new(&model_name)
             .map_err(|e| SupervisorError::Goose(e.to_string()))?
             .with_canonical_limits(&goose_provider_id);
@@ -543,7 +565,7 @@ impl AgentSupervisor {
             let mut output = ParsedAgentOutput::default();
             let run_result: anyhow::Result<()> = async {
                 let mut prompts = vec![kickoff];
-                let mut nudged_reviewer = false;
+                let mut nudge_count: u8 = 0;
                 let mut saw_any_event = false;
 
                 while let Some(next_message) = prompts.pop() {
@@ -636,40 +658,45 @@ impl AgentSupervisor {
                     }
 
                     if !saw_round_event {
-                        let diag = runtime_fs_diagnostics(
-                            &project_path_for_join,
-                            &worktree_path_for_join,
-                        );
+                        let diag =
+                            runtime_fs_diagnostics(&project_path_for_join, &worktree_path_for_join);
                         return Err(anyhow::anyhow!(
                             "agent stream ended without any events; {}",
                             diag
                         ));
                     }
 
-                    if run_agent_type == AgentType::TaskReviewer
-                        && output.reviewer_verdict.is_none()
-                        && !nudged_reviewer
+                    if let Some(nudge) =
+                        Self::missing_marker_nudge(run_agent_type, &output, nudge_count)
                     {
-                        nudged_reviewer = true;
-                        prompts.push(GooseMessage::user().with_text(
-                            "You must emit a final verdict marker now: REVIEW_RESULT: VERIFIED | REOPEN | CANCEL. If REOPEN or CANCEL, also emit FEEDBACK: <what is missing>. Do not continue analysis.",
-                        ));
+                        nudge_count = nudge_count.saturating_add(1);
+                        prompts.push(GooseMessage::user().with_text(nudge));
                         continue;
                     }
                 }
 
                 if !saw_any_event {
-                    let diag = runtime_fs_diagnostics(&project_path_for_join, &worktree_path_for_join);
+                    let diag =
+                        runtime_fs_diagnostics(&project_path_for_join, &worktree_path_for_join);
                     return Err(anyhow::anyhow!(
                         "agent session produced no events; {}",
                         diag
                     ));
                 }
 
-                if run_agent_type == AgentType::TaskReviewer && output.reviewer_verdict.is_none() {
-                    return Err(anyhow::anyhow!(
-                        "task reviewer ended without REVIEW_RESULT marker"
-                    ));
+                if Self::missing_required_marker(run_agent_type, &output) {
+                    let reason = match run_agent_type {
+                        AgentType::Worker | AgentType::ConflictResolver => {
+                            "worker ended without WORKER_RESULT marker"
+                        }
+                        AgentType::TaskReviewer => {
+                            "task reviewer ended without REVIEW_RESULT marker"
+                        }
+                        AgentType::EpicReviewer => {
+                            "epic reviewer ended without EPIC_REVIEW_RESULT marker"
+                        }
+                    };
+                    return Err(anyhow::anyhow!(reason));
                 }
 
                 Ok(())
@@ -1038,7 +1065,9 @@ impl AgentSupervisor {
 
             let mut allow_cleanup = true;
             if should_persist_final
-                && let Err(e) = self.commit_final_work_if_needed(task_id, worktree_path).await
+                && let Err(e) = self
+                    .commit_final_work_if_needed(task_id, worktree_path)
+                    .await
             {
                 allow_cleanup = false;
                 tracing::warn!(
@@ -1128,7 +1157,8 @@ impl AgentSupervisor {
         };
 
         if let Some((action, reason)) = transition {
-            let _ = repo
+            let followup_action = action.clone();
+            if let Err(e) = repo
                 .transition(
                     task_id,
                     action,
@@ -1137,7 +1167,16 @@ impl AgentSupervisor {
                     reason.as_deref(),
                     None,
                 )
-                .await;
+                .await
+            {
+                tracing::warn!(task_id = %task_id, error = %e, "failed to transition task after session");
+            } else if matches!(
+                followup_action,
+                TransitionAction::EpicReviewApprove | TransitionAction::EpicReviewReject
+            ) {
+                self.finalize_epic_batch(task_id, followup_action, reason.as_deref())
+                    .await;
+            }
         }
 
         // Capacity has just been released by this session completion. Trigger an
@@ -1146,7 +1185,9 @@ impl AgentSupervisor {
         if let Ok(task) = self.load_task(task_id).await
             && let Some(coordinator) = self.app_state.coordinator().await
         {
-            let _ = coordinator.trigger_dispatch_for_project(&task.project_id).await;
+            let _ = coordinator
+                .trigger_dispatch_for_project(&task.project_id)
+                .await;
         }
     }
 
@@ -1177,10 +1218,7 @@ impl AgentSupervisor {
                         "worker session completed without DONE/BLOCKED marker".to_string()
                     });
                     tracing::warn!(reason = %reason, "worker session completed without structured result marker");
-                    Some((
-                        TransitionAction::Release,
-                        Some(reason),
-                    ))
+                    Some((TransitionAction::Release, Some(reason)))
                 }
             },
             AgentType::TaskReviewer => match output.reviewer_verdict {
@@ -1415,6 +1453,31 @@ impl AgentSupervisor {
         Self::parse_conflict_metadata(reason)
     }
 
+    async fn active_epic_batch_for_task(&self, task_id: &str) -> Option<String> {
+        let repo =
+            TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let activity = repo.list_activity(task_id).await.ok()?;
+        let marker = "epic_review_batch:";
+        for entry in activity.iter().rev() {
+            if entry.event_type != "status_changed" {
+                continue;
+            }
+            let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload) else {
+                continue;
+            };
+            let reason = payload
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if let Some(id) = reason.strip_prefix(marker)
+                && !id.trim().is_empty()
+            {
+                return Some(id.trim().to_string());
+            }
+        }
+        None
+    }
+
     fn parse_conflict_metadata(reason: &str) -> Option<MergeConflictMetadata> {
         let raw = reason.strip_prefix(MERGE_CONFLICT_PREFIX)?;
         serde_json::from_str(raw).ok()
@@ -1513,6 +1576,96 @@ impl AgentSupervisor {
                 TransitionAction::ReleaseTaskReview,
                 Some(format!("post-review squash merge failed: {e}")),
             )),
+        }
+    }
+
+    fn missing_required_marker(agent_type: AgentType, output: &ParsedAgentOutput) -> bool {
+        match agent_type {
+            AgentType::Worker | AgentType::ConflictResolver => output.worker_signal.is_none(),
+            AgentType::TaskReviewer => output.reviewer_verdict.is_none(),
+            AgentType::EpicReviewer => output.epic_verdict.is_none(),
+        }
+    }
+
+    fn missing_marker_nudge(
+        agent_type: AgentType,
+        output: &ParsedAgentOutput,
+        nudge_count: u8,
+    ) -> Option<&'static str> {
+        const MAX_NUDGES: u8 = 2;
+        if nudge_count >= MAX_NUDGES {
+            return None;
+        }
+        if !Self::missing_required_marker(agent_type, output) {
+            return None;
+        }
+
+        match agent_type {
+            AgentType::Worker | AgentType::ConflictResolver => Some(
+                "Emit exactly one final marker now: WORKER_RESULT: DONE | PROGRESS: <what remains> | BLOCKED: <specific blocker>. Do not continue analysis.",
+            ),
+            AgentType::TaskReviewer => Some(
+                "Emit exactly one final marker now: REVIEW_RESULT: VERIFIED | REOPEN | CANCEL. If REOPEN or CANCEL, also emit FEEDBACK: <what is missing>. Do not continue analysis.",
+            ),
+            AgentType::EpicReviewer => Some(
+                "Emit exactly one final marker now: EPIC_REVIEW_RESULT: CLEAN | ISSUES_FOUND. If ISSUES_FOUND, include concise actionable findings and create follow-up tasks in this epic before finishing.",
+            ),
+        }
+    }
+
+    async fn finalize_epic_batch(
+        &self,
+        task_id: &str,
+        action: TransitionAction,
+        reason: Option<&str>,
+    ) {
+        let Some(batch_id) = self.active_epic_batch_for_task(task_id).await else {
+            return;
+        };
+        let task_repo =
+            TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let Some(task) = task_repo.get(task_id).await.ok().flatten() else {
+            return;
+        };
+        let Some(epic_id) = task.epic_id.as_deref() else {
+            return;
+        };
+
+        let batch_repo = EpicReviewBatchRepository::new(
+            self.app_state.db().clone(),
+            self.app_state.events().clone(),
+        );
+        let epic_repo =
+            EpicRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+
+        match action {
+            TransitionAction::EpicReviewApprove => {
+                if let Err(e) = batch_repo.mark_clean(&batch_id).await {
+                    tracing::warn!(batch_id = %batch_id, error = %e, "failed to mark epic review batch clean");
+                    return;
+                }
+
+                let tasks = match task_repo.list_by_epic(epic_id).await {
+                    Ok(tasks) => tasks,
+                    Err(e) => {
+                        tracing::warn!(epic_id = %epic_id, error = %e, "failed to list epic tasks after clean review");
+                        return;
+                    }
+                };
+                if tasks.iter().all(|t| t.status == "closed") {
+                    let _ = epic_repo.close(epic_id).await;
+                }
+            }
+            TransitionAction::EpicReviewReject => {
+                let verdict = reason.unwrap_or("epic reviewer reported issues_found");
+                let _ = batch_repo.mark_issues_found(&batch_id, verdict).await;
+                if let Ok(Some(epic)) = epic_repo.get(epic_id).await
+                    && epic.status == "in_review"
+                {
+                    let _ = epic_repo.reopen(epic_id).await;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1627,7 +1780,10 @@ impl AgentSupervisor {
             .await
             .map_err(|e| SupervisorError::Goose(e.to_string()))?;
 
-        let stale_worktree_path = project_dir.join(".djinn").join("worktrees").join(&task.short_id);
+        let stale_worktree_path = project_dir
+            .join(".djinn")
+            .join("worktrees")
+            .join(&task.short_id);
         let _ = git.remove_worktree(&stale_worktree_path).await;
         if stale_worktree_path.exists() {
             let _ = std::fs::remove_dir_all(&stale_worktree_path);
@@ -2081,7 +2237,10 @@ mod tests {
         assert_eq!(mock.max, 4);
         assert_eq!(mock.active, 4);
 
-        let kimi = status.capacity.get("synthetic/hf:nvidia/Kimi-K2.5-NVFP4").unwrap();
+        let kimi = status
+            .capacity
+            .get("synthetic/hf:nvidia/Kimi-K2.5-NVFP4")
+            .unwrap();
         assert_eq!(kimi.max, 2);
         assert_eq!(kimi.active, 0);
     }

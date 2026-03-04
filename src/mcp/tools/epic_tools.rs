@@ -378,9 +378,9 @@ impl DjinnMcpServer {
         else {
             return json_object(epic_not_found(&p.id));
         };
-        if epic.status != "open" {
+        if epic.status != "open" && epic.status != "in_review" {
             return json_object(serde_json::json!({
-                "error": format!("epic must be open to close (current: {})", epic.status)
+                "error": format!("epic must be open or in_review to close (current: {})", epic.status)
             }));
         }
         match repo.close(&epic.id).await {

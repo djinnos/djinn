@@ -1,11 +1,9 @@
 ---
-tags:
-    - adr
-    - execution
-    - architecture
 title: 'ADR-009: Simplified Execution — No Phases, Direct Task Dispatch'
 type: adr
+tags: []
 ---
+
 # ADR-009: Simplified Execution — No Phases, Direct Task Dispatch
 
 ## Status: Accepted
@@ -57,7 +55,7 @@ The 26-tool execution surface collapses to ~6 tools:
 - Total executor capacity is the sum of all configured model capacities.
 - Coordinator routing uses per-role model priority lists and attempts fallback models in order when a higher-priority model is at capacity or unavailable.
 - Execution controls support both global scope and project scope: global start dispatches across all currently registered projects, while project-scoped start/pause/resume only affects that project.
-- Stuck-session recovery releases tasks with no active session across `in_progress`, `in_task_review`, and `in_epic_review` so they can be re-dispatched automatically.
+- Stuck-session recovery releases tasks with no active session across `in_progress`, `in_task_review`, and `needs_epic_review` so they can be re-dispatched automatically. Epic review batch recovery is tracked separately via persisted batch status (`queued`/`in_review`).
 - Task branches are local by default; creating/pushing remote `task/*` branches is optional and not required for dispatch.
 - After any session ends, supervisor triggers immediate project-scoped dispatch to start the next ready task without waiting for coordinator tick.
 - Task-review merges run from a detached temporary merge worktree and push directly to `origin/<target>` to avoid mutating the user's local checked-out branch.

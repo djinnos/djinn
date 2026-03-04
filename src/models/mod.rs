@@ -1,5 +1,6 @@
 pub mod credential;
 pub mod epic;
+pub mod epic_review_batch;
 pub mod git_settings;
 pub mod note;
 pub mod project;

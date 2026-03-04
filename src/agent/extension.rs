@@ -33,6 +33,14 @@ pub fn config(agent_type: AgentType) -> ExtensionConfig {
         "memory_search".to_string(),
     ];
 
+    if matches!(agent_type, AgentType::EpicReviewer) {
+        tool_values
+            .push(serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"));
+        tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
+        available_tools.push("task_create".to_string());
+        available_tools.push("shell".to_string());
+    }
+
     if matches!(
         agent_type,
         AgentType::Worker | AgentType::ConflictResolver | AgentType::TaskReviewer
@@ -123,6 +131,7 @@ where
 
     match call.name.as_str() {
         "task_show" => call_task_show(state, &call.arguments).await,
+        "task_create" => call_task_create(state, &call.arguments).await,
         "task_update" => call_task_update(state, &call.arguments).await,
         "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments).await,
@@ -150,6 +159,17 @@ struct TaskUpdateParams {
     acceptance_criteria: Option<Vec<serde_json::Value>>,
     memory_refs_add: Option<Vec<String>>,
     memory_refs_remove: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct TaskCreateParams {
+    epic_id: String,
+    title: String,
+    issue_type: Option<String>,
+    description: Option<String>,
+    design: Option<String>,
+    priority: Option<i64>,
+    owner: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -212,6 +232,35 @@ async fn call_task_show(
         Ok(None) => Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) })),
         Err(e) => Err(e.to_string()),
     }
+}
+
+async fn call_task_create(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: TaskCreateParams = parse_args(arguments)?;
+    let repo = TaskRepository::new(state.db().clone(), state.events().clone());
+
+    let issue_type = p.issue_type.as_deref().unwrap_or("task");
+    let description = p.description.as_deref().unwrap_or("");
+    let design = p.design.as_deref().unwrap_or("");
+    let priority = p.priority.unwrap_or(0);
+    let owner = p.owner.as_deref().unwrap_or("");
+
+    let task = repo
+        .create(
+            &p.epic_id,
+            &p.title,
+            description,
+            design,
+            issue_type,
+            priority,
+            owner,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(task_to_value(&task))
 }
 
 async fn call_task_update(
@@ -390,7 +439,8 @@ async fn call_shell(
     );
     workspace_guard::enforce_workdir(&workdir, external_dir)?;
 
-    let outside = workspace_guard::command_outside_workspace_paths(&p.command, &workdir, external_dir);
+    let outside =
+        workspace_guard::command_outside_workspace_paths(&p.command, &workdir, external_dir);
     if !outside.is_empty() {
         return Ok(serde_json::json!({
             "ok": false,
@@ -477,7 +527,11 @@ async fn project_id_for_path(state: &AppState, project_path: &str) -> Result<Str
                 .unwrap_or(false);
         if matches {
             let len = root.len();
-            if best.as_ref().map(|(_, best_len)| len > *best_len).unwrap_or(true) {
+            if best
+                .as_ref()
+                .map(|(_, best_len)| len > *best_len)
+                .unwrap_or(true)
+            {
                 best = Some((id, len));
             }
         }
@@ -597,6 +651,26 @@ fn tool_task_update() -> RmcpTool {
                 "acceptance_criteria": {"type": "array", "items": {}},
                 "memory_refs_add": {"type": "array", "items": {"type": "string"}},
                 "memory_refs_remove": {"type": "array", "items": {"type": "string"}}
+            }
+        }),
+    )
+}
+
+fn tool_task_create() -> RmcpTool {
+    RmcpTool::new(
+        "task_create".to_string(),
+        "Create a new work item under an epic.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["epic_id", "title"],
+            "properties": {
+                "epic_id": {"type": "string"},
+                "title": {"type": "string"},
+                "issue_type": {"type": "string"},
+                "description": {"type": "string"},
+                "design": {"type": "string"},
+                "priority": {"type": "integer"},
+                "owner": {"type": "string"}
             }
         }),
     )

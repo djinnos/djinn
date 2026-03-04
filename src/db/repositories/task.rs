@@ -3,6 +3,8 @@ use tokio::sync::broadcast;
 use sqlx::{Row, SqlitePool};
 
 use crate::db::connection::Database;
+use crate::db::repositories::epic::EpicRepository;
+use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
 use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
 use crate::models::task::{ActivityEntry, Task, TaskStatus, TransitionAction, compute_transition};
@@ -250,6 +252,15 @@ impl TaskRepository {
             .fetch_one(self.db.pool())
             .await?;
 
+        if let Some(epic_id) = epic_id {
+            let epic_repo = EpicRepository::new(self.db.clone(), self.events.clone());
+            if let Some(epic) = epic_repo.get(epic_id).await?
+                && (epic.status == "closed" || epic.status == "in_review")
+            {
+                let _ = epic_repo.reopen(epic_id).await?;
+            }
+        }
+
         let _ = self.events.send(DjinnEvent::TaskCreated(task.clone()));
         Ok(task)
     }
@@ -429,6 +440,10 @@ impl TaskRepository {
 
         let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
 
+        if task.status == "closed" {
+            self.maybe_queue_epic_review_batch(&task).await?;
+        }
+
         // Blocker resolution: when a task reaches post-merge/closed states, notify any tasks
         // it was blocking that are now fully unblocked, so coordinators can dispatch them.
         if matches!(
@@ -488,8 +503,120 @@ impl TaskRepository {
             .bind(id)
             .fetch_one(self.db.pool())
             .await?;
+
+        if let Some(epic_id) = new_epic_id {
+            let epic_repo = EpicRepository::new(self.db.clone(), self.events.clone());
+            if let Some(epic) = epic_repo.get(epic_id).await?
+                && (epic.status == "closed" || epic.status == "in_review")
+            {
+                let _ = epic_repo.reopen(epic_id).await?;
+            }
+        }
+
         let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
         Ok(task)
+    }
+
+    async fn maybe_queue_epic_review_batch(&self, task: &Task) -> Result<()> {
+        let Some(epic_id) = task.epic_id.as_deref() else {
+            return Ok(());
+        };
+
+        let epic_repo = EpicRepository::new(self.db.clone(), self.events.clone());
+        let Some(epic) = epic_repo.get(epic_id).await? else {
+            return Ok(());
+        };
+
+        let tasks = self.list_by_epic(epic_id).await?;
+        if tasks.is_empty() {
+            return Ok(());
+        }
+        let all_closed = tasks.iter().all(|t| t.status == "closed");
+        if !all_closed {
+            return Ok(());
+        }
+
+        let batch_repo = EpicReviewBatchRepository::new(self.db.clone(), self.events.clone());
+        if batch_repo.has_active_batch(epic_id).await? {
+            if epic.status != "in_review" {
+                let _ = epic_repo.mark_in_review(epic_id).await?;
+            }
+            return Ok(());
+        }
+
+        let reviewable_task_ids = batch_repo.list_unreviewed_closed_task_ids(epic_id).await?;
+        if reviewable_task_ids.is_empty() {
+            if epic.status == "in_review" {
+                let _ = epic_repo.close(epic_id).await?;
+            }
+            return Ok(());
+        }
+
+        if epic.status != "in_review" {
+            let _ = epic_repo.mark_in_review(epic_id).await?;
+        }
+
+        let batch = batch_repo
+            .create_batch(&task.project_id, epic_id, &reviewable_task_ids)
+            .await?;
+
+        if let Some(anchor_task_id) = reviewable_task_ids.first() {
+            self.queue_anchor_for_epic_review(anchor_task_id, &batch.id)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn queue_anchor_for_epic_review(&self, task_id: &str, batch_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+
+        let current: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(task_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        sqlx::query(
+            "UPDATE tasks SET
+                status = 'needs_epic_review',
+                continuation_count = 0,
+                closed_at = NULL,
+                blocked_from_status = NULL,
+                close_reason = NULL,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let payload = serde_json::json!({
+            "from_status": current.status,
+            "to_status": "needs_epic_review",
+            "reason": format!("epic_review_batch:{batch_id}"),
+        })
+        .to_string();
+
+        sqlx::query(
+            "INSERT INTO activity_log
+                (id, task_id, actor_id, actor_role, event_type, payload)
+             VALUES (?1, ?2, 'agent-supervisor', 'system', 'status_changed', ?3)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(task_id)
+        .bind(payload)
+        .execute(&mut *tx)
+        .await?;
+
+        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(task_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        let _ = self.events.send(DjinnEvent::TaskUpdated(task));
+        Ok(())
     }
 
     pub async fn delete(&self, id: &str) -> Result<()> {
@@ -1570,6 +1697,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn creating_task_reopens_closed_epic() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic = epic_repo.create("Test Epic", "", "", "", "").await.unwrap();
+        epic_repo.close(&epic.id).await.unwrap();
+
+        let repo = TaskRepository::new(db.clone(), tx);
+        let _task = repo
+            .create(&epic.id, "New Task", "", "", "task", 0, "")
+            .await
+            .unwrap();
+
+        let reopened = epic_repo.get(&epic.id).await.unwrap().unwrap();
+        assert_eq!(reopened.status, "open");
+        assert!(reopened.closed_at.is_none());
+    }
+
+    #[tokio::test]
     async fn short_id_lookup() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -1909,7 +2055,7 @@ mod tests {
             .unwrap();
         assert_eq!(t.status, "in_task_review");
 
-        // task_review_approve hands off to epic review.
+        // task_review_approve closes the task.
         let t = repo
             .transition(
                 &t.id,
@@ -1919,43 +2065,6 @@ mod tests {
                 None,
                 None,
             )
-            .await
-            .unwrap();
-        assert_eq!(t.status, "needs_epic_review");
-        assert!(t.closed_at.is_none());
-        assert!(t.close_reason.is_none());
-
-        // epic_review_start
-        let t = repo
-            .transition(
-                &t.id,
-                TransitionAction::EpicReviewStart,
-                "",
-                "epic_reviewer",
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(t.status, "in_epic_review");
-
-        // epic_review_approve
-        let t = repo
-            .transition(
-                &t.id,
-                TransitionAction::EpicReviewApprove,
-                "",
-                "epic_reviewer",
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(t.status, "approved");
-
-        // close
-        let t = repo
-            .transition(&t.id, TransitionAction::Close, "", "system", None, None)
             .await
             .unwrap();
         assert_eq!(t.status, "closed");

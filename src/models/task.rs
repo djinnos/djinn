@@ -294,7 +294,12 @@ pub fn compute_transition(
             if *from != TaskStatus::InTaskReview {
                 return bad("task_review_approve is only valid from in_task_review");
             }
-            TransitionApply::simple(TaskStatus::NeedsEpicReview)
+            TransitionApply {
+                to_status: Some(TaskStatus::Closed),
+                set_closed_at: true,
+                close_reason: Some("completed"),
+                ..Default::default()
+            }
         }
 
         TransitionAction::EpicReviewStart => {
@@ -320,7 +325,12 @@ pub fn compute_transition(
             if *from != TaskStatus::InEpicReview {
                 return bad("epic_review_approve is only valid from in_epic_review");
             }
-            TransitionApply::simple(TaskStatus::Approved)
+            TransitionApply {
+                to_status: Some(TaskStatus::Closed),
+                set_closed_at: true,
+                close_reason: Some("completed"),
+                ..Default::default()
+            }
         }
 
         TransitionAction::Close => {
