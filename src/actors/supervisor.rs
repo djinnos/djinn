@@ -2152,30 +2152,22 @@ impl AgentSupervisor {
                     exit_code = failed.exit_code,
                     "Supervisor: verification command failed"
                 );
-                // Extract file paths mentioned in stderr (e.g. "--> src/auth.rs:292:5")
-                // and include their contents so the agent can fix without re-reading.
-                let file_snippets = {
-                    let re = regex::Regex::new(r"--> ([\w./-]+\.\w+)").expect("valid regex");
-                    let mut snippets = String::new();
-                    let mut seen = std::collections::HashSet::new();
-                    for cap in re.captures_iter(&failed.stderr) {
-                        let rel = &cap[1];
-                        if seen.insert(rel.to_string()) {
-                            let abs = worktree_path.join(rel);
-                            if let Ok(contents) = std::fs::read_to_string(&abs) {
-                                snippets.push_str(&format!("\n\n### {rel}\n```\n{contents}\n```"));
-                            }
-                        }
+                // Trim output to last 50 lines to avoid context overflow on noisy tools like tsc.
+                // The agent has shell tools and can re-run the command or read files as needed.
+                let trim_output = |s: &str| -> String {
+                    let lines: Vec<&str> = s.trim().lines().collect();
+                    if lines.len() > 50 {
+                        format!("... ({} lines truncated) ...\n{}", lines.len() - 50, lines[lines.len() - 50..].join("\n"))
+                    } else {
+                        lines.join("\n")
                     }
-                    snippets
                 };
                 Some(format!(
-                    "Verification command '{}' failed with exit code {}.\n\nUse your shell and editor tools to inspect and fix the issue, then signal WORKER_RESULT: DONE.\n\nstdout:\n{}\nstderr:\n{}{}",
+                    "Verification command '{}' failed with exit code {}.\n\nUse your shell and editor tools to inspect and fix the issue, then signal WORKER_RESULT: DONE.\n\nstdout:\n{}\nstderr:\n{}",
                     failed.name,
                     failed.exit_code,
-                    failed.stdout.trim(),
-                    failed.stderr.trim(),
-                    file_snippets,
+                    trim_output(&failed.stdout),
+                    trim_output(&failed.stderr),
                 ))
             }
             Err(e) => {
