@@ -4,6 +4,7 @@
 // ADR-017: Worktree Injection and Landlock Crate
 
 use std::path::Path;
+use std::sync::LazyLock;
 
 use anyhow::Result;
 
@@ -22,20 +23,50 @@ pub trait Sandbox: Send + Sync {
     fn apply(&self, worktree_path: &Path, cmd: &mut tokio::process::Command) -> Result<()>;
 }
 
+// ─── Global singleton ─────────────────────────────────────────────────────────
+
+/// Global sandbox backend, detected once at first use.
+pub static SANDBOX: LazyLock<Box<dyn Sandbox>> = LazyLock::new(detect_backend);
+
 // ─── FallbackSandbox ─────────────────────────────────────────────────────────
 
-/// Fallback sandbox: heuristic path validation via workspace_guard.
+/// Fallback sandbox: heuristic path validation for kernels that do not support
+/// Landlock (< 5.13, WSL1) or non-Linux/macOS platforms.
 ///
-/// Used on kernels < 5.13, WSL1, or any platform where the preferred
-/// OS-level sandbox backend is unavailable. Validates that the worktree path
-/// is in an allowed location but does not apply OS-level access controls.
+/// Validates that `worktree_path` is inside a `.djinn/worktrees/` subtree or a
+/// well-known temp directory. Does not apply OS-level access controls.
 pub struct FallbackSandbox;
 
 impl Sandbox for FallbackSandbox {
     fn apply(&self, worktree_path: &Path, _cmd: &mut tokio::process::Command) -> Result<()> {
-        crate::agent::workspace_guard::enforce_workdir(worktree_path, false)
-            .map_err(|e| anyhow::anyhow!(e))
+        if !worktree_path.exists() || !worktree_path.is_dir() {
+            return Err(anyhow::anyhow!(
+                "workdir does not exist or is not a directory: {}",
+                worktree_path.display()
+            ));
+        }
+        if is_worktree_path(worktree_path) || is_temp_path(worktree_path) {
+            return Ok(());
+        }
+        Err(anyhow::anyhow!(
+            "workdir is outside task worktree: {}",
+            worktree_path.display()
+        ))
     }
+}
+
+fn is_temp_path(path: &Path) -> bool {
+    path.starts_with("/tmp") || path.starts_with("/var/tmp")
+}
+
+fn is_worktree_path(path: &Path) -> bool {
+    let parts: Vec<String> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    parts
+        .windows(2)
+        .any(|w| w[0] == ".djinn" && w[1] == "worktrees")
 }
 
 // ─── Backend detection ────────────────────────────────────────────────────────
@@ -63,7 +94,7 @@ fn _detect() -> Box<dyn Sandbox> {
     }
     tracing::warn!(
         "sandbox: Landlock unavailable (kernel < 5.13 or WSL1), \
-         falling back to workspace_guard heuristics"
+         falling back to FallbackSandbox heuristics"
     );
     Box::new(FallbackSandbox)
 }
@@ -77,7 +108,7 @@ fn _detect() -> Box<dyn Sandbox> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn _detect() -> Box<dyn Sandbox> {
     tracing::warn!(
-        "sandbox: unsupported platform, falling back to workspace_guard heuristics"
+        "sandbox: unsupported platform, falling back to FallbackSandbox heuristics"
     );
     Box::new(FallbackSandbox)
 }

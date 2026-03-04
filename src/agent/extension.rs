@@ -11,7 +11,7 @@ use rmcp::object;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::AgentType;
-use super::workspace_guard;
+use super::sandbox;
 use crate::db::repositories::note::NoteRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
@@ -433,12 +433,12 @@ async fn call_memory_search(
 
 async fn call_shell(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
-    _worktree_path: &Path,
+    worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
     let p: ShellParams = parse_args(arguments)?;
     let timeout_ms = p.timeout_ms.unwrap_or(120_000).max(1000);
 
-    let workdir = workspace_guard::resolve_path(
+    let workdir = resolve_path(
         &p.workdir,
         &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     );
@@ -452,6 +452,10 @@ async fn call_shell(
         c.arg("-lc").arg(&p.command);
         c
     };
+
+    sandbox::SANDBOX
+        .apply(worktree_path, &mut cmd)
+        .map_err(|e| e.to_string())?;
 
     let output = timeout(
         Duration::from_millis(timeout_ms),
@@ -472,6 +476,27 @@ async fn call_shell(
         "stderr": String::from_utf8_lossy(&output.stderr),
         "workdir": workdir,
     }))
+}
+
+fn resolve_path(raw: &str, base: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let p = Path::new(raw);
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base.join(p)
+    };
+    let mut out = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let _ = out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn parse_args<T>(
