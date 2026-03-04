@@ -1,10 +1,9 @@
 ---
-tags:
-    - planning
-    - roadmap
 title: Roadmap
 type: roadmap
+tags: []
 ---
+
 # Roadmap — Djinn Desktop
 
 ## Phase 1: Foundation
@@ -93,36 +92,34 @@ type: roadmap
 
 ---
 
-## Phase 6: Auto-Update & CI
-**Goal:** App can be built, signed, distributed, and auto-updated via GitHub Releases.
+## Phase 6: Distribution (Public Repo)
+**Goal:** CI, code signing, release automation, and updater flows are tracked in the public repo roadmap, not in this desktop planning board.
 
-**Depends on:** Phase 1
+**Depends on:** N/A in this repo
 
-**Requirements:** UPDATE-01 through UPDATE-06, CI-01 through CI-09
+**Requirements:** N/A in this repo
 
 **Success Criteria:**
-- `tauri-action` builds for macOS (arm64/x64), Linux (x64), Windows (x64)
-- Server sidecar bundled with correct platform-triple naming
-- Signing works: ed25519 for updater, Apple notarization, Windows code signing
-- `latest.json` auto-generated and uploaded to GitHub Release
-- App checks for updates on startup, shows dialog, downloads + relaunches
-- macOS notarization passes (JIT entitlement included)
+- Desktop repo focuses on runtime, UX, and local integration scope
+- CI/release work is owned and tracked in the public repo
 
 ---
 
 ## Parallel Execution Notes
 
-- **Phase 3 and Phase 6** can run in parallel with Phase 2 (independent)
+- **Phase 3** can run in parallel with **Phase 2** (independent)
 - **Phase 4 and Phase 5** can run in parallel (both depend on Phase 3, independent of each other)
+- **Phase 6** is tracked in the public repo roadmap (not executed from this desktop board)
 - **Phase 2** depends on Phase 1 only
 
 ```
 Phase 1 (Foundation)
 ├── Phase 2 (Auth & Onboarding)
-├── Phase 3 (Core UI & SSE)
-│   ├── Phase 4 (Kanban & Roadmap)
-│   └── Phase 5 (Settings)
-└── Phase 6 (Auto-Update & CI)
+└── Phase 3 (Core UI & SSE)
+    ├── Phase 4 (Kanban & Roadmap)
+    └── Phase 5 (Settings)
+
+Phase 6 (Distribution/Public Repo) tracked externally
 ```
 
 ## Relations
