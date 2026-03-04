@@ -17,7 +17,10 @@ if [[ "${TARGET_TRIPLE}" == *windows* ]]; then
   EXT=".exe"
 fi
 
-if [[ ! -d "${CACHE_DIR}/.git" ]]; then
+if [[ -L "${CACHE_DIR}" ]]; then
+  # Symlink to a local server repo — skip clone/fetch, use as-is.
+  echo "Using symlinked server source: $(readlink -f "${CACHE_DIR}")"
+elif [[ ! -d "${CACHE_DIR}/.git" ]]; then
   mkdir -p .cache
   git clone --depth 1 --branch "${BRANCH}" "${REMOTE}" "${CACHE_DIR}"
 else
