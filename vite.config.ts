@@ -16,6 +16,9 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    watch: {
+      ignored: ["**/.djinn/**"],
+    },
   },
   build: {
     target: "safari13",
