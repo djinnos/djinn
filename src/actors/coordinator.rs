@@ -300,11 +300,18 @@ impl CoordinatorActor {
             return;
         }
         match &evt {
-            // A task was created or transitioned back to open → check dispatch.
-            DjinnEvent::TaskCreated(t) | DjinnEvent::TaskUpdated(t) if t.status == "open" => {
+            // A task became dispatch-ready for any role → check dispatch.
+            DjinnEvent::TaskCreated(t)
+            | DjinnEvent::TaskUpdated(t)
+                if matches!(
+                    t.status.as_str(),
+                    "open" | "needs_task_review" | "needs_epic_review"
+                ) =>
+            {
                 tracing::debug!(
                     task_id = %t.short_id,
-                    "CoordinatorActor: open-task event → dispatch pass"
+                    status = %t.status,
+                    "CoordinatorActor: ready-task event → dispatch pass"
                 );
                 self.dispatch_ready_tasks(Some(&t.project_id)).await;
             }
@@ -567,62 +574,76 @@ impl CoordinatorActor {
         }
     }
 
-    /// On each tick: find `in_progress` tasks with no active session and release
-    /// them back to `open` so they can be re-dispatched (AGENT-08).
+    /// On each tick: find tasks in active execution states with no active session
+    /// and release them back to a dispatch-ready state (AGENT-08).
     async fn detect_and_recover_stuck(&mut self) {
         let repo = self.task_repo();
-        let in_progress = match repo.list_by_status("in_progress").await {
-            Ok(tasks) => tasks,
-            Err(e) => {
-                tracing::warn!(error = %e, "CoordinatorActor: list_by_status(in_progress) failed");
-                return;
-            }
-        };
 
         let mut any_recovered = false;
-        for task in in_progress {
-            match self.supervisor.has_session(&task.id).await {
-                Ok(true) => continue, // healthy — session is active
-                Ok(false) => {}
-                Err(SupervisorError::ActorDead) => {
-                    tracing::error!("CoordinatorActor: supervisor actor dead during stuck check");
-                    return;
-                }
+        for (status, action) in [
+            ("in_progress", TransitionAction::Release),
+            ("in_task_review", TransitionAction::ReleaseTaskReview),
+            ("in_epic_review", TransitionAction::ReleaseEpicReview),
+        ] {
+            let tasks = match repo.list_by_status(status).await {
+                Ok(tasks) => tasks,
                 Err(e) => {
                     tracing::warn!(
-                        task_id = %task.short_id,
                         error = %e,
-                        "CoordinatorActor: has_session failed during stuck check"
+                        status,
+                        "CoordinatorActor: list_by_status failed during stuck check"
                     );
                     continue;
                 }
-            }
+            };
 
-            tracing::warn!(
-                task_id = %task.short_id,
-                "CoordinatorActor: stuck task detected (in_progress, no session) — releasing"
-            );
-            match repo
-                .transition(
-                    &task.id,
-                    TransitionAction::Release,
-                    "coordinator",
-                    "system",
-                    Some("stuck task — no active session detected"),
-                    None,
-                )
-                .await
-            {
-                Ok(_) => {
-                    self.recovered += 1;
-                    any_recovered = true;
+            for task in tasks {
+                match self.supervisor.has_session(&task.id).await {
+                    Ok(true) => continue, // healthy — session is active
+                    Ok(false) => {}
+                    Err(SupervisorError::ActorDead) => {
+                        tracing::error!("CoordinatorActor: supervisor actor dead during stuck check");
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            status,
+                            error = %e,
+                            "CoordinatorActor: has_session failed during stuck check"
+                        );
+                        continue;
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        error = %e,
-                        "CoordinatorActor: recovery transition failed"
-                    );
+
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    status,
+                    "CoordinatorActor: stuck task detected (no session) — releasing"
+                );
+                match repo
+                    .transition(
+                        &task.id,
+                        action.clone(),
+                        "coordinator",
+                        "system",
+                        Some("stuck task — no active session detected"),
+                        None,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        self.recovered += 1;
+                        any_recovered = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            status,
+                            error = %e,
+                            "CoordinatorActor: recovery transition failed"
+                        );
+                    }
                 }
             }
         }

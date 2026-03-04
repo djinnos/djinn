@@ -180,7 +180,7 @@ _Updated: 2026-03-03 (post-audit)_
 1. ~~Coordinator dispatches Goose agent to an open task; agent works in worktree~~ ✓
 2. ~~Model health tracks failures; circuit breaker trips after threshold; reroutes to alternative~~ ✓
 3. ~~Session limiting enforces per-model capacity~~ ✓
-4. ~~Graceful shutdown: CancellationToken → Goose agent stops → WIP commit → worktree preserved~~ ✓
+4. ~~Graceful shutdown: CancellationToken → Goose agent stops → WIP commit/capture and worktree cleanup handled by supervisor~~ ✓
 5. ~~Stuck detection recovers tasks from unresponsive agents within 30s~~ ✓
 6. ~~Credential vault stores API keys; Goose providers created from vault at dispatch time~~ ✓
 7. ~~Per-session prompt and extension configuration for different agent types~~ ✓
@@ -191,7 +191,7 @@ _Updated: 2026-03-03 (post-audit)_
 
 ## Phase 6: Review System
 
-**Goal**: Task review and phase review agents verify quality before approval. **Runs as Goose sessions per ADR-008.**
+**Goal**: Task review and epic review agents verify quality before approval. **Runs as Goose sessions per ADR-008.**
 
 **Progress**: COMPLETE. Review agents (`lm7a`) closed. Scaffold system (`1nby`) dropped per ADR-008. Coordinator dispatches review agents for tasks in `needs_task_review` and `needs_epic_review` states. Supervisor handles transitions for all three agent types (worker, task_reviewer, epic_reviewer).
 
@@ -314,7 +314,7 @@ Phase 7: Desktop & Sync 🟡 (qhb4)
     ↓
 Phase 8: Session Visibility ⚪ (3 features)
     ↓
-Phase 9: V1 Completion ⚪ (7 items)
+Phase 9: V1 Completion ⚪ (8 items)
 ```
 
 Phase 8 depends on Phase 5 (supervisor writes sessions). Phase 9 is independent — can run in parallel with Phase 7/8 where items don't overlap. Within Phase 9: `layi` (conflict resolution) is blocked by `lypu` (structured output parsing).

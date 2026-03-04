@@ -106,9 +106,9 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 
 | ID | Requirement | Classification | Source |
 |---|---|---|---|
-| GIT-01 | Task branches created from target branch (configurable, default: main) on remote | v1 | Brief |
+| GIT-01 | Task branches created locally from target branch (configurable, default: main); remote push is optional | v1 | Brief |
 | GIT-02 | Agent works in isolated worktree (user's checkout untouched) | v1 | Brief, Features Research |
-| GIT-03 | Squash-merge to target branch upstream on approval | v1 | Brief |
+| GIT-03 | On task-review approval, create squash merge in a detached merge worktree and push commit directly to `origin/<target>` (avoids mutating the user's local checked-out branch) | v1 | Brief |
 | GIT-04 | GitActor: serialize all git operations through a single actor per repository | v1 | Architecture Research §4 |
 | GIT-05 | Hybrid git2 + CLI: git2 for reads (status, diff, ref queries), CLI for writes (worktree, merge, push) | v1 | Architecture Research §4 |
 | GIT-06 | Worktree lifecycle: create, cleanup, orphan detection, `git worktree prune` before create | v1 | Brief, Pitfalls Research §6 |

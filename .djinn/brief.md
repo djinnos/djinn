@@ -31,7 +31,7 @@ The current Go server has accumulated significant complexity:
 
 - Server starts and serves MCP tools without external auth dependencies
 - Desktop reads task/memory state from a local Turso embedded replica with no CDC pipeline
-- Agents can be dispatched to tasks, work in worktrees, and merge directly to main upstream
+- Agents can be dispatched to tasks, work in isolated worktrees, and squash-merge to the target branch locally (remote push optional)
 - Epic review gates epic completion by checking for missing tasks and reviewing aggregate code quality
 - Task review checks acceptance criteria and code nitpicks on individual task diffs
 - All state (tasks, memory, projects, settings, activity) lives in a single libSQL database at `~/.djinn/`

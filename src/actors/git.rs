@@ -97,7 +97,7 @@ enum GitMessage {
         args: Vec<String>,
         respond_to: Reply<CommandOutput>,
     },
-    /// Create `task/{short_id}` from `target_branch` and push to origin (GIT-01).
+    /// Create local `task/{short_id}` from `target_branch` (GIT-01).
     CreateBranch {
         short_id: String,
         target_branch: String,
@@ -305,7 +305,7 @@ impl GitActor {
         })
     }
 
-    /// Create `task/{short_id}` from `target_branch`, push to origin (GIT-01).
+    /// Create local `task/{short_id}` from `target_branch` (GIT-01).
     async fn create_branch_impl(
         path: PathBuf,
         short_id: String,
@@ -321,37 +321,29 @@ impl GitActor {
         .await;
 
         // Prefer remote tracking ref; fall back to local branch.
+        // IMPORTANT: do not checkout in repo root; create branch ref only.
         let remote_ref = format!("origin/{target_branch}");
-        let checkout = Self::run_git_command(
+        let create = Self::run_git_command(
             path.clone(),
             vec![
-                "checkout".into(),
-                "-b".into(),
+                "branch".into(),
                 branch_name.clone(),
                 remote_ref,
             ],
         )
         .await;
 
-        if checkout.is_err() {
+        if create.is_err() {
             Self::run_git_command(
                 path.clone(),
                 vec![
-                    "checkout".into(),
-                    "-b".into(),
+                    "branch".into(),
                     branch_name.clone(),
                     target_branch,
                 ],
             )
             .await?;
         }
-
-        // Push new branch to remote (GIT-01 requires it on the remote).
-        Self::run_git_command(
-            path,
-            vec!["push".into(), "-u".into(), "origin".into(), branch_name],
-        )
-        .await?;
 
         Ok(())
     }
@@ -366,19 +358,84 @@ impl GitActor {
         target_branch: String,
         message: String,
     ) -> Result<MergeResult, GitError> {
-        // Switch to target branch.
-        Self::run_git_command(path.clone(), vec!["checkout".into(), target_branch.clone()]).await?;
-
-        // Stage all changes from the task branch as a squash (no commit yet).
-        if let Err(err) = Self::run_git_command(
+        // Prefer a detached temporary merge worktree based on origin/<target>
+        // so local checked-out branches are never mutated during merge.
+        let _ = Self::run_git_command(
             path.clone(),
-            vec!["merge".into(), "--squash".into(), branch],
+            vec!["fetch".into(), "origin".into(), target_branch.clone()],
         )
-        .await
+        .await;
+
+        let temp_name = format!(
+            ".merge-{}-{}",
+            target_branch,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        let merge_wt_path = path.join(".djinn").join("worktrees").join(temp_name);
+        let merge_wt = merge_wt_path.to_string_lossy().to_string();
+        let origin_target = format!("origin/{target_branch}");
+
+        let add_result = Self::run_git_command(
+            path.clone(),
+            vec![
+                "worktree".into(),
+                "add".into(),
+                "--detach".into(),
+                merge_wt.clone(),
+                origin_target,
+            ],
+        )
+        .await;
+
+        if let Err(err) = add_result {
+            // Never fall back to root-worktree merges. If the detached merge
+            // worktree cannot be created, fail fast to keep the user's root
+            // checkout untouched.
+            return Err(err);
+        }
+
+        let merge_result = Self::squash_merge_detached_worktree_impl(
+            path.clone(),
+            merge_wt_path.clone(),
+            branch,
+            target_branch.clone(),
+            message,
+        )
+        .await;
+
+        let _ = Self::run_git_command(
+            path.clone(),
+            vec![
+                "worktree".into(),
+                "remove".into(),
+                "--force".into(),
+                merge_wt,
+            ],
+        )
+        .await;
+        let _ = Self::run_git_command(path, vec!["worktree".into(), "prune".into()]).await;
+
+        merge_result
+    }
+
+    async fn squash_merge_detached_worktree_impl(
+        repo_path: PathBuf,
+        wt_path: PathBuf,
+        branch: String,
+        target_branch: String,
+        message: String,
+    ) -> Result<MergeResult, GitError> {
+        // Stage all changes from the task branch as a squash (no commit yet).
+        if let Err(err) =
+            Self::run_git_command(wt_path.clone(), vec!["merge".into(), "--squash".into(), branch])
+                .await
         {
             if matches!(err, GitError::CommandFailed { .. }) {
-                let files = Self::unmerged_files(path.clone()).await.unwrap_or_default();
-                let _ = Self::run_git_command(path, vec!["merge".into(), "--abort".into()]).await;
+                let files = Self::unmerged_files(wt_path.clone()).await.unwrap_or_default();
+                let _ = Self::run_git_command(wt_path, vec!["merge".into(), "--abort".into()]).await;
                 return Err(GitError::MergeConflict {
                     target_branch,
                     files,
@@ -388,7 +445,7 @@ impl GitActor {
         }
 
         // Commit — hooks run here. Any failure → HookFailed (GIT-07).
-        match Self::run_git_command(path.clone(), vec!["commit".into(), "-m".into(), message]).await
+        match Self::run_git_command(wt_path.clone(), vec!["commit".into(), "-m".into(), message]).await
         {
             Ok(_) => {}
             Err(GitError::CommandFailed { code, stderr }) => {
@@ -401,11 +458,21 @@ impl GitActor {
         }
 
         // Read the resulting commit SHA.
-        let out = Self::run_git_command(path, vec!["rev-parse".into(), "HEAD".into()]).await?;
+        let out = Self::run_git_command(wt_path.clone(), vec!["rev-parse".into(), "HEAD".into()]).await?;
+        let commit_sha = out.stdout.trim().to_string();
 
-        Ok(MergeResult {
-            commit_sha: out.stdout.trim().into(),
-        })
+        // Push merge commit directly to upstream target branch.
+        Self::run_git_command(
+            repo_path,
+            vec![
+                "push".into(),
+                "origin".into(),
+                format!("{commit_sha}:refs/heads/{target_branch}"),
+            ],
+        )
+        .await?;
+
+        Ok(MergeResult { commit_sha })
     }
 
     async fn unmerged_files(path: PathBuf) -> Result<Vec<String>, GitError> {
@@ -601,7 +668,7 @@ impl GitActorHandle {
         .await
     }
 
-    /// Create `task/{short_id}` from `target_branch` and push to origin (GIT-01).
+    /// Create local `task/{short_id}` from `target_branch` (GIT-01).
     pub async fn create_branch(&self, short_id: &str, target_branch: &str) -> Result<(), GitError> {
         self.request(|tx| GitMessage::CreateBranch {
             short_id: short_id.into(),

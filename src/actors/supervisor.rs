@@ -905,6 +905,43 @@ impl AgentSupervisor {
         }
     }
 
+    async fn commit_final_work_if_needed(
+        &self,
+        task_id: &str,
+        worktree_path: &Path,
+    ) -> Result<(), String> {
+        let git = self
+            .app_state
+            .git_actor(worktree_path)
+            .await
+            .map_err(|e| format!("failed to open git actor for worktree: {e}"))?;
+
+        let status = git
+            .run_command(vec!["status".into(), "--porcelain".into()])
+            .await
+            .map_err(|e| format!("failed to read worktree status: {e}"))?;
+
+        if status.stdout.trim().is_empty() {
+            return Ok(());
+        }
+
+        git.run_command(vec!["add".into(), "-A".into()])
+            .await
+            .map_err(|e| format!("failed to stage completed session changes: {e}"))?;
+
+        let message = format!("WIP: auto-save completed session {task_id}");
+        git.run_command(vec![
+            "commit".into(),
+            "--no-verify".into(),
+            "-m".into(),
+            message,
+        ])
+        .await
+        .map_err(|e| format!("failed to commit completed session changes: {e}"))?;
+
+        Ok(())
+    }
+
     async fn cleanup_worktree(&self, task_id: &str, worktree_path: &Path) {
         let task = match self.load_task(task_id).await {
             Ok(task) => task,
@@ -995,7 +1032,26 @@ impl AgentSupervisor {
         .await;
 
         if let Some(worktree_path) = session.worktree_path.as_ref() {
-            self.cleanup_worktree(task_id, worktree_path).await;
+            let should_persist_final = result.is_ok()
+                && matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver)
+                && matches!(output.worker_signal, Some(WorkerSignal::Done));
+
+            let mut allow_cleanup = true;
+            if should_persist_final
+                && let Err(e) = self.commit_final_work_if_needed(task_id, worktree_path).await
+            {
+                allow_cleanup = false;
+                tracing::warn!(
+                    task_id = %task_id,
+                    worktree_path = %worktree_path.display(),
+                    error = %e,
+                    "failed to persist completed session changes; preserving worktree for recovery"
+                );
+            }
+
+            if allow_cleanup {
+                self.cleanup_worktree(task_id, worktree_path).await;
+            }
         }
 
         if let Some(feedback) = output.reviewer_feedback.as_deref() {
@@ -1082,6 +1138,15 @@ impl AgentSupervisor {
                     None,
                 )
                 .await;
+        }
+
+        // Capacity has just been released by this session completion. Trigger an
+        // immediate dispatch pass for the same project so the next ready task
+        // starts without waiting for the coordinator interval tick.
+        if let Ok(task) = self.load_task(task_id).await
+            && let Some(coordinator) = self.app_state.coordinator().await
+        {
+            let _ = coordinator.trigger_dispatch_for_project(&task.project_id).await;
         }
     }
 
@@ -1394,13 +1459,26 @@ impl AgentSupervisor {
 
         let base_branch = format!("task/{}", task.short_id);
         let merge_target = self.default_target_branch(&task.project_id).await;
-        let message = format!("{}: {}", task.short_id, task.title);
+        let commit_type = if task.issue_type == "task" {
+            "chore"
+        } else {
+            "feat"
+        };
+        let message = format!("{}({}): {}", commit_type, task.short_id, task.title);
 
         match git
             .squash_merge(&base_branch, &merge_target, &message)
             .await
         {
             Ok(result) => {
+                if let Err(e) = git.delete_branch(&base_branch).await {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        branch = %base_branch,
+                        error = %e,
+                        "failed to delete task branch after successful merge"
+                    );
+                }
                 if let Err(e) = repo.set_merge_commit_sha(task_id, &result.commit_sha).await {
                     return Some((
                         TransitionAction::ReleaseTaskReview,
