@@ -46,7 +46,7 @@ If `$ARGUMENTS` contains `--auto`:
 Check what already exists before creating anything.
 
 1. Run `memory_catalog()` to list all existing notes
-2. Run `epic_list()` to check for existing epics
+2. Run `epic_list(project=PROJECT)` to check for existing epics
 3. **If a brief already exists:** Tell the user what you found. Ask whether they want to:
    - Start fresh (overwrites existing brief and creates new artifacts alongside existing ones)
    - Extend the existing project (skip to a specific step like research or requirements)
@@ -282,6 +282,7 @@ Translate the roadmap into domain-structured epics and features on the Djinn tas
 **8b. Create epics** for each domain area:
 ```
 epic_create(
+  project=PROJECT,
   title="{Domain Name}",
   description="...",
   emoji="{relevant_emoji}",
@@ -294,6 +295,7 @@ epic_create(
 **8c. Create features** under each epic for phase-specific work:
 ```
 task_create(
+  project=PROJECT,
   issue_type="feature",
   epic_id="{epic_id}",
   title="{Specific deliverable}",
@@ -309,11 +311,13 @@ task_create(
 **8d. Set cross-phase blocker dependencies:**
 ```
 task_blockers_add(
+  project=PROJECT,
   id="{phase_N+1_feature_id}",
   blocking_id="{phase_N_feature_id}"
 )
 ```
 - Features in Phase N+1 must be blocked by **at least one** feature in Phase N that they actually depend on
+- Do not set blockers on epics; blocker relationships are allowed only between non-epic work items (tasks/features/bugs)
 - Only block on real technical or logical dependencies -- do NOT block every Phase 2 feature on every Phase 1 feature
 - Let the Djinn coordinator parallelize everything that is not explicitly blocked
 
@@ -323,7 +327,7 @@ task_blockers_add(
 
 **Individual tasks are NOT created during new-project.** Only epics and features. Task decomposition into individual work items happens when `plan-milestone` runs for each phase.
 
-See `cookbook/task-templates.md` for epic/feature creation patterns and wave ordering examples.
+See `cookbook/task-templates.md` for epic/feature creation patterns and dependency ordering examples.
 
 ### Step 9: Verification
 
@@ -336,7 +340,7 @@ Verify all artifacts were created correctly.
    - 1 requirements note (type=requirement)
    - 1 roadmap note (type=roadmap)
    - 1 workflow preferences note (type=reference)
-2. **Task board check**: Run `epic_list()` and verify:
+2. **Task board check**: Run `epic_list(project=PROJECT)` and verify:
    - Domain-structured epics exist (3-7 for a standard project)
    - Each epic has features under it
 3. **Wikilink check**: Spot-check that `## Relations` sections contain valid wikilinks by reading 2-3 notes and confirming linked titles exist

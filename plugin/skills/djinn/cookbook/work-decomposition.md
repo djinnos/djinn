@@ -7,10 +7,10 @@ How to structure work into epics, features, and tasks in djinn — workflow agno
 Epics and tasks use **separate MCP tools** (per ADR-003):
 
 ```
-epic_create()  → Epic: "User Authentication System"   (weeks, strategic container)
-task_create()  → Feature: "Login UI"                   (2-4h, one deliverable)
-task_create()  → Task: "Create JWT middleware"          (1 outcome, implementable)
-task_create()  → Bug: "Password field clears on error" (defect fix)
+epic_create(project=PROJECT, ...)  → Epic: "User Authentication System"   (weeks, strategic container)
+task_create(project=PROJECT, ...)  → Feature: "Login UI"                   (2-4h, one deliverable)
+task_create(project=PROJECT, ...)  → Task: "Create JWT middleware"          (1 outcome, implementable)
+task_create(project=PROJECT, ...)  → Bug: "Password field clears on error" (defect fix)
 ```
 
 Features, tasks, and bugs are **all flat siblings under an epic**. There is no nesting of tasks under features. The `issue_type` field distinguishes them but they share the same parent level.
@@ -26,6 +26,7 @@ Epics are **strategic containers** managed by their own tool namespace. They don
 
 ```
 epic_create(
+  project=PROJECT,
   title="User Authentication System",
   emoji="🔐",
   color="#8B5CF6",
@@ -37,7 +38,7 @@ epic_create(
 - Describes a user-facing capability, not a technical component
 - Has acceptance criteria that a non-technical stakeholder can verify
 - Contains 2-8 features (if more, consider splitting the epic)
-- Use `epic_tasks(epic_id=...)` to list all children
+- Use `epic_tasks(project=PROJECT, epic_id=...)` to list all children
 - Use `epic_show(id=...)` to see epic details and child counts
 
 ## Features / Stories
@@ -46,6 +47,7 @@ Features are the primary unit of delivery. Each feature should be completable in
 
 ```
 task_create(
+  project=PROJECT,
   title="Login UI",
   issue_type="feature",
   epic_id="epic-id",
@@ -80,6 +82,7 @@ Tasks are implementation steps. One task = one atomic commit.
 
 ```
 task_create(
+  project=PROJECT,
   title="Implement JWT validation middleware",
   issue_type="task",
   epic_id="epic-id",
@@ -116,6 +119,7 @@ Bugs are defects found during or after implementation.
 
 ```
 task_create(
+  project=PROJECT,
   title="Login fails with special chars in password",
   issue_type="bug",
   epic_id="epic-id",
@@ -169,6 +173,7 @@ Use blockers to express sequencing requirements:
 ```
 # Registration must exist before email verification can be built
 task_blockers_add(
+  project=PROJECT,
   id="email-verification-feature-id",
   blocking_id="registration-feature-id",
 )
@@ -211,13 +216,13 @@ labels=["hotfix", "tech-debt", "a11y"]
 Query examples:
 ```
 # All auth work in sprint 3
-task_list(label="sprint:3", text="auth")
+task_list(project=PROJECT, label="sprint:3", text="auth")
 
 # All API tasks
-task_list(label="layer:api", issue_type="task")
+task_list(project=PROJECT, label="layer:api", issue_type="task")
 
 # Count by area
-task_count(group_by="epic")
+task_count(project=PROJECT, group_by="epic")
 ```
 
 ## Acceptance Criteria Patterns
@@ -254,17 +259,17 @@ For strategic planning, create epics first, then flesh out features:
 
 ```
 # Phase 1: Create epics via epic_create (separate tool namespace)
-auth_epic = epic_create(title="User Auth", emoji="🔐", color="#8B5CF6")
-payments_epic = epic_create(title="Payments", emoji="💳", color="#22C55E")
-onboarding_epic = epic_create(title="Onboarding", emoji="🚀", color="#F97316")
+auth_epic = epic_create(project=PROJECT, title="User Auth", emoji="🔐", color="#8B5CF6")
+payments_epic = epic_create(project=PROJECT, title="Payments", emoji="💳", color="#22C55E")
+onboarding_epic = epic_create(project=PROJECT, title="Onboarding", emoji="🚀", color="#F97316")
 
 # Phase 2: Create features and tasks under epics (all flat siblings)
-task_create(title="Login UI", issue_type="feature", epic_id=auth_epic, ...)
-task_create(title="Registration", issue_type="feature", epic_id=auth_epic, ...)
-task_create(title="JWT middleware", issue_type="task", epic_id=auth_epic, ...)
+task_create(project=PROJECT, title="Login UI", issue_type="feature", epic_id=auth_epic, ...)
+task_create(project=PROJECT, title="Registration", issue_type="feature", epic_id=auth_epic, ...)
+task_create(project=PROJECT, title="JWT middleware", issue_type="task", epic_id=auth_epic, ...)
 
 # Use epic_tasks to list all children of an epic
-epic_tasks(epic_id=auth_epic)
+epic_tasks(project=PROJECT, epic_id=auth_epic)
 ```
 
 ## Linking Memory to Work
@@ -274,6 +279,7 @@ Always connect work items to relevant architectural knowledge:
 ```
 # After writing an ADR
 task_update(
+  project=PROJECT,
   id="feature-id",
   memory_refs_add=["decisions/adr-005-jwt-session.md"]
 )
