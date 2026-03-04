@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use tokio::process::Command;
@@ -60,7 +60,7 @@ pub fn config(agent_type: AgentType) -> ExtensionConfig {
         description: "Djinn task and memory tools".to_string(),
         tools,
         instructions: Some(
-            "Use Djinn tools for task lifecycle and project memory. For shell calls, pass workdir as the active task worktree path; set external_dir=true only for intentional outside-workspace access.".to_string(),
+            "Use Djinn tools for task lifecycle and project memory. For shell calls, pass workdir as the active task worktree path.".to_string(),
         ),
         bundled: Some(true),
         available_tools,
@@ -71,18 +71,20 @@ pub async fn handle_event(
     state: &AppState,
     agent: &goose::agents::Agent,
     event: &goose::agents::AgentEvent,
+    worktree_path: &Path,
 ) {
     let goose::agents::AgentEvent::Message(msg) = event else {
         return;
     };
 
-    handle_frontend_requests_in_message(state, agent, msg).await;
+    handle_frontend_requests_in_message(state, agent, msg, worktree_path).await;
 }
 
 async fn handle_frontend_requests_in_message(
     state: &AppState,
     agent: &goose::agents::Agent,
     message: &Message,
+    worktree_path: &Path,
 ) {
     for content in &message.content {
         let MessageContent::FrontendToolRequest(req) = content else {
@@ -90,7 +92,7 @@ async fn handle_frontend_requests_in_message(
         };
 
         let payload = match &req.tool_call {
-            Ok(tool_call) => dispatch_tool_call(state, tool_call).await,
+            Ok(tool_call) => dispatch_tool_call(state, tool_call, worktree_path).await,
             Err(err) => Err(format!("invalid frontend tool call: {err}")),
         };
 
@@ -121,7 +123,11 @@ struct IncomingToolCall {
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-async fn dispatch_tool_call<T>(state: &AppState, tool_call: &T) -> Result<serde_json::Value, String>
+async fn dispatch_tool_call<T>(
+    state: &AppState,
+    tool_call: &T,
+    worktree_path: &Path,
+) -> Result<serde_json::Value, String>
 where
     T: Serialize,
 {
@@ -136,7 +142,7 @@ where
         "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments).await,
-        "shell" => call_shell(&call.arguments).await,
+        "shell" => call_shell(&call.arguments, worktree_path).await,
         other => Err(format!("unknown djinn frontend tool: {other}")),
     }
 }
@@ -201,7 +207,6 @@ struct ShellParams {
     command: String,
     workdir: String,
     timeout_ms: Option<u64>,
-    external_dir: Option<bool>,
 }
 
 async fn call_task_show(
@@ -428,29 +433,15 @@ async fn call_memory_search(
 
 async fn call_shell(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    _worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
     let p: ShellParams = parse_args(arguments)?;
-    let external_dir = p.external_dir.unwrap_or(false);
     let timeout_ms = p.timeout_ms.unwrap_or(120_000).max(1000);
 
     let workdir = workspace_guard::resolve_path(
         &p.workdir,
         &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     );
-    workspace_guard::enforce_workdir(&workdir, external_dir)?;
-
-    let outside =
-        workspace_guard::command_outside_workspace_paths(&p.command, &workdir, external_dir);
-    if !outside.is_empty() {
-        return Ok(serde_json::json!({
-            "ok": false,
-            "error_code": "EXTERNAL_DIR_REQUIRED",
-            "error": "Command targets paths outside the active workspace.",
-            "hint": "Use the active task worktree so changes are committed correctly. If intentional, retry with external_dir=true.",
-            "offending_paths": outside,
-            "workdir": workdir,
-        }));
-    }
 
     let mut cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");
@@ -729,15 +720,14 @@ fn tool_memory_search() -> RmcpTool {
 fn tool_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
-        "Execute shell commands guarded to task worktree by default. Outside access requires external_dir=true.".to_string(),
+        "Execute shell commands in the task worktree.".to_string(),
         object!({
             "type": "object",
             "required": ["command", "workdir"],
             "properties": {
                 "command": {"type": "string"},
                 "workdir": {"type": "string", "description": "Absolute task worktree path"},
-                "timeout_ms": {"type": "integer"},
-                "external_dir": {"type": "boolean", "description": "Set true only for intentional out-of-worktree access"}
+                "timeout_ms": {"type": "integer"}
             }
         }),
     )
