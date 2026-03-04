@@ -2146,12 +2146,32 @@ impl AgentSupervisor {
                     exit_code = failed.exit_code,
                     "Supervisor: verification command failed"
                 );
+                // Extract file paths mentioned in stderr (e.g. "--> src/auth.rs:292")
+                // and include their contents so the agent can fix without re-reading.
+                let file_snippets = {
+                    let mut snippets = String::new();
+                    let mut seen = std::collections::HashSet::new();
+                    for line in failed.stderr.lines() {
+                        let line = line.trim();
+                        if let Some(rest) = line.strip_prefix("--> ") {
+                            let rel = rest.split(':').next().unwrap_or("").trim();
+                            if !rel.is_empty() && seen.insert(rel.to_string()) {
+                                let abs = worktree_path.join(rel);
+                                if let Ok(contents) = std::fs::read_to_string(&abs) {
+                                    snippets.push_str(&format!("\n\n### {rel}\n```\n{contents}\n```"));
+                                }
+                            }
+                        }
+                    }
+                    snippets
+                };
                 Some(format!(
-                    "Verification command '{}' failed with exit code {}.\n\nFix the issue and signal WORKER_RESULT: DONE when complete.\n\nstdout:\n{}\nstderr:\n{}",
+                    "Verification command '{}' failed with exit code {}.\n\nUse your shell and editor tools to inspect and fix the issue, then signal WORKER_RESULT: DONE.\n\nstdout:\n{}\nstderr:\n{}{}",
                     failed.name,
                     failed.exit_code,
                     failed.stdout.trim(),
                     failed.stderr.trim(),
+                    file_snippets,
                 ))
             }
             Err(e) => {
@@ -2756,10 +2776,10 @@ impl AgentSupervisor {
 
         match agent_type {
             AgentType::Worker | AgentType::ConflictResolver => Some(
-                "Emit exactly one final marker now: WORKER_RESULT: DONE | PROGRESS: <what remains> | BLOCKED: <specific blocker>. Do not continue analysis.",
+                "Emit exactly one final marker now: WORKER_RESULT: DONE | PROGRESS: <what remains> | BLOCKED: <specific blocker>.",
             ),
             AgentType::TaskReviewer => Some(
-                "Emit exactly one final marker now: REVIEW_RESULT: VERIFIED | REOPEN | CANCEL. If REOPEN or CANCEL, also emit FEEDBACK: <what is missing>. Do not continue analysis.",
+                "Emit exactly one final marker now: REVIEW_RESULT: VERIFIED | REOPEN | CANCEL. If REOPEN or CANCEL, also emit FEEDBACK: <what is missing>.",
             ),
             AgentType::EpicReviewer => Some(
                 "Emit exactly one final marker now: EPIC_REVIEW_RESULT: CLEAN | ISSUES_FOUND. If ISSUES_FOUND, include concise actionable findings and create follow-up tasks in this epic before finishing.",
