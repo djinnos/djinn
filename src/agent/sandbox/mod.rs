@@ -1,0 +1,102 @@
+// Sandbox module — OS-level shell sandbox trait and backend selection.
+//
+// ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt
+// ADR-017: Worktree Injection and Landlock Crate
+
+use std::path::Path;
+
+use anyhow::Result;
+
+pub mod linux;
+pub mod macos;
+
+// ─── Trait ────────────────────────────────────────────────────────────────────
+
+/// Policy enforcement interface for agent shell calls.
+///
+/// `apply` is called just before the child process is spawned. Implementations
+/// restrict what the process can read and write using OS-level primitives
+/// (Landlock on Linux, Seatbelt on macOS). FallbackSandbox performs heuristic
+/// path validation when the OS backend is unavailable.
+pub trait Sandbox: Send + Sync {
+    fn apply(&self, worktree_path: &Path, cmd: &mut tokio::process::Command) -> Result<()>;
+}
+
+// ─── FallbackSandbox ─────────────────────────────────────────────────────────
+
+/// Fallback sandbox: heuristic path validation via workspace_guard.
+///
+/// Used on kernels < 5.13, WSL1, or any platform where the preferred
+/// OS-level sandbox backend is unavailable. Validates that the worktree path
+/// is in an allowed location but does not apply OS-level access controls.
+pub struct FallbackSandbox;
+
+impl Sandbox for FallbackSandbox {
+    fn apply(&self, worktree_path: &Path, _cmd: &mut tokio::process::Command) -> Result<()> {
+        crate::agent::workspace_guard::enforce_workdir(worktree_path, false)
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+}
+
+// ─── Backend detection ────────────────────────────────────────────────────────
+
+/// Probe the OS and return the best available sandbox backend.
+///
+/// On Linux, attempts to create a Landlock ruleset to verify kernel support
+/// (≥ 5.13). If unavailable, returns `FallbackSandbox` with a warning.
+///
+/// On macOS, returns the Seatbelt-based sandbox.
+///
+/// On all other platforms, returns `FallbackSandbox`.
+///
+/// This function should be called once at startup and the result stored in
+/// supervisor state.
+pub fn detect_backend() -> Box<dyn Sandbox> {
+    _detect()
+}
+
+#[cfg(target_os = "linux")]
+fn _detect() -> Box<dyn Sandbox> {
+    if probe_landlock() {
+        tracing::info!("sandbox: Landlock available, using LandlockSandbox");
+        return Box::new(linux::LandlockSandbox);
+    }
+    tracing::warn!(
+        "sandbox: Landlock unavailable (kernel < 5.13 or WSL1), \
+         falling back to workspace_guard heuristics"
+    );
+    Box::new(FallbackSandbox)
+}
+
+#[cfg(target_os = "macos")]
+fn _detect() -> Box<dyn Sandbox> {
+    tracing::info!("sandbox: macOS detected, using SeatbeltSandbox");
+    Box::new(macos::SeatbeltSandbox)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn _detect() -> Box<dyn Sandbox> {
+    tracing::warn!(
+        "sandbox: unsupported platform, falling back to workspace_guard heuristics"
+    );
+    Box::new(FallbackSandbox)
+}
+
+// ─── Linux Landlock probe ─────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+fn probe_landlock() -> bool {
+    // landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION=1)
+    // Returns the Landlock ABI version (> 0) if the kernel supports it,
+    // or -ENOSYS if Landlock is not available. Syscall 444 is stable on
+    // x86_64, arm64, and riscv64.
+    let ret = unsafe {
+        libc::syscall(
+            444,                                  // SYS_landlock_create_ruleset
+            std::ptr::null::<libc::c_void>(),     // attr = NULL
+            0usize,                               // size = 0
+            1i32,                                 // flags = LANDLOCK_CREATE_RULESET_VERSION
+        )
+    };
+    ret > 0
+}
