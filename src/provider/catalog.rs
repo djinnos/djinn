@@ -198,6 +198,9 @@ impl CatalogService {
     /// corresponding models.dev entry.  This makes providers like `chatgpt_codex` and
     /// `gcp_vertex_ai` visible in `provider_catalog` without requiring them to exist
     /// in the upstream models.dev JSON.
+    ///
+    /// Model lists are sourced from models.dev when a mapping exists (see
+    /// [`MODEL_SOURCE_MAP`]), falling back to Goose's hardcoded `known_models`.
     pub fn inject_goose_providers(&self, entries: &[(ProviderMetadata, ProviderType)]) {
         let mut data = self.inner.write().unwrap();
         let existing_ids: HashSet<String> = data.providers.iter().map(|p| p.id.clone()).collect();
@@ -225,25 +228,9 @@ impl CatalogService {
             };
             data.providers.push(provider);
 
-            let models: Vec<Model> = meta
-                .known_models
-                .iter()
-                .map(|info| Model {
-                    id: info.name.clone(),
-                    provider_id: meta.name.clone(),
-                    name: info.name.clone(),
-                    tool_call: true,
-                    reasoning: false,
-                    attachment: false,
-                    context_window: info.context_limit as i64,
-                    output_limit: 0,
-                    pricing: Pricing {
-                        input_per_million: info.input_token_cost.unwrap_or(0.0) * 1_000_000.0,
-                        output_per_million: info.output_token_cost.unwrap_or(0.0) * 1_000_000.0,
-                        ..Pricing::default()
-                    },
-                })
-                .collect();
+            // Try to source models from models.dev via the mapping table.
+            let models = self.models_from_catalog_source(&data, &meta.name)
+                .unwrap_or_else(|| models_from_goose_metadata(meta));
 
             if !models.is_empty() {
                 data.models_idx.insert(meta.name.clone(), models);
@@ -251,6 +238,34 @@ impl CatalogService {
         }
 
         data.providers.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+
+    /// Pull models from a mapped models.dev provider, re-tagged with the target
+    /// provider ID and filtered by the optional prefix.  Returns `None` when no
+    /// mapping exists or the source provider has no models.
+    fn models_from_catalog_source(
+        &self,
+        data: &CatalogData,
+        goose_provider_id: &str,
+    ) -> Option<Vec<Model>> {
+        let (_, source_id, prefix) = MODEL_SOURCE_MAP
+            .iter()
+            .find(|(goose_id, _, _)| *goose_id == goose_provider_id)?;
+
+        let source_models = data.models_idx.get(*source_id)?;
+        let models: Vec<Model> = source_models
+            .iter()
+            .filter(|m| match prefix {
+                Some(pfx) => m.id.contains(pfx),
+                None => true,
+            })
+            .map(|m| Model {
+                provider_id: goose_provider_id.to_string(),
+                ..m.clone()
+            })
+            .collect();
+
+        if models.is_empty() { None } else { Some(models) }
     }
 
     /// Add or replace a custom provider and its seed models in the in-memory catalog.
@@ -330,6 +345,45 @@ fn normalize(raw: HashMap<String, RawProvider>) -> (Vec<Provider>, HashMap<Strin
 
 fn is_openai_compatible(npm: &str) -> bool {
     npm.contains("openai-compatible") || npm == "@ai-sdk/openai"
+}
+
+// ── Goose → models.dev model source mapping ──────────────────────────────────
+//
+// Maps Goose-only provider IDs to a models.dev provider whose model list should
+// be used instead of Goose's hardcoded `known_models`.  The optional filter
+// prefix narrows the source list to relevant models.
+//
+// (goose_provider_id, models_dev_provider_id, optional_model_name_filter)
+const MODEL_SOURCE_MAP: &[(&str, &str, Option<&str>)] = &[
+    ("chatgpt_codex", "openai", Some("codex")),
+    ("gcp_vertex_ai", "google-vertex", None),
+    ("aws_bedrock", "amazon-bedrock", None),
+    ("azure_openai", "azure", None),
+    ("codex", "openai", Some("codex")),
+    ("claude-code", "anthropic", None),
+    ("gemini-cli", "google", None),
+];
+
+/// Build a model list from Goose's `ProviderMetadata.known_models` (fallback).
+fn models_from_goose_metadata(meta: &ProviderMetadata) -> Vec<Model> {
+    meta.known_models
+        .iter()
+        .map(|info| Model {
+            id: info.name.clone(),
+            provider_id: meta.name.clone(),
+            name: info.name.clone(),
+            tool_call: true,
+            reasoning: false,
+            attachment: false,
+            context_window: info.context_limit as i64,
+            output_limit: 0,
+            pricing: Pricing {
+                input_per_million: info.input_token_cost.unwrap_or(0.0) * 1_000_000.0,
+                output_per_million: info.output_token_cost.unwrap_or(0.0) * 1_000_000.0,
+                ..Pricing::default()
+            },
+        })
+        .collect()
 }
 
 #[cfg(test)]
