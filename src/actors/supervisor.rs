@@ -1977,17 +1977,11 @@ impl AgentSupervisor {
             }
         };
 
-        match sync_git
-            .run_command(vec!["rebase".into(), upstream.clone()])
-            .await
-        {
+        match sync_git.rebase_with_retry(&upstream).await {
             Ok(_) => {
                 tracing::info!(branch = %branch, upstream = %upstream, "rebased existing task branch before dispatch");
             }
             Err(GitError::CommandFailed { .. }) => {
-                let _ = sync_git
-                    .run_command(vec!["rebase".into(), "--abort".into()])
-                    .await;
                 tracing::warn!(
                     branch = %branch,
                     upstream = %upstream,

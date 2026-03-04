@@ -12,6 +12,38 @@ use std::path::{Path, PathBuf};
 
 use tokio::sync::{mpsc, oneshot};
 
+const PUSH_MAX_ATTEMPTS: u32 = 3;
+const REBASE_MAX_ATTEMPTS: u32 = 3;
+
+fn is_retryable_git_command_error(err: &GitError) -> bool {
+    let GitError::CommandFailed { stderr, .. } = err else {
+        return false;
+    };
+    let s = stderr.to_lowercase();
+    [
+        "cannot lock ref",
+        "failed to lock",
+        "another git process",
+        "resource temporarily unavailable",
+        "connection reset",
+        "connection timed out",
+        "timed out",
+        "remote end hung up unexpectedly",
+    ]
+    .iter()
+    .any(|needle| s.contains(needle))
+}
+
+fn retry_delay(attempt: u32) -> std::time::Duration {
+    let exp = attempt.saturating_sub(1).min(4);
+    let base_ms = 200u64.saturating_mul(1u64 << exp);
+    let jitter_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_millis() as u64) % 151)
+        .unwrap_or(0);
+    std::time::Duration::from_millis(base_ms + jitter_ms)
+}
+
 // ─── Error ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -508,15 +540,39 @@ impl GitActor {
         let commit_sha = out.stdout.trim().to_string();
 
         // Push merge commit directly to upstream target branch.
-        Self::run_git_command(
-            repo_path,
-            vec![
-                "push".into(),
-                "origin".into(),
-                format!("{commit_sha}:refs/heads/{target_branch}"),
-            ],
-        )
-        .await?;
+        // Retry short-lived transport/ref-lock failures with jitter.
+        let push_refspec = format!("{commit_sha}:refs/heads/{target_branch}");
+        let mut last_push_error: Option<GitError> = None;
+        for attempt in 1..=PUSH_MAX_ATTEMPTS {
+            match Self::run_git_command(
+                repo_path.clone(),
+                vec!["push".into(), "origin".into(), push_refspec.clone()],
+            )
+            .await
+            {
+                Ok(_) => {
+                    last_push_error = None;
+                    break;
+                }
+                Err(e) if attempt < PUSH_MAX_ATTEMPTS && is_retryable_git_command_error(&e) => {
+                    let delay = retry_delay(attempt);
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = PUSH_MAX_ATTEMPTS,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %e,
+                        target_branch = %target_branch,
+                        "push failed during squash merge; retrying"
+                    );
+                    last_push_error = Some(e);
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if let Some(e) = last_push_error {
+            return Err(e);
+        }
 
         Ok(MergeResult { commit_sha })
     }
@@ -712,6 +768,48 @@ impl GitActorHandle {
             respond_to: tx,
         })
         .await
+    }
+
+    /// Rebase onto `upstream` with short retry/jitter for transient git-state failures.
+    pub async fn rebase_with_retry(&self, upstream: &str) -> Result<(), GitError> {
+        let mut last_error: Option<GitError> = None;
+        for attempt in 1..=REBASE_MAX_ATTEMPTS {
+            match self
+                .run_command(vec!["rebase".into(), upstream.to_string()])
+                .await
+            {
+                Ok(_) => {
+                    last_error = None;
+                    break;
+                }
+                Err(e) if attempt < REBASE_MAX_ATTEMPTS && is_retryable_git_command_error(&e) => {
+                    let _ = self
+                        .run_command(vec!["rebase".into(), "--abort".into()])
+                        .await;
+                    let delay = retry_delay(attempt);
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = REBASE_MAX_ATTEMPTS,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %e,
+                        upstream = %upstream,
+                        "rebase failed with transient error; retrying"
+                    );
+                    last_error = Some(e);
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => {
+                    let _ = self
+                        .run_command(vec!["rebase".into(), "--abort".into()])
+                        .await;
+                    return Err(e);
+                }
+            }
+        }
+        if let Some(e) = last_error {
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Create local `task/{short_id}` from `target_branch` (GIT-01).
