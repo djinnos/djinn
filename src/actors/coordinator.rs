@@ -820,11 +820,11 @@ impl CoordinatorActor {
                         any_recovered = true;
                     }
                     Err(e) => {
-                        tracing::warn!(
+                        tracing::debug!(
                             task_id = %task.short_id,
                             status,
                             error = %e,
-                            "CoordinatorActor: recovery transition failed"
+                            "CoordinatorActor: recovery transition failed (task may have already transitioned)"
                         );
                     }
                 }
@@ -1251,6 +1251,27 @@ impl CoordinatorHandle {
             }
         }
     }
+
+    /// Like `wait_for_status` but evaluates the predicate against project-scoped status.
+    #[cfg(test)]
+    pub async fn wait_for_project_status<F>(&self, project_id: &str, predicate: F)
+    where
+        F: Fn(&CoordinatorStatus) -> bool,
+    {
+        let project_id = project_id.to_owned();
+        let mut rx = self.status_rx.clone();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if predicate(&rx.borrow().to_status(Some(&project_id))) {
+                return;
+            }
+            match tokio::time::timeout_at(deadline, rx.changed()).await {
+                Ok(Ok(())) => continue,
+                Ok(Err(_)) => panic!("watch channel closed"),
+                Err(_) => panic!("timed out waiting for coordinator project status condition"),
+            }
+        }
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -1325,14 +1346,16 @@ mod tests {
 
         // Pausing a project marks it paused in project-scoped status.
         handle.pause_project(project_id).await.unwrap();
-        // Trigger a dispatch so the actor processes messages and publishes status.
-        handle.trigger_dispatch().await.unwrap();
-        handle.wait_for_status(|s| s.tasks_dispatched == 0).await;
+        handle
+            .wait_for_project_status(project_id, |s| s.paused)
+            .await;
         assert!(handle.get_project_status(project_id).unwrap().paused);
 
         // Resuming removes it from the paused set.
         handle.resume_project(project_id).await.unwrap();
-        handle.wait_for_status(|s| s.sessions_recovered == 0).await;
+        handle
+            .wait_for_project_status(project_id, |s| !s.paused)
+            .await;
         assert!(!handle.get_project_status(project_id).unwrap().paused);
     }
 

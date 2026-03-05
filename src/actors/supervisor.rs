@@ -964,6 +964,10 @@ struct AgentSupervisor {
     interrupted_sessions: HashSet<String>,
     /// Tasks currently undergoing compaction (no active session, but not stuck).
     compacting_tasks: HashSet<String>,
+    /// Tasks fully owned by the supervisor: from dispatch start through post-session
+    /// completion (verification, commit, transition, cleanup). Prevents stuck detection
+    /// from false-positiving during the sessionless post-session window.
+    in_flight: HashSet<String>,
     default_max_sessions: u32,
     configured_model_limits: HashMap<String, u32>,
     session_manager: Arc<SessionManager>,
@@ -996,6 +1000,7 @@ impl AgentSupervisor {
             task_session_records: HashMap::new(),
             interrupted_sessions: HashSet::new(),
             compacting_tasks: HashSet::new(),
+            in_flight: HashSet::new(),
             default_max_sessions: 1,
             configured_model_limits: HashMap::new(),
             session_manager,
@@ -1062,14 +1067,19 @@ impl AgentSupervisor {
                 model_id,
                 respond_to,
             } => {
-                let _ = respond_to.send(self.dispatch(task_id, project_path, model_id).await);
+                let result = self.dispatch(task_id.clone(), project_path, model_id).await;
+                if result.is_err() {
+                    self.in_flight.remove(&task_id);
+                }
+                let _ = respond_to.send(result);
             }
             SupervisorMessage::HasSession {
                 task_id,
                 respond_to,
             } => {
                 let active = self.sessions.contains_key(&task_id)
-                    || self.compacting_tasks.contains(&task_id);
+                    || self.compacting_tasks.contains(&task_id)
+                    || self.in_flight.contains(&task_id);
                 let _ = respond_to.send(Ok(active));
             }
             SupervisorMessage::KillSession {
@@ -1128,6 +1138,7 @@ impl AgentSupervisor {
             } => {
                 if self.interrupted_sessions.remove(&task_id) {
                     tracing::info!(task_id = %task_id, "Supervisor: ignoring completion for interrupted session");
+                    self.in_flight.remove(&task_id);
                     return;
                 }
                 tracing::info!(
@@ -1138,6 +1149,12 @@ impl AgentSupervisor {
                 let session = self.remove_session(&task_id);
                 self.handle_session_result(&task_id, session, result, output)
                     .await;
+                // Remove in_flight AFTER all post-session work (verification, commit,
+                // transition, cleanup) is done. If handle_session_result queued a
+                // ResumeSession (verification failure path), this removal is safe:
+                // no HasSession query can be processed between this remove and the
+                // re-insert in dispatch_resume since the actor is still in its loop.
+                self.in_flight.remove(&task_id);
             }
             SupervisorMessage::ResumeSession {
                 task_id,
@@ -1150,7 +1167,7 @@ impl AgentSupervisor {
             } => {
                 if let Err(e) = self
                     .dispatch_resume(
-                        task_id,
+                        task_id.clone(),
                         model_id,
                         goose_session_id,
                         worktree_path,
@@ -1161,6 +1178,7 @@ impl AgentSupervisor {
                     .await
                 {
                     tracing::warn!(error = %e, "Supervisor: failed to dispatch resume session after verification failure");
+                    self.in_flight.remove(&task_id);
                 }
             }
             SupervisorMessage::CompactionNeeded {
@@ -1224,6 +1242,11 @@ impl AgentSupervisor {
         if self.sessions.contains_key(&task_id) {
             return Err(SupervisorError::SessionAlreadyActive { task_id });
         }
+        // Mark in-flight immediately so stuck detection skips this task for the
+        // entire dispatch → session → post-session lifecycle. The caller (Dispatch
+        // message handler) removes it on error; SessionCompleted handler removes
+        // it after all post-session work is done.
+        self.in_flight.insert(task_id.clone());
 
         let max_for_model = self.max_for_model(&model_id);
         let (active, max) = {
@@ -1632,6 +1655,9 @@ impl AgentSupervisor {
         if self.sessions.contains_key(&task_id) {
             return Err(SupervisorError::SessionAlreadyActive { task_id });
         }
+        // Re-mark in-flight: this is called after a SessionCompleted removed it
+        // (verification-failure resume path). Caller removes on error.
+        self.in_flight.insert(task_id.clone());
 
         let max_for_model = self.max_for_model(&model_id);
         let (active, max) = {
