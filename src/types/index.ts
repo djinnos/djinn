@@ -1,0 +1,48 @@
+/**
+ * Task and Epic types for DjinnOS Desktop
+ * 
+ * These types mirror the server-side types for full-entity SSE events.
+ */
+
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'blocked' | 'canceled';
+export type TaskPriority = 'P0' | 'P1' | 'P2' | 'P3';
+
+export interface Task {
+  id: string;
+  title: string;
+  description: string;
+  status: TaskStatus;
+  priority: TaskPriority;
+  epicId: string | null;
+  labels: string[];
+  owner: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type EpicStatus = 'active' | 'completed' | 'archived';
+
+export interface Epic {
+  id: string;
+  title: string;
+  description: string;
+  status: EpicStatus;
+  priority: TaskPriority;
+  labels: string[];
+  owner: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// SSE Event payloads
+export interface TaskCreatedPayload extends Task {}
+export interface TaskUpdatedPayload extends Task {}
+export interface TaskDeletedPayload {
+  id: string;
+}
+
+export interface EpicCreatedPayload extends Epic {}
+export interface EpicUpdatedPayload extends Epic {}
+export interface EpicDeletedPayload {
+  id: string;
+}

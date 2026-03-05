@@ -13,6 +13,7 @@
 import { useEffect, useRef } from "react";
 import { sseStore, type SSEEvent, type SSEEventType } from "../stores/sseStore";
 import { getServerPort } from "../tauri";
+import { initSSEEventHandlers } from "../stores/sseEventHandlers";
 
 const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
@@ -22,9 +23,13 @@ const MAX_RECONNECT_ATTEMPTS = 10;
 export function useEventSource() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cleanupHandlersRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     let isActive = true;
+
+    // Initialize SSE event handlers (wire stores to SSE events)
+    cleanupHandlersRef.current = initSSEEventHandlers();
 
     const connect = async () => {
       try {
@@ -57,6 +62,7 @@ export function useEventSource() {
           "task_deleted",
           "epic_created",
           "epic_updated",
+          "epic_deleted",
           "project_changed",
         ];
 
@@ -140,6 +146,12 @@ export function useEventSource() {
         eventSourceRef.current = null;
       }
       sseStore.getState().setConnected(false);
+      
+      // Cleanup SSE event handlers
+      if (cleanupHandlersRef.current) {
+        cleanupHandlersRef.current();
+        cleanupHandlersRef.current = null;
+      }
     };
   }, []);
 

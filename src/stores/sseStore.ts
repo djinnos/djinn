@@ -11,8 +11,10 @@ export type SSEEventType =
   | "task_created"
   | "task_updated"
   | "task_deleted"
-  | `epic_${string}`
-  | `project_${string}`;
+  | "epic_created"
+  | "epic_updated"
+  | "epic_deleted"
+  | "project_changed";
 
 export type ConnectionStatus = "connected" | "reconnecting" | "error";
 
