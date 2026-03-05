@@ -14,6 +14,9 @@ import {
 } from '@/api/server';
 import { AlertCircleIcon, CheckCircle2Icon, CopyIcon, EyeIcon, EyeOffIcon, Loader2Icon, XCircleIcon } from 'lucide-react';
 import { Input } from '@/components/ui/input';
+import { InlineError } from '@/components/InlineError';
+import { EmptyState } from '@/components/EmptyState';
+import { showToast } from '@/lib/toast';
 import { AgentConfig } from '@/components/AgentConfig';
 
 type SettingsCategory = 'providers' | 'projects' | 'general' | 'agents';
@@ -97,7 +100,9 @@ function ProvidersSettings() {
         setProviders(catalog);
         setCredentials(credentialList);
       } catch (error) {
-        setLoadError(error instanceof Error ? error.message : 'Failed to load providers');
+        const message = error instanceof Error ? error.message : 'Failed to load providers';
+        setLoadError(message);
+        showToast.error('Failed to load providers', { description: message });
       } finally {
         setLoading(false);
       }
@@ -150,6 +155,8 @@ function ProvidersSettings() {
       setCredentials(credentialList);
       setValidationStatus({ type: 'success', message: 'API key saved successfully' });
       setApiKey('');
+    } catch (error) {
+      showToast.error('Could not save API key', { description: error instanceof Error ? error.message : 'Unknown error' });
     } finally {
       setSaving(false);
     }
@@ -171,6 +178,8 @@ function ProvidersSettings() {
       } else {
         setValidationStatus({ type: 'error', message: result.error ?? 'Connection failed' });
       }
+    } catch (error) {
+      showToast.error('Connection test failed', { description: error instanceof Error ? error.message : 'Unknown error' });
     } finally {
       setTesting(false);
     }
@@ -185,6 +194,8 @@ function ProvidersSettings() {
       setCredentials(credentialList);
       setValidationStatus({ type: 'success', message: 'API key deleted' });
       setRevealedProvider(null);
+    } catch (error) {
+      showToast.error('Failed to delete API key', { description: error instanceof Error ? error.message : 'Unknown error' });
     } finally {
       setDeleting(false);
     }
@@ -201,13 +212,18 @@ function ProvidersSettings() {
   }
 
   if (loadError) {
+    return <InlineError message={loadError} onRetry={() => window.location.reload()} />;
+  }
+
+  if (providers.length === 0) {
     return (
-      <div className="rounded-lg border border-border bg-card p-6">
-        <div className="flex items-start gap-2 text-destructive">
-          <AlertCircleIcon className="mt-0.5 h-4 w-4" />
-          <p className="text-sm">{loadError}</p>
-        </div>
-      </div>
+      <EmptyState
+        title="No providers found"
+        message="Add a provider to start connecting your workspace tools."
+        actionLabel="Reload providers"
+        onAction={() => window.location.reload()}
+        illustration={<div className="text-4xl">🔌</div>}
+      />
     );
   }
 
