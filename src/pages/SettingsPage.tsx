@@ -1,28 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { useWizardStore } from '@/stores/wizardStore';
 import { NavLink, Navigate, useParams } from 'react-router-dom';
-import {
-  fetchCredentialList,
-  fetchProviderCatalog,
-  saveProviderCredentials,
-  validateProviderApiKey,
-  addCustomProvider,
-  fetchProjects,
-  addProject,
-  removeProject,
-  type Provider,
-  type ProviderCredential,
-  type Project,
-} from '@/api/server';
 import { Input } from '@/components/ui/input';
 import { InlineError } from '@/components/InlineError';
 import { EmptyState } from '@/components/EmptyState';
-import { showToast } from '@/lib/toast';
 import { AgentConfig } from '@/components/AgentConfig';
-import { useAgentConfig } from '@/hooks/useAgentConfig';
-import { selectDirectory } from '@/tauri/commands';
+import { useProviders } from '@/hooks/settings/useProviders';
+import { useProjects } from '@/hooks/settings/useProjects';
+import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
 
 type SettingsCategory = 'providers' | 'projects' | 'general' | 'agents';
 
@@ -34,43 +20,28 @@ const categories: Array<{ key: SettingsCategory; label: string }> = [
 ];
 
 function ProvidersSettings() {
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [credentials, setCredentials] = useState<ProviderCredential[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const {
+    providers,
+    configuredProviders,
+    unconfiguredProviders,
+    loading,
+    loadError,
+    validationStatus,
+    validating,
+    saving,
+    setValidationStatus,
+    loadData,
+    validateInline,
+    saveProvider,
+    addCustom,
+  } = useProviders();
+
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [selectedProviderId, setSelectedProviderId] = useState('');
   const [apiKey, setApiKey] = useState('');
-  const [validationStatus, setValidationStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
-  const [validating, setValidating] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [customName, setCustomName] = useState('');
   const [customBaseUrl, setCustomBaseUrl] = useState('');
 
-  const loadData = async () => {
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const [catalog, credentialList] = await Promise.all([fetchProviderCatalog(), fetchCredentialList()]);
-      setProviders(catalog);
-      setCredentials(credentialList);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to load providers';
-      setLoadError(message);
-      showToast.error('Failed to load providers', { description: message });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void loadData();
-  }, []);
-
-  const credentialByProvider = useMemo(() => new Map(credentials.map((entry) => [entry.provider_id, entry])), [credentials]);
-
-  const configuredProviders = providers.filter((p) => credentialByProvider.get(p.id)?.configured);
-  const unconfiguredProviders = providers.filter((p) => !credentialByProvider.get(p.id)?.configured);
   const selectedProvider = providers.find((p) => p.id === selectedProviderId);
 
   const resetAddFlow = () => {
@@ -81,54 +52,18 @@ function ProvidersSettings() {
     setCustomBaseUrl('');
   };
 
-  const validateInline = async () => {
-    if (!selectedProviderId || !apiKey.trim()) return;
-    setValidating(true);
-    try {
-      const result = await validateProviderApiKey(selectedProviderId, apiKey.trim());
-      if (result.valid) {
-        setValidationStatus({ type: 'success', message: 'API key is valid' });
-      } else {
-        setValidationStatus({ type: 'error', message: result.error ?? 'Validation failed' });
-      }
-    } finally {
-      setValidating(false);
-    }
-  };
-
   const handleSave = async () => {
-    if (!selectedProviderId || !apiKey.trim()) return;
-    setSaving(true);
-    try {
-      const validation = await validateProviderApiKey(selectedProviderId, apiKey.trim());
-      if (!validation.valid) {
-        setValidationStatus({ type: 'error', message: validation.error ?? 'Validation failed' });
-        return;
-      }
-      await saveProviderCredentials(selectedProviderId, apiKey.trim());
-      await loadData();
-      showToast.success('Provider added', { description: 'Credentials saved successfully.' });
-      setIsAddOpen(false);
-      resetAddFlow();
-    } catch (error) {
-      showToast.error('Could not save API key', { description: error instanceof Error ? error.message : 'Unknown error' });
-    } finally {
-      setSaving(false);
-    }
+    const ok = await saveProvider(selectedProviderId, apiKey);
+    if (!ok) return;
+    setIsAddOpen(false);
+    resetAddFlow();
   };
 
   const handleAddCustom = async () => {
-    if (!customName.trim()) return;
-    setSaving(true);
-    try {
-      await addCustomProvider({ name: customName.trim(), base_url: customBaseUrl.trim() || undefined });
-      await loadData();
-      showToast.success('Custom provider added');
-      setCustomName('');
-      setCustomBaseUrl('');
-    } finally {
-      setSaving(false);
-    }
+    const ok = await addCustom(customName, customBaseUrl);
+    if (!ok) return;
+    setCustomName('');
+    setCustomBaseUrl('');
   };
 
   if (loading) {
@@ -189,7 +124,7 @@ function ProvidersSettings() {
                   setApiKey(e.target.value);
                   setValidationStatus(null);
                 }}
-                onBlur={() => void validateInline()}
+                onBlur={() => void validateInline(selectedProviderId, apiKey)}
               />
               {validationStatus && <p className={cn('text-xs', validationStatus.type === 'success' ? 'text-green-500' : 'text-red-500')}>{validationStatus.message}</p>}
               <Button onClick={() => void handleSave()} disabled={saving || validating || !apiKey.trim()}>
@@ -221,65 +156,9 @@ function ProvidersSettings() {
     </div>
   );
 }
+
 function ProjectsSettings() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [busyProjectId, setBusyProjectId] = useState<string | null>(null);
-  const [isAdding, setIsAdding] = useState(false);
-
-  const loadProjects = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await fetchProjects();
-      setProjects(result);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load projects');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void loadProjects();
-  }, []);
-
-  const handleAddProject = async () => {
-    setIsAdding(true);
-    setError(null);
-    try {
-      const path = await selectDirectory('Select Project Directory');
-      if (!path) return;
-      await addProject(path);
-      await loadProjects();
-      showToast.success('Project added');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to add project';
-      setError(message);
-      showToast.error('Could not add project', { description: message });
-    } finally {
-      setIsAdding(false);
-    }
-  };
-
-  const handleRemoveProject = async (project: Project) => {
-    if (!confirm(`Remove project "${project.name}"?`)) return;
-
-    setBusyProjectId(project.id);
-    setError(null);
-    try {
-      await removeProject(project.id);
-      await loadProjects();
-      showToast.success('Project removed');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to remove project';
-      setError(message);
-      showToast.error('Could not remove project', { description: message });
-    } finally {
-      setBusyProjectId(null);
-    }
-  };
+  const { projects, loading, error, busyProjectId, isAdding, loadProjects, handleAddProject, handleRemoveProject } = useProjects();
 
   if (loading) {
     return <div className="rounded-lg border border-border bg-card p-6">Loading projects...</div>;
@@ -332,15 +211,7 @@ function ProjectsSettings() {
   );
 }
 
-function GeneralSettings() {
-  const { resetWizard } = useWizardStore();
-
-  const handleResetWizard = () => {
-    if (confirm('Are you sure you want to reset the wizard? This will show the setup wizard on next launch.')) {
-      resetWizard();
-    }
-  };
-
+function GeneralSettings({ onResetWizard }: { onResetWizard: () => void }) {
   return (
     <div className="space-y-6">
       <div className="rounded-lg border border-border bg-card p-6">
@@ -364,7 +235,7 @@ function GeneralSettings() {
               <p className="font-medium">Setup Wizard</p>
               <p className="text-sm text-muted-foreground">Reset the setup wizard to show on next launch</p>
             </div>
-            <Button variant="outline" size="sm" onClick={handleResetWizard}>
+            <Button variant="outline" size="sm" onClick={onResetWizard}>
               Reset Wizard
             </Button>
           </div>
@@ -420,7 +291,7 @@ export function SettingsPage() {
         <section className="min-w-0 flex-1">
           {category === 'providers' && <ProvidersSettings />}
           {category === 'projects' && <ProjectsSettings />}
-          {category === 'general' && <GeneralSettings />}
+          {category === 'general' && <GeneralSettings onResetWizard={agentConfig.handleResetWizard} />}
           {category === 'agents' && <AgentConfig {...agentConfig} />}
         </section>
       </div>
