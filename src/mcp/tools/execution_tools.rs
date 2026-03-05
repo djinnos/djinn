@@ -93,8 +93,8 @@ impl DjinnMcpServer {
         }
 
         let status_result = match project_id.as_deref() {
-            Some(id) => coordinator.get_project_status(id).await,
-            None => coordinator.get_status().await,
+            Some(id) => coordinator.get_project_status(id),
+            None => coordinator.get_status(),
         };
         let status = match status_result {
             Ok(status) => status,
@@ -225,8 +225,8 @@ impl DjinnMcpServer {
         };
 
         let coordinator_status_result = match project_id.as_deref() {
-            Some(id) => coordinator.get_project_status(id).await,
-            None => coordinator.get_status().await,
+            Some(id) => coordinator.get_project_status(id),
+            None => coordinator.get_status(),
         };
         let coordinator_status = match coordinator_status_result {
             Ok(status) => status,

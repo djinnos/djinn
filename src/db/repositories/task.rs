@@ -359,13 +359,20 @@ impl TaskRepository {
         }
 
         // Resolve final target status.
-        // Unblock (to_status = None) restores blocked_from_status, defaulting to Open.
+        // Unblock (to_status = None) restores blocked_from_status, mapping active
+        // statuses (in_progress, in_task_review) to their standby equivalents
+        // (open, needs_task_review) since no session is running after unblock.
         let to_status = match apply.to_status {
             Some(s) => s,
             None => current
                 .blocked_from_status
                 .as_deref()
                 .and_then(|s| TaskStatus::parse(s).ok())
+                .map(|s| match s {
+                    TaskStatus::InProgress => TaskStatus::Open,
+                    TaskStatus::InTaskReview => TaskStatus::NeedsTaskReview,
+                    other => other,
+                })
                 .unwrap_or(TaskStatus::Open),
         };
         let to_str = to_status.as_str();
@@ -2174,12 +2181,12 @@ mod tests {
         let entries = repo.list_activity(&t.id).await.unwrap();
         assert_eq!(entries.last().unwrap().event_type, "blocked");
 
-        // Unblock — should restore to in_progress.
+        // Unblock — should map in_progress to open (standby equivalent).
         let t = repo
             .transition(&t.id, TransitionAction::Unblock, "user", "user", None, None)
             .await
             .unwrap();
-        assert_eq!(t.status, "in_progress");
+        assert_eq!(t.status, "open");
         assert!(t.blocked_from_status.is_none());
 
         let entries = repo.list_activity(&t.id).await.unwrap();

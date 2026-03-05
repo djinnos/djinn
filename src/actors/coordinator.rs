@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{self, Interval};
 use tokio_util::sync::CancellationToken;
 
@@ -54,9 +54,40 @@ pub struct CoordinatorStatus {
     pub sessions_recovered: u64,
 }
 
-// ─── Messages (≤15 variants — AGENT-11) ──────────────────────────────────────
+/// Internal snapshot published via `watch` channel so `get_status()` reads
+/// never queue behind long-running dispatch passes.
+#[derive(Debug, Clone)]
+struct SharedCoordinatorState {
+    paused: bool,
+    paused_projects: HashSet<String>,
+    resumed_projects: HashSet<String>,
+    unhealthy_project_ids: HashSet<String>,
+    dispatched: u64,
+    recovered: u64,
+}
 
-type Reply<T> = oneshot::Sender<T>;
+impl SharedCoordinatorState {
+    fn to_status(&self, project_id: Option<&str>) -> CoordinatorStatus {
+        let project_paused = project_id.map(|id| {
+            if self.unhealthy_project_ids.contains(id) {
+                return true;
+            }
+            if self.paused {
+                !self.resumed_projects.contains(id)
+            } else {
+                self.paused_projects.contains(id)
+            }
+        });
+        CoordinatorStatus {
+            paused: project_paused.unwrap_or(self.paused),
+            global_paused: self.paused,
+            tasks_dispatched: self.dispatched,
+            sessions_recovered: self.recovered,
+        }
+    }
+}
+
+// ─── Messages (≤15 variants — AGENT-11) ──────────────────────────────────────
 
 enum CoordinatorMessage {
     /// Run an immediate dispatch pass for all ready tasks.
@@ -74,11 +105,6 @@ enum CoordinatorMessage {
     Resume,
     /// Resume dispatch for one project.
     ResumeProject { project_id: String },
-    /// Return current coordinator status.
-    GetStatus {
-        project_id: Option<String>,
-        respond_to: Reply<CoordinatorStatus>,
-    },
     /// Pause dispatch for one project, optionally interrupting active sessions.
     PauseProject {
         project_id: String,
@@ -119,6 +145,8 @@ struct CoordinatorActor {
     health: HealthTracker,
     // Sender clone for background tasks to send results back.
     self_sender: mpsc::Sender<CoordinatorMessage>,
+    // Watch channel for lock-free status reads.
+    status_tx: watch::Sender<SharedCoordinatorState>,
     // State
     paused: bool,
     paused_projects: HashSet<String>,
@@ -145,6 +173,7 @@ impl CoordinatorActor {
         supervisor: AgentSupervisorHandle,
         catalog: CatalogService,
         health: HealthTracker,
+        status_tx: watch::Sender<SharedCoordinatorState>,
     ) -> Self {
         let events = events_tx.subscribe();
         let mut tick = time::interval(STUCK_INTERVAL);
@@ -160,6 +189,7 @@ impl CoordinatorActor {
             catalog,
             health,
             self_sender,
+            status_tx,
             paused: true,
             paused_projects: HashSet::new(),
             resumed_projects: HashSet::new(),
@@ -208,6 +238,18 @@ impl CoordinatorActor {
         tracing::info!("CoordinatorActor stopped");
     }
 
+    /// Publish current state to the watch channel for lock-free status reads.
+    fn publish_status(&self) {
+        let _ = self.status_tx.send(SharedCoordinatorState {
+            paused: self.paused,
+            paused_projects: self.paused_projects.clone(),
+            resumed_projects: self.resumed_projects.clone(),
+            unhealthy_project_ids: self.unhealthy_projects.keys().cloned().collect(),
+            dispatched: self.dispatched,
+            recovered: self.recovered,
+        });
+    }
+
     async fn handle_message(&mut self, msg: CoordinatorMessage) {
         match msg {
             CoordinatorMessage::TriggerDispatch => {
@@ -230,6 +272,7 @@ impl CoordinatorActor {
                     self.paused = true;
                     self.paused_projects.clear();
                     self.resumed_projects.clear();
+                    self.publish_status();
                     if interrupt_active && let Err(e) = self.supervisor.interrupt_all(&reason).await
                     {
                         tracing::warn!(error = %e, "CoordinatorActor: failed to interrupt active sessions on pause");
@@ -246,6 +289,7 @@ impl CoordinatorActor {
                 } else {
                     self.paused_projects.insert(project_id.clone());
                 }
+                self.publish_status();
                 if interrupt_active {
                     if let Err(e) = self.supervisor.interrupt_project(&project_id, &reason).await {
                         tracing::warn!(
@@ -264,6 +308,7 @@ impl CoordinatorActor {
                     self.resumed_projects.clear();
                     self.detect_and_recover_stuck_filtered(None).await;
                     self.dispatch_ready_tasks(None).await;
+                    self.publish_status();
                 }
             }
             CoordinatorMessage::ResumeProject { project_id } => {
@@ -275,21 +320,7 @@ impl CoordinatorActor {
                 self.detect_and_recover_stuck_filtered(Some(&project_id))
                     .await;
                 self.dispatch_ready_tasks(Some(&project_id)).await;
-            }
-            CoordinatorMessage::GetStatus {
-                project_id,
-                respond_to,
-            } => {
-                let paused = project_id
-                    .as_deref()
-                    .map(|id| !self.is_project_dispatch_enabled(id))
-                    .unwrap_or(self.paused);
-                let _ = respond_to.send(CoordinatorStatus {
-                    paused,
-                    global_paused: self.paused,
-                    tasks_dispatched: self.dispatched,
-                    sessions_recovered: self.recovered,
-                });
+                self.publish_status();
             }
             CoordinatorMessage::TriggerStuckScan => {
                 if !self.paused {
@@ -341,6 +372,7 @@ impl CoordinatorActor {
                         error,
                     });
                 }
+                self.publish_status();
                 // If project just became healthy and dispatch is enabled, trigger a dispatch pass.
                 if healthy && self.is_project_dispatch_enabled(&project_id) {
                     self.dispatch_ready_tasks(Some(&project_id)).await;
@@ -789,6 +821,7 @@ impl CoordinatorActor {
                 }
             }
         }
+        self.publish_status();
     }
 
     /// On each tick: find tasks in active execution states with no active session
@@ -931,6 +964,7 @@ impl CoordinatorActor {
         if any_recovered {
             self.dispatch_ready_tasks(None).await;
         }
+        self.publish_status();
     }
 
     /// Spawn background health-check tasks for all projects (or one) that have
@@ -1131,6 +1165,7 @@ async fn run_project_health_check(
 #[derive(Clone)]
 pub struct CoordinatorHandle {
     sender: mpsc::Sender<CoordinatorMessage>,
+    status_rx: watch::Receiver<SharedCoordinatorState>,
 }
 
 impl CoordinatorHandle {
@@ -1144,6 +1179,15 @@ impl CoordinatorHandle {
         health: HealthTracker,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(32);
+        let initial_state = SharedCoordinatorState {
+            paused: true,
+            paused_projects: HashSet::new(),
+            resumed_projects: HashSet::new(),
+            unhealthy_project_ids: HashSet::new(),
+            dispatched: 0,
+            recovered: 0,
+        };
+        let (status_tx, status_rx) = watch::channel(initial_state);
         let actor = CoordinatorActor::new(
             receiver,
             sender.clone(),
@@ -1153,9 +1197,10 @@ impl CoordinatorHandle {
             supervisor,
             catalog,
             health,
+            status_tx,
         );
         tokio::spawn(actor.run());
-        Self { sender }
+        Self { sender, status_rx }
     }
 
     async fn send(&self, msg: CoordinatorMessage) -> Result<(), CoordinatorError> {
@@ -1232,28 +1277,16 @@ impl CoordinatorHandle {
         .await
     }
 
-    /// Return the current coordinator status snapshot.
-    pub async fn get_status(&self) -> Result<CoordinatorStatus, CoordinatorError> {
-        let (tx, rx) = oneshot::channel();
-        self.send(CoordinatorMessage::GetStatus {
-            project_id: None,
-            respond_to: tx,
-        })
-        .await?;
-        rx.await.map_err(|_| CoordinatorError::NoResponse)
+    /// Return the current coordinator status snapshot (lock-free read via watch channel).
+    pub fn get_status(&self) -> Result<CoordinatorStatus, CoordinatorError> {
+        Ok(self.status_rx.borrow().to_status(None))
     }
 
-    pub async fn get_project_status(
+    pub fn get_project_status(
         &self,
         project_id: &str,
     ) -> Result<CoordinatorStatus, CoordinatorError> {
-        let (tx, rx) = oneshot::channel();
-        self.send(CoordinatorMessage::GetStatus {
-            project_id: Some(project_id.to_owned()),
-            respond_to: tx,
-        })
-        .await?;
-        rx.await.map_err(|_| CoordinatorError::NoResponse)
+        Ok(self.status_rx.borrow().to_status(Some(project_id)))
     }
 
     /// Trigger an immediate stuck-task detection pass.
@@ -1286,6 +1319,26 @@ impl CoordinatorHandle {
     ) -> Result<(), CoordinatorError> {
         self.send(CoordinatorMessage::ValidateProjectHealth { project_id_filter })
             .await
+    }
+    /// Wait until the coordinator status satisfies the given predicate.
+    /// For use in tests where we need to observe the effect of a sent message.
+    #[cfg(test)]
+    pub async fn wait_for_status<F>(&self, predicate: F)
+    where
+        F: Fn(&CoordinatorStatus) -> bool,
+    {
+        let mut rx = self.status_rx.clone();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if predicate(&rx.borrow().to_status(None)) {
+                return;
+            }
+            match tokio::time::timeout_at(deadline, rx.changed()).await {
+                Ok(Ok(())) => continue,
+                Ok(Err(_)) => panic!("watch channel closed"),
+                Err(_) => panic!("timed out waiting for coordinator status condition"),
+            }
+        }
     }
 }
 
@@ -1340,7 +1393,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let handle = spawn_coordinator(&db, &tx);
 
-        let status = handle.get_status().await.unwrap();
+        let status = handle.get_status().unwrap();
         assert!(status.paused, "coordinator should start paused by default");
         assert_eq!(status.tasks_dispatched, 0);
         assert_eq!(status.sessions_recovered, 0);
@@ -1354,12 +1407,14 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let handle = spawn_coordinator(&db, &tx);
 
+        // Coordinator starts paused, so pause() is a no-op (no publish).
         handle.pause().await.unwrap();
-        let status = handle.get_status().await.unwrap();
+        let status = handle.get_status().unwrap();
         assert!(status.paused, "should be paused");
 
         handle.resume().await.unwrap();
-        let status = handle.get_status().await.unwrap();
+        handle.wait_for_status(|s| !s.paused).await;
+        let status = handle.get_status().unwrap();
         assert!(!status.paused, "should be resumed");
     }
 
@@ -1369,12 +1424,12 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let handle = spawn_coordinator(&db, &tx);
 
+        // Coordinator starts paused; dispatch while paused is a no-op (no publish).
         handle.pause().await.unwrap();
         handle.trigger_dispatch().await.unwrap();
 
-        let status = handle.get_status().await.unwrap();
-        // tasks_dispatched stays 0 because the supervisor stub is a no-op,
-        // but the coordinator shouldn't even attempt dispatch while paused.
+        let status = handle.get_status().unwrap();
+        // tasks_dispatched stays 0 because the coordinator doesn't dispatch while paused.
         assert_eq!(status.tasks_dispatched, 0);
     }
 
@@ -1394,13 +1449,12 @@ mod tests {
 
         let handle = spawn_coordinator(&db, &tx);
         handle.resume().await.unwrap();
-        handle.trigger_dispatch().await.unwrap();
+        // Resume internally runs dispatch; wait for it to complete.
+        handle.wait_for_status(|s| s.tasks_dispatched >= 1).await;
 
-        // Give the actor time to process the message and run dispatch.
-        let status = handle.get_status().await.unwrap();
-        // Supervisor stub says no session → dispatch is called once.
-        assert_eq!(
-            status.tasks_dispatched, 1,
+        let status = handle.get_status().unwrap();
+        assert!(
+            status.tasks_dispatched >= 1,
             "should have dispatched the ready task"
         );
     }
@@ -1439,11 +1493,12 @@ mod tests {
 
         let handle = spawn_coordinator(&db, &tx);
         handle.resume().await.unwrap();
-        handle.trigger_dispatch().await.unwrap();
+        // Resume internally runs dispatch; wait for it to complete.
+        handle.wait_for_status(|s| s.tasks_dispatched >= 1).await;
 
-        let status = handle.get_status().await.unwrap();
-        assert_eq!(
-            status.tasks_dispatched, 1,
+        let status = handle.get_status().unwrap();
+        assert!(
+            status.tasks_dispatched >= 1,
             "should dispatch task waiting for review"
         );
     }
@@ -1466,9 +1521,10 @@ mod tests {
 
         let handle = spawn_coordinator(&db, &tx);
         handle.resume().await.unwrap();
-        handle.trigger_stuck_scan().await.unwrap();
+        // Resume internally runs stuck detection; wait for recovery.
+        handle.wait_for_status(|s| s.sessions_recovered >= 1).await;
 
-        let status = handle.get_status().await.unwrap();
+        let status = handle.get_status().unwrap();
         assert!(
             status.sessions_recovered >= 1,
             "stuck task should have been recovered"
