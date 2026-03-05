@@ -60,6 +60,13 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             id: Some(id),
             project_id: None,
         },
+        DjinnEvent::ProjectConfigUpdated { project_id, config } => Envelope {
+            entity_type: "project_config",
+            action: "updated",
+            data: serde_json::to_value(config).ok(),
+            id: None,
+            project_id: Some(project_id),
+        },
         DjinnEvent::EpicCreated(v) => Envelope {
             entity_type: "epic",
             action: "created",

@@ -14,7 +14,11 @@ CREATE TABLE projects (
     path                  TEXT NOT NULL UNIQUE,
     created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     setup_commands        TEXT NOT NULL DEFAULT '[]',
-    verification_commands TEXT NOT NULL DEFAULT '[]'
+    verification_commands TEXT NOT NULL DEFAULT '[]',
+  target_branch TEXT NOT NULL DEFAULT 'main',
+  auto_merge INTEGER NOT NULL DEFAULT 1,
+  sync_enabled INTEGER NOT NULL DEFAULT 0,
+  sync_remote TEXT
 );
 
 CREATE TABLE epics (

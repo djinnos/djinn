@@ -30,6 +30,29 @@ pub struct ProjectRemoveParams {
 
 // ── Response structs ─────────────────────────────────────────────────────────
 
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectConfigGetParams {
+    pub project: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectConfigSetParams {
+    pub project: String,
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProjectConfigResponse {
+    pub status: String,
+    pub project: String,
+    pub target_branch: String,
+    pub auto_merge: bool,
+    pub sync_enabled: bool,
+    pub sync_remote: Option<String>,
+}
+
+
 #[derive(Serialize, JsonSchema)]
 pub struct ProjectAddResponse {
     pub status: String,
@@ -264,6 +287,80 @@ impl DjinnMcpServer {
         }
     }
 
+
+    #[tool(description = "Get project config fields for a project path.")]
+    pub async fn project_config_get(
+        &self,
+        Parameters(input): Parameters<ProjectConfigGetParams>,
+    ) -> Json<ProjectConfigResponse> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
+        match repo.get_by_path(&input.project).await {
+            Ok(Some(project)) => Json(ProjectConfigResponse {
+                status: "ok".into(),
+                project: project.path,
+                target_branch: project.target_branch,
+                auto_merge: project.auto_merge,
+                sync_enabled: project.sync_enabled,
+                sync_remote: project.sync_remote,
+            }),
+            Ok(None) => Json(ProjectConfigResponse {
+                status: format!("error: project not found: {}", input.project),
+                project: input.project,
+                target_branch: "main".into(),
+                auto_merge: true,
+                sync_enabled: false,
+                sync_remote: None,
+            }),
+            Err(e) => Json(ProjectConfigResponse {
+                status: format!("error: {e}"),
+                project: input.project,
+                target_branch: "main".into(),
+                auto_merge: true,
+                sync_enabled: false,
+                sync_remote: None,
+            }),
+        }
+    }
+
+    #[tool(description = "Set a single project config field by key.")]
+    pub async fn project_config_set(
+        &self,
+        Parameters(input): Parameters<ProjectConfigSetParams>,
+    ) -> Json<ProjectConfigResponse> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
+        let project = match repo.get_by_path(&input.project).await {
+            Ok(Some(project)) => project,
+            Ok(None) => return Json(ProjectConfigResponse { status: format!("error: project not found: {}", input.project), project: input.project, target_branch: "main".into(), auto_merge: true, sync_enabled: false, sync_remote: None }),
+            Err(e) => return Json(ProjectConfigResponse { status: format!("error: {e}"), project: input.project, target_branch: "main".into(), auto_merge: true, sync_enabled: false, sync_remote: None }),
+        };
+
+        match repo.update_config_field(&project.id, &input.key, &input.value).await {
+            Ok(Some(config)) => Json(ProjectConfigResponse {
+                status: "ok".into(),
+                project: project.path,
+                target_branch: config.target_branch,
+                auto_merge: config.auto_merge,
+                sync_enabled: config.sync_enabled,
+                sync_remote: config.sync_remote,
+            }),
+            Ok(None) => Json(ProjectConfigResponse {
+                status: format!("error: invalid key '{}'", input.key),
+                project: project.path,
+                target_branch: project.target_branch,
+                auto_merge: project.auto_merge,
+                sync_enabled: project.sync_enabled,
+                sync_remote: project.sync_remote,
+            }),
+            Err(e) => Json(ProjectConfigResponse {
+                status: format!("error: {e}"),
+                project: project.path,
+                target_branch: project.target_branch,
+                auto_merge: project.auto_merge,
+                sync_enabled: project.sync_enabled,
+                sync_remote: project.sync_remote,
+            }),
+        }
+    }
     /// Return the configured setup and verification commands for a project.
     #[tool(description = "Read setup and verification commands configured for a project.")]
     pub async fn project_commands_get(

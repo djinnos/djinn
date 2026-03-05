@@ -5,6 +5,15 @@ use crate::error::Result;
 use crate::events::DjinnEvent;
 use crate::models::project::Project;
 
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ProjectConfig {
+    pub target_branch: String,
+    pub auto_merge: bool,
+    pub sync_enabled: bool,
+    pub sync_remote: Option<String>,
+}
+
 pub struct ProjectRepository {
     db: Database,
     events: broadcast::Sender<DjinnEvent>,
@@ -18,7 +27,7 @@ impl ProjectRepository {
     pub async fn list(&self) -> Result<Vec<Project>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, setup_commands, verification_commands FROM projects ORDER BY name",
+            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects ORDER BY name",
         )
         .fetch_all(self.db.pool())
         .await?)
@@ -27,7 +36,7 @@ impl ProjectRepository {
     pub async fn get(&self, id: &str) -> Result<Option<Project>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, setup_commands, verification_commands FROM projects WHERE id = ?1",
+            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
         )
         .bind(id)
         .fetch_optional(self.db.pool())
@@ -37,7 +46,7 @@ impl ProjectRepository {
     pub async fn get_by_path(&self, path: &str) -> Result<Option<Project>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, setup_commands, verification_commands FROM projects WHERE path = ?1",
+            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE path = ?1",
         )
         .bind(path)
         .fetch_optional(self.db.pool())
@@ -54,7 +63,7 @@ impl ProjectRepository {
             .execute(self.db.pool())
             .await?;
         let project = sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, setup_commands, verification_commands FROM projects WHERE id = ?1",
+            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
         )
         .bind(&id)
         .fetch_one(self.db.pool())
@@ -75,7 +84,7 @@ impl ProjectRepository {
             .execute(self.db.pool())
             .await?;
         let project = sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, setup_commands, verification_commands FROM projects WHERE id = ?1",
+            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
         )
         .bind(id)
         .fetch_one(self.db.pool())
@@ -103,7 +112,7 @@ impl ProjectRepository {
         .execute(self.db.pool())
         .await?;
         let project = sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, setup_commands, verification_commands FROM projects WHERE id = ?1",
+            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
         )
         .bind(id)
         .fetch_one(self.db.pool())
@@ -113,6 +122,63 @@ impl ProjectRepository {
             .events
             .send(DjinnEvent::ProjectUpdated(project.clone()));
         Ok(project)
+    }
+
+    pub async fn get_config(&self, id: &str) -> Result<Option<ProjectConfig>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, ProjectConfig>(
+            "SELECT target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    pub async fn update_config_field(&self, id: &str, key: &str, value: &str) -> Result<Option<ProjectConfig>> {
+        self.db.ensure_initialized().await?;
+        match key {
+            "target_branch" => {
+                sqlx::query("UPDATE projects SET target_branch = ?2 WHERE id = ?1")
+                    .bind(id)
+                    .bind(value)
+                    .execute(self.db.pool())
+                    .await?;
+            }
+            "auto_merge" => {
+                let v = matches!(value, "true" | "1");
+                sqlx::query("UPDATE projects SET auto_merge = ?2 WHERE id = ?1")
+                    .bind(id)
+                    .bind(v)
+                    .execute(self.db.pool())
+                    .await?;
+            }
+            "sync_enabled" => {
+                let v = matches!(value, "true" | "1");
+                sqlx::query("UPDATE projects SET sync_enabled = ?2 WHERE id = ?1")
+                    .bind(id)
+                    .bind(v)
+                    .execute(self.db.pool())
+                    .await?;
+            }
+            "sync_remote" => {
+                let val = if value.is_empty() { None } else { Some(value) };
+                sqlx::query("UPDATE projects SET sync_remote = ?2 WHERE id = ?1")
+                    .bind(id)
+                    .bind(val)
+                    .execute(self.db.pool())
+                    .await?;
+            }
+            _ => return Ok(None),
+        }
+
+        let Some(config) = self.get_config(id).await? else {
+            return Ok(None);
+        };
+        let _ = self.events.send(DjinnEvent::ProjectConfigUpdated {
+            project_id: id.to_owned(),
+            config: config.clone(),
+        });
+        Ok(Some(config))
     }
 
     pub async fn delete(&self, id: &str) -> Result<()> {

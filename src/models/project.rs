@@ -9,4 +9,8 @@ pub struct Project {
     pub created_at: String,
     pub setup_commands: String,
     pub verification_commands: String,
+    pub target_branch: String,
+    pub auto_merge: bool,
+    pub sync_enabled: bool,
+    pub sync_remote: Option<String>,
 }

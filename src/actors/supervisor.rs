@@ -4021,12 +4021,12 @@ impl AgentSupervisor {
     }
 
     async fn default_target_branch(&self, project_id: &str) -> String {
-        let repo = GitSettingsRepository::new(
+        let repo = ProjectRepository::new(
             self.app_state.db().clone(),
             self.app_state.events().clone(),
         );
-        if let Ok(settings) = repo.get(project_id).await {
-            return settings.target_branch;
+        if let Ok(Some(config)) = repo.get_config(project_id).await {
+            return config.target_branch;
         }
 
         "main".to_string()
