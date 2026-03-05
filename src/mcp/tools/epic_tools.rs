@@ -12,9 +12,22 @@ use crate::mcp::tools::validation::{
     validate_color, validate_description, validate_emoji, validate_limit, validate_offset,
     validate_owner, validate_sort, validate_title,
 };
-use crate::mcp::tools::AnyJson;
 use crate::models::epic::Epic;
 use crate::models::task::Task;
+
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum AcceptanceCriterionItem {
+    Text(String),
+    Structured(AcceptanceCriterionStatus),
+}
+
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct AcceptanceCriterionStatus {
+    pub criterion: String,
+    #[serde(default)]
+    pub met: bool,
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -87,7 +100,7 @@ pub struct EpicTaskModel {
     pub owner: String,
     pub labels: Vec<String>,
     pub memory_refs: Vec<String>,
-    pub acceptance_criteria: Vec<AnyJson>,
+    pub acceptance_criteria: Vec<AcceptanceCriterionItem>,
     pub reopen_count: i64,
     pub continuation_count: i64,
     pub created_at: String,
@@ -113,7 +126,7 @@ impl From<&Task> for EpicTaskModel {
             owner: t.owner.clone(),
             labels: parse_string_array(&t.labels),
             memory_refs: parse_string_array(&t.memory_refs),
-            acceptance_criteria: parse_json_array(&t.acceptance_criteria),
+            acceptance_criteria: parse_acceptance_criteria_array(&t.acceptance_criteria),
             reopen_count: t.reopen_count,
             continuation_count: t.continuation_count,
             created_at: t.created_at.clone(),
@@ -208,12 +221,18 @@ fn parse_string_array(raw: &str) -> Vec<String> {
     serde_json::from_str(raw).unwrap_or_default()
 }
 
-fn parse_json_array(raw: &str) -> Vec<AnyJson> {
+fn parse_acceptance_criteria_array(raw: &str) -> Vec<AcceptanceCriterionItem> {
     let parsed = serde_json::from_str::<serde_json::Value>(raw)
         .ok()
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
-    parsed.into_iter().map(AnyJson::from).collect()
+    parsed
+        .into_iter()
+        .map(|item| {
+            serde_json::from_value::<AcceptanceCriterionItem>(item.clone())
+                .unwrap_or_else(|_| AcceptanceCriterionItem::Text(item.to_string()))
+        })
+        .collect()
 }
 
 // ── Param structs ────────────────────────────────────────────────────────────
@@ -393,7 +412,10 @@ impl DjinnMcpServer {
     #[tool(
         description = "Show details of an epic including child task counts. Accepts epic UUID or short_id."
     )]
-    pub async fn epic_show(&self, Parameters(p): Parameters<EpicShowParams>) -> Json<EpicShowResponse> {
+    pub async fn epic_show(
+        &self,
+        Parameters(p): Parameters<EpicShowParams>,
+    ) -> Json<EpicShowResponse> {
         let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
@@ -434,7 +456,10 @@ impl DjinnMcpServer {
     #[tool(
         description = "List epics with optional filters and offset-based pagination. Returns {epics[], total_count, limit, offset, has_more}."
     )]
-    pub async fn epic_list(&self, Parameters(p): Parameters<EpicListParams>) -> Json<EpicListResponse> {
+    pub async fn epic_list(
+        &self,
+        Parameters(p): Parameters<EpicListParams>,
+    ) -> Json<EpicListResponse> {
         let sort = p.sort.as_deref().unwrap_or("created");
         if let Err(e) = validate_sort(
             sort,
@@ -589,7 +614,10 @@ impl DjinnMcpServer {
 
     /// Close an epic.
     #[tool(description = "Close an epic. Accepts epic UUID or short_id.")]
-    pub async fn epic_close(&self, Parameters(p): Parameters<EpicCloseParams>) -> Json<EpicSingleResponse> {
+    pub async fn epic_close(
+        &self,
+        Parameters(p): Parameters<EpicCloseParams>,
+    ) -> Json<EpicSingleResponse> {
         let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
@@ -720,7 +748,10 @@ impl DjinnMcpServer {
     #[tool(
         description = "List tasks under an epic with optional filters and pagination. Accepts epic UUID or short_id."
     )]
-    pub async fn epic_tasks(&self, Parameters(p): Parameters<EpicTasksParams>) -> Json<EpicTasksResponse> {
+    pub async fn epic_tasks(
+        &self,
+        Parameters(p): Parameters<EpicTasksParams>,
+    ) -> Json<EpicTasksResponse> {
         let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
@@ -808,7 +839,10 @@ impl DjinnMcpServer {
 
     /// Count epics with optional grouping.
     #[tool(description = "Count epics with optional grouping by status.")]
-    pub async fn epic_count(&self, Parameters(p): Parameters<EpicCountParams>) -> Json<EpicCountResponse> {
+    pub async fn epic_count(
+        &self,
+        Parameters(p): Parameters<EpicCountParams>,
+    ) -> Json<EpicCountResponse> {
         if let Some(ref gb) = p.group_by {
             if let Err(e) = validate_sort(gb, &["status"]) {
                 return Json(EpicCountResponse {
@@ -836,7 +870,8 @@ impl DjinnMcpServer {
         let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.count_grouped(query).await {
             Ok(v) => {
-                if let Some(total_count) = v.get("total_count").and_then(serde_json::Value::as_i64) {
+                if let Some(total_count) = v.get("total_count").and_then(serde_json::Value::as_i64)
+                {
                     return Json(EpicCountResponse {
                         total_count: Some(total_count),
                         groups: None,

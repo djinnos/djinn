@@ -189,7 +189,10 @@ impl DjinnMcpServer {
 
         let (resumed, result) = match project_id.as_deref() {
             Some(id) => {
-                let paused = coordinator.get_project_status(id).map(|s| s.paused).unwrap_or(false);
+                let paused = coordinator
+                    .get_project_status(id)
+                    .map(|s| s.paused)
+                    .unwrap_or(false);
                 let r = if paused {
                     coordinator.resume_project(id).await
                 } else {
@@ -216,7 +219,14 @@ impl DjinnMcpServer {
             ok: true,
             state: Some("active".to_string()),
             resumed: Some(resumed),
-            scope: Some(if project_id.is_some() { "project" } else { "global" }.to_string()),
+            scope: Some(
+                if project_id.is_some() {
+                    "project"
+                } else {
+                    "global"
+                }
+                .to_string(),
+            ),
             project_id,
             error: None,
         })

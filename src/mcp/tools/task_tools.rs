@@ -10,13 +10,13 @@ use crate::db::repositories::task::{
     ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository,
 };
 use crate::mcp::server::DjinnMcpServer;
+use crate::mcp::tools::AnyJson;
 use crate::mcp::tools::validation::{
     validate_ac_count, validate_actor_id, validate_actor_role, validate_body, validate_description,
     validate_design, validate_issue_type, validate_label, validate_labels_count, validate_limit,
     validate_offset, validate_owner, validate_priority, validate_reason, validate_sort,
     validate_title,
 };
-use crate::mcp::tools::AnyJson;
 use crate::models::session::SessionStatus;
 use crate::models::task::{Task, TaskStatus, TransitionAction};
 
@@ -50,7 +50,7 @@ pub struct TaskCreateParams {
     pub priority: Option<i64>,
     pub owner: Option<String>,
     pub labels: Option<Vec<String>>,
-    pub acceptance_criteria: Option<Vec<AnyJson>>,
+    pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -69,13 +69,27 @@ pub struct TaskUpdateParams {
     /// Labels to remove.
     pub labels_remove: Option<Vec<String>>,
     /// Full replacement for acceptance_criteria.
-    pub acceptance_criteria: Option<Vec<AnyJson>>,
+    pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
     /// New parent epic UUID or short_id.
     pub epic_id: Option<String>,
     /// Memory note permalinks to add to this task.
     pub memory_refs_add: Option<Vec<String>>,
     /// Memory note permalinks to remove from this task.
     pub memory_refs_remove: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum AcceptanceCriterionItem {
+    Text(String),
+    Structured(AcceptanceCriterionStatus),
+}
+
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct AcceptanceCriterionStatus {
+    pub criterion: String,
+    #[serde(default)]
+    pub met: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -276,11 +290,27 @@ impl ErrorResponse {
     }
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Serialize)]
 #[serde(untagged)]
 pub enum ErrorOr<T> {
     Ok(T),
     Error(ErrorResponse),
+}
+
+impl<T> schemars::JsonSchema for ErrorOr<T>
+where
+    T: schemars::JsonSchema,
+{
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        format!("ErrorOr{}", T::schema_name()).into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "additionalProperties": true
+        })
+    }
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -297,7 +327,7 @@ pub struct TaskResponse {
     pub owner: String,
     pub labels: Vec<String>,
     pub memory_refs: Vec<String>,
-    pub acceptance_criteria: Vec<AnyJson>,
+    pub acceptance_criteria: Vec<AcceptanceCriterionItem>,
     pub reopen_count: i64,
     pub continuation_count: i64,
     pub created_at: String,
@@ -482,7 +512,7 @@ pub struct TaskListItem {
     pub owner: String,
     pub labels: Vec<String>,
     pub memory_refs: Vec<String>,
-    pub acceptance_criteria: Vec<AnyJson>,
+    pub acceptance_criteria: Vec<AcceptanceCriterionItem>,
     pub reopen_count: i64,
     pub continuation_count: i64,
     pub created_at: String,
@@ -497,18 +527,22 @@ fn parse_string_array(raw: &str) -> Vec<String> {
     serde_json::from_str(raw).unwrap_or_default()
 }
 
-fn parse_json_array(raw: &str) -> Vec<AnyJson> {
+fn parse_acceptance_criteria_array(raw: &str) -> Vec<AcceptanceCriterionItem> {
     let parsed = serde_json::from_str::<serde_json::Value>(raw)
         .ok()
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
-    parsed.into_iter().map(AnyJson::from).collect()
+    parsed
+        .into_iter()
+        .map(|item| {
+            serde_json::from_value::<AcceptanceCriterionItem>(item.clone())
+                .unwrap_or_else(|_| AcceptanceCriterionItem::Text(item.to_string()))
+        })
+        .collect()
 }
 
 fn parse_any_json(raw: &str) -> AnyJson {
-    AnyJson(
-        serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({})),
-    )
+    AnyJson(serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({})))
 }
 
 fn task_to_response(t: &Task) -> TaskResponse {
@@ -525,7 +559,7 @@ fn task_to_response(t: &Task) -> TaskResponse {
         owner: t.owner.clone(),
         labels: parse_string_array(&t.labels),
         memory_refs: parse_string_array(&t.memory_refs),
-        acceptance_criteria: parse_json_array(&t.acceptance_criteria),
+        acceptance_criteria: parse_acceptance_criteria_array(&t.acceptance_criteria),
         reopen_count: t.reopen_count,
         continuation_count: t.continuation_count,
         created_at: t.created_at.clone(),
@@ -984,11 +1018,7 @@ impl DjinnMcpServer {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.list_filtered(query).await {
             Ok(result) => {
-                let tasks = result
-                    .tasks
-                    .iter()
-                    .map(task_to_list_item)
-                    .collect();
+                let tasks = result.tasks.iter().map(task_to_list_item).collect();
                 Json(TaskListResponse {
                     has_more: offset + limit < result.total_count,
                     tasks,
@@ -1181,13 +1211,11 @@ impl DjinnMcpServer {
             Ok(refs) => {
                 let tasks = refs
                     .iter()
-                    .map(|b| {
-                        TaskBlockedItemResponse {
-                            task_id: b.task_id.clone(),
-                            short_id: b.short_id.clone(),
-                            title: b.title.clone(),
-                            status: b.status.clone(),
-                        }
+                    .map(|b| TaskBlockedItemResponse {
+                        task_id: b.task_id.clone(),
+                        short_id: b.short_id.clone(),
+                        title: b.title.clone(),
+                        status: b.status.clone(),
                     })
                     .collect();
                 Json(ErrorOr::Ok(TaskBlockedListResponse { tasks }))
@@ -1606,10 +1634,7 @@ impl DjinnMcpServer {
                                 }
                                 if !stale_batch_worktrees.is_empty() {
                                     let _ = git
-                                        .run_command(vec![
-                                            "worktree".into(),
-                                            "prune".into(),
-                                        ])
+                                        .run_command(vec!["worktree".into(), "prune".into()])
                                         .await;
                                 }
                             }

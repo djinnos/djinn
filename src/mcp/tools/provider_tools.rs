@@ -269,6 +269,7 @@ pub struct ProviderOauthStartInput {
 
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderOauthStartResponse {
+    pub ok: bool,
     pub success: bool,
     pub provider_id: String,
     pub goose_provider_id: Option<String>,
@@ -337,6 +338,7 @@ pub struct ProviderAddCustomInput {
 
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderAddCustomResponse {
+    pub ok: bool,
     pub success: bool,
     pub id: String,
     pub error: Option<String>,
@@ -361,10 +363,8 @@ impl DjinnMcpServer {
         match action {
             "status" => {
                 let all = tracker.all_health();
-                let models: Vec<ModelHealthOutput> = all
-                    .into_iter()
-                    .map(ModelHealthOutput::from)
-                    .collect();
+                let models: Vec<ModelHealthOutput> =
+                    all.into_iter().map(ModelHealthOutput::from).collect();
                 Json(ModelHealthResponse {
                     action: "status".into(),
                     models,
@@ -652,6 +652,7 @@ impl DjinnMcpServer {
         let Some(goose_provider_id) = resolve_goose_provider_name(&input.provider_id, &entries)
         else {
             return Json(ProviderOauthStartResponse {
+                ok: false,
                 success: false,
                 provider_id: input.provider_id,
                 goose_provider_id: None,
@@ -664,6 +665,7 @@ impl DjinnMcpServer {
         let oauth_keys = oauth_keys_for_provider(&goose_provider_id, &entries);
         if oauth_keys.is_empty() {
             return Json(ProviderOauthStartResponse {
+                ok: false,
                 success: false,
                 provider_id: input.provider_id,
                 goose_provider_id: Some(goose_provider_id),
@@ -679,6 +681,7 @@ impl DjinnMcpServer {
                 Ok(p) => p,
                 Err(e) => {
                     return Json(ProviderOauthStartResponse {
+                        ok: false,
                         success: false,
                         provider_id: input.provider_id,
                         goose_provider_id: Some(goose_provider_id),
@@ -691,6 +694,7 @@ impl DjinnMcpServer {
 
         match provider.configure_oauth().await {
             Ok(()) => Json(ProviderOauthStartResponse {
+                ok: true,
                 success: true,
                 provider_id: input.provider_id,
                 goose_provider_id: Some(goose_provider_id),
@@ -699,6 +703,7 @@ impl DjinnMcpServer {
                 error: None,
             }),
             Err(e) => Json(ProviderOauthStartResponse {
+                ok: false,
                 success: false,
                 provider_id: input.provider_id,
                 goose_provider_id: Some(goose_provider_id),
@@ -770,6 +775,7 @@ impl DjinnMcpServer {
         // Validate ID format (basic sanity check).
         if input.id.is_empty() || input.id.contains('/') {
             return Json(ProviderAddCustomResponse {
+                ok: false,
                 success: false,
                 id: input.id,
                 error: Some("provider id must be non-empty and must not contain '/'".into()),
@@ -779,6 +785,7 @@ impl DjinnMcpServer {
         // Validate base_url scheme.
         if !input.base_url.starts_with("http://") && !input.base_url.starts_with("https://") {
             return Json(ProviderAddCustomResponse {
+                ok: false,
                 success: false,
                 id: input.id,
                 error: Some("base_url must use http or https scheme".into()),
@@ -809,6 +816,7 @@ impl DjinnMcpServer {
         if let Err(e) = repo.upsert(&provider).await {
             tracing::warn!(id = %input.id, error = %e, "provider_add_custom: DB upsert failed");
             return Json(ProviderAddCustomResponse {
+                ok: false,
                 success: false,
                 id: input.id,
                 error: Some(e.to_string()),
@@ -845,6 +853,7 @@ impl DjinnMcpServer {
 
         tracing::info!(id = %input.id, "registered custom provider");
         Json(ProviderAddCustomResponse {
+            ok: true,
             success: true,
             id: input.id,
             error: None,

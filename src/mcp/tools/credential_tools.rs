@@ -101,6 +101,7 @@ pub struct CredentialSetInput {
 
 #[derive(Serialize, JsonSchema)]
 pub struct CredentialSetResponse {
+    pub ok: bool,
     pub success: bool,
     pub id: String,
     pub key_name: String,
@@ -133,6 +134,7 @@ pub struct CredentialDeleteInput {
 
 #[derive(Serialize, JsonSchema)]
 pub struct CredentialDeleteResponse {
+    pub ok: bool,
     pub success: bool,
     pub deleted: bool,
     pub key_name: String,
@@ -154,6 +156,7 @@ impl DjinnMcpServer {
     ) -> Json<CredentialSetResponse> {
         if input.key_name.is_empty() {
             return Json(CredentialSetResponse {
+                ok: false,
                 success: false,
                 id: String::new(),
                 key_name: input.key_name,
@@ -162,6 +165,7 @@ impl DjinnMcpServer {
         }
         if input.api_key.is_empty() {
             return Json(CredentialSetResponse {
+                ok: false,
                 success: false,
                 id: String::new(),
                 key_name: input.key_name,
@@ -191,6 +195,7 @@ impl DjinnMcpServer {
                 }
 
                 Json(CredentialSetResponse {
+                    ok: true,
                     success: true,
                     id: cred.id,
                     key_name: cred.key_name,
@@ -200,6 +205,7 @@ impl DjinnMcpServer {
             Err(e) => {
                 tracing::warn!(key_name = %input.key_name, error = %e, "credential_set failed");
                 Json(CredentialSetResponse {
+                    ok: false,
                     success: false,
                     id: String::new(),
                     key_name: input.key_name,
@@ -248,6 +254,7 @@ impl DjinnMcpServer {
 
         match repo.delete(&input.key_name).await {
             Ok(deleted) => Json(CredentialDeleteResponse {
+                ok: true,
                 success: true,
                 deleted,
                 key_name: input.key_name,
@@ -256,6 +263,7 @@ impl DjinnMcpServer {
             Err(e) => {
                 tracing::warn!(key_name = %input.key_name, error = %e, "credential_delete failed");
                 Json(CredentialDeleteResponse {
+                    ok: false,
                     success: false,
                     deleted: false,
                     key_name: input.key_name,

@@ -5,10 +5,10 @@ use std::sync::Arc;
 use crate::sse;
 use axum::Router;
 use axum::routing::get;
-use tower_http::cors::CorsLayer;
 use serde::Serialize;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
+use tower_http::cors::CorsLayer;
 
 use crate::actors::coordinator::CoordinatorHandle;
 use crate::actors::git::{GitActorHandle, GitError};
@@ -254,8 +254,8 @@ impl AppState {
     pub async fn apply_settings(&self, settings: &DjinnSettings) -> Result<(), String> {
         self.validate_model_priority_providers_connected(settings)
             .await?;
-        let raw = serde_json::to_string(settings)
-            .map_err(|e| format!("serialize settings: {e}"))?;
+        let raw =
+            serde_json::to_string(settings).map_err(|e| format!("serialize settings: {e}"))?;
         let repo = SettingsRepository::new(self.db().clone(), self.events().clone());
         repo.set(SETTINGS_RAW_KEY, &raw)
             .await
@@ -300,8 +300,10 @@ impl AppState {
         let goose_entries = crate::mcp::tools::provider_tools::goose_provider_entries().await;
         let catalog_providers = self.catalog().list_providers();
         for provider in &catalog_providers {
-            let oauth_keys =
-                crate::mcp::tools::provider_tools::oauth_keys_for_provider(&provider.id, &goose_entries);
+            let oauth_keys = crate::mcp::tools::provider_tools::oauth_keys_for_provider(
+                &provider.id,
+                &goose_entries,
+            );
             if !oauth_keys.is_empty()
                 && crate::mcp::tools::provider_tools::is_oauth_key_present(&oauth_keys)
             {
@@ -333,7 +335,9 @@ impl AppState {
                 .await;
         }
         if let Some(supervisor) = self.supervisor().await {
-            let _ = supervisor.update_session_limits(std::collections::HashMap::new(), 1).await;
+            let _ = supervisor
+                .update_session_limits(std::collections::HashMap::new(), 1)
+                .await;
         }
     }
 
@@ -452,7 +456,7 @@ pub async fn run(router: Router, port: u16, cancel: CancellationToken) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{fs, path::Path};
 
     use axum::body::Body;
     use axum::http::header::{ACCEPT, CONTENT_TYPE};
@@ -465,6 +469,195 @@ mod tests {
     use crate::server::AppState;
     use crate::test_helpers;
     use tokio_util::sync::CancellationToken;
+
+    const CONTRACT_PROJECT_PATH: &str = "/home/fernando/git/djinnos/server";
+
+    fn parse_sse_json_events(body: &str) -> Vec<Value> {
+        let mut events = Vec::new();
+        let mut data_lines: Vec<String> = Vec::new();
+
+        for line in body.lines() {
+            if let Some(rest) = line.strip_prefix("data:") {
+                data_lines.push(rest.trim_start().to_string());
+                continue;
+            }
+
+            if line.is_empty() && !data_lines.is_empty() {
+                let payload = data_lines.join("\n").trim().to_string();
+                if !payload.is_empty()
+                    && let Ok(value) = serde_json::from_str::<Value>(&payload)
+                {
+                    events.push(value);
+                }
+                data_lines.clear();
+            }
+        }
+
+        if !data_lines.is_empty() {
+            let payload = data_lines.join("\n").trim().to_string();
+            if !payload.is_empty()
+                && let Ok(value) = serde_json::from_str::<Value>(&payload)
+            {
+                events.push(value);
+            }
+        }
+
+        events
+    }
+
+    async fn initialize_mcp_session(app: &axum::Router) -> String {
+        let initialize_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "schema-test-client",
+                    "version": "0.0.0"
+                }
+            }
+        });
+
+        let init_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json, text/event-stream")
+            .body(Body::from(initialize_payload.to_string()))
+            .unwrap();
+        let init_resp = app.clone().oneshot(init_req).await.unwrap();
+        assert_eq!(init_resp.status(), 200);
+
+        let session_id = init_resp
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .expect("missing mcp-session-id header on initialize response")
+            .to_string();
+
+        let init_notify_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        });
+        let init_notify_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header("mcp-session-id", session_id.clone())
+            .body(Body::from(init_notify_payload.to_string()))
+            .unwrap();
+        let init_notify_resp = app.clone().oneshot(init_notify_req).await.unwrap();
+        assert_eq!(init_notify_resp.status(), 202);
+
+        session_id
+    }
+
+    async fn mcp_jsonrpc(
+        app: &axum::Router,
+        session_id: &str,
+        id: i64,
+        method: &str,
+        params: Value,
+    ) -> Value {
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header("mcp-session-id", session_id)
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let raw = String::from_utf8(body.to_vec()).expect("response body should be utf-8");
+
+        if let Ok(single) = serde_json::from_str::<Value>(&raw)
+            && single.get("id") == Some(&Value::from(id))
+        {
+            return single;
+        }
+
+        parse_sse_json_events(&raw)
+            .into_iter()
+            .find(|event| event.get("id") == Some(&Value::from(id)))
+            .expect("missing JSON-RPC event with requested id")
+    }
+
+    fn extract_tool_result_payload(result: &Value) -> Value {
+        if let Some(structured) = result.get("structuredContent") {
+            return structured.clone();
+        }
+
+        if let Some(content) = result.get("content").and_then(Value::as_array) {
+            for item in content {
+                if let Some(text) = item.get("text").and_then(Value::as_str)
+                    && let Ok(parsed) = serde_json::from_str::<Value>(text)
+                {
+                    return parsed;
+                }
+            }
+        }
+
+        result.clone()
+    }
+
+    async fn mcp_call_tool(
+        app: &axum::Router,
+        session_id: &str,
+        id: i64,
+        name: &str,
+        arguments: Value,
+    ) -> Value {
+        let event = mcp_jsonrpc(
+            app,
+            session_id,
+            id,
+            "tools/call",
+            serde_json::json!({
+                "name": name,
+                "arguments": arguments,
+            }),
+        )
+        .await;
+
+        let result = event
+            .get("result")
+            .expect("tools/call missing result payload");
+        extract_tool_result_payload(result)
+    }
+
+    fn canonicalize_json(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut keys: Vec<_> = map.keys().cloned().collect();
+                keys.sort();
+
+                let mut out = serde_json::Map::new();
+                for key in keys {
+                    if let Some(child) = map.get(&key) {
+                        out.insert(key, canonicalize_json(child));
+                    }
+                }
+                Value::Object(out)
+            }
+            Value::Array(items) => Value::Array(items.iter().map(canonicalize_json).collect()),
+            _ => value.clone(),
+        }
+    }
 
     /// Integration test: hit /health via tower::ServiceExt::oneshot().
     #[tokio::test]
@@ -517,39 +710,6 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_tool_schemas_avoid_nonstandard_uint_formats() {
-        fn parse_sse_json_events(body: &str) -> Vec<Value> {
-            let mut events = Vec::new();
-            let mut data_lines: Vec<String> = Vec::new();
-
-            for line in body.lines() {
-                if let Some(rest) = line.strip_prefix("data:") {
-                    data_lines.push(rest.trim_start().to_string());
-                    continue;
-                }
-
-                if line.is_empty() && !data_lines.is_empty() {
-                    let payload = data_lines.join("\n").trim().to_string();
-                    if !payload.is_empty()
-                        && let Ok(value) = serde_json::from_str::<Value>(&payload)
-                    {
-                        events.push(value);
-                    }
-                    data_lines.clear();
-                }
-            }
-
-            if !data_lines.is_empty() {
-                let payload = data_lines.join("\n").trim().to_string();
-                if !payload.is_empty()
-                    && let Ok(value) = serde_json::from_str::<Value>(&payload)
-                {
-                    events.push(value);
-                }
-            }
-
-            events
-        }
-
         fn collect_bad_formats(
             tool_name: &str,
             schema_kind: &str,
@@ -606,79 +766,10 @@ mod tests {
         }
 
         let app = test_helpers::create_test_app();
-
-        let initialize_payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "schema-test-client",
-                    "version": "0.0.0"
-                }
-            }
-        });
-
-        let init_req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/mcp")
-            .header(CONTENT_TYPE, "application/json")
-            .header(ACCEPT, "application/json, text/event-stream")
-            .body(Body::from(initialize_payload.to_string()))
-            .unwrap();
-        let init_resp = app.clone().oneshot(init_req).await.unwrap();
-        assert_eq!(init_resp.status(), 200);
-
-        let session_id = init_resp
-            .headers()
-            .get("mcp-session-id")
-            .cloned()
-            .expect("missing mcp-session-id header on initialize response");
-
-        let init_notify_payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {}
-        });
-        let init_notify_req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/mcp")
-            .header(CONTENT_TYPE, "application/json")
-            .header(ACCEPT, "application/json, text/event-stream")
-            .header("mcp-session-id", session_id.clone())
-            .body(Body::from(init_notify_payload.to_string()))
-            .unwrap();
-        let init_notify_resp = app.clone().oneshot(init_notify_req).await.unwrap();
-        assert_eq!(init_notify_resp.status(), 202);
-
-        let list_payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-            "params": {}
-        });
-        let list_req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/mcp")
-            .header(CONTENT_TYPE, "application/json")
-            .header(ACCEPT, "application/json, text/event-stream")
-            .header("mcp-session-id", session_id)
-            .body(Body::from(list_payload.to_string()))
-            .unwrap();
-
-        let list_resp = app.oneshot(list_req).await.unwrap();
-        assert_eq!(list_resp.status(), 200);
-
-        let body = list_resp.into_body().collect().await.unwrap().to_bytes();
-        let raw = String::from_utf8(body.to_vec()).expect("sse body should be utf-8");
-        let events = parse_sse_json_events(&raw);
-        let result = events
-            .iter()
-            .find(|event| event.get("id") == Some(&Value::from(2)))
-            .and_then(|event| event.get("result"))
-            .expect("tools/list JSON-RPC result missing in SSE stream");
+        let session_id = initialize_mcp_session(&app).await;
+        let list_event =
+            mcp_jsonrpc(&app, &session_id, 2, "tools/list", serde_json::json!({})).await;
+        let result = list_event.get("result").expect("tools/list result missing");
 
         let tools = result
             .get("tools")
@@ -717,6 +808,206 @@ mod tests {
             bad_nullable.is_empty(),
             "Found nullable schema branches without explicit type (breaks strict clients):\n  {}",
             bad_nullable.join("\n  ")
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_list_schema_snapshot_matches_repo_file() {
+        let app = test_helpers::create_test_app();
+        let session_id = initialize_mcp_session(&app).await;
+
+        let list_event =
+            mcp_jsonrpc(&app, &session_id, 2, "tools/list", serde_json::json!({})).await;
+        let tools = list_event
+            .get("result")
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("tools/list result missing tools array");
+
+        let mut signatures: Vec<Value> = tools
+            .iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.get("name").cloned().unwrap_or(Value::Null),
+                    "input_schema": canonicalize_json(tool.get("inputSchema").unwrap_or(&Value::Null)),
+                    "output_schema": canonicalize_json(tool.get("outputSchema").unwrap_or(&Value::Null)),
+                })
+            })
+            .collect();
+
+        signatures.sort_by(|a, b| {
+            let a_name = a.get("name").and_then(Value::as_str).unwrap_or("");
+            let b_name = b.get("name").and_then(Value::as_str).unwrap_or("");
+            a_name.cmp(b_name)
+        });
+
+        let snapshot = serde_json::json!({ "tools": signatures });
+        let snapshot_text = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&snapshot).expect("serialize schema snapshot")
+        );
+
+        let snapshot_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/mcp_tools_schema_snapshot.json");
+
+        if !snapshot_path.exists() {
+            if let Some(parent) = snapshot_path.parent() {
+                fs::create_dir_all(parent).expect("create snapshot parent directory");
+            }
+            fs::write(&snapshot_path, &snapshot_text).expect("write initial schema snapshot");
+            return;
+        }
+
+        let expected = fs::read_to_string(&snapshot_path).expect("read tools schema snapshot");
+        assert_eq!(
+            expected,
+            snapshot_text,
+            "MCP tools schema snapshot changed. Review and update {} if intentional.",
+            snapshot_path.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_contract_desktop_critical_tools_success_shapes() {
+        let app = test_helpers::create_test_app();
+        let session_id = initialize_mcp_session(&app).await;
+
+        let _ = mcp_call_tool(
+            &app,
+            &session_id,
+            3,
+            "project_add",
+            serde_json::json!({
+                "name": "contract-shape-project",
+                "path": CONTRACT_PROJECT_PATH,
+            }),
+        )
+        .await;
+
+        let provider_catalog = mcp_call_tool(
+            &app,
+            &session_id,
+            4,
+            "provider_catalog",
+            serde_json::json!({}),
+        )
+        .await;
+        let providers = provider_catalog
+            .get("providers")
+            .and_then(Value::as_array)
+            .expect("provider_catalog must return providers array");
+        assert!(
+            !providers.is_empty(),
+            "provider_catalog providers should not be empty"
+        );
+        for provider in providers {
+            assert!(provider.get("id").and_then(Value::as_str).is_some());
+            assert!(provider.get("name").and_then(Value::as_str).is_some());
+            assert!(provider.get("connected").and_then(Value::as_bool).is_some());
+        }
+
+        let credential_list = mcp_call_tool(
+            &app,
+            &session_id,
+            5,
+            "credential_list",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(
+            credential_list
+                .get("credentials")
+                .and_then(Value::as_array)
+                .is_some(),
+            "credential_list must return credentials array"
+        );
+
+        let task_list = mcp_call_tool(
+            &app,
+            &session_id,
+            6,
+            "task_list",
+            serde_json::json!({ "project": CONTRACT_PROJECT_PATH }),
+        )
+        .await;
+        assert!(task_list.get("tasks").and_then(Value::as_array).is_some());
+        assert!(
+            task_list
+                .get("total_count")
+                .and_then(Value::as_i64)
+                .is_some()
+        );
+        assert!(task_list.get("limit").and_then(Value::as_i64).is_some());
+        assert!(task_list.get("offset").and_then(Value::as_i64).is_some());
+        assert!(task_list.get("has_more").and_then(Value::as_bool).is_some());
+
+        let epic_list = mcp_call_tool(
+            &app,
+            &session_id,
+            7,
+            "epic_list",
+            serde_json::json!({ "project": CONTRACT_PROJECT_PATH }),
+        )
+        .await;
+        assert!(epic_list.get("epics").and_then(Value::as_array).is_some());
+        assert!(
+            epic_list
+                .get("total_count")
+                .and_then(Value::as_i64)
+                .is_some()
+        );
+        assert!(epic_list.get("limit").and_then(Value::as_i64).is_some());
+        assert!(epic_list.get("offset").and_then(Value::as_i64).is_some());
+        assert!(epic_list.get("has_more").and_then(Value::as_bool).is_some());
+    }
+
+    #[tokio::test]
+    async fn mcp_contract_not_found_shapes_include_error_field() {
+        let app = test_helpers::create_test_app();
+        let session_id = initialize_mcp_session(&app).await;
+
+        let _ = mcp_call_tool(
+            &app,
+            &session_id,
+            8,
+            "project_add",
+            serde_json::json!({
+                "name": "contract-not-found-project",
+                "path": CONTRACT_PROJECT_PATH,
+            }),
+        )
+        .await;
+
+        let task_show = mcp_call_tool(
+            &app,
+            &session_id,
+            9,
+            "task_show",
+            serde_json::json!({
+                "project": CONTRACT_PROJECT_PATH,
+                "id": "task-does-not-exist",
+            }),
+        )
+        .await;
+        assert!(
+            task_show.get("error").and_then(Value::as_str).is_some(),
+            "task_show not-found response must include error"
+        );
+
+        let epic_show = mcp_call_tool(
+            &app,
+            &session_id,
+            10,
+            "epic_show",
+            serde_json::json!({
+                "project": CONTRACT_PROJECT_PATH,
+                "id": "epic-does-not-exist",
+            }),
+        )
+        .await;
+        assert!(
+            epic_show.get("error").and_then(Value::as_str).is_some(),
+            "epic_show not-found response must include error"
         );
     }
 
@@ -806,9 +1097,12 @@ mod tests {
 
         let settings = DjinnSettings {
             model_priority: Some(
-                [("worker".into(), vec!["nvidia/moonshotai/kimi-k2-instruct".into()])]
-                    .into_iter()
-                    .collect(),
+                [(
+                    "worker".into(),
+                    vec!["nvidia/moonshotai/kimi-k2-instruct".into()],
+                )]
+                .into_iter()
+                .collect(),
             ),
             ..Default::default()
         };
@@ -835,9 +1129,12 @@ mod tests {
 
         let settings = DjinnSettings {
             model_priority: Some(
-                [("worker".into(), vec!["synthetic/hf:moonshotai/Kimi-K2.5".into()])]
-                    .into_iter()
-                    .collect(),
+                [(
+                    "worker".into(),
+                    vec!["synthetic/hf:moonshotai/Kimi-K2.5".into()],
+                )]
+                .into_iter()
+                .collect(),
             ),
             ..Default::default()
         };

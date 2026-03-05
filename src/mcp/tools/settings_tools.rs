@@ -106,7 +106,9 @@ impl DjinnMcpServer {
         }
     }
 
-    #[tool(description = "Patch runtime server settings. Only provided fields are updated; omitted fields keep their current values. Use individual model_priority_* params to set per-role model lists without overwriting other roles.")]
+    #[tool(
+        description = "Patch runtime server settings. Only provided fields are updated; omitted fields keep their current values. Use individual model_priority_* params to set per-role model lists without overwriting other roles."
+    )]
     pub async fn settings_set(
         &self,
         Parameters(p): Parameters<SettingsSetParams>,
