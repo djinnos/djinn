@@ -1275,21 +1275,45 @@ impl AgentSupervisor {
 
         // Check for a paused session — resume it instead of starting fresh.
         if let Some(paused) = self.find_paused_session_record(&task_id).await {
-            let context = self.resume_context_for_task(&task_id).await;
-            match self
-                .resume_paused_session(
-                    task_id.clone(),
-                    project_path.clone(),
-                    model_id.clone(),
-                    paused,
-                    context,
-                )
-                .await
-            {
-                Err(SupervisorError::PausedSessionStale { .. }) => {
-                    // Stale paused session was finalized; fall through to fresh dispatch below.
+            // Don't resume a worker session when the task needs conflict resolution.
+            // The worker doesn't have the conflict resolver prompt or merge setup.
+            let has_conflict = self.conflict_context_for_dispatch(&task_id).await.is_some();
+            if has_conflict && paused.agent_type == AgentType::Worker.as_str() {
+                tracing::info!(
+                    task_id = %task_id,
+                    paused_session_id = %paused.id,
+                    "Supervisor: paused worker session skipped — task needs conflict resolution"
+                );
+                let session_repo = SessionRepository::new(
+                    self.app_state.db().clone(),
+                    self.app_state.events().clone(),
+                );
+                let _ = session_repo
+                    .update(
+                        &paused.id,
+                        SessionStatus::Interrupted,
+                        paused.tokens_in,
+                        paused.tokens_out,
+                    )
+                    .await;
+                // Fall through to fresh dispatch as conflict resolver below.
+            } else {
+                let context = self.resume_context_for_task(&task_id).await;
+                match self
+                    .resume_paused_session(
+                        task_id.clone(),
+                        project_path.clone(),
+                        model_id.clone(),
+                        paused,
+                        context,
+                    )
+                    .await
+                {
+                    Err(SupervisorError::PausedSessionStale { .. }) => {
+                        // Stale paused session was finalized; fall through to fresh dispatch below.
+                    }
+                    other => return other,
                 }
-                other => return other,
             }
         }
 
@@ -2332,7 +2356,7 @@ impl AgentSupervisor {
                         || lower.contains("context limit exceeded")
                 })
             }
-        };
+        } || output.context_exhausted; // Goose catches the error internally and reports it as text
 
         if !is_context_error {
             return false;

@@ -30,6 +30,7 @@ pub struct ParsedAgentOutput {
     pub reviewer_verdict: Option<ReviewerVerdict>,
     pub reviewer_feedback: Option<String>,
     pub epic_verdict: Option<EpicReviewVerdict>,
+    pub context_exhausted: bool,
 }
 
 impl Default for ParsedAgentOutput {
@@ -48,6 +49,7 @@ impl ParsedAgentOutput {
             reviewer_verdict: None,
             reviewer_feedback: None,
             epic_verdict: None,
+            context_exhausted: false,
         }
     }
 
@@ -92,6 +94,15 @@ impl ParsedAgentOutput {
             if self.runtime_error.is_none() {
                 if let Some(error) = extract_runtime_error(&line) {
                     self.runtime_error = Some(error.to_string());
+                }
+            }
+
+            if !self.context_exhausted {
+                let lower = line.to_lowercase();
+                if lower.contains("context_length_exceeded")
+                    || lower.contains("context length exceeded")
+                {
+                    self.context_exhausted = true;
                 }
             }
         }
@@ -230,6 +241,24 @@ mod tests {
         let mut epic = ParsedAgentOutput::new(AgentType::EpicReviewer);
         epic.ingest_text("EPIC_REVIEW_RESULT: ???");
         assert_eq!(epic.epic_verdict, None);
+    }
+
+    #[test]
+    fn detects_context_exhausted_from_goose_error_text() {
+        let mut out = ParsedAgentOutput::new(AgentType::TaskReviewer);
+        out.ingest_text(
+            "Ran into this error: Request failed: Stream decode error: Responses API error: Object {\"type\": String(\"invalid_request_error\"), \"code\": String(\"context_length_exceeded\"), \"message\": String(\"Your input exceeds the context window\")}"
+        );
+        assert!(out.context_exhausted);
+        // Verdict should remain None since no REVIEW_RESULT marker was emitted
+        assert_eq!(out.reviewer_verdict, None);
+    }
+
+    #[test]
+    fn context_exhausted_false_by_default() {
+        let mut out = ParsedAgentOutput::new(AgentType::Worker);
+        out.ingest_text("WORKER_RESULT: DONE");
+        assert!(!out.context_exhausted);
     }
 
     #[test]
