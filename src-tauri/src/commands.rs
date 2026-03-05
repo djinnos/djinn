@@ -2,11 +2,10 @@ use crate::auth::{build_authorize_url, clear_token, generate_pkce, retrieve_toke
 use crate::server::ServerState;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use once_cell::sync::Lazy;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 // Token refresh module imports
 use crate::token_refresh::{self, RefreshResult, TokenState};
-use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct UserProfile {
@@ -145,11 +144,12 @@ pub async fn set_auth_token(token: String) -> Result<(), String> {
 /// Clear authentication token
 #[tauri::command]
 pub async fn clear_auth_token() -> Result<(), String> {
-    let mut session = AUTH_SESSION
-        .lock()
-        .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
-    *session = None;
-    drop(session);
+    {
+        let mut session = AUTH_SESSION
+            .lock()
+            .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+        *session = None;
+    }
     clear_token().await?;
     token_refresh::clear_token_state();
     Ok(())
@@ -281,29 +281,35 @@ pub async fn exchange_auth_code(
         .transpose()?;
 
     // Store in legacy session
-    let mut auth_session = AUTH_SESSION
-        .lock()
-        .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
-    let session = AuthSession {
-        access_token: token_response.access_token.clone(),
-        expires_in: Some(token_response.expires_in),
-        user_profile: user_profile.clone(),
+    let session = {
+        let mut auth_session = AUTH_SESSION
+            .lock()
+            .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+        let session = AuthSession {
+            access_token: token_response.access_token.clone(),
+            expires_in: Some(token_response.expires_in),
+            user_profile: user_profile.clone(),
+        };
+        *auth_session = Some(session.clone());
+        session
     };
-    *auth_session = Some(session.clone());
-    drop(auth_session);
 
     // Store refresh token
-    if let Some(refresh_token) = token_response.refresh_token.clone() {
-        store_token(&refresh_token).await?;
+    if let Some(refresh_token) = token_response.refresh_token.as_deref() {
+        store_token(refresh_token).await?;
         log::info!("Stored refresh token in secure storage");
     }
 
     // Update new token state with expiry tracking
-    let expires_at = Instant::now() + Duration::from_secs(token_response.expires_in);
+    let expires_at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        + token_response.expires_in;
     let token_state = TokenState {
         access_token: token_response.access_token,
         refresh_token: token_response.refresh_token.unwrap_or_default(),
-        expires_at,
+        expires_at_unix,
         user_id: user_profile.as_ref().map(|p| p.sub.clone()),
     };
     token_refresh::set_token_state(token_state);
@@ -371,10 +377,7 @@ pub async fn perform_token_refresh() -> Result<Option<TokenState>, String> {
 /// Get current authentication state including expiry information
 #[tauri::command]
 pub fn get_auth_state() -> Result<Option<TokenState>, String> {
-    let state = token_refresh::CURRENT_TOKEN_STATE
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
-    Ok(state.clone())
+    Ok(token_refresh::get_token_state())
 }
 
 /// Check if the current token is expired or about to expire (within 30s buffer)

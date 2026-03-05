@@ -8,8 +8,8 @@
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::auth::{clear_token, retrieve_token, store_token, CLERK_DOMAIN};
@@ -37,7 +37,8 @@ struct TokenResponse {
 pub struct TokenState {
     pub access_token: String,
     pub refresh_token: String,
-    pub expires_at: Instant,
+    /// Unix timestamp (seconds) when the token expires
+    pub expires_at_unix: u64,
     pub user_id: Option<String>,
 }
 
@@ -55,15 +56,19 @@ static REFRESH_MUTEX: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 /// Global storage for current token state
 static CURRENT_TOKEN_STATE: Lazy<Mutex<Option<TokenState>>> = Lazy::new(|| Mutex::new(None));
 
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Check if the current token is expired or about to expire (within buffer)
 pub fn is_token_expired_or_stale() -> bool {
     let state = CURRENT_TOKEN_STATE.lock().unwrap();
     match state.as_ref() {
         None => true,
-        Some(token_state) => {
-            let buffer = Duration::from_secs(EXPIRY_BUFFER_SECONDS);
-            Instant::now() + buffer >= token_state.expires_at
-        }
+        Some(token_state) => now_unix() + EXPIRY_BUFFER_SECONDS >= token_state.expires_at_unix,
     }
 }
 
@@ -71,13 +76,17 @@ pub fn is_token_expired_or_stale() -> bool {
 pub fn get_valid_access_token() -> Option<String> {
     let state = CURRENT_TOKEN_STATE.lock().unwrap();
     state.as_ref().and_then(|token_state| {
-        let buffer = Duration::from_secs(EXPIRY_BUFFER_SECONDS);
-        if Instant::now() + buffer < token_state.expires_at {
+        if now_unix() + EXPIRY_BUFFER_SECONDS < token_state.expires_at_unix {
             Some(token_state.access_token.clone())
         } else {
             None
         }
     })
+}
+
+/// Get the current token state (cloned)
+pub fn get_token_state() -> Option<TokenState> {
+    CURRENT_TOKEN_STATE.lock().unwrap().clone()
 }
 
 /// Set the current token state
@@ -173,10 +182,11 @@ pub async fn perform_silent_refresh() -> RefreshResult {
         }
     };
 
-    // Calculate expiry time with buffer applied
-    let expires_at = Instant::now() + Duration::from_secs(token_response.expires_in);
+    // Calculate expiry time as unix timestamp
+    let expires_at_unix = now_unix() + token_response.expires_in;
 
     // Handle token rotation: Clerk may return a new refresh token
+    let had_new_refresh_token = token_response.refresh_token.is_some();
     let new_refresh_token = token_response.refresh_token.unwrap_or_else(|| {
         log::warn!("Clerk did not return new refresh token, reusing existing");
         refresh_token.clone()
@@ -186,7 +196,7 @@ pub async fn perform_silent_refresh() -> RefreshResult {
     if let Err(e) = store_token(&new_refresh_token).await {
         log::error!("Failed to store rotated refresh token: {}", e);
         // Continue anyway - we have a valid access token for now
-    } else if token_response.refresh_token.is_some() {
+    } else if had_new_refresh_token {
         log::info!("Stored rotated refresh token");
     }
 
@@ -194,7 +204,7 @@ pub async fn perform_silent_refresh() -> RefreshResult {
     let token_state = TokenState {
         access_token: token_response.access_token.clone(),
         refresh_token: new_refresh_token,
-        expires_at,
+        expires_at_unix,
         user_id: None, // Extracted from id_token if needed
     };
 
