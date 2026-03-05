@@ -334,7 +334,7 @@ fn spawn_reply_task(
     session_manager: Arc<SessionManager>,
 ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
     tokio::spawn(async move {
-        let mut output = ParsedAgentOutput::default();
+        let mut output = ParsedAgentOutput::new(agent_type);
         let run_result: anyhow::Result<()> = async {
             let mut pending_message = Some(kickoff);
             let mut saw_any_event = false;
