@@ -841,15 +841,14 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<EpicCountParams>,
     ) -> Json<EpicCountResponse> {
-        if let Some(ref gb) = p.group_by {
-            if let Err(e) = validate_sort(gb, &["status"]) {
+        if let Some(ref gb) = p.group_by
+            && let Err(e) = validate_sort(gb, &["status"]) {
                 return Json(EpicCountResponse {
                     total_count: None,
                     groups: None,
                     error: Some(e),
                 });
             }
-        }
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {

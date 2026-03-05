@@ -24,6 +24,7 @@ pub struct ModelHealth {
     pub cooldown_seconds_remaining: Option<u64>,
 }
 
+#[derive(Default)]
 struct ModelState {
     auto_disabled: bool,
     cooldown_until: Option<Instant>,
@@ -33,18 +34,6 @@ struct ModelState {
     disable_ttl_trips: u32,
 }
 
-impl Default for ModelState {
-    fn default() -> Self {
-        Self {
-            auto_disabled: false,
-            cooldown_until: None,
-            consecutive_failures: 0,
-            total_failures: 0,
-            total_successes: 0,
-            disable_ttl_trips: 0,
-        }
-    }
-}
 
 impl ModelState {
     fn is_available(&self) -> bool {
@@ -151,7 +140,7 @@ impl HealthTracker {
     /// (or when its cooldown has expired).
     pub fn is_available(&self, model_id: &str) -> bool {
         let map = self.inner.lock().unwrap();
-        map.get(model_id).map_or(true, |s| s.is_available())
+        map.get(model_id).is_none_or(|s| s.is_available())
     }
 
     /// Return health state for all tracked models, sorted by model ID.

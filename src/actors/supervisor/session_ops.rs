@@ -457,7 +457,7 @@ impl AgentSupervisor {
         }
     }
 
-    pub(super) async fn commit_wip_if_needed(&self, task_id: &str, worktree_path: &PathBuf) {
+    pub(super) async fn commit_wip_if_needed(&self, task_id: &str, worktree_path: &Path) {
         let git = match self.app_state.git_actor(worktree_path).await {
             Ok(g) => g,
             Err(e) => {
@@ -542,8 +542,8 @@ impl AgentSupervisor {
         // The paused session will be resumed later with this worktree.
         let session_repo =
             SessionRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
-        if let Ok(Some(paused)) = session_repo.paused_for_task(task_id).await {
-            if paused.worktree_path.as_deref() == Some(worktree_path.to_str().unwrap_or("")) {
+        if let Ok(Some(paused)) = session_repo.paused_for_task(task_id).await
+            && paused.worktree_path.as_deref() == Some(worktree_path.to_str().unwrap_or("")) {
                 tracing::info!(
                     task_id = %task_id,
                     worktree = %worktree_path.display(),
@@ -551,7 +551,6 @@ impl AgentSupervisor {
                 );
                 return;
             }
-        }
 
         let task = match self.load_task(task_id).await {
             Ok(task) => task,

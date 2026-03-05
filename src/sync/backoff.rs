@@ -36,7 +36,7 @@ impl BackoffState {
         if self.failures == 0 {
             return Duration::ZERO;
         }
-        let shifts = (self.failures - 1).min(5) as u32;
+        let shifts = (self.failures - 1).min(5);
         let secs = Self::MIN_DELAY_SECS.saturating_mul(1u64 << shifts);
         Duration::from_secs(secs.min(Self::MAX_DELAY_SECS))
     }

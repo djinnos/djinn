@@ -119,15 +119,14 @@ impl AgentSupervisor {
 
         // Check for most recent task reviewer comment (reviewer rejection feedback).
         for entry in activity.iter().rev() {
-            if entry.event_type == "comment" && entry.actor_role == "task_reviewer" {
-                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
+            if entry.event_type == "comment" && entry.actor_role == "task_reviewer"
+                && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
                     && let Some(body) = payload.get("body").and_then(|v| v.as_str())
                 {
                     return format!(
                         "Your previous work was reviewed and returned with this feedback:\n\n{body}\n\nAddress this feedback, make the necessary changes, then emit:\nWORKER_RESULT: DONE"
                     );
                 }
-            }
         }
 
         // Check for merge conflict context.
@@ -137,8 +136,8 @@ impl AgentSupervisor {
 
         // Check for merge conflict info in activity.
         for entry in activity.iter().rev() {
-            if entry.event_type == "merge_conflict" {
-                if let Ok(meta) = serde_json::from_str::<MergeConflictMetadata>(&entry.payload) {
+            if entry.event_type == "merge_conflict"
+                && let Ok(meta) = serde_json::from_str::<MergeConflictMetadata>(&entry.payload) {
                     let files = meta
                         .conflicting_files
                         .iter()
@@ -150,7 +149,6 @@ impl AgentSupervisor {
                         meta.merge_target
                     );
                 }
-            }
         }
 
         // Default fallback.

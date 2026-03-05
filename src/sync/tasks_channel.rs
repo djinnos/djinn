@@ -151,7 +151,7 @@ pub async fn export(
     let filename = format!("{user_id}.jsonl");
     let jsonl: String = tasks
         .iter()
-        .map(|t| serde_json::to_string(t))
+        .map(serde_json::to_string)
         .collect::<std::result::Result<Vec<_>, _>>()?
         .join("\n");
 
@@ -170,14 +170,13 @@ pub async fn export(
 
         // Rebase on top of remote if it exists.
         let has_remote = git_ok(&wt, &["rev-parse", "--verify", &format!("origin/{BRANCH}")]).await;
-        if has_remote {
-            if let Err(e) = git(&wt, &["rebase", &format!("origin/{BRANCH}")]).await {
+        if has_remote
+            && let Err(e) = git(&wt, &["rebase", &format!("origin/{BRANCH}")]).await {
                 tracing::warn!(attempt, error = %e, "rebase failed during export; aborting");
                 let _ = git(&wt, &["rebase", "--abort"]).await;
                 // Re-stage from scratch on next iteration.
                 continue;
             }
-        }
 
         // Try to push.
         match git(&wt, &["push", "origin", BRANCH]).await {

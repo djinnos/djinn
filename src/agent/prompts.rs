@@ -228,6 +228,7 @@ mod tests {
             close_reason: None,
             merge_commit_sha: None,
             memory_refs: "[]".into(),
+            unresolved_blocker_count: 0,
         }
     }
 

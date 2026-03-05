@@ -3,7 +3,7 @@ use super::*;
 impl AgentSupervisor {
     pub(super) async fn prepare_worktree(
         &self,
-        project_dir: &PathBuf,
+        project_dir: &Path,
         task: &Task,
     ) -> Result<PathBuf, SupervisorError> {
         let branch = format!("task/{}", task.short_id);
@@ -77,7 +77,7 @@ impl AgentSupervisor {
 
     pub(super) async fn prepare_epic_reviewer_worktree(
         &self,
-        project_dir: &PathBuf,
+        project_dir: &Path,
         batch_id: &str,
     ) -> Result<PathBuf, SupervisorError> {
         let git = self

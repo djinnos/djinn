@@ -346,7 +346,7 @@ impl AgentSupervisor {
             }
             Ok(()) => {
                 // Goose handled it internally but gave up after compaction attempts.
-                output.runtime_error.as_deref().map_or(false, |e| {
+                output.runtime_error.as_deref().is_some_and(|e| {
                     let lower = e.to_lowercase();
                     lower.contains("context length exceeded")
                         || lower.contains("context limit exceeded")
@@ -552,6 +552,7 @@ impl AgentSupervisor {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_compaction_complete(
         &mut self,
         task_id: String,

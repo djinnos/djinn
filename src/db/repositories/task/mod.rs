@@ -189,6 +189,7 @@ impl TaskRepository {
         .await?)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         epic_id: &str,
@@ -219,6 +220,7 @@ impl TaskRepository {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_in_project(
         &self,
         project_id: &str,
@@ -269,6 +271,7 @@ impl TaskRepository {
         Ok(task)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
         id: &str,
@@ -739,11 +742,10 @@ impl TaskRepository {
         };
         tx.commit().await?;
 
-        if changed {
-            if let Ok(Some(updated)) = self.get(&task.id).await {
+        if changed
+            && let Ok(Some(updated)) = self.get(&task.id).await {
                 let _ = self.events.send(DjinnEvent::TaskUpdated(updated));
             }
-        }
         Ok(changed)
     }
 

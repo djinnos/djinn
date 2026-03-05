@@ -551,15 +551,14 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<ExecutionKillTaskParams>,
     ) -> Json<ExecutionKillTaskResponse> {
-        if let Some(path) = &p.project {
-            if self.project_id_for_path(path).await.is_none() {
+        if let Some(path) = &p.project
+            && self.project_id_for_path(path).await.is_none() {
                 return Json(ExecutionKillTaskResponse {
                     ok: false,
                     task_id: None,
                     error: Some(format!("project not found: {path}")),
                 });
             }
-        }
         let Some(supervisor) = self.state.supervisor().await else {
             return Json(ExecutionKillTaskResponse {
                 ok: false,

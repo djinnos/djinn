@@ -734,7 +734,7 @@ mod tests {
     async fn encode_base36_roundtrip() {
         assert_eq!(encode_base36(0), "0000");
         assert_eq!(encode_base36(1_679_615), "zzzz");
-        for s in [encode_base36(12345), encode_base36(999999 % 1_679_616)] {
+        for s in [encode_base36(12345), encode_base36(999999)] {
             assert_eq!(s.len(), 4);
             assert!(
                 s.chars()

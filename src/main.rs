@@ -121,28 +121,24 @@ impl ServerHandler for StdioBridge {
         }
     }
 
-    fn list_tools(
+    async fn list_tools(
         &self,
         request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        async move {
-            self.upstream.list_tools(request).await.map_err(|e| {
-                McpError::internal_error(format!("upstream list_tools failed: {e}"), None)
-            })
-        }
+    ) -> Result<ListToolsResult, McpError> {
+        self.upstream.list_tools(request).await.map_err(|e| {
+            McpError::internal_error(format!("upstream list_tools failed: {e}"), None)
+        })
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
-        async move {
-            self.upstream.call_tool(request).await.map_err(|e| {
-                McpError::internal_error(format!("upstream call_tool failed: {e}"), None)
-            })
-        }
+    ) -> Result<CallToolResult, McpError> {
+        self.upstream.call_tool(request).await.map_err(|e| {
+            McpError::internal_error(format!("upstream call_tool failed: {e}"), None)
+        })
     }
 }
 

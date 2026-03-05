@@ -114,8 +114,8 @@ pub(super) async fn board_reconcile_impl(
                         .map(|e| e.path())
                         .collect();
 
-                    if !batch_dirs.is_empty() {
-                        if let Ok(git) = server.state.git_actor(&project_path).await {
+                    if !batch_dirs.is_empty()
+                        && let Ok(git) = server.state.git_actor(&project_path).await {
                             for batch_dir in batch_dirs {
                                 let batch_str = batch_dir.display().to_string();
                                 if active_worktree_paths.contains(&batch_str) {
@@ -149,7 +149,6 @@ pub(super) async fn board_reconcile_impl(
                                     .await;
                             }
                         }
-                    }
                 }
             }
 

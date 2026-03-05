@@ -44,27 +44,22 @@ impl DjinnMcpServer {
 
         // For singletons, upsert: try create, fall back to update if already exists.
         use crate::db::repositories::note::is_singleton;
-        if is_singleton(&p.note_type) {
-            match repo
+        if is_singleton(&p.note_type)
+            && let Some(existing) = repo
                 .get_by_permalink(&project_id, &p.note_type)
                 .await
                 .ok()
-                .flatten()
-            {
-                Some(existing) => {
-                    match repo
-                        .update(&existing.id, &p.title, &p.content, &tags_json)
-                        .await
-                    {
-                        Ok(note) => return Json(MemoryNoteResponse::from_note(&note)),
-                        Err(e) => {
-                            return Json(MemoryNoteResponse::error(e.to_string()));
-                        }
+                .flatten() {
+                match repo
+                    .update(&existing.id, &p.title, &p.content, &tags_json)
+                    .await
+                {
+                    Ok(note) => return Json(MemoryNoteResponse::from_note(&note)),
+                    Err(e) => {
+                        return Json(MemoryNoteResponse::error(e.to_string()));
                     }
                 }
-                None => {}
             }
-        }
 
         match repo
             .create(
@@ -801,11 +796,10 @@ async fn resolve_note_by_identifier(
         return Some(n);
     }
     // Fallback: search by title
-    if let Ok(results) = repo.search(project_id, identifier, None, None, 1).await {
-        if let Some(r) = results.into_iter().next() {
+    if let Ok(results) = repo.search(project_id, identifier, None, None, 1).await
+        && let Some(r) = results.into_iter().next() {
             return repo.get(&r.id).await.ok().flatten();
         }
-    }
     None
 }
 
@@ -935,7 +929,7 @@ async fn git_log_for_file(file_path: &str, limit: i64) -> Vec<GitLogEntry> {
     let output = tokio::process::Command::new("git")
         .args([
             "log",
-            &format!("--format=%H|||%s|||%an|||%ai"),
+            "--format=%H|||%s|||%an|||%ai",
             &format!("-n{limit}"),
             "--",
             file_path,

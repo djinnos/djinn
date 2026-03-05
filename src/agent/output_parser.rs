@@ -89,11 +89,10 @@ impl ParsedAgentOutput {
                 }
             }
 
-            if self.runtime_error.is_none() {
-                if let Some(error) = extract_runtime_error(&line) {
+            if self.runtime_error.is_none()
+                && let Some(error) = extract_runtime_error(&line) {
                     self.runtime_error = Some(error.to_string());
                 }
-            }
 
             if !self.context_exhausted {
                 let lower = line.to_lowercase();

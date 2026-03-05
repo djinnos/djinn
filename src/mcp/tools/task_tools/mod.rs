@@ -62,16 +62,14 @@ impl DjinnMcpServer {
             Ok(o) => o,
             Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e))),
         };
-        if let Some(ref labels) = p.labels {
-            if let Err(e) = validate_labels(labels) {
+        if let Some(ref labels) = p.labels
+            && let Err(e) = validate_labels(labels) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
-        if let Some(ref ac) = p.acceptance_criteria {
-            if let Err(e) = validate_ac_count(ac.len()) {
+        if let Some(ref ac) = p.acceptance_criteria
+            && let Err(e) = validate_ac_count(ac.len()) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
 
         let project_id = match self.require_project_id(&p.project).await {
             Ok(id) => id,
@@ -165,41 +163,34 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<TaskUpdateParams>,
     ) -> Json<ErrorOr<TaskResponse>> {
         // Validate provided fields.
-        if let Some(ref t) = p.title {
-            if let Err(e) = validate_title(t) {
+        if let Some(ref t) = p.title
+            && let Err(e) = validate_title(t) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
-        if let Some(ref d) = p.description {
-            if let Err(e) = validate_description(d) {
+        if let Some(ref d) = p.description
+            && let Err(e) = validate_description(d) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
-        if let Some(ref d) = p.design {
-            if let Err(e) = validate_design(d) {
+        if let Some(ref d) = p.design
+            && let Err(e) = validate_design(d) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
-        if let Some(prio) = p.priority {
-            if let Err(e) = validate_priority(prio) {
+        if let Some(prio) = p.priority
+            && let Err(e) = validate_priority(prio) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
-        if let Some(ref o) = p.owner {
-            if let Err(e) = validate_owner(o) {
+        if let Some(ref o) = p.owner
+            && let Err(e) = validate_owner(o) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
-        if let Some(ref add) = p.labels_add {
-            if let Err(e) = validate_labels(add) {
+        if let Some(ref add) = p.labels_add
+            && let Err(e) = validate_labels(add) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
-        if let Some(ref ac) = p.acceptance_criteria {
-            if let Err(e) = validate_ac_count(ac.len()) {
+        if let Some(ref ac) = p.acceptance_criteria
+            && let Err(e) = validate_ac_count(ac.len()) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let project_id = match self.require_project_id(&p.project).await {
@@ -270,11 +261,10 @@ impl DjinnMcpServer {
             .unwrap_or_else(|| task.acceptance_criteria.clone());
 
         // If parent changed, move the task first.
-        if epic_id != task.epic_id {
-            if let Err(e) = repo.move_to_epic(&task.id, epic_id.as_deref()).await {
+        if epic_id != task.epic_id
+            && let Err(e) = repo.move_to_epic(&task.id, epic_id.as_deref()).await {
                 return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
             }
-        }
 
         let updated = match repo
             .update(
@@ -416,8 +406,8 @@ impl DjinnMcpServer {
                 has_more: false,
             });
         }
-        if let Some(prio) = p.priority {
-            if let Err(e) = validate_priority(prio) {
+        if let Some(prio) = p.priority
+            && let Err(e) = validate_priority(prio) {
                 let limit = validate_limit(p.limit.unwrap_or(25));
                 let offset = validate_offset(p.offset.unwrap_or(0));
                 tracing::error!(error = %e, "task_list: invalid priority");
@@ -429,7 +419,6 @@ impl DjinnMcpServer {
                     has_more: false,
                 });
             }
-        }
 
         let limit = validate_limit(p.limit.unwrap_or(25));
         let offset = validate_offset(p.offset.unwrap_or(0));
@@ -482,16 +471,14 @@ impl DjinnMcpServer {
             Ok(id) => id,
             Err(e) => return Json(ErrorOr::Error(e)),
         };
-        if let Some(ref gb) = p.group_by {
-            if let Err(e) = validate_sort(gb, &["status", "priority", "issue_type", "epic"]) {
+        if let Some(ref gb) = p.group_by
+            && let Err(e) = validate_sort(gb, &["status", "priority", "issue_type", "epic"]) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
-        if let Some(prio) = p.priority {
-            if let Err(e) = validate_priority(prio) {
+        if let Some(prio) = p.priority
+            && let Err(e) = validate_priority(prio) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
 
         let query = CountQuery {
             project_id: Some(project_id),
@@ -668,16 +655,14 @@ impl DjinnMcpServer {
             Ok(id) => id,
             Err(e) => return Json(ErrorOr::Error(e)),
         };
-        if let Some(ref o) = p.owner {
-            if let Err(e) = validate_owner(o) {
+        if let Some(ref o) = p.owner
+            && let Err(e) = validate_owner(o) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
-        if let Some(pmax) = p.priority_max {
-            if let Err(e) = validate_priority(pmax) {
+        if let Some(pmax) = p.priority_max
+            && let Err(e) = validate_priority(pmax) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let query = ReadyQuery {
@@ -716,11 +701,10 @@ impl DjinnMcpServer {
         if let Err(e) = validate_actor_role(actor_role) {
             return Json(ErrorOr::Error(ErrorResponse::new(e)));
         }
-        if let Some(ref r) = p.reason {
-            if let Err(e) = validate_reason(r) {
+        if let Some(ref r) = p.reason
+            && let Err(e) = validate_reason(r) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
 
@@ -777,11 +761,10 @@ impl DjinnMcpServer {
             Ok(id) => id,
             Err(e) => return Json(ErrorOr::Error(e)),
         };
-        if let Some(ref o) = p.owner {
-            if let Err(e) = validate_owner(o) {
+        if let Some(ref o) = p.owner
+            && let Err(e) = validate_owner(o) {
                 return Json(ErrorOr::Error(ErrorResponse::new(e)));
             }
-        }
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let query = ReadyQuery {
@@ -972,7 +955,7 @@ impl DjinnMcpServer {
     ) -> std::result::Result<String, ErrorResponse> {
         self.resolve_project_id(project)
             .await
-            .map_err(|e| ErrorResponse::new(e))
+            .map_err(ErrorResponse::new)
     }
 
     /// Resolve a task UUID/short_id to its UUID, rejecting epics with a clear error.

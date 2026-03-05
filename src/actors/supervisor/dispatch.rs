@@ -139,8 +139,8 @@ impl AgentSupervisor {
         // worktree so conflict markers are present for the agent to resolve.
         // Without this, the resolver edits files but the task branch never
         // incorporates main's changes, causing the same conflict on re-merge.
-        if agent_type == AgentType::ConflictResolver {
-            if let Some(ref ctx) = conflict_ctx {
+        if agent_type == AgentType::ConflictResolver
+            && let Some(ref ctx) = conflict_ctx {
                 let target_ref = format!("origin/{}", ctx.merge_target);
                 let wt_git = self.app_state.git_actor(&worktree_path).await;
                 if let Ok(wt_git) = wt_git {
@@ -171,7 +171,6 @@ impl AgentSupervisor {
                     }
                 }
             }
-        }
 
         let goose_logs_dir = goose::config::paths::Paths::in_state_dir("logs");
         if let Err(e) = std::fs::create_dir_all(&goose_logs_dir) {
@@ -473,6 +472,7 @@ impl AgentSupervisor {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn dispatch_resume(
         &mut self,
         task_id: String,

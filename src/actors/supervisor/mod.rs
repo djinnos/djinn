@@ -138,7 +138,7 @@ pub(super) fn log_snippet(text: &str, max_chars: usize) -> String {
         out.push(ch);
     }
     if trimmed.chars().count() > max_chars {
-        out.push_str("…");
+        out.push('…');
     }
     if out.is_empty() {
         "<empty>".to_string()
@@ -529,8 +529,8 @@ pub(super) fn spawn_reply_task(
             }
 
             // Session complete — send a single nudge if the marker is missing
-            if saw_any_tool_use && AgentSupervisor::missing_required_marker(agent_type, &output) {
-                if let Some(nudge) = AgentSupervisor::missing_marker_nudge(agent_type, &output) {
+            if saw_any_tool_use && AgentSupervisor::missing_required_marker(agent_type, &output)
+                && let Some(nudge) = AgentSupervisor::missing_marker_nudge(agent_type, &output) {
                     tracing::info!(
                         task_id = %task_id,
                         agent_type = %agent_type.as_str(),
@@ -570,7 +570,6 @@ pub(super) fn spawn_reply_task(
                         extension::handle_event(&app_state, &agent, &evt, &worktree_path).await;
                     }
                 }
-            }
 
             if let Some(last_assistant_text) =
                 AgentSupervisor::last_assistant_text_from_goose_sqlite(&session_id).await

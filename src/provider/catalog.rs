@@ -74,21 +74,13 @@ struct RawLimit {
 
 // ── Catalog internals ─────────────────────────────────────────────────────────
 
+#[derive(Default)]
 struct CatalogData {
     providers: Vec<Provider>,
     models_idx: HashMap<String, Vec<Model>>,
     fetched_at: Option<Instant>,
 }
 
-impl Default for CatalogData {
-    fn default() -> Self {
-        Self {
-            providers: Vec::new(),
-            models_idx: HashMap::new(),
-            fetched_at: None,
-        }
-    }
-}
 
 /// Fetches, caches, and serves LLM provider and model data from models.dev.
 ///

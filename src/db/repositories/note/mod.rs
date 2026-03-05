@@ -111,10 +111,9 @@ impl NoteRepository {
         }
         .await;
 
-        let note = note_result.map_err(|e| {
+        let note = note_result.inspect_err(|_e| {
             // Best-effort cleanup: remove file if DB insert failed.
             let _ = std::fs::remove_file(&file_path);
-            e
         })?;
 
         let _ = self.events.send(DjinnEvent::NoteCreated(note.clone()));

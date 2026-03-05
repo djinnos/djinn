@@ -155,6 +155,7 @@ struct CoordinatorActor {
 //              catalog, health, paused, dispatched, recovered = 12 ✓ (≤20)
 
 impl CoordinatorActor {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         receiver: mpsc::Receiver<CoordinatorMessage>,
         self_sender: mpsc::Sender<CoordinatorMessage>,
@@ -265,11 +266,10 @@ impl CoordinatorActor {
                     "CoordinatorActor: paused all projects"
                 );
                 self.publish_status();
-                if interrupt_active {
-                    if let Err(e) = self.supervisor.interrupt_all(&reason).await {
+                if interrupt_active
+                    && let Err(e) = self.supervisor.interrupt_all(&reason).await {
                         tracing::warn!(error = %e, "CoordinatorActor: failed to interrupt sessions on pause");
                     }
-                }
             }
             CoordinatorMessage::PauseProject {
                 project_id,
@@ -278,8 +278,8 @@ impl CoordinatorActor {
             } => {
                 self.paused_projects.insert(project_id.clone());
                 self.publish_status();
-                if interrupt_active {
-                    if let Err(e) = self
+                if interrupt_active
+                    && let Err(e) = self
                         .supervisor
                         .interrupt_project(&project_id, &reason)
                         .await
@@ -290,7 +290,6 @@ impl CoordinatorActor {
                             "CoordinatorActor: failed to interrupt project sessions on pause"
                         );
                     }
-                }
             }
             CoordinatorMessage::Resume => {
                 // Global resume = unpause every project and dispatch.
@@ -415,7 +414,7 @@ impl CoordinatorActor {
     async fn resolve_dispatch_models_for_role(&self, _role: &str) -> Vec<String> {
         #[cfg(test)]
         {
-            return vec![DEFAULT_MODEL_ID.to_owned()];
+            vec![DEFAULT_MODEL_ID.to_owned()]
         }
 
         #[cfg(not(test))]

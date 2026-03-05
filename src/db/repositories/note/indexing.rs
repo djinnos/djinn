@@ -124,6 +124,7 @@ impl NoteRepository {
         Ok(note)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn update_index_entry(
         &self,
         id: &str,

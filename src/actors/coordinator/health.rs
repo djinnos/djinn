@@ -29,11 +29,10 @@ impl CoordinatorActor {
                 .collect();
 
         for row in rows {
-            if let Some(ref filter) = project_id_filter {
-                if row.id != *filter {
+            if let Some(ref filter) = project_id_filter
+                && row.id != *filter {
                     continue;
                 }
-            }
 
             let setup_cmds: Vec<CommandSpec> =
                 serde_json::from_str(&row.setup_commands).unwrap_or_default();

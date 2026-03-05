@@ -100,9 +100,7 @@ impl GitActor {
             )
             .await;
 
-            if let Err(err) = add_result {
-                return Err(err);
-            }
+            add_result?;
 
             let merge_result = Self::squash_merge_detached_worktree_impl(
                 path.clone(),

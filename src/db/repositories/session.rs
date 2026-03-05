@@ -15,6 +15,7 @@ impl SessionRepository {
         Self { db, events }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         project_id: &str,
