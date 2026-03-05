@@ -43,9 +43,6 @@ export const taskStore = createStore<TaskState>()(
 
     updateTask: (payload) => {
       set((state) => {
-        const existingTask = state.tasks.get(payload.id);
-        if (!existingTask) return state;
-        
         const newTasks = new Map(state.tasks);
         newTasks.set(payload.id, payload);
         return { tasks: newTasks };

@@ -62,8 +62,8 @@ export interface ProviderCredential {
 
 type ProviderCatalogResponse = McpToolOutput<"provider_catalog">;
 type ProviderCatalogItem = ProviderCatalogResponse["providers"][number];
-type TaskListMcpResponse = McpToolOutput<"task_list">;
-type EpicListMcpResponse = McpToolOutput<"epic_list">;
+export type TaskListMcpResponse = McpToolOutput<"task_list">;
+export type EpicListMcpResponse = McpToolOutput<"epic_list">;
 
 export async function fetchProviderCatalog(): Promise<Provider[]> {
   const providers = await listProviderCatalogRaw();
@@ -254,14 +254,14 @@ export async function addCustomProvider(payload: CustomProviderRequest): Promise
   return response.json();
 }
 
-function mapPriority(priority: number): TaskPriority {
+export function mapPriority(priority: number): TaskPriority {
   if (priority <= 0) return "P0";
   if (priority === 1) return "P1";
   if (priority === 2) return "P2";
   return "P3";
 }
 
-function mapTaskStatus(status: string): TaskStatus {
+export function mapTaskStatus(status: string): TaskStatus {
   if (status === "in_progress") return "in_progress";
   if (status === "blocked" || status === "needs_task_review" || status === "in_task_review") {
     return "blocked";
@@ -271,13 +271,13 @@ function mapTaskStatus(status: string): TaskStatus {
   return "pending";
 }
 
-function mapEpicStatus(status: string): EpicStatus {
+export function mapEpicStatus(status: string): EpicStatus {
   if (status === "closed") return "completed";
   if (status === "archived") return "archived";
   return "active";
 }
 
-function mapTaskFromMcp(task: TaskListMcpResponse["tasks"][number]): Task {
+export function mapTaskFromMcp(task: TaskListMcpResponse["tasks"][number]): Task {
   return {
     id: task.id,
     shortId: task.short_id,
@@ -302,7 +302,7 @@ function mapTaskFromMcp(task: TaskListMcpResponse["tasks"][number]): Task {
   };
 }
 
-function mapEpicFromMcp(epic: NonNullable<EpicListMcpResponse["epics"]>[number]): Epic {
+export function mapEpicFromMcp(epic: NonNullable<EpicListMcpResponse["epics"]>[number]): Epic {
   return {
     id: epic.id,
     title: epic.title,

@@ -9,14 +9,44 @@ import { sseStore, type SSEEvent } from "./sseStore";
 import { taskStore } from "./taskStore";
 import { epicStore } from "./epicStore";
 import { queryClient } from "@/lib/queryClient";
-import type { 
-  TaskCreatedPayload, 
-  TaskUpdatedPayload, 
+import { mapTaskFromMcp, mapEpicFromMcp } from "@/api/server";
+import type {
+  Task,
+  Epic,
   TaskDeletedPayload,
-  EpicCreatedPayload,
-  EpicUpdatedPayload,
-  EpicDeletedPayload 
+  EpicDeletedPayload
 } from "../types";
+
+/**
+ * Unwrap SSE event payload.
+ * SSE events arrive as {type, action, data: {...entity...}}.
+ * Returns the inner entity object.
+ */
+function unwrapPayload(raw: unknown): Record<string, unknown> {
+  const obj = raw as Record<string, unknown>;
+  if (obj && typeof obj === "object" && "data" in obj && typeof obj.data === "object") {
+    return obj.data as Record<string, unknown>;
+  }
+  return obj;
+}
+
+/**
+ * SSE sends some array fields as JSON strings (e.g. labels, acceptance_criteria).
+ * Parse them back to arrays before passing to the mapper.
+ */
+function normalizeSSEPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...payload };
+  for (const key of ["labels", "acceptance_criteria", "memory_refs"]) {
+    if (typeof result[key] === "string") {
+      try {
+        result[key] = JSON.parse(result[key] as string);
+      } catch {
+        // leave as-is
+      }
+    }
+  }
+  return result;
+}
 
 // Track subscription cleanup functions
 let taskCreatedUnsub: (() => void) | null = null;
@@ -33,50 +63,54 @@ let epicDeletedUnsub: (() => void) | null = null;
 export function initSSEEventHandlers(): () => void {
   const { subscribe } = sseStore.getState();
 
-  // Task events
+  // Task events — SSE sends snake_case MCP payloads wrapped in {type,action,data}
   taskCreatedUnsub = subscribe("task_created", (event: SSEEvent) => {
-    const payload = event.data as TaskCreatedPayload;
-    taskStore.getState().addTask(payload);
-    queryClient.setQueryData(["tasks"], (current: TaskCreatedPayload[] | undefined) =>
-      current ? [...current, payload] : [payload]
+    const raw = normalizeSSEPayload(unwrapPayload(event.data));
+    const task: Task = mapTaskFromMcp(raw as any);
+    taskStore.getState().addTask(task);
+    queryClient.setQueryData(["tasks"], (current: Task[] | undefined) =>
+      current ? [...current, task] : [task]
     );
   });
 
   taskUpdatedUnsub = subscribe("task_updated", (event: SSEEvent) => {
-    const payload = event.data as TaskUpdatedPayload;
-    taskStore.getState().updateTask(payload);
-    queryClient.setQueryData(["tasks"], (current: TaskUpdatedPayload[] | undefined) =>
-      current?.map((task) => (task.id === payload.id ? payload : task))
+    const raw = normalizeSSEPayload(unwrapPayload(event.data));
+    const task: Task = mapTaskFromMcp(raw as any);
+    taskStore.getState().updateTask(task);
+    queryClient.setQueryData(["tasks"], (current: Task[] | undefined) =>
+      current?.map((t) => (t.id === task.id ? task : t))
     );
   });
 
   taskDeletedUnsub = subscribe("task_deleted", (event: SSEEvent) => {
-    const payload = event.data as TaskDeletedPayload;
+    const payload = unwrapPayload(event.data) as unknown as TaskDeletedPayload;
     taskStore.getState().removeTask(payload.id);
     queryClient.setQueryData(["tasks"], (current: { id: string }[] | undefined) =>
       current?.filter((task) => task.id !== payload.id)
     );
   });
 
-  // Epic events
+  // Epic events — SSE sends snake_case MCP payloads wrapped in {type,action,data}
   epicCreatedUnsub = subscribe("epic_created", (event: SSEEvent) => {
-    const payload = event.data as EpicCreatedPayload;
-    epicStore.getState().addEpic(payload);
-    queryClient.setQueryData(["epics"], (current: EpicCreatedPayload[] | undefined) =>
-      current ? [...current, payload] : [payload]
+    const raw = unwrapPayload(event.data);
+    const epic: Epic = mapEpicFromMcp(raw as any);
+    epicStore.getState().addEpic(epic);
+    queryClient.setQueryData(["epics"], (current: Epic[] | undefined) =>
+      current ? [...current, epic] : [epic]
     );
   });
 
   epicUpdatedUnsub = subscribe("epic_updated", (event: SSEEvent) => {
-    const payload = event.data as EpicUpdatedPayload;
-    epicStore.getState().updateEpic(payload);
-    queryClient.setQueryData(["epics"], (current: EpicUpdatedPayload[] | undefined) =>
-      current?.map((epic) => (epic.id === payload.id ? payload : epic))
+    const raw = unwrapPayload(event.data);
+    const epic: Epic = mapEpicFromMcp(raw as any);
+    epicStore.getState().updateEpic(epic);
+    queryClient.setQueryData(["epics"], (current: Epic[] | undefined) =>
+      current?.map((e) => (e.id === epic.id ? epic : e))
     );
   });
 
   epicDeletedUnsub = subscribe("epic_deleted", (event: SSEEvent) => {
-    const payload = event.data as EpicDeletedPayload;
+    const payload = unwrapPayload(event.data) as unknown as EpicDeletedPayload;
     epicStore.getState().removeEpic(payload.id);
     queryClient.setQueryData(["epics"], (current: { id: string }[] | undefined) =>
       current?.filter((epic) => epic.id !== payload.id)
