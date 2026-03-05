@@ -396,12 +396,12 @@ pub async fn select_directory(
     title: Option<String>,
 ) -> Result<Option<std::path::PathBuf>, String> {
     use tauri_plugin_dialog::DialogExt;
-    
+
     let folder_path = window
         .dialog()
         .file()
         .set_title(title.as_deref().unwrap_or("Select Directory"))
         .blocking_pick_folder();
-    
-    Ok(folder_path)
+
+    Ok(folder_path.map(|p| p.into_path().map_err(|e| e.to_string())).transpose()?)
 }
