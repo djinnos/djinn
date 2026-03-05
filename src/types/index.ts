@@ -23,6 +23,7 @@ export interface Task {
   owner: string | null;
   createdAt: string;
   updatedAt: string;
+  sessionModelId?: string;
   sessionCount?: number;
   trackedSeconds?: number;
   activeSessionStartedAt?: string | null;
@@ -40,6 +41,7 @@ export interface Epic {
   owner: string | null;
   createdAt: string;
   updatedAt: string;
+  sessionModelId?: string;
   sessionCount?: number;
   trackedSeconds?: number;
   activeSessionStartedAt?: string | null;

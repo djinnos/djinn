@@ -212,6 +212,11 @@ export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps)
           {ownerInitials(task.owner)}
         </div>
       </div>
+      {task.sessionModelId ? (
+        <div className="mt-1 text-[10px] text-muted-foreground" title={task.sessionModelId}>
+          <span className="block truncate">{task.sessionModelId}</span>
+        </div>
+      ) : null}
     </article>
   );
 }
