@@ -125,7 +125,6 @@ export function KanbanBoard() {
                               <li key={task.id}>
                                 <TaskCard
                                   task={task}
-                                  epic={task.epicId ? epics.get(task.epicId) : undefined}
                                   moving={!!movingTaskIds[task.id]}
                                   onClick={() => setSelectedTask(task)}
                                 />
