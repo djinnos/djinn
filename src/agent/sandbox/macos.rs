@@ -30,7 +30,10 @@ impl Sandbox for SeatbeltSandbox {
              (allow file-read*)\
              (deny file-write*)\
              (allow file-write* (subpath \"{worktree}\"))\
-             (allow file-write* (subpath \"/tmp\"))"
+             (allow file-write* (subpath \"/tmp\"))\
+             (allow file-write* (literal \"/dev/null\"))\
+             (allow file-write* (literal \"/dev/zero\"))\
+             (allow file-write* (literal \"/dev/urandom\"))"
         );
 
         // Snapshot the existing command configuration before we overwrite it.

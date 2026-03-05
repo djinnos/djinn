@@ -55,9 +55,12 @@ fn apply_policy(worktree: &Path) -> anyhow::Result<()> {
         .add_rule(PathBeneath::new(PathFd::new("/")?, read_exec))?
         // Full (read + write) access to the task worktree.
         .add_rule(PathBeneath::new(PathFd::new(worktree)?, full_access))?
-        // Full access to shared temp directories.
+        // Full access to shared temp directories and /dev/null et al.
         .add_rule(PathBeneath::new(PathFd::new("/tmp")?, full_access))?
         .add_rule(PathBeneath::new(PathFd::new("/var/tmp")?, full_access))?
+        .add_rule(PathBeneath::new(PathFd::new("/dev/null")?, full_access))?
+        .add_rule(PathBeneath::new(PathFd::new("/dev/zero")?, full_access))?
+        .add_rule(PathBeneath::new(PathFd::new("/dev/urandom")?, full_access))?
         .restrict_self()?;
 
     Ok(())
