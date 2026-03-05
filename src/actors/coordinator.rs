@@ -514,37 +514,9 @@ impl CoordinatorActor {
                 }
             }
 
-            if !selected.is_empty() {
-                return selected;
-            }
-
-            // When model_priorities are configured but none resolved (e.g. provider
-            // disconnected), do NOT fall back to enumerating every credential —
-            // that spawns sessions for random models the user never configured.
-            if !self.model_priorities.is_empty() {
-                return selected; // empty — dispatch_ready_tasks will skip
-            }
-
-            // Only enumerate all providers when NO priorities are configured at all
-            // (backwards compat for unconfigured setups).
-            for cred in &credentials {
-                let models = self.catalog.list_models(&cred.provider_id);
-                // Prefer a model with tool_call capability.
-                if let Some(model) = models.iter().find(|m| m.tool_call) {
-                    let model_id = format!("{}/{}", cred.provider_id, model.id);
-                    if seen.insert(model_id.clone()) {
-                        selected.push(model_id);
-                    }
-                }
-
-                for model in models {
-                    let model_id = format!("{}/{}", cred.provider_id, model.id);
-                    if seen.insert(model_id.clone()) {
-                        selected.push(model_id);
-                    }
-                }
-            }
-
+            // Return whatever resolved (may be empty if no priorities configured
+            // or all configured providers are disconnected). Never fall back to
+            // enumerating random credentials — only dispatch what the user configured.
             selected
         }
     }

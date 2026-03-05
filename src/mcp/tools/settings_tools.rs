@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
@@ -23,8 +25,18 @@ pub struct SettingsGetResponse {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct SettingsSetParams {
-    /// Typed settings object. Unknown fields are rejected.
-    pub settings: DjinnSettings,
+    /// Maximum number of tasks to dispatch per cycle. Omit to keep current value.
+    #[schemars(with = "Option<i64>")]
+    pub dispatch_limit: Option<u32>,
+    /// Ordered model list for the 'worker' role (e.g. ["chatgpt_codex/gpt-5.3-codex"]). Omit to keep current value.
+    pub model_priority_worker: Option<Vec<String>>,
+    /// Ordered model list for the 'task_reviewer' role. Omit to keep current value.
+    pub model_priority_task_reviewer: Option<Vec<String>>,
+    /// Ordered model list for the 'conflict_resolver' role. Omit to keep current value.
+    pub model_priority_conflict_resolver: Option<Vec<String>>,
+    /// Per-model concurrent session caps (e.g. {"chatgpt_codex/gpt-5.3-codex": 4}). Omit to keep current value.
+    #[schemars(with = "Option<HashMap<String, i64>>")]
+    pub max_sessions: Option<HashMap<String, u32>>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -82,12 +94,44 @@ impl DjinnMcpServer {
         }
     }
 
-    #[tool(description = "Set and apply runtime server settings from raw JSON payload")]
+    #[tool(description = "Patch runtime server settings. Only provided fields are updated; omitted fields keep their current values. Use individual model_priority_* params to set per-role model lists without overwriting other roles.")]
     pub async fn settings_set(
         &self,
         Parameters(p): Parameters<SettingsSetParams>,
     ) -> Json<SettingsSetResponse> {
-        match self.state.apply_settings(&p.settings).await {
+        // Load existing settings so we can patch rather than replace.
+        let repo = SettingsRepository::new(self.state.db().clone(), self.state.events().clone());
+        let mut settings = match repo.get(SETTINGS_RAW_KEY).await {
+            Ok(Some(s)) => DjinnSettings::from_db_value(&s.value),
+            _ => DjinnSettings::default(),
+        };
+
+        if let Some(v) = p.dispatch_limit {
+            settings.dispatch_limit = Some(v);
+        }
+        if let Some(v) = p.max_sessions {
+            settings.max_sessions = Some(v);
+        }
+        if let Some(v) = p.model_priority_worker {
+            settings
+                .model_priority
+                .get_or_insert_with(HashMap::new)
+                .insert("worker".to_string(), v);
+        }
+        if let Some(v) = p.model_priority_task_reviewer {
+            settings
+                .model_priority
+                .get_or_insert_with(HashMap::new)
+                .insert("task_reviewer".to_string(), v);
+        }
+        if let Some(v) = p.model_priority_conflict_resolver {
+            settings
+                .model_priority
+                .get_or_insert_with(HashMap::new)
+                .insert("conflict_resolver".to_string(), v);
+        }
+
+        match self.state.apply_settings(&settings).await {
             Ok(()) => Json(SettingsSetResponse {
                 ok: true,
                 applied: true,
