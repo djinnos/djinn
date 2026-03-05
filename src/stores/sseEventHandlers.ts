@@ -8,6 +8,7 @@
 import { sseStore, type SSEEvent } from "./sseStore";
 import { taskStore } from "./taskStore";
 import { epicStore } from "./epicStore";
+import { queryClient } from "@/lib/queryClient";
 import type { 
   TaskCreatedPayload, 
   TaskUpdatedPayload, 
@@ -36,32 +37,59 @@ export function initSSEEventHandlers(): () => void {
   taskCreatedUnsub = subscribe("task_created", (event: SSEEvent) => {
     const payload = event.data as TaskCreatedPayload;
     taskStore.getState().addTask(payload);
+    queryClient.setQueryData(["tasks"], (current: TaskCreatedPayload[] | undefined) =>
+      current ? [...current, payload] : [payload]
+    );
   });
 
   taskUpdatedUnsub = subscribe("task_updated", (event: SSEEvent) => {
     const payload = event.data as TaskUpdatedPayload;
     taskStore.getState().updateTask(payload);
+    queryClient.setQueryData(["tasks"], (current: TaskUpdatedPayload[] | undefined) =>
+      current?.map((task) => (task.id === payload.id ? payload : task))
+    );
   });
 
   taskDeletedUnsub = subscribe("task_deleted", (event: SSEEvent) => {
     const payload = event.data as TaskDeletedPayload;
     taskStore.getState().removeTask(payload.id);
+    queryClient.setQueryData(["tasks"], (current: { id: string }[] | undefined) =>
+      current?.filter((task) => task.id !== payload.id)
+    );
   });
 
   // Epic events
   epicCreatedUnsub = subscribe("epic_created", (event: SSEEvent) => {
     const payload = event.data as EpicCreatedPayload;
     epicStore.getState().addEpic(payload);
+    queryClient.setQueryData(["epics"], (current: EpicCreatedPayload[] | undefined) =>
+      current ? [...current, payload] : [payload]
+    );
   });
 
   epicUpdatedUnsub = subscribe("epic_updated", (event: SSEEvent) => {
     const payload = event.data as EpicUpdatedPayload;
     epicStore.getState().updateEpic(payload);
+    queryClient.setQueryData(["epics"], (current: EpicUpdatedPayload[] | undefined) =>
+      current?.map((epic) => (epic.id === payload.id ? payload : epic))
+    );
   });
 
   epicDeletedUnsub = subscribe("epic_deleted", (event: SSEEvent) => {
     const payload = event.data as EpicDeletedPayload;
     epicStore.getState().removeEpic(payload.id);
+    queryClient.setQueryData(["epics"], (current: { id: string }[] | undefined) =>
+      current?.filter((epic) => epic.id !== payload.id)
+    );
+  });
+
+  const invalidateSettingsLikeData = () => {
+    queryClient.invalidateQueries({ queryKey: ["providers"] });
+    queryClient.invalidateQueries({ queryKey: ["settings"] });
+  };
+
+  const projectChangedUnsub = subscribe("project_changed", () => {
+    invalidateSettingsLikeData();
   });
 
   // Return cleanup function
@@ -72,6 +100,7 @@ export function initSSEEventHandlers(): () => void {
     epicCreatedUnsub?.();
     epicUpdatedUnsub?.();
     epicDeletedUnsub?.();
+    projectChangedUnsub?.();
   };
 }
 
