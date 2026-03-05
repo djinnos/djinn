@@ -1,6 +1,6 @@
 pub mod actors;
-pub mod commands;
 pub mod agent;
+pub mod commands;
 pub mod crypto;
 pub mod daemon;
 pub mod db;

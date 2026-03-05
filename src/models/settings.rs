@@ -68,9 +68,7 @@ impl DjinnSettings {
         }
     }
 
-    fn extract_model_priority(
-        v: &serde_json::Value,
-    ) -> Option<HashMap<String, Vec<String>>> {
+    fn extract_model_priority(v: &serde_json::Value) -> Option<HashMap<String, Vec<String>>> {
         let root = v
             .get("coordinator")
             .and_then(|c| c.get("model_priority"))

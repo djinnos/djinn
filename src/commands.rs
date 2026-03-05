@@ -25,7 +25,10 @@ pub struct CommandResult {
     pub duration_ms: u64,
 }
 
-pub async fn run_commands(commands: &[CommandSpec], working_dir: &Path) -> Result<Vec<CommandResult>> {
+pub async fn run_commands(
+    commands: &[CommandSpec],
+    working_dir: &Path,
+) -> Result<Vec<CommandResult>> {
     let mut results = Vec::with_capacity(commands.len());
 
     for spec in commands {
@@ -42,10 +45,12 @@ pub async fn run_commands(commands: &[CommandSpec], working_dir: &Path) -> Resul
                 .output(),
         )
         .await
-        .map_err(|_| Error::Internal(format!(
-            "command '{}' timed out after {}s",
-            spec.name, timeout_secs
-        )))?
+        .map_err(|_| {
+            Error::Internal(format!(
+                "command '{}' timed out after {}s",
+                spec.name, timeout_secs
+            ))
+        })?
         .map_err(|e| Error::Internal(format!("failed to run '{}': {}", spec.name, e)))?;
 
         let duration_ms = start.elapsed().as_millis() as u64;

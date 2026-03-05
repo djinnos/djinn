@@ -405,12 +405,28 @@ mod tests {
         let repo = SessionRepository::new(db, tx);
 
         let first = repo
-            .create(&project_id, &task_id, "openai/gpt-5", "worker", None, None, None)
+            .create(
+                &project_id,
+                &task_id,
+                "openai/gpt-5",
+                "worker",
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let second = repo
-            .create(&project_id, &task_id, "openai/gpt-5", "worker", None, None, None)
+            .create(
+                &project_id,
+                &task_id,
+                "openai/gpt-5",
+                "worker",
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -445,19 +461,43 @@ mod tests {
 
         // A: root session
         let a = repo
-            .create(&project_id, &task_id, "openai/gpt-5", "worker", None, None, None)
+            .create(
+                &project_id,
+                &task_id,
+                "openai/gpt-5",
+                "worker",
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
 
         // B: compacted from A
         let b = repo
-            .create(&project_id, &task_id, "openai/gpt-5", "worker", None, None, Some(&a.id))
+            .create(
+                &project_id,
+                &task_id,
+                "openai/gpt-5",
+                "worker",
+                None,
+                None,
+                Some(&a.id),
+            )
             .await
             .unwrap();
 
         // C: compacted from B
         let c = repo
-            .create(&project_id, &task_id, "openai/gpt-5", "worker", None, None, Some(&b.id))
+            .create(
+                &project_id,
+                &task_id,
+                "openai/gpt-5",
+                "worker",
+                None,
+                None,
+                Some(&b.id),
+            )
             .await
             .unwrap();
 

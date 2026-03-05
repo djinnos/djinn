@@ -87,7 +87,11 @@ pub fn git_metadata_dir(worktree: &Path) -> Option<PathBuf> {
     } else {
         worktree.join(gitdir).canonicalize().ok()?
     };
-    if resolved.is_dir() { Some(resolved) } else { None }
+    if resolved.is_dir() {
+        Some(resolved)
+    } else {
+        None
+    }
 }
 
 /// Resolve the main `.git/` directory for a worktree.
@@ -139,9 +143,7 @@ fn _detect() -> Box<dyn Sandbox> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn _detect() -> Box<dyn Sandbox> {
-    tracing::warn!(
-        "sandbox: unsupported platform, falling back to FallbackSandbox heuristics"
-    );
+    tracing::warn!("sandbox: unsupported platform, falling back to FallbackSandbox heuristics");
     Box::new(FallbackSandbox)
 }
 
@@ -155,10 +157,10 @@ fn probe_landlock() -> bool {
     // x86_64, arm64, and riscv64.
     let ret = unsafe {
         libc::syscall(
-            444,                                  // SYS_landlock_create_ruleset
-            std::ptr::null::<libc::c_void>(),     // attr = NULL
-            0usize,                               // size = 0
-            1i32,                                 // flags = LANDLOCK_CREATE_RULESET_VERSION
+            444,                              // SYS_landlock_create_ruleset
+            std::ptr::null::<libc::c_void>(), // attr = NULL
+            0usize,                           // size = 0
+            1i32,                             // flags = LANDLOCK_CREATE_RULESET_VERSION
         )
     };
     ret > 0

@@ -265,9 +265,7 @@ impl DjinnMcpServer {
     }
 
     /// Return the configured setup and verification commands for a project.
-    #[tool(
-        description = "Read setup and verification commands configured for a project."
-    )]
+    #[tool(description = "Read setup and verification commands configured for a project.")]
     pub async fn project_commands_get(
         &self,
         Parameters(input): Parameters<ProjectCommandsGetParams>,

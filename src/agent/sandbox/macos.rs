@@ -48,8 +48,7 @@ impl Sandbox for SeatbeltSandbox {
 
         // Snapshot the existing command configuration before we overwrite it.
         let program = cmd.as_std().get_program().to_owned();
-        let args: Vec<std::ffi::OsString> =
-            cmd.as_std().get_args().map(|a| a.to_owned()).collect();
+        let args: Vec<std::ffi::OsString> = cmd.as_std().get_args().map(|a| a.to_owned()).collect();
         let current_dir = cmd.as_std().get_current_dir().map(|p| p.to_owned());
         let envs: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> = cmd
             .as_std()

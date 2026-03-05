@@ -260,8 +260,7 @@ impl GitActor {
                 respond_to,
             } => {
                 let path = self.path.clone();
-                let result =
-                    Self::create_worktree_impl(path, task_short_id, branch, detach).await;
+                let result = Self::create_worktree_impl(path, task_short_id, branch, detach).await;
                 let _ = respond_to.send(result);
             }
             GitMessage::RemoveWorktree {
@@ -1080,11 +1079,7 @@ mod tests {
             .await
             .unwrap();
         let log = handle
-            .run_command(vec![
-                "log".into(),
-                "--oneline".into(),
-                "origin/main".into(),
-            ])
+            .run_command(vec!["log".into(), "--oneline".into(), "origin/main".into()])
             .await
             .unwrap();
         let lines: Vec<&str> = log.stdout.lines().collect();
@@ -1292,7 +1287,10 @@ mod tests {
             .unwrap();
 
         let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
-        let wt_path = handle.create_worktree("wt1", "task/wt1", false).await.unwrap();
+        let wt_path = handle
+            .create_worktree("wt1", "task/wt1", false)
+            .await
+            .unwrap();
 
         // Directory must exist.
         assert!(wt_path.exists(), "worktree directory should exist");
@@ -1321,7 +1319,10 @@ mod tests {
             .unwrap();
 
         let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
-        let wt_path = handle.create_worktree("wt2", "task/wt2", false).await.unwrap();
+        let wt_path = handle
+            .create_worktree("wt2", "task/wt2", false)
+            .await
+            .unwrap();
         assert!(wt_path.exists(), "precondition: worktree should exist");
 
         handle.remove_worktree(&wt_path).await.unwrap();
@@ -1341,7 +1342,10 @@ mod tests {
             .unwrap();
 
         let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
-        let wt_path = handle.create_worktree("wt3", "task/wt3", false).await.unwrap();
+        let wt_path = handle
+            .create_worktree("wt3", "task/wt3", false)
+            .await
+            .unwrap();
 
         let worktrees = handle.list_worktrees().await.unwrap();
         assert!(

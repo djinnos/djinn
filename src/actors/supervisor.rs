@@ -29,8 +29,8 @@ use crate::agent::output_parser::{
 };
 use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::{AgentType, GooseSessionHandle, SessionManager, SessionType};
-use crate::db::repositories::credential::CredentialRepository;
 use crate::commands::{CommandSpec, run_commands};
+use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::epic::EpicRepository;
 use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
 use crate::db::repositories::git_settings::GitSettingsRepository;
@@ -660,30 +660,39 @@ async fn perform_compaction(
     };
 
     // 1. Read conversation history + final token counts from old Goose session.
-    let (final_tokens_in, final_tokens_out, messages) =
-        match session_manager.get_session(&old_goose_session_id, true).await {
-            Ok(s) => {
-                let tin = s.accumulated_input_tokens.or(s.input_tokens).unwrap_or(0) as i64;
-                let tout =
-                    s.accumulated_output_tokens.or(s.output_tokens).unwrap_or(0) as i64;
-                let msgs = s.conversation.map(|c| c.messages().clone()).unwrap_or_default();
-                (tin.max(tokens_in), tout, msgs)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %task_id,
-                    error = %e,
-                    "compaction: failed to read Goose session"
-                );
-                (tokens_in, 0, vec![])
-            }
-        };
+    let (final_tokens_in, final_tokens_out, messages) = match session_manager
+        .get_session(&old_goose_session_id, true)
+        .await
+    {
+        Ok(s) => {
+            let tin = s.accumulated_input_tokens.or(s.input_tokens).unwrap_or(0) as i64;
+            let tout = s.accumulated_output_tokens.or(s.output_tokens).unwrap_or(0) as i64;
+            let msgs = s
+                .conversation
+                .map(|c| c.messages().clone())
+                .unwrap_or_default();
+            (tin.max(tokens_in), tout, msgs)
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "compaction: failed to read Goose session"
+            );
+            (tokens_in, 0, vec![])
+        }
+    };
 
     // 2. Finalize old Djinn session record as Compacted.
     if let Some(record_id) = old_record_id.as_deref() {
         let repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
         if let Err(e) = repo
-            .update(record_id, SessionStatus::Compacted, final_tokens_in, final_tokens_out)
+            .update(
+                record_id,
+                SessionStatus::Compacted,
+                final_tokens_in,
+                final_tokens_out,
+            )
             .await
         {
             tracing::warn!(record_id = %record_id, error = %e, "compaction: failed to finalize old session record");
@@ -730,9 +739,7 @@ async fn perform_compaction(
             .into_iter()
             .find(|p| p.id == catalog_provider_id)
             .and_then(|p| p.env_vars.into_iter().next())
-            .unwrap_or_else(|| {
-                format!("{}_API_KEY", catalog_provider_id.to_ascii_uppercase())
-            });
+            .unwrap_or_else(|| format!("{}_API_KEY", catalog_provider_id.to_ascii_uppercase()));
         let cred_repo =
             CredentialRepository::new(app_state.db().clone(), app_state.events().clone());
         match cred_repo.get_decrypted(&key_name).await {
@@ -828,15 +835,17 @@ async fn perform_compaction(
             _ => format!("{task_id} (compacted)"),
         }
     };
-    let new_goose_session =
-        match session_manager.create_session(worktree_path.clone(), task_name, SessionType::SubAgent).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(task_id = %task_id, error = %e, "compaction: failed to create new Goose session");
-                abort(task_id, model_id, Some(worktree_path)).await;
-                return;
-            }
-        };
+    let new_goose_session = match session_manager
+        .create_session(worktree_path.clone(), task_name, SessionType::SubAgent)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(task_id = %task_id, error = %e, "compaction: failed to create new Goose session");
+            abort(task_id, model_id, Some(worktree_path)).await;
+            return;
+        }
+    };
 
     // 6. Create new Djinn session record with continuation_of pointing to the old record.
     let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
@@ -887,16 +896,17 @@ async fn perform_compaction(
 
     // 7. Set up new agent with provider and extensions.
     let extensions = vec![extension::config(agent_type)];
-    let provider =
-        match providers::create(&goose_provider_id, goose_model, extensions.clone()).await {
-            Ok(p) => p,
-            Err(e) => {
-                app_state.health_tracker().record_failure(&model_id);
-                tracing::warn!(task_id = %task_id, error = %e, "compaction: failed to create new agent provider");
-                abort(task_id, model_id, Some(worktree_path)).await;
-                return;
-            }
-        };
+    let provider = match providers::create(&goose_provider_id, goose_model, extensions.clone())
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            app_state.health_tracker().record_failure(&model_id);
+            tracing::warn!(task_id = %task_id, error = %e, "compaction: failed to create new agent provider");
+            abort(task_id, model_id, Some(worktree_path)).await;
+            return;
+        }
+    };
 
     let agent = Arc::new(GooseAgent::with_config(GooseAgentConfig::new(
         session_manager.clone(),
@@ -1139,7 +1149,15 @@ impl AgentSupervisor {
                 old_record_id,
             } => {
                 if let Err(e) = self
-                    .dispatch_resume(task_id, model_id, goose_session_id, worktree_path, resume_prompt, tokens_in, old_record_id)
+                    .dispatch_resume(
+                        task_id,
+                        model_id,
+                        goose_session_id,
+                        worktree_path,
+                        resume_prompt,
+                        tokens_in,
+                        old_record_id,
+                    )
                     .await
                 {
                     tracing::warn!(error = %e, "Supervisor: failed to dispatch resume session after verification failure");
@@ -1151,8 +1169,13 @@ impl AgentSupervisor {
                 tokens_in,
                 context_window,
             } => {
-                self.handle_compaction_needed(task_id, old_goose_session_id, tokens_in, context_window)
-                    .await;
+                self.handle_compaction_needed(
+                    task_id,
+                    old_goose_session_id,
+                    tokens_in,
+                    context_window,
+                )
+                .await;
             }
             SupervisorMessage::CompactionComplete {
                 task_id,
@@ -1224,7 +1247,16 @@ impl AgentSupervisor {
         // Check for a paused session — resume it instead of starting fresh.
         if let Some(paused) = self.find_paused_session_record(&task_id).await {
             let context = self.resume_context_for_task(&task_id).await;
-            match self.resume_paused_session(task_id.clone(), project_path.clone(), model_id.clone(), paused, context).await {
+            match self
+                .resume_paused_session(
+                    task_id.clone(),
+                    project_path.clone(),
+                    model_id.clone(),
+                    paused,
+                    context,
+                )
+                .await
+            {
                 Err(SupervisorError::PausedSessionStale { .. }) => {
                     // Stale paused session was finalized; fall through to fresh dispatch below.
                 }
@@ -1304,10 +1336,8 @@ impl AgentSupervisor {
         }
 
         // Load project commands once — used for both setup execution and prompt injection.
-        let project_repo = ProjectRepository::new(
-            self.app_state.db().clone(),
-            self.app_state.events().clone(),
-        );
+        let project_repo =
+            ProjectRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
         let (prompt_setup_commands, prompt_verification_commands) = {
             if let Ok(Some(ref p)) = project_repo.get(&task.project_id).await {
                 let setup_names = format_command_names(&p.setup_commands);
@@ -1642,7 +1672,10 @@ impl AgentSupervisor {
             let max_sessions = self.max_for_model(&model_id);
             self.capacity
                 .entry(model_id.clone())
-                .or_insert(ModelCapacity { active: 0, max: max_sessions })
+                .or_insert(ModelCapacity {
+                    active: 0,
+                    max: max_sessions,
+                })
                 .active += 1;
             self.compacting_tasks.insert(task_id.clone());
             let sender = self.sender.clone();
@@ -1781,7 +1814,8 @@ impl AgentSupervisor {
             .insert(task_id.clone(), task.project_id.clone());
         self.task_session_records
             .insert(task_id.clone(), session_record.id);
-        self.session_agent_types.insert(task_id.clone(), AgentType::Worker);
+        self.session_agent_types
+            .insert(task_id.clone(), AgentType::Worker);
 
         tracing::info!(
             task_id = %task.short_id,
@@ -1945,10 +1979,7 @@ impl AgentSupervisor {
             .as_deref()
             .map(PathBuf::from)
             .ok_or_else(|| {
-                SupervisorError::Goose(format!(
-                    "paused session {} has no worktree_path",
-                    paused.id
-                ))
+                SupervisorError::Goose(format!("paused session {} has no worktree_path", paused.id))
             })?;
 
         // Use the model from the paused record (continuity — same model that wrote the code).
@@ -1962,7 +1993,12 @@ impl AgentSupervisor {
                 self.app_state.events().clone(),
             );
             let _ = session_repo
-                .update(&paused.id, SessionStatus::Interrupted, paused.tokens_in, paused.tokens_out)
+                .update(
+                    &paused.id,
+                    SessionStatus::Interrupted,
+                    paused.tokens_in,
+                    paused.tokens_out,
+                )
                 .await;
             tracing::warn!(
                 task_id = %task_id,
@@ -1970,7 +2006,9 @@ impl AgentSupervisor {
                 worktree = %worktree_path.display(),
                 "Supervisor: paused session worktree missing; finalized session as interrupted"
             );
-            return Err(SupervisorError::PausedSessionStale { task_id: task_id.to_string() });
+            return Err(SupervisorError::PausedSessionStale {
+                task_id: task_id.to_string(),
+            });
         }
 
         let max_for_model = self.max_for_model(&model_id);
@@ -2037,7 +2075,10 @@ impl AgentSupervisor {
             let max_sessions = self.max_for_model(&model_id);
             self.capacity
                 .entry(model_id.clone())
-                .or_insert(ModelCapacity { active: 0, max: max_sessions })
+                .or_insert(ModelCapacity {
+                    active: 0,
+                    max: max_sessions,
+                })
                 .active += 1;
             self.compacting_tasks.insert(task_id.clone());
             let sender = self.sender.clone();
@@ -2182,8 +2223,7 @@ impl AgentSupervisor {
         self.session_models.insert(task_id.clone(), model_id);
         self.session_projects
             .insert(task_id.clone(), task.project_id.clone());
-        self.task_session_records
-            .insert(task_id.clone(), paused.id);
+        self.task_session_records.insert(task_id.clone(), paused.id);
         self.session_agent_types.insert(task_id, agent_type);
 
         tracing::info!(
@@ -2210,7 +2250,10 @@ impl AgentSupervisor {
         };
 
         let model_id = self.session_models.remove(&task_id).unwrap_or_default();
-        let agent_type = self.session_agent_types.remove(&task_id).unwrap_or(AgentType::Worker);
+        let agent_type = self
+            .session_agent_types
+            .remove(&task_id)
+            .unwrap_or(AgentType::Worker);
         let project_id = self.session_projects.remove(&task_id).unwrap_or_default();
         let old_record_id = self.task_session_records.remove(&task_id);
         let worktree_path = handle.worktree_path.take();
@@ -2322,7 +2365,10 @@ impl AgentSupervisor {
         let max_sessions = self.max_for_model(&model_id);
         self.capacity
             .entry(model_id.clone())
-            .or_insert_with(|| ModelCapacity { active: 1, max: max_sessions });
+            .or_insert_with(|| ModelCapacity {
+                active: 1,
+                max: max_sessions,
+            });
 
         let session_cancel = CancellationToken::new();
         let kickoff = GooseMessage::user().with_text(&summary);
@@ -2355,7 +2401,8 @@ impl AgentSupervisor {
         );
         self.session_models.insert(task_id.clone(), model_id);
         self.session_projects.insert(task_id.clone(), project_id);
-        self.task_session_records.insert(task_id.clone(), new_record_id);
+        self.task_session_records
+            .insert(task_id.clone(), new_record_id);
         self.session_agent_types.insert(task_id.clone(), agent_type);
 
         tracing::info!(task_id = %task_id, "Supervisor: compaction complete, new session registered");
@@ -2379,13 +2426,11 @@ impl AgentSupervisor {
             task_id = %task_id,
             "Supervisor: compaction aborted; releasing task back to open"
         );
-        self.transition_interrupted(&task_id, agent_type, "compaction aborted").await;
+        self.transition_interrupted(&task_id, agent_type, "compaction aborted")
+            .await;
     }
 
-    async fn find_paused_session_record(
-        &self,
-        task_id: &str,
-    ) -> Option<SessionRecord> {
+    async fn find_paused_session_record(&self, task_id: &str) -> Option<SessionRecord> {
         let repo =
             SessionRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
         repo.paused_for_task(task_id).await.ok().flatten()
@@ -2417,9 +2462,7 @@ impl AgentSupervisor {
         // Check for merge conflict info in activity.
         for entry in activity.iter().rev() {
             if entry.event_type == "merge_conflict" {
-                if let Ok(meta) =
-                    serde_json::from_str::<MergeConflictMetadata>(&entry.payload)
-                {
+                if let Ok(meta) = serde_json::from_str::<MergeConflictMetadata>(&entry.payload) {
                     let files = meta
                         .conflicting_files
                         .iter()
@@ -2748,8 +2791,7 @@ impl AgentSupervisor {
 
             // Run verification commands after DONE signal, before committing.
             if is_worker_done {
-                if let Some(feedback) =
-                    self.run_verification_commands(task_id, worktree_path).await
+                if let Some(feedback) = self.run_verification_commands(task_id, worktree_path).await
                 {
                     // Verification failed — preserve worktree, resume the session.
                     self.queue_resume_after_verification_failure(
@@ -2911,10 +2953,14 @@ impl AgentSupervisor {
     /// dependencies that changed as a result of merging main into the task branch).
     /// Failures are logged as warnings but do not abort the session.
     async fn run_setup_commands(&self, task_id: &str, worktree_path: &Path) {
-        let Ok(task) = self.load_task(task_id).await else { return };
+        let Ok(task) = self.load_task(task_id).await else {
+            return;
+        };
         let project_repo =
             ProjectRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
-        let Ok(Some(project)) = project_repo.get(&task.project_id).await else { return };
+        let Ok(Some(project)) = project_repo.get(&task.project_id).await else {
+            return;
+        };
         let specs: Vec<CommandSpec> =
             serde_json::from_str(&project.setup_commands).unwrap_or_default();
         if specs.is_empty() {
@@ -2978,7 +3024,11 @@ impl AgentSupervisor {
                 let trim_output = |s: &str| -> String {
                     let lines: Vec<&str> = s.trim().lines().collect();
                     if lines.len() > 50 {
-                        format!("... ({} lines truncated) ...\n{}", lines.len() - 50, lines[lines.len() - 50..].join("\n"))
+                        format!(
+                            "... ({} lines truncated) ...\n{}",
+                            lines.len() - 50,
+                            lines[lines.len() - 50..].join("\n")
+                        )
                     } else {
                         lines.join("\n")
                     }
@@ -3589,7 +3639,10 @@ impl AgentSupervisor {
         }
     }
 
-    fn missing_marker_nudge(agent_type: AgentType, output: &ParsedAgentOutput) -> Option<&'static str> {
+    fn missing_marker_nudge(
+        agent_type: AgentType,
+        output: &ParsedAgentOutput,
+    ) -> Option<&'static str> {
         if !Self::missing_required_marker(agent_type, output) {
             return None;
         }

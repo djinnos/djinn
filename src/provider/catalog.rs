@@ -229,7 +229,8 @@ impl CatalogService {
             data.providers.push(provider);
 
             // Try to source models from models.dev via the mapping table.
-            let models = self.models_from_catalog_source(&data, &meta.name)
+            let models = self
+                .models_from_catalog_source(&data, &meta.name)
                 .unwrap_or_else(|| models_from_goose_metadata(meta));
 
             if !models.is_empty() {
@@ -265,7 +266,11 @@ impl CatalogService {
             })
             .collect();
 
-        if models.is_empty() { None } else { Some(models) }
+        if models.is_empty() {
+            None
+        } else {
+            Some(models)
+        }
     }
 
     /// Add or replace a custom provider and its seed models in the in-memory catalog.
@@ -473,7 +478,13 @@ mod tests {
             "test-model-v1",
             vec!["test-model-v1", "test-model-v2"],
             "https://example.com/docs",
-            vec![ConfigKey::new_oauth("TEST_OAUTH_TOKEN", true, true, None, false)],
+            vec![ConfigKey::new_oauth(
+                "TEST_OAUTH_TOKEN",
+                true,
+                true,
+                None,
+                false,
+            )],
         );
         let entries = vec![(meta, ProviderType::Preferred)];
         catalog.inject_goose_providers(&entries);

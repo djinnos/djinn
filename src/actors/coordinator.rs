@@ -257,7 +257,10 @@ impl CoordinatorActor {
                         self.paused_projects.insert(p.id);
                     }
                 }
-                tracing::info!(count = self.paused_projects.len(), "CoordinatorActor: paused all projects");
+                tracing::info!(
+                    count = self.paused_projects.len(),
+                    "CoordinatorActor: paused all projects"
+                );
                 self.publish_status();
                 if interrupt_active {
                     if let Err(e) = self.supervisor.interrupt_all(&reason).await {
@@ -273,7 +276,11 @@ impl CoordinatorActor {
                 self.paused_projects.insert(project_id.clone());
                 self.publish_status();
                 if interrupt_active {
-                    if let Err(e) = self.supervisor.interrupt_project(&project_id, &reason).await {
+                    if let Err(e) = self
+                        .supervisor
+                        .interrupt_project(&project_id, &reason)
+                        .await
+                    {
                         tracing::warn!(
                             project_id = %project_id,
                             error = %e,
@@ -426,14 +433,12 @@ impl CoordinatorActor {
                 credentials.iter().map(|c| c.provider_id.clone()).collect();
 
             // Also consider OAuth-connected providers (e.g. chatgpt_codex).
-            let goose_entries =
-                crate::mcp::tools::provider_tools::goose_provider_entries().await;
+            let goose_entries = crate::mcp::tools::provider_tools::goose_provider_entries().await;
             for provider in self.catalog.list_providers() {
-                let oauth_keys =
-                    crate::mcp::tools::provider_tools::oauth_keys_for_provider(
-                        &provider.id,
-                        &goose_entries,
-                    );
+                let oauth_keys = crate::mcp::tools::provider_tools::oauth_keys_for_provider(
+                    &provider.id,
+                    &goose_entries,
+                );
                 if !oauth_keys.is_empty()
                     && crate::mcp::tools::provider_tools::is_oauth_key_present(&oauth_keys)
                 {
@@ -887,23 +892,22 @@ impl CoordinatorActor {
             verification_commands: String,
         }
 
-        let rows: Vec<ProjectRow> = sqlx::query(
-            "SELECT id, path, setup_commands, verification_commands FROM projects",
-        )
-        .fetch_all(self.db.pool())
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|row| {
-            use sqlx::Row;
-            ProjectRow {
-                id: row.get("id"),
-                path: row.get("path"),
-                setup_commands: row.get("setup_commands"),
-                verification_commands: row.get("verification_commands"),
-            }
-        })
-        .collect();
+        let rows: Vec<ProjectRow> =
+            sqlx::query("SELECT id, path, setup_commands, verification_commands FROM projects")
+                .fetch_all(self.db.pool())
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|row| {
+                    use sqlx::Row;
+                    ProjectRow {
+                        id: row.get("id"),
+                        path: row.get("path"),
+                        setup_commands: row.get("setup_commands"),
+                        verification_commands: row.get("verification_commands"),
+                    }
+                })
+                .collect();
 
         for row in rows {
             if let Some(ref filter) = project_id_filter {
@@ -943,20 +947,19 @@ impl CoordinatorActor {
             );
 
             tokio::spawn(async move {
-                let (healthy, error) =
-                    match run_project_health_check(
-                        project_id.clone(),
-                        path,
-                        setup_cmds,
-                        verify_cmds,
-                        db,
-                        events_tx,
-                    )
-                    .await
-                    {
-                        Ok(()) => (true, None),
-                        Err(e) => (false, Some(e)),
-                    };
+                let (healthy, error) = match run_project_health_check(
+                    project_id.clone(),
+                    path,
+                    setup_cmds,
+                    verify_cmds,
+                    db,
+                    events_tx,
+                )
+                .await
+                {
+                    Ok(()) => (true, None),
+                    Err(e) => (false, Some(e)),
+                };
                 let _ = sender
                     .send(CoordinatorMessage::SetProjectHealth {
                         project_id,
@@ -1302,7 +1305,10 @@ mod tests {
         let handle = spawn_coordinator(&db, &tx);
 
         let status = handle.get_status().unwrap();
-        assert!(!status.paused, "coordinator should start active (no global pause state)");
+        assert!(
+            !status.paused,
+            "coordinator should start active (no global pause state)"
+        );
         assert_eq!(status.tasks_dispatched, 0);
         assert_eq!(status.sessions_recovered, 0);
     }
@@ -1336,11 +1342,16 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let epic = make_epic(&db, tx.clone()).await;
         let repo = TaskRepository::new(db.clone(), tx.clone());
-        repo.create(&epic.id, "T1", "", "", "task", 0, "").await.unwrap();
+        repo.create(&epic.id, "T1", "", "", "task", 0, "")
+            .await
+            .unwrap();
 
         let handle = spawn_coordinator(&db, &tx);
         handle.pause_project(&epic.project_id).await.unwrap();
-        handle.trigger_dispatch_for_project(&epic.project_id).await.unwrap();
+        handle
+            .trigger_dispatch_for_project(&epic.project_id)
+            .await
+            .unwrap();
         // Give the actor a moment to process; dispatched count stays 0.
         tokio::task::yield_now().await;
         assert_eq!(handle.get_status().unwrap().tasks_dispatched, 0);
