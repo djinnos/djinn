@@ -143,10 +143,15 @@ fn is_provider_usable_by_goose(provider: &Provider, goose_ids: &HashSet<String>)
 
 // ── model_health ──────────────────────────────────────────────────────────────
 
+fn default_model_health_action() -> String {
+    "status".to_string()
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct ModelHealthInput {
-    /// Action to perform: status (view all), reset (reset one model),
+    /// Action to perform: status (view all, default), reset (reset one model),
     /// reset_all (reset all models), enable (re-enable auto-disabled model).
+    #[serde(default = "default_model_health_action")]
     pub action: String,
     /// Model ID (required for reset and enable actions).
     pub model: Option<String>,

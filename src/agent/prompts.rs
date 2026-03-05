@@ -272,19 +272,17 @@ mod tests {
     }
 
     #[test]
-    fn task_reviewer_prompt_contains_diff() {
+    fn task_reviewer_prompt_contains_task_fields() {
         let task = make_task();
-        let ctx = TaskContext {
-            diff: Some("+ fn foo() {}".into()),
-            commits: Some("abc1234 Add widget".into()),
-            start_commit: Some("abc0000".into()),
-            end_commit: Some("abc1234".into()),
-            ..make_ctx()
-        };
+        let ctx = make_ctx();
         let prompt = render_prompt(AgentType::TaskReviewer, &task, &ctx);
 
-        assert!(prompt.contains("+ fn foo() {}"));
-        assert!(prompt.contains("abc0000..abc1234"));
+        // Task ID and title are substituted.
+        assert!(prompt.contains(&task.id));
+        // The reviewer is instructed to run git diff itself, not receive it injected.
+        assert!(prompt.contains("git diff"));
+        // REVIEW_RESULT marker instructions are present.
+        assert!(prompt.contains("REVIEW_RESULT"));
         assert!(!prompt.contains("{{"));
     }
 

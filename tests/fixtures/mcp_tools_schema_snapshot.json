@@ -831,10 +831,6 @@
                 },
                 "type": "array"
               },
-              "blocked_from_status": {
-                "nullable": true,
-                "type": "string"
-              },
               "close_reason": {
                 "nullable": true,
                 "type": "string"
@@ -1263,13 +1259,11 @@
           "ExecutionStatusCapacity": {
             "properties": {
               "active": {
-                "format": "uint32",
-                "minimum": 0,
+                "format": "int64",
                 "type": "integer"
               },
               "max": {
-                "format": "uint32",
-                "minimum": 0,
+                "format": "int64",
                 "type": "integer"
               }
             },
@@ -1282,13 +1276,11 @@
           "ExecutionStatusMetrics": {
             "properties": {
               "sessions_recovered": {
-                "format": "uint64",
-                "minimum": 0,
+                "format": "int64",
                 "type": "integer"
               },
               "tasks_dispatched": {
-                "format": "uint64",
-                "minimum": 0,
+                "format": "int64",
                 "type": "integer"
               }
             },
@@ -1301,8 +1293,7 @@
           "ExecutionStatusSession": {
             "properties": {
               "duration_seconds": {
-                "format": "uint64",
-                "minimum": 0,
+                "format": "int64",
                 "type": "integer"
               },
               "model_id": {
@@ -1342,21 +1333,12 @@
             "type": "string"
           },
           "max_sessions": {
-            "format": "uint32",
-            "minimum": 0,
+            "format": "int64",
             "nullable": true,
             "type": "integer"
           },
           "metrics": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ExecutionStatusMetrics"
-              },
-              {
-                "const": null,
-                "nullable": true
-              }
-            ]
+            "$ref": "#/$defs/ExecutionStatusMetrics"
           },
           "ok": {
             "type": "boolean"
@@ -1366,8 +1348,7 @@
             "type": "string"
           },
           "running_sessions": {
-            "format": "uint",
-            "minimum": 0,
+            "format": "int64",
             "nullable": true,
             "type": "integer"
           },
@@ -1388,7 +1369,8 @@
           }
         },
         "required": [
-          "ok"
+          "ok",
+          "metrics"
         ],
         "title": "ExecutionStatusResponse",
         "type": "object"
@@ -2778,7 +2760,8 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "action": {
-            "description": "Action to perform: status (view all), reset (reset one model),\nreset_all (reset all models), enable (re-enable auto-disabled model).",
+            "default": "status",
+            "description": "Action to perform: status (view all, default), reset (reset one model),\nreset_all (reset all models), enable (re-enable auto-disabled model).",
             "type": "string"
           },
           "model": {
@@ -2787,9 +2770,6 @@
             "type": "string"
           }
         },
-        "required": [
-          "action"
-        ],
         "title": "ModelHealthInput",
         "type": "object"
       },
@@ -2801,32 +2781,27 @@
                 "type": "boolean"
               },
               "consecutive_failures": {
-                "format": "uint32",
-                "minimum": 0,
+                "format": "int64",
                 "type": "integer"
               },
               "cooldown_seconds_remaining": {
-                "format": "uint64",
-                "minimum": 0,
+                "format": "int64",
                 "nullable": true,
                 "type": "integer"
               },
               "disable_ttl_trips": {
-                "format": "uint32",
-                "minimum": 0,
+                "format": "int64",
                 "type": "integer"
               },
               "model_id": {
                 "type": "string"
               },
               "total_failures": {
-                "format": "uint32",
-                "minimum": 0,
+                "format": "int64",
                 "type": "integer"
               },
               "total_successes": {
-                "format": "uint32",
-                "minimum": 0,
+                "format": "int64",
                 "type": "integer"
               }
             },
@@ -3567,15 +3542,7 @@
             "type": "boolean"
           },
           "model": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ProviderModelOutput"
-              },
-              {
-                "const": null,
-                "nullable": true
-              }
-            ]
+            "$ref": "#/$defs/ProviderModelOutput"
           },
           "model_id": {
             "type": "string"
@@ -3583,7 +3550,8 @@
         },
         "required": [
           "model_id",
-          "found"
+          "found",
+          "model"
         ],
         "title": "ProviderModelLookupResponse",
         "type": "object"
@@ -4058,8 +4026,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "duration_seconds": {
-            "format": "uint64",
-            "minimum": 0,
+            "format": "int64",
             "nullable": true,
             "type": "integer"
           },
@@ -4355,20 +4322,13 @@
             "type": "string"
           },
           "settings": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/DjinnSettings"
-              },
-              {
-                "const": null,
-                "nullable": true
-              }
-            ]
+            "$ref": "#/$defs/DjinnSettings"
           }
         },
         "required": [
           "key",
-          "exists"
+          "exists",
+          "settings"
         ],
         "title": "SettingsGetResponse",
         "type": "object"
@@ -4607,12 +4567,12 @@
             "type": "string"
           },
           "project": {
-            "description": "Absolute project path.",
+            "description": "Absolute project path. Optional — task IDs are globally unique.",
+            "nullable": true,
             "type": "string"
           }
         },
         "required": [
-          "project",
           "id"
         ],
         "title": "TaskBlockedListParams",
@@ -5038,10 +4998,6 @@
                 },
                 "type": "array"
               },
-              "blocked_from_status": {
-                "nullable": true,
-                "type": "string"
-              },
               "close_reason": {
                 "nullable": true,
                 "type": "string"
@@ -5251,12 +5207,12 @@
             "type": "string"
           },
           "project": {
-            "description": "Absolute project path.",
+            "description": "Absolute project path. Optional — task IDs are globally unique.",
+            "nullable": true,
             "type": "string"
           }
         },
         "required": [
-          "project",
           "id"
         ],
         "title": "TaskShowParams",
@@ -5335,8 +5291,7 @@
             "type": "boolean"
           },
           "tasks_exported": {
-            "format": "uint",
-            "minimum": 0,
+            "format": "int64",
             "nullable": true,
             "type": "integer"
           }
@@ -5367,8 +5322,7 @@
                 "type": "string"
               },
               "count": {
-                "format": "uint",
-                "minimum": 0,
+                "format": "int64",
                 "nullable": true,
                 "type": "integer"
               },
@@ -5431,8 +5385,7 @@
                 "type": "string"
               },
               "count": {
-                "format": "uint",
-                "minimum": 0,
+                "format": "int64",
                 "nullable": true,
                 "type": "integer"
               },
@@ -5492,8 +5445,7 @@
           "SyncChannelStatus": {
             "properties": {
               "backoff_secs": {
-                "format": "uint64",
-                "minimum": 0,
+                "format": "int64",
                 "type": "integer"
               },
               "branch": {
@@ -5503,8 +5455,7 @@
                 "type": "boolean"
               },
               "failure_count": {
-                "format": "uint32",
-                "minimum": 0,
+                "format": "int64",
                 "type": "integer"
               },
               "last_error": {
@@ -5557,7 +5508,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "action": {
-            "description": "Transition action: accept, start, submit_task_review, task_review_start,\ntask_review_reject, task_review_reject_conflict, task_review_approve,\nreopen, close, release, release_task_review, block, unblock, force_close,\nuser_override.",
+            "description": "Transition action: accept, start, submit_task_review, task_review_start,\ntask_review_reject, task_review_reject_conflict, task_review_approve,\nreopen, close, release, release_task_review, force_close,\nuser_override.",
             "type": "string"
           },
           "actor_id": {
@@ -5577,12 +5528,12 @@
             "type": "string"
           },
           "reason": {
-            "description": "Required for: task_review_reject, task_review_reject_conflict,\nreopen, release, release_task_review, block, force_close.",
+            "description": "Required for: task_review_reject, task_review_reject_conflict,\nreopen, release, release_task_review, force_close.",
             "nullable": true,
             "type": "string"
           },
           "target_status": {
-            "description": "Required when action = \"user_override\". Allowed values: draft, open, needs_task_review,\nin_task_review, in_progress, blocked, closed.",
+            "description": "Required when action = \"user_override\". Allowed values: draft, open, needs_task_review,\nin_task_review, in_progress, closed.",
             "nullable": true,
             "type": "string"
           }

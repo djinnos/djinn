@@ -65,6 +65,6 @@ You have access to Djinn tools via the `djinn` extension. Use them during implem
 - **Never run destructive git commands.** No `git stash`, `git checkout .`, `git reset --hard`, `git clean`.
 - **Do not run build or test commands.** The coordinator runs verification automatically after your session — see Automated Verification above.
 - **Do not commit.** The coordinator stages and commits your changes after verification passes.
-- **Do not install dependencies.** Setup commands already ran before your session started — see Automated Commands above.
+- **Do not install dependencies.** Setup commands already ran before your session started.
 - **Operate only in the active workspace.** Use relative paths and do not target parent repo paths directly.
 - **Always emit a result marker.** The supervisor reads your final `WORKER_RESULT` line to transition task state.

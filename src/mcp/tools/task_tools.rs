@@ -94,8 +94,8 @@ pub struct AcceptanceCriterionStatus {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskShowParams {
-    /// Absolute project path.
-    pub project: String,
+    /// Absolute project path. Optional — task IDs are globally unique.
+    pub project: Option<String>,
     /// Task UUID or short_id.
     pub id: String,
 }
@@ -174,8 +174,8 @@ pub struct TaskBlockersListParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskBlockedListParams {
-    /// Absolute project path.
-    pub project: String,
+    /// Absolute project path. Optional — task IDs are globally unique.
+    pub project: Option<String>,
     /// Task UUID or short_id.
     pub id: String,
 }
@@ -898,11 +898,16 @@ impl DjinnMcpServer {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let session_repo =
             SessionRepository::new(self.state.db().clone(), self.state.events().clone());
-        let project_id = match self.require_project_id(&p.project).await {
-            Ok(id) => id,
-            Err(e) => return Json(ErrorOr::Error(e)),
+        let task_result = if let Some(project) = &p.project {
+            let project_id = match self.require_project_id(project).await {
+                Ok(id) => id,
+                Err(e) => return Json(ErrorOr::Error(e)),
+            };
+            repo.resolve_in_project(&project_id, &p.id).await
+        } else {
+            repo.resolve(&p.id).await
         };
-        match repo.resolve_in_project(&project_id, &p.id).await {
+        match task_result {
             Ok(Some(t)) => {
                 let session_count = session_repo.count_for_task(&t.id).await.unwrap_or(0);
                 let active_session = session_repo
@@ -1191,17 +1196,17 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskBlockedListParams>,
     ) -> Json<ErrorOr<TaskBlockedListResponse>> {
-        let project_id = match self.require_project_id(&p.project).await {
-            Ok(id) => id,
-            Err(e) => return Json(ErrorOr::Error(e)),
-        };
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
-        let Some(task) = repo
-            .resolve_in_project(&project_id, &p.id)
-            .await
-            .ok()
-            .flatten()
-        else {
+        let task_result = if let Some(project) = &p.project {
+            let project_id = match self.require_project_id(project).await {
+                Ok(id) => id,
+                Err(e) => return Json(ErrorOr::Error(e)),
+            };
+            repo.resolve_in_project(&project_id, &p.id).await
+        } else {
+            repo.resolve(&p.id).await
+        };
+        let Some(task) = task_result.ok().flatten() else {
             return Json(ErrorOr::Error(not_found(&p.id)));
         };
         match repo.list_blocked_by(&task.id).await {
