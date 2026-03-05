@@ -1,4 +1,4 @@
-use crate::auth::{build_authorize_url, generate_pkce, PkceParams};
+use crate::auth::{build_authorize_url, clear_token, generate_pkce, retrieve_token, store_token, PkceParams};
 use crate::server::ServerState;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use once_cell::sync::Lazy;
@@ -119,7 +119,25 @@ pub async fn clear_auth_token() -> Result<(), String> {
         .lock()
         .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
     *session = None;
+    drop(session);
+    clear_token().await?;
     Ok(())
+}
+
+
+#[tauri::command]
+pub async fn get_refresh_token() -> Result<Option<String>, String> {
+    retrieve_token().await
+}
+
+#[tauri::command]
+pub async fn set_refresh_token(token: String) -> Result<(), String> {
+    store_token(&token).await
+}
+
+#[tauri::command]
+pub async fn clear_refresh_token() -> Result<(), String> {
+    clear_token().await
 }
 
 /// Initiate OAuth login with Clerk
@@ -203,7 +221,8 @@ pub async fn exchange_auth_code(
     drop(auth_session);
 
     if let Some(refresh_token) = token_response.refresh_token {
-        log::info!("Received refresh token ({} chars), ready for storage handoff", refresh_token.len());
+        store_token(&refresh_token).await?;
+        log::info!("Stored refresh token in secure storage");
     }
 
     user_profile.ok_or_else(|| "Missing id_token in token response".to_string())

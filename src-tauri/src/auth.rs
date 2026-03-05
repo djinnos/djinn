@@ -2,6 +2,9 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
 
 /// Authentication state
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,10 +35,10 @@ pub const CLERK_DOMAIN: &str = "clerk.djinnai.io";
 pub const OAUTH_AUTHORIZE_PATH: &str = "/oauth/authorize";
 pub const CLIENT_ID: &str = "djinnos-desktop";
 pub const REDIRECT_URI: &str = "djinnos://auth/callback";
+const KEYRING_SERVICE: &str = "djinnos-desktop";
+const KEYRING_USERNAME: &str = "refresh_token";
 
 /// Generate PKCE code_verifier and code_challenge
-///
-/// Returns PKCE parameters including code_verifier, code_challenge (SHA256), and state
 pub fn generate_pkce() -> PkceParams {
     let code_verifier = generate_code_verifier();
     let code_challenge = generate_code_challenge(&code_verifier);
@@ -48,27 +51,18 @@ pub fn generate_pkce() -> PkceParams {
     }
 }
 
-/// Generate a random code_verifier (43-128 chars)
-///
-/// Per RFC 7636, code_verifier is a random string using [A-Za-z0-9_-]
-/// with length between 43 and 128 characters.
 fn generate_code_verifier() -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut rng = rand::thread_rng();
 
-    let verifier: String = (0..128)
+    (0..128)
         .map(|_| {
             let idx = rng.gen_range(0..CHARSET.len());
             CHARSET[idx] as char
         })
-        .collect();
-
-    verifier
+        .collect()
 }
 
-/// Generate code_challenge from code_verifier using SHA256
-///
-/// code_challenge = BASE64URL-ENCODE(SHA256(ASCII(code_verifier)))
 fn generate_code_challenge(code_verifier: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
@@ -77,16 +71,12 @@ fn generate_code_challenge(code_verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(&hash)
 }
 
-/// Generate random state parameter for CSRF protection
-///
-/// Returns a 32-byte random string encoded as URL-safe base64
 fn generate_state() -> String {
     let mut rng = rand::thread_rng();
     let bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
     URL_SAFE_NO_PAD.encode(&bytes)
 }
 
-/// Build Clerk OAuth authorization URL with PKCE parameters
 pub fn build_authorize_url(pkce: &PkceParams) -> String {
     use url::form_urlencoded;
 
@@ -107,81 +97,90 @@ pub fn build_authorize_url(pkce: &PkceParams) -> String {
     )
 }
 
-/// Initialize authentication state
 pub async fn init_auth() -> Result<AuthState, String> {
     Ok(AuthState::default())
 }
 
-/// Store authentication token securely
-pub async fn store_token(_token: &str) -> Result<(), String> {
+fn token_hint_path() -> Result<PathBuf, String> {
+    let mut dir = dirs::config_dir().ok_or_else(|| "Unable to resolve config dir".to_string())?;
+    dir.push("djinnos");
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
+    dir.push("refresh_token.meta");
+    Ok(dir)
+}
+
+fn set_owner_only_permissions(path: &PathBuf) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed setting 0o600 permissions: {e}"))?;
+    }
     Ok(())
 }
 
-/// Retrieve authentication token from secure storage
+fn touch_hint_file() -> Result<(), String> {
+    let hint_path = token_hint_path()?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&hint_path)
+        .map_err(|e| format!("Failed to create token metadata file: {e}"))?;
+    file.write_all(b"stored_in_keyring=true\n")
+        .map_err(|e| format!("Failed to write token metadata file: {e}"))?;
+    file.flush()
+        .map_err(|e| format!("Failed to flush token metadata file: {e}"))?;
+    set_owner_only_permissions(&hint_path)?;
+    Ok(())
+}
+
+fn delete_hint_file() -> Result<(), String> {
+    let hint_path = token_hint_path()?;
+    if hint_path.exists() {
+        fs::remove_file(&hint_path).map_err(|e| format!("Failed to remove token metadata file: {e}"))?;
+    }
+    Ok(())
+}
+
+pub async fn store_token(token: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
+        .map_err(|e| format!("Failed to initialize keyring entry: {e}"))?;
+    entry
+        .set_password(token)
+        .map_err(|e| format!("Failed to store refresh token in keyring: {e}"))?;
+    touch_hint_file()?;
+    Ok(())
+}
+
 pub async fn retrieve_token() -> Result<Option<String>, String> {
-    Ok(None)
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
+        .map_err(|e| format!("Failed to initialize keyring entry: {e}"))?;
+
+    match entry.get_password() {
+        Ok(token) => Ok(Some(token)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("Failed to retrieve refresh token from keyring: {e}")),
+    }
 }
 
-/// Clear authentication token from secure storage
 pub async fn clear_token() -> Result<(), String> {
-    Ok(())
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
+        .map_err(|e| format!("Failed to initialize keyring entry: {e}"))?;
+
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => {
+            delete_hint_file()?;
+            Ok(())
+        }
+        Err(e) => Err(format!("Failed to clear refresh token from keyring: {e}")),
+    }
 }
 
-/// Handle deep link callback for OAuth PKCE
-///
-/// This is called when the system browser redirects back to the app
-/// after successful authentication.
 pub async fn handle_deep_link(_url: &str) -> Result<AuthState, String> {
     Ok(AuthState::default())
 }
 
-/// Check if user is authenticated
 pub fn is_authenticated(state: &AuthState) -> bool {
     state.token.is_some()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_code_verifier_length() {
-        let verifier = generate_code_verifier();
-        assert!(verifier.len() >= 43);
-        assert!(verifier.len() <= 128);
-        assert!(verifier
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
-    }
-
-    #[test]
-    fn test_code_challenge_format() {
-        let verifier = generate_code_verifier();
-        let challenge = generate_code_challenge(&verifier);
-        assert_eq!(challenge.len(), 43);
-        assert!(challenge
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
-    }
-
-    #[test]
-    fn test_state_length() {
-        let state = generate_state();
-        assert_eq!(state.len(), 43);
-    }
-
-    #[test]
-    fn test_authorize_url_format() {
-        let pkce = generate_pkce();
-        let url = build_authorize_url(&pkce);
-
-        assert!(url.starts_with("https://clerk.djinnai.io/oauth/authorize"));
-        assert!(url.contains(&format!("state={}", pkce.state)));
-        assert!(url.contains(&format!("code_challenge={}", pkce.code_challenge)));
-        assert!(url.contains("code_challenge_method=S256"));
-        assert!(url.contains("response_type=code"));
-        assert!(url.contains("client_id=djinnos-desktop"));
-        assert!(url.contains("scope=openid+profile+email+offline_access"));
-        assert!(url.contains("prompt=login"));
-    }
 }

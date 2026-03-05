@@ -32,6 +32,7 @@ url = { version = "2", default-features = false }
 once_cell = { version = "1", default-features = false }
 axum = { version = "0.7", features = ["tokio"] }
 urlencoding = "2"
+keyring = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
