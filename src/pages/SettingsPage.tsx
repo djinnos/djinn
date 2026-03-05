@@ -1,9 +1,20 @@
+import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useWizardStore } from '@/stores/wizardStore';
 import { NavLink, Navigate, useParams } from 'react-router-dom';
+import {
+  fetchCredentialList,
+  fetchProviderCatalog,
+  saveProviderCredentials,
+  type Provider,
+  type ProviderCredential,
+} from '@/api/server';
+import { AlertCircleIcon, CheckCircle2Icon, Loader2Icon, XCircleIcon } from 'lucide-react';
+import { Input } from '@/components/ui/input';
 
 type SettingsCategory = 'providers' | 'projects' | 'general';
+type ProviderStatus = 'connected' | 'error' | 'unconfigured';
 
 const categories: Array<{ key: SettingsCategory; label: string }> = [
   { key: 'providers', label: 'Providers' },
@@ -11,13 +22,167 @@ const categories: Array<{ key: SettingsCategory; label: string }> = [
   { key: 'general', label: 'General' },
 ];
 
-function ProvidersSettings() {
+function ProviderCard({
+  provider,
+  status,
+  expanded,
+  onClick,
+}: {
+  provider: Provider;
+  status: ProviderStatus;
+  expanded: boolean;
+  onClick: () => void;
+}) {
+  const statusStyles = {
+    connected: 'bg-green-500/15 text-green-500 border-green-500/25',
+    error: 'bg-red-500/15 text-red-500 border-red-500/25',
+    unconfigured: 'bg-muted text-muted-foreground border-border',
+  } as const;
+
+  const dotStyles = {
+    connected: 'bg-green-500',
+    error: 'bg-red-500',
+    unconfigured: 'bg-gray-500',
+  } as const;
+
   return (
-    <div className="rounded-lg border border-border bg-card p-6">
-      <h2 className="mb-2 text-lg font-semibold">Providers</h2>
-      <p className="text-sm text-muted-foreground">
-        Configure and manage your provider integrations.
-      </p>
+    <button
+      type="button"
+      onClick={onClick}
+      className="w-full rounded-lg border border-border bg-card p-4 text-left transition-colors hover:bg-muted/40"
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-md bg-muted text-sm font-semibold uppercase">
+            {provider.name.slice(0, 2)}
+          </div>
+          <div>
+            <p className="font-medium">{provider.name}</p>
+            <p className="text-sm text-muted-foreground">{provider.description}</p>
+          </div>
+        </div>
+        <span className={cn('inline-flex items-center gap-2 rounded-full border px-2 py-1 text-xs', statusStyles[status])}>
+          <span className={cn('h-2 w-2 rounded-full', dotStyles[status])} />
+          {status}
+        </span>
+      </div>
+      {expanded && <p className="mt-3 text-xs text-muted-foreground">Click again to collapse</p>}
+    </button>
+  );
+}
+
+function ProvidersSettings() {
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [credentials, setCredentials] = useState<ProviderCredential[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
+  const [apiKey, setApiKey] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+      setLoadError(null);
+      try {
+        const [catalog, credentialList] = await Promise.all([fetchProviderCatalog(), fetchCredentialList()]);
+        setProviders(catalog);
+        setCredentials(credentialList);
+      } catch (error) {
+        setLoadError(error instanceof Error ? error.message : 'Failed to load providers');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    void load();
+  }, []);
+
+  const credentialByProvider = useMemo(
+    () => new Map(credentials.map((entry) => [entry.provider_id, entry])),
+    [credentials],
+  );
+
+  const getStatus = (providerId: string): ProviderStatus => {
+    const credential = credentialByProvider.get(providerId);
+    if (!credential || !credential.configured) return 'unconfigured';
+    return credential.valid ? 'connected' : 'error';
+  };
+
+  const handleSave = async () => {
+    if (!expandedProvider) return;
+    setSaving(true);
+    try {
+      await saveProviderCredentials(expandedProvider, apiKey);
+      const credentialList = await fetchCredentialList();
+      setCredentials(credentialList);
+      setApiKey('');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="rounded-lg border border-border bg-card p-6">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2Icon className="h-4 w-4 animate-spin" /> Loading providers...
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="rounded-lg border border-border bg-card p-6">
+        <div className="flex items-start gap-2 text-destructive">
+          <AlertCircleIcon className="mt-0.5 h-4 w-4" />
+          <p className="text-sm">{loadError}</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {providers.map((provider) => {
+        const status = getStatus(provider.id);
+        const expanded = expandedProvider === provider.id;
+
+        return (
+          <div key={provider.id} className="space-y-2">
+            <ProviderCard
+              provider={provider}
+              status={status}
+              expanded={expanded}
+              onClick={() => setExpandedProvider(expanded ? null : provider.id)}
+            />
+
+            {expanded && (
+              <div className="rounded-lg border border-border bg-card p-4">
+                <h3 className="mb-3 text-sm font-medium">API Key Management</h3>
+                <div className="flex gap-2">
+                  <Input
+                    type="password"
+                    placeholder="Enter API key"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                  />
+                  <Button onClick={() => void handleSave()} disabled={saving || !apiKey.trim()}>
+                    {saving ? <Loader2Icon className="h-4 w-4 animate-spin" /> : 'Save'}
+                  </Button>
+                </div>
+                <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+                  {status === 'connected' && <CheckCircle2Icon className="h-4 w-4 text-green-500" />}
+                  {status === 'error' && <XCircleIcon className="h-4 w-4 text-red-500" />}
+                  {status === 'unconfigured' && <AlertCircleIcon className="h-4 w-4 text-gray-500" />}
+                  Current status: {status}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -69,20 +234,6 @@ function GeneralSettings() {
               Reset Wizard
             </Button>
           </div>
-        </div>
-      </div>
-
-      <div className="rounded-lg border border-border bg-card p-6">
-        <h2 className="mb-4 text-lg font-semibold">About</h2>
-        <div className="space-y-2">
-          <p className="text-sm">
-            <span className="text-muted-foreground">Version:</span>{' '}
-            <span className="font-medium">0.1.0</span>
-          </p>
-          <p className="text-sm">
-            <span className="text-muted-foreground">Build:</span>{' '}
-            <span className="font-medium">Development</span>
-          </p>
         </div>
       </div>
     </div>

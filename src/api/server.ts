@@ -21,6 +21,12 @@ export interface Provider {
   requires_api_key: boolean;
 }
 
+export interface ProviderCredential {
+  provider_id: string;
+  configured: boolean;
+  valid: boolean;
+}
+
 export async function fetchProviderCatalog(): Promise<Provider[]> {
   const baseUrl = await getBaseUrl();
   const response = await fetch(`${baseUrl}/providers/catalog`);
@@ -129,6 +135,16 @@ export async function fetchProviderConfigStatus(): Promise<ProviderConfigStatus>
   const response = await fetch(`${baseUrl}/providers/configured`);
   if (!response.ok) {
     throw new Error(`Failed to fetch provider config status: ${response.status}`);
+  }
+  return response.json();
+}
+
+
+export async function fetchCredentialList(): Promise<ProviderCredential[]> {
+  const baseUrl = await getBaseUrl();
+  const response = await fetch(`${baseUrl}/credentials/list`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch credentials list: ${response.status}`);
   }
   return response.json();
 }
