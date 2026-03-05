@@ -127,6 +127,8 @@ export interface Project {
   id: string;
   name: string;
   path: string;
+  branch?: string;
+  auto_merge?: boolean;
   created_at?: string;
   updated_at?: string;
 }
@@ -137,7 +139,26 @@ export async function fetchProjects(): Promise<Project[]> {
     id: project.id,
     name: project.name,
     path: project.path,
+    branch: project.branch,
+    auto_merge: project.auto_merge,
   }));
+}
+
+
+
+export async function updateProject(projectId: string, updates: { branch?: string; auto_merge?: boolean }): Promise<void> {
+  const projects = await callMcpTool("project_list");
+  const project = projects.projects.find((entry) => entry.id === projectId);
+  if (!project) {
+    throw new Error("Project not found");
+  }
+
+  await callMcpTool("project_add", {
+    name: project.name,
+    path: project.path,
+    branch: updates.branch ?? project.branch,
+    auto_merge: updates.auto_merge ?? project.auto_merge,
+  });
 }
 
 export async function addProject(path: string): Promise<Project> {
