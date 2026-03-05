@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::sse;
 use axum::Router;
 use axum::routing::get;
+use tower_http::cors::CorsLayer;
 use serde::Serialize;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -429,6 +430,7 @@ pub fn router(state: AppState) -> Router {
         .route("/events", get(sse::events_handler))
         .route("/db-info", get(sse::db_info_handler))
         .nest("/mcp", mcp_router)
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
