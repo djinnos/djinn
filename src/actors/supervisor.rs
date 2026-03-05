@@ -3106,22 +3106,21 @@ impl AgentSupervisor {
         match agent_type {
             AgentType::Worker | AgentType::ConflictResolver => match output.worker_signal {
                 Some(WorkerSignal::Done) => Some((TransitionAction::SubmitTaskReview, None)),
-                Some(WorkerSignal::Blocked) => Some((
-                    TransitionAction::Block,
-                    Some(
-                        output
-                            .worker_reason
-                            .clone()
-                            .unwrap_or_else(|| "worker reported BLOCKED".to_string()),
-                    ),
-                )),
+                Some(WorkerSignal::Blocked) => {
+                    let reason = output
+                        .worker_reason
+                        .clone()
+                        .unwrap_or_else(|| "worker reported BLOCKED (re-queueing)".to_string());
+                    tracing::warn!(reason = %reason, "worker emitted BLOCKED signal; treating as release");
+                    Some((TransitionAction::Release, Some(reason)))
+                }
                 Some(WorkerSignal::Progress) => Some((
                     TransitionAction::Release,
                     Some("worker session ended with PROGRESS signal".to_string()),
                 )),
                 None => {
                     let reason = output.runtime_error.clone().unwrap_or_else(|| {
-                        "worker session completed without DONE/BLOCKED marker".to_string()
+                        "worker session completed without DONE marker".to_string()
                     });
                     tracing::warn!(reason = %reason, "worker session completed without structured result marker");
                     Some((TransitionAction::Release, Some(reason)))

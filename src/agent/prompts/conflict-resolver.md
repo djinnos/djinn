@@ -31,7 +31,6 @@
 3. Commit your conflict resolution with a focused message.
 4. End with exactly one marker:
    - `WORKER_RESULT: DONE`
-   - `WORKER_RESULT: BLOCKED: <concrete reason>`
 
 ## Rules
 
