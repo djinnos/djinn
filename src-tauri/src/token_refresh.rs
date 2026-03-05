@@ -28,7 +28,6 @@ const EXPIRY_BUFFER_SECONDS: u64 = 30;
 struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
-    id_token: Option<String>,
     expires_in: u64,
 }
 
@@ -110,7 +109,7 @@ pub async fn perform_silent_refresh() -> RefreshResult {
     let _guard = REFRESH_MUTEX.lock().await;
     
     // Double-check after acquiring lock - another thread may have refreshed
-    if let Some(token) = get_valid_access_token() {
+    if let Some(_token) = get_valid_access_token() {
         log::debug!("Token still valid after acquiring refresh lock, skipping refresh");
         let state = CURRENT_TOKEN_STATE.lock().unwrap();
         if let Some(s) = state.clone() {

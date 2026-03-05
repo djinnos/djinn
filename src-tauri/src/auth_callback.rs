@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 /// Port for dev-mode callback server
 pub const DEV_CALLBACK_PORT: u16 = 19876;
@@ -175,24 +174,3 @@ fn percent_decode(s: &str) -> String {
     result
 }
 
-/// Generate PKCE code verifier and challenge
-pub fn generate_pkce() -> (String, String) {
-    // Generate 32 random bytes for code_verifier
-    let verifier_bytes: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
-    let code_verifier = URL_SAFE_NO_PAD.encode(&verifier_bytes);
-    
-    // Generate code_challenge = SHA256(code_verifier) base64url encoded
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(code_verifier.as_bytes());
-    let challenge = hasher.finalize();
-    let code_challenge = URL_SAFE_NO_PAD.encode(&challenge);
-    
-    (code_verifier, code_challenge)
-}
-
-/// Generate random state parameter for CSRF protection
-pub fn generate_state() -> String {
-    let state_bytes: Vec<u8> = (0..16).map(|_| rand::random::<u8>()).collect();
-    URL_SAFE_NO_PAD.encode(&state_bytes)
-}

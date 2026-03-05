@@ -18,7 +18,6 @@ pub struct UserProfile {
 #[derive(Debug, Clone)]
 struct AuthSession {
     access_token: String,
-    expires_in: Option<u64>,
     user_profile: Option<UserProfile>,
 }
 
@@ -135,7 +134,6 @@ pub async fn set_auth_token(token: String) -> Result<(), String> {
         .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
     *session = Some(AuthSession {
         access_token: token,
-        expires_in: None,
         user_profile: None,
     });
     Ok(())
@@ -287,7 +285,6 @@ pub async fn exchange_auth_code(
             .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
         let session = AuthSession {
             access_token: token_response.access_token.clone(),
-            expires_in: Some(token_response.expires_in),
             user_profile: user_profile.clone(),
         };
         *auth_session = Some(session.clone());

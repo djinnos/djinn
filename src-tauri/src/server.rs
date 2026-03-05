@@ -237,17 +237,6 @@ fn get_daemon_json_path<R: Runtime>(_app: &AppHandle<R>) -> Result<PathBuf, Stri
     Ok(daemon_dir.join("daemon.json"))
 }
 
-/// Discover an existing server by reading daemon.json
-///
-/// Returns the port if a valid daemon.json exists, None otherwise
-pub fn discover_server() -> Option<u16> {
-    // Keep this helper for contexts where AppHandle is not available.
-    let app_data_dir = dirs::data_dir()?.join("com.djinnos.desktop");
-    let daemon_json_path = app_data_dir.join("daemon.json");
-
-    discover_server_from_path(&daemon_json_path)
-}
-
 /// Discover an existing server using Tauri's app data directory
 pub fn discover_server_for_app<R: Runtime>(app: &AppHandle<R>) -> Option<u16> {
     let daemon_json_path = get_daemon_json_path(app).ok()?;
@@ -320,24 +309,6 @@ pub async fn health_check(port: u16) -> bool {
     match reqwest::get(&url).await {
         Ok(response) => response.status().is_success(),
         Err(_) => false,
-    }
-}
-
-/// Check if server is ready (has started and daemon.json exists)
-pub fn is_server_ready<R: Runtime>(app: &AppHandle<R>) -> bool {
-    if let Ok(state) = app.state::<Mutex<ServerState>>().lock() {
-        state.ready
-    } else {
-        false
-    }
-}
-
-/// Get the server port from state
-pub fn get_server_port<R: Runtime>(app: &AppHandle<R>) -> Option<u16> {
-    if let Ok(state) = app.state::<Mutex<ServerState>>().lock() {
-        state.port
-    } else {
-        None
     }
 }
 

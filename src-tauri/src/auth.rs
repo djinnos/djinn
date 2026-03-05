@@ -6,22 +6,6 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
-/// Authentication state
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthState {
-    pub token: Option<String>,
-    pub user_id: Option<String>,
-}
-
-impl Default for AuthState {
-    fn default() -> Self {
-        Self {
-            token: None,
-            user_id: None,
-        }
-    }
-}
-
 /// PKCE parameters for OAuth flow
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PkceParams {
@@ -95,10 +79,6 @@ pub fn build_authorize_url(pkce: &PkceParams) -> String {
         pkce.state,
         pkce.code_challenge
     )
-}
-
-pub async fn init_auth() -> Result<AuthState, String> {
-    Ok(AuthState::default())
 }
 
 fn token_hint_path() -> Result<PathBuf, String> {
@@ -177,10 +157,3 @@ pub async fn clear_token() -> Result<(), String> {
     }
 }
 
-pub async fn handle_deep_link(_url: &str) -> Result<AuthState, String> {
-    Ok(AuthState::default())
-}
-
-pub fn is_authenticated(state: &AuthState) -> bool {
-    state.token.is_some()
-}
