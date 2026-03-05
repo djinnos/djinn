@@ -6,7 +6,6 @@ use super::AgentType;
 pub enum WorkerSignal {
     Done,
     Progress,
-    Blocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,13 +116,6 @@ impl ParsedAgentOutput {
             return;
         }
 
-        if upper.starts_with("BLOCKED") {
-            self.worker_signal = Some(WorkerSignal::Blocked);
-            self.worker_reason = split_reason(normalized)
-                .or_else(|| Some("worker reported BLOCKED without reason".to_string()));
-            return;
-        }
-
         if raw_line.to_ascii_uppercase().contains("WORKER_RESULT") {
             tracing::warn!(line = %raw_line, "malformed WORKER_RESULT marker");
         }
@@ -204,14 +196,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_worker_done_and_blocked() {
+    fn parses_worker_done() {
         let mut out = ParsedAgentOutput::new(AgentType::Worker);
         out.ingest_text("WORKER_RESULT: DONE");
         assert_eq!(out.worker_signal, Some(WorkerSignal::Done));
-
-        out.ingest_text("WORKER_RESULT: BLOCKED: waiting on API token");
-        assert_eq!(out.worker_signal, Some(WorkerSignal::Blocked));
-        assert_eq!(out.worker_reason.as_deref(), Some("waiting on API token"));
     }
 
     #[test]

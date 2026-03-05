@@ -225,7 +225,6 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
             closed_at: None,
-            blocked_from_status: None,
             close_reason: None,
             merge_commit_sha: None,
             memory_refs: "[]".into(),

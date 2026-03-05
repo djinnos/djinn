@@ -1376,7 +1376,7 @@ impl AgentSupervisor {
                                     task_id = %task.short_id,
                                     command = %failure.name,
                                     exit_code = failure.exit_code,
-                                    "Supervisor: setup command failed; blocking task"
+                                    "Supervisor: setup command failed; releasing task"
                                 );
                                 let task_repo = TaskRepository::new(
                                     self.app_state.db().clone(),
@@ -1385,7 +1385,7 @@ impl AgentSupervisor {
                                 if let Err(e) = task_repo
                                     .transition(
                                         &task.id,
-                                        TransitionAction::Block,
+                                        TransitionAction::Release,
                                         "agent-supervisor",
                                         "system",
                                         Some(&reason),
@@ -1416,7 +1416,7 @@ impl AgentSupervisor {
                             tracing::warn!(
                                 task_id = %task.short_id,
                                 error = %e,
-                                "Supervisor: setup command error; blocking task"
+                                "Supervisor: setup command error; releasing task"
                             );
                             let task_repo = TaskRepository::new(
                                 self.app_state.db().clone(),
@@ -1425,7 +1425,7 @@ impl AgentSupervisor {
                             if let Err(e2) = task_repo
                                 .transition(
                                     &task.id,
-                                    TransitionAction::Block,
+                                    TransitionAction::Release,
                                     "agent-supervisor",
                                     "system",
                                     Some(&reason),
@@ -3106,14 +3106,6 @@ impl AgentSupervisor {
         match agent_type {
             AgentType::Worker | AgentType::ConflictResolver => match output.worker_signal {
                 Some(WorkerSignal::Done) => Some((TransitionAction::SubmitTaskReview, None)),
-                Some(WorkerSignal::Blocked) => {
-                    let reason = output
-                        .worker_reason
-                        .clone()
-                        .unwrap_or_else(|| "worker reported BLOCKED (re-queueing)".to_string());
-                    tracing::warn!(reason = %reason, "worker emitted BLOCKED signal; treating as release");
-                    Some((TransitionAction::Release, Some(reason)))
-                }
                 Some(WorkerSignal::Progress) => Some((
                     TransitionAction::Release,
                     Some("worker session ended with PROGRESS signal".to_string()),

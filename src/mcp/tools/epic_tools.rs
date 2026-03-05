@@ -106,7 +106,6 @@ pub struct EpicTaskModel {
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
-    pub blocked_from_status: Option<String>,
     pub close_reason: Option<String>,
     pub merge_commit_sha: Option<String>,
 }
@@ -132,7 +131,6 @@ impl From<&Task> for EpicTaskModel {
             created_at: t.created_at.clone(),
             updated_at: t.updated_at.clone(),
             closed_at: t.closed_at.clone(),
-            blocked_from_status: t.blocked_from_status.clone(),
             close_reason: t.close_reason.clone(),
             merge_commit_sha: t.merge_commit_sha.clone(),
         }

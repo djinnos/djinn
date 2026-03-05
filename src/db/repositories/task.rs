@@ -141,7 +141,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE epic_id = ?1 ORDER BY priority, created_at",
         )
         .bind(epic_id)
@@ -155,7 +155,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE status = ?1 ORDER BY priority, created_at",
         )
         .bind(status)
@@ -177,7 +177,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE short_id = ?1",
         )
         .bind(short_id)
@@ -358,23 +358,7 @@ impl TaskRepository {
             }
         }
 
-        // Resolve final target status.
-        // Unblock (to_status = None) restores blocked_from_status, mapping active
-        // statuses (in_progress, in_task_review) to their standby equivalents
-        // (open, needs_task_review) since no session is running after unblock.
-        let to_status = match apply.to_status {
-            Some(s) => s,
-            None => current
-                .blocked_from_status
-                .as_deref()
-                .and_then(|s| TaskStatus::parse(s).ok())
-                .map(|s| match s {
-                    TaskStatus::InProgress => TaskStatus::Open,
-                    TaskStatus::InTaskReview => TaskStatus::NeedsTaskReview,
-                    other => other,
-                })
-                .unwrap_or(TaskStatus::Open),
-        };
+        let to_status = apply.to_status.expect("all transitions must have a target status");
         let to_str = to_status.as_str();
         let from_str = from.as_str();
 
@@ -389,14 +373,9 @@ impl TaskRepository {
                     WHEN ?6 THEN NULL
                     ELSE closed_at
                 END,
-                blocked_from_status = CASE
-                    WHEN ?7 THEN ?10
-                    WHEN ?8 THEN NULL
-                    ELSE blocked_from_status
-                END,
                 close_reason = CASE
-                    WHEN ?11 IS NOT NULL THEN ?11
-                    WHEN ?9 THEN NULL
+                    WHEN ?7 IS NOT NULL THEN ?7
+                    WHEN ?8 THEN NULL
                     ELSE close_reason
                 END,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -408,11 +387,8 @@ impl TaskRepository {
         .bind(apply.reset_continuation)
         .bind(apply.set_closed_at)
         .bind(apply.clear_closed_at)
-        .bind(apply.save_blocked_from)
-        .bind(apply.clear_blocked_from)
-        .bind(apply.clear_close_reason)
-        .bind(from_str)
         .bind(apply.close_reason)
+        .bind(apply.clear_close_reason)
         .execute(&mut *tx)
         .await?;
 
@@ -708,7 +684,7 @@ impl TaskRepository {
                     t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.blocked_from_status, t.close_reason, t.merge_commit_sha, t.memory_refs
+                    t.close_reason, t.merge_commit_sha, t.memory_refs
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -787,7 +763,7 @@ impl TaskRepository {
                     t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.blocked_from_status, t.close_reason, t.merge_commit_sha, t.memory_refs
+                    t.close_reason, t.merge_commit_sha, t.memory_refs
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -862,7 +838,7 @@ impl TaskRepository {
                     t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.blocked_from_status, t.close_reason, t.merge_commit_sha, t.memory_refs
+                    t.close_reason, t.merge_commit_sha, t.memory_refs
              FROM blockers b
              JOIN tasks t ON t.id = b.task_id
              WHERE b.blocking_task_id = ?1
@@ -1100,7 +1076,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, memory_refs
              FROM tasks
              WHERE status = 'in_progress'
                AND updated_at < datetime('now', '-{stale_hours} hours')"
@@ -1165,7 +1141,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE id = ?1 OR short_id = ?1",
         )
         .bind(id_or_short)
@@ -1183,7 +1159,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE project_id = ?1 AND (id = ?2 OR short_id = ?2)",
         )
         .bind(project_id)
@@ -1220,7 +1196,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
         );
         let mut task_q = sqlx::query_as::<_, Task>(&sql);
@@ -1357,7 +1333,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    blocked_from_status, close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE memory_refs LIKE ?1
              ORDER BY priority, created_at",
         )
@@ -1393,10 +1369,10 @@ impl TaskRepository {
                 issue_type, status, priority, owner, labels,
                 acceptance_criteria, reopen_count, continuation_count,
                 created_at, updated_at, closed_at,
-                blocked_from_status, close_reason, merge_commit_sha, memory_refs
+                close_reason, merge_commit_sha, memory_refs
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
              )
              ON CONFLICT(id) DO UPDATE SET
                 project_id          = excluded.project_id,
@@ -1413,7 +1389,6 @@ impl TaskRepository {
                 continuation_count  = excluded.continuation_count,
                 updated_at          = excluded.updated_at,
                 closed_at           = excluded.closed_at,
-                blocked_from_status = excluded.blocked_from_status,
                 close_reason        = excluded.close_reason,
                 merge_commit_sha    = excluded.merge_commit_sha,
                 memory_refs         = excluded.memory_refs
@@ -1437,7 +1412,6 @@ impl TaskRepository {
         .bind(&task.created_at)
         .bind(&task.updated_at)
         .bind(&task.closed_at)
-        .bind(&task.blocked_from_status)
         .bind(&task.close_reason)
         .bind(&task.merge_commit_sha)
         .bind(&task.memory_refs)
@@ -1481,7 +1455,7 @@ const TASK_SELECT_WHERE_ID: &str =
     "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
             status, priority, owner, labels, acceptance_criteria,
             reopen_count, continuation_count, created_at, updated_at, closed_at,
-            blocked_from_status, close_reason, merge_commit_sha, memory_refs
+            close_reason, merge_commit_sha, memory_refs
      FROM tasks WHERE id = ?1";
 
 fn short_id_from_uuid(id: &uuid::Uuid) -> String {
@@ -1937,7 +1911,6 @@ mod tests {
             "needs_task_review",
             "in_task_review",
             "closed",
-            "blocked",
         ];
         for s in statuses {
             let parsed = TaskStatus::parse(s).unwrap();
@@ -2145,52 +2118,6 @@ mod tests {
         assert_eq!(t.status, "open");
         assert_eq!(t.reopen_count, 0); // conflict doesn't count against budget
         assert_eq!(t.continuation_count, 0);
-    }
-
-    #[tokio::test]
-    async fn block_saves_and_unblock_restores_status() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-        let epic = make_epic(&db, tx.clone()).await;
-        let repo = TaskRepository::new(db, tx);
-
-        let task = open_task(&repo, &epic.id).await;
-        // Move to in_progress first.
-        let t = repo
-            .transition(&task.id, TransitionAction::Start, "", "system", None, None)
-            .await
-            .unwrap();
-        assert_eq!(t.status, "in_progress");
-
-        // Block it — should store in_progress as blocked_from_status.
-        let t = repo
-            .transition(
-                &t.id,
-                TransitionAction::Block,
-                "user",
-                "user",
-                Some("waiting on external API"),
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(t.status, "blocked");
-        assert_eq!(t.blocked_from_status.as_deref(), Some("in_progress"));
-
-        // Check activity log event type.
-        let entries = repo.list_activity(&t.id).await.unwrap();
-        assert_eq!(entries.last().unwrap().event_type, "blocked");
-
-        // Unblock — should map in_progress to open (standby equivalent).
-        let t = repo
-            .transition(&t.id, TransitionAction::Unblock, "user", "user", None, None)
-            .await
-            .unwrap();
-        assert_eq!(t.status, "open");
-        assert!(t.blocked_from_status.is_none());
-
-        let entries = repo.list_activity(&t.id).await.unwrap();
-        assert_eq!(entries.last().unwrap().event_type, "unblocked");
     }
 
     #[tokio::test]

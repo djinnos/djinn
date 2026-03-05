@@ -241,16 +241,16 @@ pub struct TaskTransitionParams {
     pub id: String,
     /// Transition action: accept, start, submit_task_review, task_review_start,
     /// task_review_reject, task_review_reject_conflict, task_review_approve,
-    /// reopen, close, release, release_task_review, block, unblock, force_close,
+    /// reopen, close, release, release_task_review, force_close,
     /// user_override.
     pub action: String,
     /// Required for: task_review_reject, task_review_reject_conflict,
-    /// reopen, release, release_task_review, block, force_close.
+    /// reopen, release, release_task_review, force_close.
     pub reason: Option<String>,
     pub actor_id: Option<String>,
     pub actor_role: Option<String>,
     /// Required when action = "user_override". Allowed values: draft, open, needs_task_review,
-    /// in_task_review, in_progress, blocked, closed.
+    /// in_task_review, in_progress, closed.
     pub target_status: Option<String>,
 }
 
@@ -333,7 +333,6 @@ pub struct TaskResponse {
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
-    pub blocked_from_status: Option<String>,
     pub close_reason: Option<String>,
     pub merge_commit_sha: Option<String>,
 }
@@ -519,7 +518,6 @@ pub struct TaskListItem {
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
-    pub blocked_from_status: Option<String>,
     pub close_reason: Option<String>,
     pub merge_commit_sha: Option<String>,
 }
@@ -566,7 +564,6 @@ fn task_to_response(t: &Task) -> TaskResponse {
         created_at: t.created_at.clone(),
         updated_at: t.updated_at.clone(),
         closed_at: t.closed_at.clone(),
-        blocked_from_status: t.blocked_from_status.clone(),
         close_reason: t.close_reason.clone(),
         merge_commit_sha: t.merge_commit_sha.clone(),
     }
@@ -593,7 +590,6 @@ fn task_to_list_item(t: &Task) -> TaskListItem {
         created_at: base.created_at,
         updated_at: base.updated_at,
         closed_at: base.closed_at,
-        blocked_from_status: base.blocked_from_status,
         close_reason: base.close_reason,
         merge_commit_sha: base.merge_commit_sha,
     }

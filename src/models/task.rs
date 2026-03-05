@@ -25,7 +25,6 @@ pub struct Task {
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
-    pub blocked_from_status: Option<String>,
     pub close_reason: Option<String>,
     pub merge_commit_sha: Option<String>,
     /// JSON array of memory note permalinks associated with this task.
@@ -57,7 +56,6 @@ pub enum TaskStatus {
     NeedsTaskReview,
     InTaskReview,
     Closed,
-    Blocked,
 }
 
 impl TaskStatus {
@@ -70,7 +68,6 @@ impl TaskStatus {
             Self::NeedsTaskReview => "needs_task_review",
             Self::InTaskReview => "in_task_review",
             Self::Closed => "closed",
-            Self::Blocked => "blocked",
         }
     }
 
@@ -83,7 +80,6 @@ impl TaskStatus {
             "needs_task_review" => Ok(Self::NeedsTaskReview),
             "in_task_review" => Ok(Self::InTaskReview),
             "closed" => Ok(Self::Closed),
-            "blocked" => Ok(Self::Blocked),
             other => Err(Error::Internal(format!("unknown task status: {other}"))),
         }
     }
@@ -110,8 +106,6 @@ pub enum TransitionAction {
     Reopen,
     Release,
     ReleaseTaskReview,
-    Block,
-    Unblock,
     ForceClose,
     UserOverride,
 }
@@ -126,7 +120,6 @@ impl TransitionAction {
                 | Self::Reopen
                 | Self::Release
                 | Self::ReleaseTaskReview
-                | Self::Block
                 | Self::ForceClose
         )
     }
@@ -145,8 +138,6 @@ impl TransitionAction {
             "reopen" => Ok(Self::Reopen),
             "release" => Ok(Self::Release),
             "release_task_review" => Ok(Self::ReleaseTaskReview),
-            "block" => Ok(Self::Block),
-            "unblock" => Ok(Self::Unblock),
             "force_close" => Ok(Self::ForceClose),
             "user_override" => Ok(Self::UserOverride),
             other => Err(Error::Internal(format!(
@@ -160,7 +151,7 @@ impl TransitionAction {
 ///
 /// Returned by [`compute_transition`]; applied atomically by `TaskRepository::transition`.
 pub struct TransitionApply {
-    /// Target status. `None` means restore from `blocked_from_status` (Unblock only).
+    /// Target status.
     pub to_status: Option<TaskStatus>,
     /// Increment `reopen_count` by 1.
     pub increment_reopen: bool,
@@ -170,10 +161,6 @@ pub struct TransitionApply {
     pub set_closed_at: bool,
     /// Set `closed_at` to NULL.
     pub clear_closed_at: bool,
-    /// Store the current status as `blocked_from_status` (Block action).
-    pub save_blocked_from: bool,
-    /// Set `blocked_from_status` to NULL.
-    pub clear_blocked_from: bool,
     /// Set `close_reason` to this value.
     pub close_reason: Option<&'static str>,
     /// Set `close_reason` to NULL.
@@ -190,8 +177,6 @@ impl Default for TransitionApply {
             reset_continuation: false,
             set_closed_at: false,
             clear_closed_at: false,
-            save_blocked_from: false,
-            clear_blocked_from: false,
             close_reason: None,
             clear_close_reason: false,
             activity_type: "status_changed",
@@ -310,14 +295,10 @@ pub fn compute_transition(
         }
 
         TransitionAction::Release => {
-            if *from != TaskStatus::InProgress && *from != TaskStatus::Blocked {
-                return bad("release is only valid from in_progress or blocked");
+            if *from != TaskStatus::InProgress {
+                return bad("release is only valid from in_progress");
             }
-            TransitionApply {
-                to_status: Some(TaskStatus::Open),
-                clear_blocked_from: *from == TaskStatus::Blocked,
-                ..Default::default()
-            }
+            TransitionApply::simple(TaskStatus::Open)
         }
 
         TransitionAction::ReleaseTaskReview => {
@@ -327,34 +308,6 @@ pub fn compute_transition(
             TransitionApply::simple(TaskStatus::NeedsTaskReview)
         }
 
-        TransitionAction::Block => {
-            if *from == TaskStatus::Closed {
-                return bad("cannot block a closed task");
-            }
-            if *from == TaskStatus::Blocked {
-                return bad("task is already blocked");
-            }
-            TransitionApply {
-                to_status: Some(TaskStatus::Blocked),
-                save_blocked_from: true,
-                activity_type: "blocked",
-                ..Default::default()
-            }
-        }
-
-        TransitionAction::Unblock => {
-            if *from != TaskStatus::Blocked {
-                return bad("unblock is only valid from blocked");
-            }
-            TransitionApply {
-                to_status: None, // resolved by caller from blocked_from_status
-                clear_blocked_from: true,
-                reset_continuation: true,
-                activity_type: "unblocked",
-                ..Default::default()
-            }
-        }
-
         TransitionAction::ForceClose => {
             if *from == TaskStatus::Closed {
                 return bad("task is already closed");
@@ -362,7 +315,6 @@ pub fn compute_transition(
             TransitionApply {
                 to_status: Some(TaskStatus::Closed),
                 set_closed_at: true,
-                clear_blocked_from: true,
                 close_reason: Some("force_closed"),
                 ..Default::default()
             }
@@ -378,7 +330,6 @@ pub fn compute_transition(
                 reset_continuation: true,
                 set_closed_at: closing,
                 clear_closed_at: !closing,
-                clear_blocked_from: true,
                 close_reason: if closing { Some("force_closed") } else { None },
                 clear_close_reason: !closing,
                 ..Default::default()
