@@ -14,14 +14,16 @@ import {
 } from '@/api/server';
 import { AlertCircleIcon, CheckCircle2Icon, CopyIcon, EyeIcon, EyeOffIcon, Loader2Icon, XCircleIcon } from 'lucide-react';
 import { Input } from '@/components/ui/input';
+import { AgentConfig } from '@/components/AgentConfig';
 
-type SettingsCategory = 'providers' | 'projects' | 'general';
+type SettingsCategory = 'providers' | 'projects' | 'general' | 'agents';
 type ProviderStatus = 'connected' | 'error' | 'unconfigured';
 
 const categories: Array<{ key: SettingsCategory; label: string }> = [
   { key: 'providers', label: 'Providers' },
   { key: 'projects', label: 'Projects' },
   { key: 'general', label: 'General' },
+  { key: 'agents', label: 'Agents' },
 ];
 
 function ProviderCard({
@@ -398,6 +400,7 @@ export function SettingsPage() {
           {category === 'providers' && <ProvidersSettings />}
           {category === 'projects' && <ProjectsSettings />}
           {category === 'general' && <GeneralSettings />}
+          {category === 'agents' && <AgentConfig />}
         </section>
       </div>
     </div>
