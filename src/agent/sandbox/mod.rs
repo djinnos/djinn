@@ -3,7 +3,7 @@
 // ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt
 // ADR-017: Worktree Injection and Landlock Crate
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use anyhow::Result;
@@ -67,6 +67,27 @@ fn is_worktree_path(path: &Path) -> bool {
     parts
         .windows(2)
         .any(|w| w[0] == ".djinn" && w[1] == "worktrees")
+}
+
+// ─── Git worktree metadata resolution ─────────────────────────────────────────
+
+/// Resolve the git worktree metadata directory for a `.djinn/worktrees/{id}/` path.
+///
+/// Git stores per-worktree state (HEAD, ORIG_HEAD, index, refs) under
+/// `<repo>/.git/worktrees/{id}/`. Operations like `git merge` need write
+/// access there (e.g. ORIG_HEAD.lock). Returns `None` if the `.git` file
+/// doesn't point to a recognizable worktree metadata path.
+pub fn git_metadata_dir(worktree: &Path) -> Option<PathBuf> {
+    let dot_git = worktree.join(".git");
+    let content = std::fs::read_to_string(&dot_git).ok()?;
+    // .git file contains: "gitdir: ../../.git/worktrees/{id}"
+    let gitdir = content.strip_prefix("gitdir: ")?.trim();
+    let resolved = if Path::new(gitdir).is_absolute() {
+        PathBuf::from(gitdir)
+    } else {
+        worktree.join(gitdir).canonicalize().ok()?
+    };
+    if resolved.is_dir() { Some(resolved) } else { None }
 }
 
 // ─── Backend detection ────────────────────────────────────────────────────────

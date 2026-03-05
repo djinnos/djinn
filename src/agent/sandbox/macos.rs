@@ -7,6 +7,8 @@ use std::path::Path;
 use anyhow::Result;
 
 use super::Sandbox;
+#[cfg(target_os = "macos")]
+use super::git_metadata_dir;
 
 /// Seatbelt (sandbox-exec) based filesystem sandbox for macOS.
 ///
@@ -24,12 +26,20 @@ impl Sandbox for SeatbeltSandbox {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("worktree path contains non-UTF-8 characters"))?;
 
+        // Git worktree metadata dir (e.g. .git/worktrees/{id}/) needs write
+        // access for merge/rebase lock files.
+        let git_meta_rule = git_metadata_dir(worktree_path)
+            .and_then(|p| p.to_str().map(|s| s.to_owned()))
+            .map(|m| format!("(allow file-write* (subpath \"{m}\"))"))
+            .unwrap_or_default();
+
         let policy = format!(
             "(version 1)\
              (allow default)\
              (allow file-read*)\
              (deny file-write*)\
              (allow file-write* (subpath \"{worktree}\"))\
+             {git_meta_rule}\
              (allow file-write* (subpath \"/tmp\"))\
              (allow file-write* (literal \"/dev/null\"))\
              (allow file-write* (literal \"/dev/zero\"))\
