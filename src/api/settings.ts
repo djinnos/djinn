@@ -1,9 +1,4 @@
-import { getServerPort } from "@/tauri/commands";
-
-async function getBaseUrl(): Promise<string> {
-  const port = await getServerPort();
-  return `http://127.0.0.1:${port}`;
-}
+import { callMcpTool } from "@/api/mcpClient";
 
 export type AgentRole = "worker" | "task_reviewer" | "epic_reviewer";
 
@@ -28,35 +23,112 @@ export interface SettingsResponse {
   agents: AgentSettings;
 }
 
-export async function fetchSettings(): Promise<SettingsResponse> {
-  const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/settings/get`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({}),
-  });
-  
-  if (!response.ok) {
-    throw new Error(`Failed to fetch settings: ${response.status}`);
+interface SettingsGetToolResponse {
+  settings?: {
+    model_priority?: Record<string, string[]>;
+    max_sessions?: Record<string, number>;
+  };
+  error?: string;
+}
+
+interface SettingsSetToolResponse {
+  ok: boolean;
+  error?: string;
+}
+
+interface ProviderModelsConnectedResponse {
+  models: Array<{
+    id: string;
+    name: string;
+    provider_id: string;
+  }>;
+}
+
+function splitModelId(modelId: string): { provider: string; model: string } {
+  const slashIndex = modelId.indexOf("/");
+  if (slashIndex < 0) {
+    return { provider: "unknown", model: modelId };
   }
-  
-  return response.json();
+
+  return {
+    provider: modelId.slice(0, slashIndex),
+    model: modelId.slice(slashIndex + 1),
+  };
+}
+
+function combineModelId(provider: string, model: string): string {
+  if (model.startsWith(`${provider}/`)) {
+    return model;
+  }
+  return `${provider}/${model}`;
+}
+
+export async function fetchSettings(): Promise<SettingsResponse> {
+  const response = await callMcpTool<SettingsGetToolResponse>("settings_get", {});
+  if (response.error) {
+    throw new Error(response.error);
+  }
+
+  const modelPriority = response.settings?.model_priority ?? {};
+  const maxSessions = response.settings?.max_sessions ?? {};
+
+  const toPriorityItems = (values: string[] | undefined): ModelPriorityItem[] =>
+    (values ?? []).map((value) => {
+      const split = splitModelId(value);
+      return {
+        provider: split.provider,
+        model: split.model,
+      };
+    });
+
+  const sessionLimits: ModelSessionLimit[] = Object.entries(maxSessions).map(
+    ([modelId, maxConcurrent]) => {
+      const split = splitModelId(modelId);
+      return {
+        provider: split.provider,
+        model: split.model,
+        max_concurrent: maxConcurrent,
+        current_active: 0,
+      };
+    }
+  );
+
+  return {
+    agents: {
+      model_priorities: {
+        worker: toPriorityItems(modelPriority.worker),
+        task_reviewer: toPriorityItems(modelPriority.task_reviewer),
+        epic_reviewer: toPriorityItems(modelPriority.conflict_resolver),
+      },
+      session_limits: sessionLimits,
+    },
+  };
 }
 
 export async function saveSettings(settings: SettingsResponse): Promise<void> {
-  const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/settings/set`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+  const maxSessions = settings.agents.session_limits.reduce<Record<string, number>>(
+    (acc, item) => {
+      acc[combineModelId(item.provider, item.model)] = item.max_concurrent;
+      return acc;
     },
-    body: JSON.stringify(settings),
+    {}
+  );
+
+  const response = await callMcpTool<SettingsSetToolResponse>("settings_set", {
+    model_priority_worker: settings.agents.model_priorities.worker.map((item) =>
+      combineModelId(item.provider, item.model)
+    ),
+    model_priority_task_reviewer: settings.agents.model_priorities.task_reviewer.map((item) =>
+      combineModelId(item.provider, item.model)
+    ),
+    model_priority_conflict_resolver: settings.agents.model_priorities.epic_reviewer.map((item) =>
+      combineModelId(item.provider, item.model)
+    ),
+    max_sessions: maxSessions,
   });
-  
+
   if (!response.ok) {
-    throw new Error(`Failed to save settings: ${response.status}`);
+    throw new Error(response.error ?? "Failed to save settings");
   }
 }
 
@@ -67,17 +139,10 @@ export interface ProviderModel {
 }
 
 export async function fetchProviderModels(): Promise<ProviderModel[]> {
-  const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/providers/models`, {
-    method: "GET",
-    headers: {
-      "Content-Type": "application/json",
-    },
-  });
-  
-  if (!response.ok) {
-    throw new Error(`Failed to fetch provider models: ${response.status}`);
-  }
-  
-  return response.json();
+  const response = await callMcpTool<ProviderModelsConnectedResponse>("provider_models_connected");
+  return response.models.map((model) => ({
+    id: model.id,
+    name: model.name,
+    provider: model.provider_id,
+  }));
 }
