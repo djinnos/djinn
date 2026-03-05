@@ -39,6 +39,17 @@ function getReviewIndicator(reviewPhase: Task["reviewPhase"]): { dotClass: strin
   return null;
 }
 
+
+function RunningSpinner() {
+  return (
+    <span
+      className="inline-block h-3 w-3 shrink-0 animate-spin rounded-full border border-blue-500 border-t-transparent opacity-80"
+      title="Task running"
+      aria-label="Task running"
+    />
+  );
+}
+
 function ownerInitials(owner: string | null): string {
   if (!owner) return "??";
   const parts = owner
@@ -82,6 +93,7 @@ export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps)
         <h4 className="truncate font-medium" title={task.title}>
           {task.title}
         </h4>
+        {task.status === "in_progress" ? <RunningSpinner /> : null}
         {reviewIndicator ? (
           <span
             className={`h-2 w-2 shrink-0 rounded-full ${reviewIndicator.dotClass} ${reviewIndicator.animateClass ?? ""}`}
