@@ -1,4 +1,5 @@
 import { callMcpTool } from "@/api/mcpClient";
+import type { McpToolOutput } from "@/api/generated/mcp-tools.gen";
 
 export type AgentRole = "worker" | "task_reviewer" | "epic_reviewer";
 
@@ -23,25 +24,14 @@ export interface SettingsResponse {
   agents: AgentSettings;
 }
 
-interface SettingsGetToolResponse {
+type SettingsGetToolResponse = McpToolOutput<"settings_get">;
+
+interface ParsedSettingsGet {
   settings?: {
     model_priority?: Record<string, string[]>;
     max_sessions?: Record<string, number>;
   };
   error?: string;
-}
-
-interface SettingsSetToolResponse {
-  ok: boolean;
-  error?: string;
-}
-
-interface ProviderModelsConnectedResponse {
-  models: Array<{
-    id: string;
-    name: string;
-    provider_id: string;
-  }>;
 }
 
 function splitModelId(modelId: string): { provider: string; model: string } {
@@ -64,13 +54,14 @@ function combineModelId(provider: string, model: string): string {
 }
 
 export async function fetchSettings(): Promise<SettingsResponse> {
-  const response = await callMcpTool<SettingsGetToolResponse>("settings_get", {});
-  if (response.error) {
-    throw new Error(response.error);
+  const response = (await callMcpTool("settings_get", {})) as SettingsGetToolResponse;
+  const parsed = response as ParsedSettingsGet;
+  if (parsed.error) {
+    throw new Error(parsed.error);
   }
 
-  const modelPriority = response.settings?.model_priority ?? {};
-  const maxSessions = response.settings?.max_sessions ?? {};
+  const modelPriority = parsed.settings?.model_priority ?? {};
+  const maxSessions = parsed.settings?.max_sessions ?? {};
 
   const toPriorityItems = (values: string[] | undefined): ModelPriorityItem[] =>
     (values ?? []).map((value) => {
@@ -114,7 +105,7 @@ export async function saveSettings(settings: SettingsResponse): Promise<void> {
     {}
   );
 
-  const response = await callMcpTool<SettingsSetToolResponse>("settings_set", {
+  const response = await callMcpTool("settings_set", {
     model_priority_worker: settings.agents.model_priorities.worker.map((item) =>
       combineModelId(item.provider, item.model)
     ),
@@ -139,7 +130,7 @@ export interface ProviderModel {
 }
 
 export async function fetchProviderModels(): Promise<ProviderModel[]> {
-  const response = await callMcpTool<ProviderModelsConnectedResponse>("provider_models_connected");
+  const response = await callMcpTool("provider_models_connected");
   return response.models.map((model) => ({
     id: model.id,
     name: model.name,

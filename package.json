@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "mcp:types": "tsx scripts/generate-mcp-types.ts --source=live",
+    "mcp:types:snapshot": "tsx scripts/generate-mcp-types.ts --source=snapshot",
+    "mcp:types:check": "pnpm mcp:types:snapshot && git diff --exit-code -- src/api/generated/mcp-tools.gen.ts",
     "lint": "eslint .",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -50,6 +53,7 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
+    "json-schema-to-typescript": "^15.0.4",
     "tsx": "^4.21.0",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.46.4",

@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { McpToolInput, McpToolName, McpToolOutput } from "@/api/generated/mcp-tools.gen";
 import { getServerPort } from "@/tauri/commands";
 
 type ToolCallResult = {
@@ -74,14 +75,20 @@ async function connectClient(forceReconnect = false): Promise<Client> {
   return client;
 }
 
-export async function callMcpTool<T>(name: string, args?: Record<string, unknown>): Promise<T> {
-  const invoke = async (reconnect: boolean): Promise<T> => {
+export async function callMcpTool<TName extends McpToolName>(
+  name: TName,
+  args?: McpToolInput<TName>
+): Promise<McpToolOutput<TName>> {
+  const invoke = async (reconnect: boolean): Promise<McpToolOutput<TName>> => {
     const client = await connectClient(reconnect);
-    const result = (await client.callTool({ name, arguments: args ?? {} })) as ToolCallResult;
+    const result = (await client.callTool({
+      name,
+      arguments: (args ?? {}) as Record<string, unknown>,
+    })) as ToolCallResult;
     if (result.isError) {
       throw new Error(buildErrorMessage(result));
     }
-    return extractToolPayload<T>(result);
+    return extractToolPayload<McpToolOutput<TName>>(result);
   };
 
   try {

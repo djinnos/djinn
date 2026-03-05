@@ -1,5 +1,7 @@
 import { callMcpTool } from "@/api/mcpClient";
+import type { McpToolOutput } from "@/api/generated/mcp-tools.gen";
 import { getServerPort } from "@/tauri/commands";
+import type { Epic, EpicStatus, Task, TaskPriority, TaskStatus } from "@/types";
 
 async function getBaseUrl(): Promise<string> {
   const port = await getServerPort();
@@ -20,7 +22,7 @@ function fallbackKeyName(providerId: string): string {
 }
 
 async function listProviderCatalogRaw(): Promise<ProviderCatalogItem[]> {
-  const response = await callMcpTool<ProviderCatalogResponse>("provider_catalog");
+  const response = await callMcpTool("provider_catalog");
   return response.providers;
 }
 
@@ -53,62 +55,10 @@ export interface ProviderCredential {
   api_key_masked?: string;
 }
 
-interface ProviderCatalogResponse {
-  providers: ProviderCatalogItem[];
-  total: number;
-}
-
-interface ProviderCatalogItem {
-  id: string;
-  name: string;
-  npm: string;
-  env_vars: string[];
-  is_openai_compatible: boolean;
-  oauth_supported: boolean;
-  base_url: string;
-}
-
-interface ProviderValidateResponse {
-  ok: boolean;
-  error?: string;
-}
-
-interface CredentialSetResponse {
-  success: boolean;
-  error?: string;
-}
-
-interface ProjectInfo {
-  id: string;
-  name: string;
-  path: string;
-}
-
-interface ProjectListMcpResponse {
-  projects: ProjectInfo[];
-}
-
-interface ProjectAddMcpResponse {
-  project: ProjectInfo;
-}
-
-interface ProviderConnectedResponse {
-  providers: Array<{ id: string }>;
-  total: number;
-}
-
-interface CredentialListResponse {
-  credentials: Array<{
-    provider_id: string;
-    key_name: string;
-  }>;
-}
-
-interface CredentialDeleteResponse {
-  success: boolean;
-  deleted: boolean;
-  error?: string;
-}
+type ProviderCatalogResponse = McpToolOutput<"provider_catalog">;
+type ProviderCatalogItem = ProviderCatalogResponse["providers"][number];
+type TaskListMcpResponse = McpToolOutput<"task_list">;
+type EpicListMcpResponse = McpToolOutput<"epic_list">;
 
 export async function fetchProviderCatalog(): Promise<Provider[]> {
   const providers = await listProviderCatalogRaw();
@@ -131,7 +81,7 @@ export async function validateProviderApiKey(
       return { valid: false, error: `Unknown provider: ${providerId}` };
     }
 
-    const result = await callMcpTool<ProviderValidateResponse>("provider_validate", {
+    const result = await callMcpTool("provider_validate", {
       provider_id: providerId,
       base_url: provider.base_url,
       api_key: apiKey,
@@ -155,7 +105,7 @@ export async function saveProviderCredentials(
   apiKey: string
 ): Promise<void> {
   const keyName = await resolveKeyName(providerId);
-  const response = await callMcpTool<CredentialSetResponse>("credential_set", {
+  const response = await callMcpTool("credential_set", {
     provider_id: providerId,
     key_name: keyName,
     api_key: apiKey,
@@ -177,14 +127,18 @@ export interface Project {
 }
 
 export async function fetchProjects(): Promise<Project[]> {
-  const data = await callMcpTool<ProjectListMcpResponse>("project_list");
-  return data.projects;
+  const data = await callMcpTool("project_list");
+  return data.projects.map((project) => ({
+    id: project.id,
+    name: project.name,
+    path: project.path,
+  }));
 }
 
 export async function addProject(path: string): Promise<Project> {
   const segments = path.split(/[\\/]/).filter(Boolean);
   const inferredName = segments[segments.length - 1] ?? "project";
-  const response = await callMcpTool<ProjectAddMcpResponse>("project_add", {
+  const response = await callMcpTool("project_add", {
     name: inferredName,
     path,
   });
@@ -200,7 +154,7 @@ export interface ProviderConfigStatus {
 }
 
 export async function fetchProviderConfigStatus(): Promise<ProviderConfigStatus> {
-  const response = await callMcpTool<ProviderConnectedResponse>("provider_connected");
+  const response = await callMcpTool("provider_connected");
   const providers = response.providers.map((provider) => provider.id);
   return {
     configured: providers.length > 0,
@@ -211,8 +165,8 @@ export async function fetchProviderConfigStatus(): Promise<ProviderConfigStatus>
 
 export async function fetchCredentialList(): Promise<ProviderCredential[]> {
   const [credentials, connected] = await Promise.all([
-    callMcpTool<CredentialListResponse>("credential_list"),
-    callMcpTool<ProviderConnectedResponse>("provider_connected"),
+    callMcpTool("credential_list"),
+    callMcpTool("provider_connected"),
   ]);
 
   const connectedProviders = new Set(connected.providers.map((provider) => provider.id));
@@ -241,7 +195,7 @@ export async function fetchCredentialList(): Promise<ProviderCredential[]> {
 
 
 export async function deleteProviderCredentials(providerId: string): Promise<void> {
-  const credentials = await callMcpTool<CredentialListResponse>("credential_list");
+  const credentials = await callMcpTool("credential_list");
   const keys = credentials.credentials
     .filter((credential) => credential.provider_id === providerId)
     .map((credential) => credential.key_name);
@@ -252,7 +206,7 @@ export async function deleteProviderCredentials(providerId: string): Promise<voi
 
   const results = await Promise.all(
     keys.map((keyName) =>
-      callMcpTool<CredentialDeleteResponse>("credential_delete", {
+      callMcpTool("credential_delete", {
         key_name: keyName,
       })
     )
@@ -262,4 +216,91 @@ export async function deleteProviderCredentials(providerId: string): Promise<voi
   if (failed) {
     throw new Error(failed.error ?? "Failed to delete credentials");
   }
+}
+
+function mapPriority(priority: number): TaskPriority {
+  if (priority <= 0) return "P0";
+  if (priority === 1) return "P1";
+  if (priority === 2) return "P2";
+  return "P3";
+}
+
+function mapTaskStatus(status: string): TaskStatus {
+  if (status === "in_progress") return "in_progress";
+  if (status === "blocked" || status === "needs_task_review" || status === "in_task_review") {
+    return "blocked";
+  }
+  if (status === "closed") return "completed";
+  if (status === "draft" || status === "open") return "pending";
+  return "canceled";
+}
+
+function mapEpicStatus(status: string): EpicStatus {
+  if (status === "closed") return "completed";
+  if (status === "archived") return "archived";
+  return "active";
+}
+
+function mapTaskFromMcp(task: TaskListMcpResponse["tasks"][number]): Task {
+  return {
+    id: task.id,
+    title: task.title,
+    description: task.description,
+    status: mapTaskStatus(task.status),
+    priority: mapPriority(task.priority),
+    epicId: task.epic_id ?? null,
+    labels: task.labels,
+    owner: task.owner || null,
+    createdAt: task.created_at,
+    updatedAt: task.updated_at,
+  };
+}
+
+function mapEpicFromMcp(epic: NonNullable<EpicListMcpResponse["epics"]>[number]): Epic {
+  return {
+    id: epic.id,
+    title: epic.title,
+    description: epic.description,
+    status: mapEpicStatus(epic.status),
+    priority: "P2",
+    labels: [],
+    owner: epic.owner || null,
+    createdAt: epic.created_at,
+    updatedAt: epic.updated_at,
+  };
+}
+
+export interface KanbanSnapshot {
+  projectPath: string | null;
+  tasks: Task[];
+  epics: Epic[];
+}
+
+export async function fetchKanbanSnapshot(): Promise<KanbanSnapshot> {
+  const projects = await callMcpTool("project_list");
+  const projectPath = projects.projects[0]?.path ?? null;
+
+  if (!projectPath) {
+    return { projectPath: null, tasks: [], epics: [] };
+  }
+
+  const [taskList, epicList] = await Promise.all([
+    callMcpTool("task_list", {
+      project: projectPath,
+      issue_type: "!epic",
+      limit: 500,
+      offset: 0,
+    }),
+    callMcpTool("epic_list", {
+      project: projectPath,
+      limit: 500,
+      offset: 0,
+    }),
+  ]);
+
+  return {
+    projectPath,
+    tasks: taskList.tasks.map(mapTaskFromMcp),
+    epics: (epicList.epics ?? []).map(mapEpicFromMcp),
+  };
 }

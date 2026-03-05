@@ -14,6 +14,9 @@ import { useEffect, useRef } from "react";
 import { sseStore, type SSEEvent, type SSEEventType } from "../stores/sseStore";
 import { getServerPort } from "../tauri";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
+import { fetchKanbanSnapshot } from "@/api/server";
+import { taskStore } from "@/stores/taskStore";
+import { epicStore } from "@/stores/epicStore";
 
 const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
@@ -24,6 +27,50 @@ export function useEventSource() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cleanupHandlersRef = useRef<(() => void) | null>(null);
+  const snapshotLoadRef = useRef<Promise<void> | null>(null);
+
+  const hydrateSnapshot = async () => {
+    if (snapshotLoadRef.current) {
+      return snapshotLoadRef.current;
+    }
+
+    snapshotLoadRef.current = (async () => {
+      try {
+        const snapshot = await fetchKanbanSnapshot();
+        taskStore.getState().setTasks(snapshot.tasks);
+        epicStore.getState().setEpics(snapshot.epics);
+      } catch (error) {
+        console.error("Failed to hydrate Kanban snapshot:", error);
+      }
+    })();
+
+    try {
+      await snapshotLoadRef.current;
+    } finally {
+      snapshotLoadRef.current = null;
+    }
+  };
+
+  const normalizeEventType = (rawType: string): SSEEventType | null => {
+    const normalized = rawType.replace(".", "_");
+    if (normalized === "task_created") return "task_created";
+    if (normalized === "task_updated") return "task_updated";
+    if (normalized === "task_deleted") return "task_deleted";
+    if (normalized === "epic_created") return "epic_created";
+    if (normalized === "epic_updated") return "epic_updated";
+    if (normalized === "epic_deleted") return "epic_deleted";
+    if (
+      normalized === "project_changed" ||
+      normalized === "project_created" ||
+      normalized === "project_updated" ||
+      normalized === "project_deleted" ||
+      normalized === "project_health_ok" ||
+      normalized === "project_health_error"
+    ) {
+      return "project_changed";
+    }
+    return null;
+  };
 
   useEffect(() => {
     let isActive = true;
@@ -33,6 +80,8 @@ export function useEventSource() {
 
     const connect = async () => {
       try {
+        await hydrateSnapshot();
+
         const port = await getServerPort();
         
         // Build URL with Last-Event-ID if available
@@ -49,14 +98,17 @@ export function useEventSource() {
 
         es.onopen = () => {
           if (!isActive) return;
+          if (sseStore.getState().reconnectAttempt > 0) {
+            void hydrateSnapshot();
+          }
           sseStore.getState().resetReconnectAttempt();
           sseStore.getState().setConnected(true);
           sseStore.getState().setConnectionStatus("connected");
           sseStore.getState().setError(null);
         };
 
-        // Handle specific event types
-        const eventTypes: SSEEventType[] = [
+        const eventTypes = [
+          "lagged",
           "task_created",
           "task_updated",
           "task_deleted",
@@ -64,12 +116,28 @@ export function useEventSource() {
           "epic_updated",
           "epic_deleted",
           "project_changed",
-        ];
+          "task.created",
+          "task.updated",
+          "task.deleted",
+          "epic.created",
+          "epic.updated",
+          "epic.deleted",
+          "project.created",
+          "project.updated",
+          "project.deleted",
+          "project.health_ok",
+          "project.health_error",
+        ] as const;
 
         eventTypes.forEach((eventType) => {
           es.addEventListener(eventType, (event) => {
             if (!isActive) return;
             try {
+              if (eventType === "lagged") {
+                void hydrateSnapshot();
+                return;
+              }
+
               const data = JSON.parse(event.data);
               
               // Track the event ID from the SSE message if present
@@ -78,8 +146,13 @@ export function useEventSource() {
                 sseStore.getState().setLastEventId(eventId);
               }
               
+              const mappedType = normalizeEventType(eventType);
+              if (!mappedType) {
+                return;
+              }
+
               const sseEvent: SSEEvent = {
-                type: eventType,
+                type: mappedType,
                 data,
                 timestamp: Date.now(),
                 id: eventId,
