@@ -1,4 +1,10 @@
-use super::*;
+use std::collections::HashSet;
+
+use crate::db::repositories::credential::CredentialRepository;
+use crate::db::repositories::settings::SettingsRepository;
+use crate::models::settings::DjinnSettings;
+
+use super::{AppState, SETTINGS_RAW_KEY};
 
 impl AppState {
     pub async fn apply_settings(&self, settings: &DjinnSettings) -> Result<(), String> {
