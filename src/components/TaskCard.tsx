@@ -1,3 +1,4 @@
+import { showToast } from "@/lib/toast";
 import type { Epic, Task } from "@/types";
 
 type TaskCardProps = {
@@ -28,7 +29,6 @@ function getEpicDotColor(epic: Epic | undefined): string {
   return "bg-violet-500";
 }
 
-
 function getReviewIndicator(reviewPhase: Task["reviewPhase"]): { dotClass: string; animateClass?: string; title: string } | null {
   if (reviewPhase === "needs_task_review") {
     return { dotClass: "bg-amber-500", title: "Waiting for review" };
@@ -49,6 +49,11 @@ function ownerInitials(owner: string | null): string {
   return parts.map((p) => p[0]?.toUpperCase() ?? "").join("");
 }
 
+async function copyTaskId(taskId: string): Promise<void> {
+  await navigator.clipboard.writeText(taskId);
+  showToast.success("Task ID copied");
+}
+
 export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps) {
   const reviewIndicator = getReviewIndicator(task.reviewPhase);
 
@@ -57,6 +62,22 @@ export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps)
       className={`rounded border bg-card p-2 text-sm transition-all duration-200 ease-in-out hover:-translate-y-px hover:shadow-sm ${moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"} ${onClick ? "cursor-pointer" : ""}`}
       onClick={onClick}
     >
+      <div className="mb-1 flex items-center gap-1 text-[10px] text-muted-foreground">
+        <span className="font-semibold uppercase">{task.shortId ?? task.id.slice(0, 4)}</span>
+        <button
+          type="button"
+          className="inline-flex h-4 w-4 items-center justify-center rounded hover:bg-muted"
+          aria-label="Copy task ID"
+          title="Copy full task ID"
+          onClick={(event) => {
+            event.stopPropagation();
+            void copyTaskId(task.id);
+          }}
+        >
+          ⧉
+        </button>
+      </div>
+
       <div className="mb-2 flex items-start justify-between gap-2">
         <h4 className="truncate font-medium" title={task.title}>
           {task.title}

@@ -9,6 +9,7 @@ export type TaskPriority = 'P0' | 'P1' | 'P2' | 'P3';
 
 export interface Task {
   id: string;
+  shortId?: string;
   title: string;
   description: string;
   design: string;

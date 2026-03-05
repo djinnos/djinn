@@ -280,6 +280,7 @@ function mapEpicStatus(status: string): EpicStatus {
 function mapTaskFromMcp(task: TaskListMcpResponse["tasks"][number]): Task {
   return {
     id: task.id,
+    shortId: task.short_id,
     title: task.title,
     description: task.description,
     design: task.design ?? "",
