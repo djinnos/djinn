@@ -17,7 +17,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
 import { ProjectSelector } from "@/components/ProjectSelector";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
-import { useSelectedProjectId } from "@/stores/useProjectStore";
+import { useProjectStore, useProjects, useSelectedProjectId } from "@/stores/useProjectStore";
 import { Button } from "@/components/ui/button";
 import { useSidebar } from "@/hooks/useSidebar";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
@@ -65,6 +65,9 @@ function DoneState() {
 
 function MainLayout() {
   const sidebar = useSidebar();
+  const projects = useProjects();
+  const selectedProjectId = useSelectedProjectId();
+  const setSelectedProjectId = useProjectStore((state) => state.setSelectedProjectId);
 
   return (
     <main className="flex min-h-screen flex-col bg-background">
@@ -72,7 +75,14 @@ function MainLayout() {
         <div className="flex items-center gap-2">
           <h1 className="text-sm font-semibold text-foreground">DjinnOS Desktop</h1>
         </div>
-        <div className="flex items-center gap-4"><ProjectSelector /><ConnectionStatus /></div>
+        <div className="flex items-center gap-4">
+          <ProjectSelector
+            projects={projects}
+            selectedId={selectedProjectId}
+            onSelect={setSelectedProjectId}
+          />
+          <ConnectionStatus />
+        </div>
       </header>
 
       <div className="flex flex-1 overflow-hidden">
@@ -90,6 +100,7 @@ function MainLayout() {
     </main>
   );
 }
+
 
 export default function App() {
   const { status, error, retry, isRetrying } = useServerHealth();
