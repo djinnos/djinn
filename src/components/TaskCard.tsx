@@ -1,5 +1,7 @@
 import { showToast } from "@/lib/toast";
 import type { Epic, Task } from "@/types";
+import { Clock3 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
 type TaskCardProps = {
   task: Task;
@@ -45,6 +47,19 @@ function PriorityBars({ priority }: { priority: Task["priority"] }) {
       })}
     </span>
   );
+}
+
+function formatCompactDuration(totalSeconds: number): string {
+  const safeSeconds = Math.max(0, totalSeconds);
+  const totalMinutes = Math.floor(safeSeconds / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+
+  return `${minutes}m`;
 }
 
 function getEpicEmoji(epic: Epic | undefined): string {
@@ -99,6 +114,43 @@ async function copyTaskId(taskId: string): Promise<void> {
 
 export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps) {
   const reviewIndicator = getReviewIndicator(task.reviewPhase);
+  const [now, setNow] = useState(() => Date.now());
+
+  const runningSessionStartMs = useMemo(() => {
+    if (!task.activeSessionStartedAt || task.status !== "in_progress") {
+      return null;
+    }
+
+    const parsed = Date.parse(task.activeSessionStartedAt);
+    return Number.isNaN(parsed) ? null : parsed;
+  }, [task.activeSessionStartedAt, task.status]);
+
+  useEffect(() => {
+    if (!runningSessionStartMs) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [runningSessionStartMs]);
+
+  const totalTrackedSeconds = useMemo(() => {
+    const persisted = task.trackedSeconds ?? 0;
+
+    if (!runningSessionStartMs) {
+      return persisted;
+    }
+
+    const extraSeconds = Math.max(0, Math.floor((now - runningSessionStartMs) / 1000));
+    return persisted + extraSeconds;
+  }, [now, runningSessionStartMs, task.trackedSeconds]);
+
+  const shouldShowDuration = totalTrackedSeconds > 0 || (task.sessionCount ?? 0) > 0;
 
   return (
     <article
@@ -135,6 +187,13 @@ export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps)
         ) : null}
         <PriorityBars priority={task.priority} />
       </div>
+
+      {shouldShowDuration ? (
+        <div className="mb-2 flex items-center gap-1 text-xs text-muted-foreground" title="Time spent">
+          <Clock3 className="h-3 w-3 shrink-0" aria-hidden="true" />
+          <span>{formatCompactDuration(totalTrackedSeconds)}</span>
+        </div>
+      ) : null}
 
       <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
         <div className="flex min-w-0 items-center gap-1" title={epic?.title ?? "No Epic"}>

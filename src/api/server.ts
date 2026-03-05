@@ -296,6 +296,9 @@ function mapTaskFromMcp(task: TaskListMcpResponse["tasks"][number]): Task {
     owner: task.owner || null,
     createdAt: task.created_at,
     updatedAt: task.updated_at,
+    sessionCount: typeof task.session_count === "number" ? task.session_count : undefined,
+    trackedSeconds: typeof task.duration_seconds === "number" ? task.duration_seconds : undefined,
+    activeSessionStartedAt: task.active_session?.started_at ?? null,
   };
 }
 

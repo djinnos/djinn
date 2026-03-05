@@ -23,6 +23,9 @@ export interface Task {
   owner: string | null;
   createdAt: string;
   updatedAt: string;
+  sessionCount?: number;
+  trackedSeconds?: number;
+  activeSessionStartedAt?: string | null;
 }
 
 export type EpicStatus = 'active' | 'completed' | 'archived';
@@ -37,6 +40,9 @@ export interface Epic {
   owner: string | null;
   createdAt: string;
   updatedAt: string;
+  sessionCount?: number;
+  trackedSeconds?: number;
+  activeSessionStartedAt?: string | null;
 }
 
 // SSE Event payloads
