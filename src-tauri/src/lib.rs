@@ -7,6 +7,7 @@ mod auth_callback;
 mod commands;
 mod dev_server;
 mod server;
+mod token_refresh;
 
 pub use auth_callback::AuthCallbackManager;
 pub use server::ServerState;
@@ -117,6 +118,32 @@ pub fn run() {
                 });
             }
 
+            // Attempt silent authentication on startup
+            let silent_auth_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match token_refresh::attempt_silent_auth_on_startup().await {
+                    token_refresh::RefreshResult::Success(state) => {
+                        log::info!("Silent authentication successful on startup");
+                        // Emit event to frontend indicating successful silent auth
+                        let _ = silent_auth_app.emit("auth:silent-refresh-success", serde_json::json!({
+                            "user_id": state.user_id,
+                        }));
+                    }
+                    token_refresh::RefreshResult::NoToken => {
+                        log::info!("No refresh token available, user needs to login");
+                        // Emit event to frontend indicating auth required
+                        let _ = silent_auth_app.emit("auth:login-required", ());
+                    }
+                    token_refresh::RefreshResult::Failed(reason) => {
+                        log::warn!("Silent authentication failed: {}", reason);
+                        // Emit event to frontend indicating auth failure
+                        let _ = silent_auth_app.emit("auth:silent-refresh-failed", serde_json::json!({
+                            "reason": reason,
+                        }));
+                    }
+                }
+            });
+
             // On macOS, set up window close handler
             #[cfg(target_os = "macos")]
             {
@@ -155,6 +182,10 @@ pub fn run() {
             commands::initiate_oauth_login,
             commands::get_pkce_code_verifier,
             commands::clear_pkce_params,
+            commands::perform_token_refresh,
+            commands::get_auth_state,
+            commands::is_token_expired,
+            commands::logout,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

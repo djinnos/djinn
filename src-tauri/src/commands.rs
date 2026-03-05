@@ -4,6 +4,10 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
 
+// Token refresh module imports
+use crate::token_refresh::{self, RefreshResult, TokenState};
+use std::time::{Duration, Instant};
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct UserProfile {
     pub sub: String,
@@ -24,7 +28,7 @@ struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
     id_token: Option<String>,
-    expires_in: Option<u64>,
+    expires_in: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,7 +41,7 @@ struct IdTokenClaims {
 
 use serde::Deserialize;
 use std::sync::Mutex as StdMutex;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_opener::OpenerExt;
 
 /// Global storage for PKCE params during OAuth flow
@@ -89,9 +93,15 @@ pub async fn retry_server_discovery(app: AppHandle) -> Result<u16, String> {
     crate::server::retry_server_discovery(&app).await
 }
 
-/// Get authentication token
+/// Get authentication token (from token refresh state or legacy session)
 #[tauri::command]
-pub async fn get_auth_token() -> Result<Option<String>, String> {
+pub fn get_auth_token() -> Result<Option<String>, String> {
+    // First check the new token refresh state
+    if let Some(token) = token_refresh::get_valid_access_token() {
+        return Ok(Some(token));
+    }
+    
+    // Fallback to legacy session
     let session = AUTH_SESSION
         .lock()
         .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
@@ -121,6 +131,7 @@ pub async fn clear_auth_token() -> Result<(), String> {
     *session = None;
     drop(session);
     clear_token().await?;
+    token_refresh::clear_token_state();
     Ok(())
 }
 
@@ -210,20 +221,32 @@ pub async fn exchange_auth_code(
         .map(decode_id_token)
         .transpose()?;
 
+    // Store in legacy session
     let mut auth_session = AUTH_SESSION
         .lock()
         .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
     *auth_session = Some(AuthSession {
-        access_token: token_response.access_token,
-        expires_in: token_response.expires_in,
+        access_token: token_response.access_token.clone(),
+        expires_in: Some(token_response.expires_in),
         user_profile: user_profile.clone(),
     });
     drop(auth_session);
 
-    if let Some(refresh_token) = token_response.refresh_token {
+    // Store refresh token
+    if let Some(refresh_token) = token_response.refresh_token.clone() {
         store_token(&refresh_token).await?;
         log::info!("Stored refresh token in secure storage");
     }
+
+    // Update new token state with expiry tracking
+    let expires_at = Instant::now() + Duration::from_secs(token_response.expires_in);
+    let token_state = TokenState {
+        access_token: token_response.access_token,
+        refresh_token: token_response.refresh_token.unwrap_or_default(),
+        expires_at,
+        user_id: user_profile.as_ref().map(|p| p.sub.clone()),
+    };
+    token_refresh::set_token_state(token_state);
 
     user_profile.ok_or_else(|| "Missing id_token in token response".to_string())
 }
@@ -267,4 +290,38 @@ pub fn clear_pkce_params() -> Result<(), String> {
         .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
     *stored = None;
     Ok(())
+}
+
+// Token refresh commands
+
+/// Perform token refresh (can be called explicitly or happens automatically)
+/// Returns the new token state if successful, None if no token exists, or error if refresh failed
+#[tauri::command]
+pub async fn perform_token_refresh() -> Result<Option<TokenState>, String> {
+    match token_refresh::perform_silent_refresh().await {
+        RefreshResult::Success(state) => Ok(Some(state)),
+        RefreshResult::NoToken => Ok(None),
+        RefreshResult::Failed(e) => Err(e),
+    }
+}
+
+/// Get current authentication state including expiry information
+#[tauri::command]
+pub fn get_auth_state() -> Result<Option<TokenState>, String> {
+    let state = token_refresh::CURRENT_TOKEN_STATE
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+    Ok(state.clone())
+}
+
+/// Check if the current token is expired or about to expire (within 30s buffer)
+#[tauri::command]
+pub fn is_token_expired() -> Result<bool, String> {
+    Ok(token_refresh::is_token_expired_or_stale())
+}
+
+/// Logout - clear all authentication state
+#[tauri::command]
+pub async fn logout() -> Result<(), String> {
+    token_refresh::logout().await
 }
