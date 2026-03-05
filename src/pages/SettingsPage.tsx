@@ -21,6 +21,7 @@ import { InlineError } from '@/components/InlineError';
 import { EmptyState } from '@/components/EmptyState';
 import { showToast } from '@/lib/toast';
 import { AgentConfig } from '@/components/AgentConfig';
+import { useAgentConfig } from '@/hooks/useAgentConfig';
 import { selectDirectory } from '@/tauri/commands';
 
 type SettingsCategory = 'providers' | 'projects' | 'general' | 'agents';
@@ -385,6 +386,8 @@ export function SettingsPage() {
     return <Navigate to="/settings/providers" replace />;
   }
 
+  const agentConfig = useAgentConfig();
+
   return (
     <div className="flex h-full flex-col p-6">
       <div className="mb-6">
@@ -418,7 +421,7 @@ export function SettingsPage() {
           {category === 'providers' && <ProvidersSettings />}
           {category === 'projects' && <ProjectsSettings />}
           {category === 'general' && <GeneralSettings />}
-          {category === 'agents' && <AgentConfig />}
+          {category === 'agents' && <AgentConfig {...agentConfig} />}
         </section>
       </div>
     </div>
