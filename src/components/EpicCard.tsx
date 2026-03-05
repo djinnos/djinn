@@ -36,7 +36,7 @@ function getPriorityBorderColor(priority: Epic["priority"]): string {
 function calculateProgress(tasks: Task[]): { percentage: number; closed: number; total: number } {
   const total = tasks.length;
   if (total === 0) return { percentage: 0, closed: 0, total: 0 };
-  const closed = tasks.filter((task) => task.status === "completed" || task.status === "canceled").length;
+  const closed = tasks.filter((task) => task.status === "completed").length;
   const percentage = Math.round((closed / total) * 100);
   return { percentage, closed, total };
 }
@@ -49,8 +49,6 @@ function getStatusBadge(status: TaskStatus): { dot: string; label: string } {
       return { dot: "bg-blue-500", label: "In Progress" };
     case "blocked":
       return { dot: "bg-red-500", label: "Blocked" };
-    case "canceled":
-      return { dot: "bg-gray-500", label: "Canceled" };
     case "pending":
     default:
       return { dot: "bg-amber-500", label: "Pending" };

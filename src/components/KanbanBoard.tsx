@@ -10,9 +10,8 @@ import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 const STATUS_COLUMNS: Array<{ key: TaskStatus; label: string }> = [
   { key: "pending", label: "Open" },
   { key: "in_progress", label: "In Progress" },
-  { key: "blocked", label: "Needs Review" },
-  { key: "completed", label: "Approved" },
-  { key: "canceled", label: "Closed" },
+  { key: "blocked", label: "In Review" },
+  { key: "completed", label: "Closed" },
 ];
 
 const PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3"];

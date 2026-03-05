@@ -4,7 +4,7 @@
  * These types mirror the server-side types for full-entity SSE events.
  */
 
-export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'blocked' | 'canceled';
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'blocked';
 export type TaskPriority = 'P0' | 'P1' | 'P2' | 'P3';
 
 export interface Task {
@@ -15,6 +15,7 @@ export interface Task {
   acceptanceCriteria: string[];
   activity: string[];
   status: TaskStatus;
+  reviewPhase?: 'needs_task_review' | 'in_task_review';
   priority: TaskPriority;
   epicId: string | null;
   labels: string[];

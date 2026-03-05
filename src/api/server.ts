@@ -268,7 +268,7 @@ function mapTaskStatus(status: string): TaskStatus {
   }
   if (status === "closed") return "completed";
   if (status === "draft" || status === "open") return "pending";
-  return "canceled";
+  return "pending";
 }
 
 function mapEpicStatus(status: string): EpicStatus {
@@ -288,6 +288,7 @@ function mapTaskFromMcp(task: TaskListMcpResponse["tasks"][number]): Task {
     ),
     activity: [],
     status: mapTaskStatus(task.status),
+    reviewPhase: task.status === "needs_task_review" || task.status === "in_task_review" ? task.status : undefined,
     priority: mapPriority(task.priority),
     epicId: task.epic_id ?? null,
     labels: task.labels,

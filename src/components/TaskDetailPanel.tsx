@@ -10,9 +10,8 @@ type TaskDetailPanelProps = {
 const STATUS_LABELS: Record<Task["status"], string> = {
   pending: "Open",
   in_progress: "In Progress",
-  blocked: "Needs Review",
-  completed: "Approved",
-  canceled: "Closed",
+  blocked: "In Review",
+  completed: "Closed",
 };
 
 function renderMarkdown(markdown: string): string {

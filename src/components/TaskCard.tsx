@@ -28,6 +28,17 @@ function getEpicDotColor(epic: Epic | undefined): string {
   return "bg-violet-500";
 }
 
+
+function getReviewIndicator(reviewPhase: Task["reviewPhase"]): { dotClass: string; animateClass?: string; title: string } | null {
+  if (reviewPhase === "needs_task_review") {
+    return { dotClass: "bg-amber-500", title: "Waiting for review" };
+  }
+  if (reviewPhase === "in_task_review") {
+    return { dotClass: "bg-blue-500", animateClass: "animate-spin", title: "Agent reviewing" };
+  }
+  return null;
+}
+
 function ownerInitials(owner: string | null): string {
   if (!owner) return "??";
   const parts = owner
@@ -39,6 +50,8 @@ function ownerInitials(owner: string | null): string {
 }
 
 export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps) {
+  const reviewIndicator = getReviewIndicator(task.reviewPhase);
+
   return (
     <article
       className={`rounded border bg-card p-2 text-sm transition-all duration-200 ease-in-out hover:-translate-y-px hover:shadow-sm ${moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"} ${onClick ? "cursor-pointer" : ""}`}
@@ -48,6 +61,13 @@ export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps)
         <h4 className="truncate font-medium" title={task.title}>
           {task.title}
         </h4>
+        {reviewIndicator ? (
+          <span
+            className={`h-2 w-2 shrink-0 rounded-full ${reviewIndicator.dotClass} ${reviewIndicator.animateClass ?? ""}`}
+            title={reviewIndicator.title}
+            aria-label={reviewIndicator.title}
+          />
+        ) : null}
         <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${PRIORITY_STYLES[task.priority]}`}>
           {task.priority}
         </span>
