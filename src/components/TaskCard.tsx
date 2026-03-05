@@ -8,12 +8,44 @@ type TaskCardProps = {
   onClick?: () => void;
 };
 
-const PRIORITY_STYLES: Record<Task["priority"], string> = {
-  P0: "bg-red-100 text-red-700 border-red-200",
-  P1: "bg-orange-100 text-orange-700 border-orange-200",
-  P2: "bg-yellow-100 text-yellow-700 border-yellow-200",
-  P3: "bg-gray-100 text-gray-700 border-gray-200",
+const PRIORITY_BAR_COLORS: Record<Task["priority"], string> = {
+  P0: "bg-red-500",
+  P1: "bg-orange-500",
+  P2: "bg-amber-500",
+  P3: "bg-gray-400",
 };
+
+const PRIORITY_BAR_COUNT: Record<Task["priority"], number> = {
+  P0: 4,
+  P1: 3,
+  P2: 2,
+  P3: 1,
+};
+
+function PriorityBars({ priority }: { priority: Task["priority"] }) {
+  const activeBars = PRIORITY_BAR_COUNT[priority];
+  const activeColor = PRIORITY_BAR_COLORS[priority];
+
+  return (
+    <span
+      className="inline-flex h-4 items-end gap-0.5"
+      title={`Priority ${priority}`}
+      aria-label={`Priority ${priority}`}
+    >
+      {[0, 1, 2, 3].map((bar) => {
+        const height = ["h-1.5", "h-2.5", "h-3.5", "h-4"][bar];
+        const isActive = bar < activeBars;
+        return (
+          <span
+            key={bar}
+            className={`w-1 rounded-sm ${height} ${isActive ? activeColor : "bg-muted"}`}
+            aria-hidden="true"
+          />
+        );
+      })}
+    </span>
+  );
+}
 
 function getEpicEmoji(epic: Epic | undefined): string {
   if (!epic) return "📌";
@@ -101,9 +133,7 @@ export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps)
             aria-label={reviewIndicator.title}
           />
         ) : null}
-        <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${PRIORITY_STYLES[task.priority]}`}>
-          {task.priority}
-        </span>
+        <PriorityBars priority={task.priority} />
       </div>
 
       <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
