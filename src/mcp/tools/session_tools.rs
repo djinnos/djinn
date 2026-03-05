@@ -1,10 +1,10 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
 use crate::mcp::server::DjinnMcpServer;
-use crate::mcp::tools::{ObjectJson, json_object};
+use crate::models::session::SessionRecord;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct SessionListParams {
@@ -32,6 +32,73 @@ pub struct SessionActiveParams {
     pub project: String,
 }
 
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct SessionToolSession {
+    pub id: String,
+    pub project_id: String,
+    pub task_id: String,
+    pub model_id: String,
+    pub agent_type: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub status: String,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub worktree_path: Option<String>,
+    pub goose_session_id: Option<String>,
+    pub continuation_of: Option<String>,
+}
+
+impl From<SessionRecord> for SessionToolSession {
+    fn from(value: SessionRecord) -> Self {
+        Self {
+            id: value.id,
+            project_id: value.project_id,
+            task_id: value.task_id,
+            model_id: value.model_id,
+            agent_type: value.agent_type,
+            started_at: value.started_at,
+            ended_at: value.ended_at,
+            status: value.status,
+            tokens_in: value.tokens_in,
+            tokens_out: value.tokens_out,
+            worktree_path: value.worktree_path,
+            goose_session_id: value.goose_session_id,
+            continuation_of: value.continuation_of,
+        }
+    }
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct SessionListResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<Vec<SessionToolSession>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct SessionActiveResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<Vec<SessionToolSession>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_sessions: Option<Vec<SessionToolSession>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_triggered: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct SessionShowResponse {
+    #[serde(flatten)]
+    pub session: Option<SessionToolSession>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[tool_router(router = session_tool_router, vis = "pub")]
 impl DjinnMcpServer {
     /// List all sessions for a task, newest first by started_at.
@@ -41,11 +108,17 @@ impl DjinnMcpServer {
     pub async fn session_list(
         &self,
         Parameters(p): Parameters<SessionListParams>,
-    ) -> Json<ObjectJson> {
+    ) -> Json<SessionListResponse> {
         let task_repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
-            Err(e) => return json_object(serde_json::json!({ "error": e })),
+            Err(e) => {
+                return Json(SessionListResponse {
+                    task_id: None,
+                    sessions: None,
+                    error: Some(e),
+                });
+            }
         };
         let Some(task) = task_repo
             .resolve_in_project(&project_id, &p.task_id)
@@ -53,9 +126,11 @@ impl DjinnMcpServer {
             .ok()
             .flatten()
         else {
-            return json_object(
-                serde_json::json!({ "error": format!("task not found: {}", p.task_id) }),
-            );
+            return Json(SessionListResponse {
+                task_id: None,
+                sessions: None,
+                error: Some(format!("task not found: {}", p.task_id)),
+            });
         };
 
         let repo = SessionRepository::new(self.state.db().clone(), self.state.events().clone());
@@ -65,10 +140,16 @@ impl DjinnMcpServer {
             repo.list_for_task_in_project(&project_id, &task.id).await
         };
         match result {
-            Ok(sessions) => {
-                json_object(serde_json::json!({ "task_id": task.id, "sessions": sessions }))
-            }
-            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
+            Ok(sessions) => Json(SessionListResponse {
+                task_id: Some(task.id),
+                sessions: Some(sessions.into_iter().map(Into::into).collect()),
+                error: None,
+            }),
+            Err(e) => Json(SessionListResponse {
+                task_id: None,
+                sessions: None,
+                error: Some(e.to_string()),
+            }),
         }
     }
 
@@ -77,13 +158,25 @@ impl DjinnMcpServer {
     pub async fn session_active(
         &self,
         Parameters(p): Parameters<SessionActiveParams>,
-    ) -> Json<ObjectJson> {
+    ) -> Json<SessionActiveResponse> {
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
-            Err(e) => return json_object(serde_json::json!({ "error": e })),
+            Err(e) => {
+                return Json(SessionActiveResponse {
+                    sessions: None,
+                    stale_sessions: None,
+                    recovery_triggered: None,
+                    error: Some(e),
+                });
+            }
         };
         let Some(supervisor) = self.state.supervisor().await else {
-            return json_object(serde_json::json!({ "error": "supervisor actor not initialized" }));
+            return Json(SessionActiveResponse {
+                sessions: None,
+                stale_sessions: None,
+                recovery_triggered: None,
+                error: Some("supervisor actor not initialized".to_string()),
+            });
         };
         let coordinator = self.state.coordinator().await;
         let repo = SessionRepository::new(self.state.db().clone(), self.state.events().clone());
@@ -97,7 +190,12 @@ impl DjinnMcpServer {
                         Ok(true) => runtime_sessions.push(session),
                         Ok(false) => stale_sessions.push(session),
                         Err(e) => {
-                            return json_object(serde_json::json!({ "error": e.to_string() }));
+                            return Json(SessionActiveResponse {
+                                sessions: None,
+                                stale_sessions: None,
+                                recovery_triggered: None,
+                                error: Some(e.to_string()),
+                            });
                         }
                     }
                 }
@@ -115,13 +213,19 @@ impl DjinnMcpServer {
                     recovery_triggered = true;
                 }
 
-                json_object(serde_json::json!({
-                    "sessions": runtime_sessions,
-                    "stale_sessions": stale_sessions,
-                    "recovery_triggered": recovery_triggered,
-                }))
+                Json(SessionActiveResponse {
+                    sessions: Some(runtime_sessions.into_iter().map(Into::into).collect()),
+                    stale_sessions: Some(stale_sessions.into_iter().map(Into::into).collect()),
+                    recovery_triggered: Some(recovery_triggered),
+                    error: None,
+                })
             }
-            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => Json(SessionActiveResponse {
+                sessions: None,
+                stale_sessions: None,
+                recovery_triggered: None,
+                error: Some(e.to_string()),
+            }),
         }
     }
 
@@ -132,18 +236,30 @@ impl DjinnMcpServer {
     pub async fn session_show(
         &self,
         Parameters(p): Parameters<SessionShowParams>,
-    ) -> Json<ObjectJson> {
+    ) -> Json<SessionShowResponse> {
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
-            Err(e) => return json_object(serde_json::json!({ "error": e })),
+            Err(e) => {
+                return Json(SessionShowResponse {
+                    session: None,
+                    error: Some(e),
+                });
+            }
         };
         let repo = SessionRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.get_in_project(&project_id, &p.id).await {
-            Ok(Some(session)) => json_object(serde_json::json!(session)),
-            Ok(None) => {
-                json_object(serde_json::json!({ "error": format!("session not found: {}", p.id) }))
-            }
-            Err(e) => json_object(serde_json::json!({ "error": e.to_string() })),
+            Ok(Some(session)) => Json(SessionShowResponse {
+                session: Some(session.into()),
+                error: None,
+            }),
+            Ok(None) => Json(SessionShowResponse {
+                session: None,
+                error: Some(format!("session not found: {}", p.id)),
+            }),
+            Err(e) => Json(SessionShowResponse {
+                session: None,
+                error: Some(e.to_string()),
+            }),
         }
     }
 }

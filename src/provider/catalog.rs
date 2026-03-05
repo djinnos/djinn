@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn inject_goose_providers_adds_missing_entries() {
-        use goose::providers::base::{ConfigKey, ModelInfo};
+        use goose::providers::base::ConfigKey;
 
         let catalog = CatalogService::new();
         let initial_count = catalog.list_providers().len();

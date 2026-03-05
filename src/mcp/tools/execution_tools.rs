@@ -123,42 +123,14 @@ pub struct ExecutionKillTaskResponse {
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
-pub struct SessionForTaskSession {
-    pub model_id: String,
-    pub session_id: String,
-    pub duration_seconds: u64,
-    pub worktree_path: Option<String>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum SessionForTaskPayload {
-    Running(SessionForTaskRunningPayload),
-    Idle(SessionForTaskIdlePayload),
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct SessionForTaskRunningPayload {
-    pub task_id: String,
-    pub model_id: String,
-    pub session_id: String,
-    pub duration_seconds: u64,
-    pub worktree_path: Option<String>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct SessionForTaskIdlePayload {
-    pub task_id: String,
-    pub session: Option<SessionForTaskSession>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
 pub struct SessionForTaskResponse {
     pub ok: bool,
-    #[serde(flatten)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Option<serde_json::Value>")]
-    pub payload: Option<SessionForTaskPayload>,
+    pub task_id: String,
+    pub model_id: Option<String>,
+    pub session_id: Option<String>,
+    pub duration_seconds: Option<u64>,
+    pub worktree_path: Option<String>,
+    pub session: Option<String>,
     pub error: Option<String>,
 }
 
@@ -218,9 +190,14 @@ impl DjinnMcpServer {
         let (resumed, result) = match project_id.as_deref() {
             Some(id) => {
                 let paused = coordinator.get_project_status(id).map(|s| s.paused).unwrap_or(false);
-                let r = if paused { coordinator.resume_project(id).await } else { coordinator.trigger_dispatch_for_project(id).await };
+                let r = if paused {
+                    coordinator.resume_project(id).await
+                } else {
+                    coordinator.trigger_dispatch_for_project(id).await
+                };
                 (paused, r)
             }
+            // Global start: always resume (clears all project pauses + dispatches).
             None => (false, coordinator.resume().await),
         };
 
@@ -597,7 +574,12 @@ impl DjinnMcpServer {
             Err(e) => {
                 return Json(SessionForTaskResponse {
                     ok: false,
-                    payload: None,
+                    task_id: p.task_id,
+                    model_id: None,
+                    session_id: None,
+                    duration_seconds: None,
+                    worktree_path: None,
+                    session: None,
                     error: Some(e),
                 });
             }
@@ -609,16 +591,27 @@ impl DjinnMcpServer {
             .ok()
             .flatten()
         else {
+            let missing_task_id = p.task_id.clone();
             return Json(SessionForTaskResponse {
                 ok: false,
-                payload: None,
-                error: Some(format!("task not found: {}", p.task_id)),
+                task_id: missing_task_id.clone(),
+                model_id: None,
+                session_id: None,
+                duration_seconds: None,
+                worktree_path: None,
+                session: None,
+                error: Some(format!("task not found: {}", missing_task_id)),
             });
         };
         let Some(supervisor) = self.state.supervisor().await else {
             return Json(SessionForTaskResponse {
                 ok: false,
-                payload: None,
+                task_id: task.id,
+                model_id: None,
+                session_id: None,
+                duration_seconds: None,
+                worktree_path: None,
+                session: None,
                 error: Some("supervisor actor not initialized".to_string()),
             });
         };
@@ -628,7 +621,12 @@ impl DjinnMcpServer {
             Err(e) => {
                 return Json(SessionForTaskResponse {
                     ok: false,
-                    payload: None,
+                    task_id: task.id,
+                    model_id: None,
+                    session_id: None,
+                    duration_seconds: None,
+                    worktree_path: None,
+                    session: None,
                     error: Some(e.to_string()),
                 });
             }
@@ -637,21 +635,22 @@ impl DjinnMcpServer {
         match session {
             Some(session) => Json(SessionForTaskResponse {
                 ok: true,
-                payload: Some(SessionForTaskPayload::Running(SessionForTaskRunningPayload {
-                    task_id: task.id,
-                    model_id: session.model_id,
-                    session_id: session.session_id,
-                    duration_seconds: session.duration_seconds,
-                    worktree_path: session.worktree_path,
-                })),
+                task_id: task.id,
+                model_id: Some(session.model_id),
+                session_id: Some(session.session_id),
+                duration_seconds: Some(session.duration_seconds),
+                worktree_path: session.worktree_path,
+                session: None,
                 error: None,
             }),
             None => Json(SessionForTaskResponse {
                 ok: true,
-                payload: Some(SessionForTaskPayload::Idle(SessionForTaskIdlePayload {
-                    task_id: task.id,
-                    session: None,
-                })),
+                task_id: task.id,
+                model_id: None,
+                session_id: None,
+                duration_seconds: None,
+                worktree_path: None,
+                session: None,
                 error: None,
             }),
         }

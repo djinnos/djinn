@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::repositories::settings::SettingsRepository;
 use crate::mcp::server::DjinnMcpServer;
-use crate::mcp::tools::AnyJson;
 use crate::models::settings::DjinnSettings;
 
 const SETTINGS_RAW_KEY: &str = "settings.raw";
@@ -20,7 +19,9 @@ pub struct SettingsGetParams {
 pub struct SettingsGetResponse {
     pub key: String,
     pub exists: bool,
-    pub value: AnyJson,
+    pub settings: Option<DjinnSettings>,
+    pub raw_value: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -67,29 +68,40 @@ impl DjinnMcpServer {
         let repo = SettingsRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.get(&key).await {
             Ok(Some(setting)) => {
-                let value = if key == SETTINGS_RAW_KEY {
+                if key == SETTINGS_RAW_KEY {
                     // Deserialize through DjinnSettings so the response is always
                     // the canonical typed shape, even if the DB contains legacy JSON.
                     let typed = DjinnSettings::from_db_value(&setting.value);
-                    serde_json::to_value(&typed).unwrap_or(serde_json::Value::Null)
+                    Json(SettingsGetResponse {
+                        key,
+                        exists: true,
+                        settings: Some(typed),
+                        raw_value: None,
+                        error: None,
+                    })
                 } else {
-                    serde_json::json!(setting.value)
-                };
-                Json(SettingsGetResponse {
-                    key,
-                    exists: true,
-                    value: AnyJson::from(value),
-                })
+                    Json(SettingsGetResponse {
+                        key,
+                        exists: true,
+                        settings: None,
+                        raw_value: Some(setting.value),
+                        error: None,
+                    })
+                }
             }
             Ok(None) => Json(SettingsGetResponse {
                 key,
                 exists: false,
-                value: AnyJson::from(serde_json::Value::Null),
+                settings: None,
+                raw_value: None,
+                error: None,
             }),
             Err(e) => Json(SettingsGetResponse {
                 key,
                 exists: false,
-                value: AnyJson::from(serde_json::json!({ "error": e.to_string() })),
+                settings: None,
+                raw_value: None,
+                error: Some(e.to_string()),
             }),
         }
     }

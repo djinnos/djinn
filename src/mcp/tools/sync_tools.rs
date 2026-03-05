@@ -3,10 +3,10 @@
 use std::path::PathBuf;
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::mcp::server::DjinnMcpServer;
-use crate::mcp::tools::{ObjectJson, json_object};
+use crate::sync::{ChannelStatus, SyncResult};
 
 // ── Param structs ─────────────────────────────────────────────────────────────
 
@@ -41,6 +41,92 @@ pub struct TaskSyncStatusParams {
     pub project: Option<String>,
 }
 
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct SyncChannelResult {
+    pub channel: String,
+    pub ok: bool,
+    pub count: Option<usize>,
+    pub error: Option<String>,
+}
+
+impl From<SyncResult> for SyncChannelResult {
+    fn from(value: SyncResult) -> Self {
+        Self {
+            channel: value.channel,
+            ok: value.ok,
+            count: value.count,
+            error: value.error,
+        }
+    }
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct SyncChannelStatus {
+    pub name: String,
+    pub branch: String,
+    pub enabled: bool,
+    pub project_path: Option<String>,
+    pub last_synced_at: Option<String>,
+    pub last_error: Option<String>,
+    pub failure_count: u32,
+    pub backoff_secs: u64,
+}
+
+impl From<ChannelStatus> for SyncChannelStatus {
+    fn from(value: ChannelStatus) -> Self {
+        Self {
+            name: value.name,
+            branch: value.branch,
+            enabled: value.enabled,
+            project_path: value.project_path,
+            last_synced_at: value.last_synced_at,
+            last_error: value.last_error,
+            failure_count: value.failure_count,
+            backoff_secs: value.backoff_secs,
+        }
+    }
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct TaskSyncEnableResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tasks_exported: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct TaskSyncDisableResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_wide: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct TaskSyncRunResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channels: Option<Vec<SyncChannelResult>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct TaskSyncStatusResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channels: Option<Vec<SyncChannelStatus>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 // ── Tool implementations ──────────────────────────────────────────────────────
 
 #[tool_router(router = sync_tool_router, vis = "pub")]
@@ -53,17 +139,25 @@ impl DjinnMcpServer {
     pub async fn task_sync_enable(
         &self,
         Parameters(p): Parameters<TaskSyncEnableParams>,
-    ) -> Json<ObjectJson> {
+    ) -> Json<TaskSyncEnableResponse> {
         if self.project_id_for_path(&p.project).await.is_none() {
-            return json_object(serde_json::json!({
-                "error": format!("project not found: {}", p.project)
-            }));
+            return Json(TaskSyncEnableResponse {
+                ok: None,
+                tasks_exported: None,
+                note: None,
+                error: Some(format!("project not found: {}", p.project)),
+            });
         }
         let project = PathBuf::from(&p.project);
 
         let mgr = self.state.sync_manager();
         if let Err(e) = mgr.enable("tasks", &project).await {
-            return json_object(serde_json::json!({ "error": e.to_string() }));
+            return Json(TaskSyncEnableResponse {
+                ok: None,
+                tasks_exported: None,
+                note: None,
+                error: Some(e.to_string()),
+            });
         }
 
         // Trigger an initial export.
@@ -71,19 +165,26 @@ impl DjinnMcpServer {
         let results = mgr.export_all(Some(uid)).await;
 
         match results.into_iter().find(|r| r.channel == "tasks") {
-            Some(r) if r.ok => json_object(serde_json::json!({
-                "ok": true,
-                "tasks_exported": r.count.unwrap_or(0),
-            })),
-            Some(r) => json_object(serde_json::json!({
-                "ok": false,
-                "error": r.error.unwrap_or_default(),
-                "note": "sync enabled but initial export failed; will retry automatically",
-            })),
-            None => json_object(serde_json::json!({
-                "ok": true,
-                "note": "sync enabled; no tasks to export",
-            })),
+            Some(r) if r.ok => Json(TaskSyncEnableResponse {
+                ok: Some(true),
+                tasks_exported: Some(r.count.unwrap_or(0)),
+                note: None,
+                error: None,
+            }),
+            Some(r) => Json(TaskSyncEnableResponse {
+                ok: Some(false),
+                tasks_exported: None,
+                error: Some(r.error.unwrap_or_default()),
+                note: Some(
+                    "sync enabled but initial export failed; will retry automatically".to_string(),
+                ),
+            }),
+            None => Json(TaskSyncEnableResponse {
+                ok: Some(true),
+                tasks_exported: None,
+                note: Some("sync enabled; no tasks to export".to_string()),
+                error: None,
+            }),
         }
     }
 
@@ -95,7 +196,7 @@ impl DjinnMcpServer {
     pub async fn task_sync_disable(
         &self,
         Parameters(p): Parameters<TaskSyncDisableParams>,
-    ) -> Json<ObjectJson> {
+    ) -> Json<TaskSyncDisableResponse> {
         let mgr = self.state.sync_manager();
         let team_wide = p.team_wide.unwrap_or(false);
 
@@ -111,10 +212,18 @@ impl DjinnMcpServer {
         }
 
         if let Err(e) = mgr.disable("tasks").await {
-            return json_object(serde_json::json!({ "error": e.to_string() }));
+            return Json(TaskSyncDisableResponse {
+                ok: None,
+                team_wide: None,
+                error: Some(e.to_string()),
+            });
         }
 
-        json_object(serde_json::json!({ "ok": true, "team_wide": team_wide }))
+        Json(TaskSyncDisableResponse {
+            ok: Some(true),
+            team_wide: Some(team_wide),
+            error: None,
+        })
     }
 
     /// Export task state to git sync branch.
@@ -122,23 +231,34 @@ impl DjinnMcpServer {
     pub async fn task_sync_export(
         &self,
         Parameters(p): Parameters<TaskSyncExportParams>,
-    ) -> Json<ObjectJson> {
-        if let Err(e) = self.validate_optional_project(&p.project).await {
-            return e;
+    ) -> Json<TaskSyncRunResponse> {
+        if let Some(path) = p.project.as_ref()
+            && self.project_id_for_path(path).await.is_none()
+        {
+            return Json(TaskSyncRunResponse {
+                ok: None,
+                channels: None,
+                error: Some(format!("project not found: {path}")),
+            });
         }
         let mgr = self.state.sync_manager();
         let uid = self.state.sync_user_id();
         let results = mgr.export_all(Some(uid)).await;
 
         if results.is_empty() {
-            return json_object(serde_json::json!({
-                "ok": false,
-                "error": "sync not enabled — call task_sync_enable first"
-            }));
+            return Json(TaskSyncRunResponse {
+                ok: Some(false),
+                channels: None,
+                error: Some("sync not enabled — call task_sync_enable first".to_string()),
+            });
         }
 
         let all_ok = results.iter().all(|r| r.ok);
-        json_object(serde_json::json!({ "ok": all_ok, "channels": results }))
+        Json(TaskSyncRunResponse {
+            ok: Some(all_ok),
+            channels: Some(results.into_iter().map(SyncChannelResult::from).collect()),
+            error: None,
+        })
     }
 
     /// Import task state from git sync branch.
@@ -146,22 +266,33 @@ impl DjinnMcpServer {
     pub async fn task_sync_import(
         &self,
         Parameters(p): Parameters<TaskSyncImportParams>,
-    ) -> Json<ObjectJson> {
-        if let Err(e) = self.validate_optional_project(&p.project).await {
-            return e;
+    ) -> Json<TaskSyncRunResponse> {
+        if let Some(path) = p.project.as_ref()
+            && self.project_id_for_path(path).await.is_none()
+        {
+            return Json(TaskSyncRunResponse {
+                ok: None,
+                channels: None,
+                error: Some(format!("project not found: {path}")),
+            });
         }
         let mgr = self.state.sync_manager();
         let results = mgr.import_all().await;
 
         if results.is_empty() {
-            return json_object(serde_json::json!({
-                "ok": false,
-                "error": "sync not enabled — call task_sync_enable first"
-            }));
+            return Json(TaskSyncRunResponse {
+                ok: Some(false),
+                channels: None,
+                error: Some("sync not enabled — call task_sync_enable first".to_string()),
+            });
         }
 
         let all_ok = results.iter().all(|r| r.ok);
-        json_object(serde_json::json!({ "ok": all_ok, "channels": results }))
+        Json(TaskSyncRunResponse {
+            ok: Some(all_ok),
+            channels: Some(results.into_iter().map(SyncChannelResult::from).collect()),
+            error: None,
+        })
     }
 
     /// Show full sync health status including backoff state and pending export count.
@@ -171,11 +302,19 @@ impl DjinnMcpServer {
     pub async fn task_sync_status(
         &self,
         Parameters(p): Parameters<TaskSyncStatusParams>,
-    ) -> Json<ObjectJson> {
-        if let Err(e) = self.validate_optional_project(&p.project).await {
-            return e;
+    ) -> Json<TaskSyncStatusResponse> {
+        if let Some(path) = p.project.as_ref()
+            && self.project_id_for_path(path).await.is_none()
+        {
+            return Json(TaskSyncStatusResponse {
+                channels: None,
+                error: Some(format!("project not found: {path}")),
+            });
         }
         let channels = self.state.sync_manager().status().await;
-        json_object(serde_json::json!({ "channels": channels }))
+        Json(TaskSyncStatusResponse {
+            channels: Some(channels.into_iter().map(SyncChannelStatus::from).collect()),
+            error: None,
+        })
     }
 }
