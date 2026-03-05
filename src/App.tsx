@@ -73,7 +73,8 @@ function MainLayout() {
           <Routes>
             <Route path="/" element={<KanbanPage />} />
             <Route path="/roadmap" element={<RoadmapPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/settings" element={<Navigate to="/settings/providers" replace />} />
+            <Route path="/settings/:category" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>
