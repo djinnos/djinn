@@ -8,10 +8,16 @@ import { ServerCheckStep } from "@/components/ServerCheckStep";
 import { ProviderSetupStep } from "@/components/ProviderSetupStep";
 import { ProjectSetupStep } from "@/components/ProjectSetupStep";
 import { ConnectionStatus } from "@/components/ConnectionStatus";
+import { Sidebar } from "@/components/Sidebar";
+import { KanbanPage } from "@/pages/KanbanPage";
+import { RoadmapPage } from "@/pages/RoadmapPage";
+import { SettingsPage } from "@/pages/SettingsPage";
 import { useWizardStore } from "@/stores/wizardStore";
+import { useSidebarStore } from "@/stores/sidebarStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 
 function WelcomeStep() {
   return (
@@ -38,20 +44,55 @@ function CompletionStep() {
   );
 }
 
+function MainLayout() {
+  const { setActiveSection } = useSidebarStore();
+  const location = useLocation();
+
+  useEffect(() => {
+    if (location.pathname.startsWith('/roadmap')) {
+      setActiveSection('roadmap');
+    } else if (location.pathname.startsWith('/settings')) {
+      setActiveSection('settings');
+    } else {
+      setActiveSection('kanban');
+    }
+  }, [location.pathname, setActiveSection]);
+
+  return (
+    <main className="flex min-h-screen flex-col bg-background">
+      <header className="flex h-14 items-center justify-between border-b px-4">
+        <div className="flex items-center gap-2">
+          <h1 className="text-sm font-semibold text-foreground">DjinnOS Desktop</h1>
+        </div>
+        <ConnectionStatus />
+      </header>
+
+      <div className="flex flex-1 overflow-hidden">
+        <Sidebar />
+        <div className="flex-1 overflow-auto">
+          <Routes>
+            <Route path="/" element={<KanbanPage />} />
+            <Route path="/roadmap" element={<RoadmapPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </div>
+      </div>
+    </main>
+  );
+}
+
 export default function App() {
-  const { status, port, error, retry, isRetrying } = useServerHealth();
+  const { status, error, retry, isRetrying } = useServerHealth();
   const { isFirstRun, isLoading: isFirstRunLoading } = useFirstRun();
   const { isCompleted } = useWizardStore();
   const [showWizard, setShowWizard] = useState(false);
 
-  // Initialize EventSource connection for SSE events
   useEventSource();
 
-  // Determine whether to show wizard based on first-run detection
   useEffect(() => {
     if (isFirstRunLoading) return;
-    
-    // Show wizard if it's the first run and wizard hasn't been completed
+
     if (isFirstRun === true && !isCompleted) {
       setShowWizard(true);
     } else {
@@ -59,24 +100,21 @@ export default function App() {
     }
   }, [isFirstRun, isFirstRunLoading, isCompleted]);
 
-  // Show window when connected
   useEffect(() => {
     if (status === "connected") {
       getCurrentWindow().show();
     }
   }, [status]);
 
-  // Loading states
   if (status === "loading" || isFirstRunLoading) {
     return (
-      <LoadingScreen 
-        status="loading" 
+      <LoadingScreen
+        status="loading"
         message={status === "loading" ? "Connecting to server..." : "Checking first-run status..."}
       />
     );
   }
 
-  // Server error state
   if (status === "error") {
     return (
       <LoadingScreen
@@ -88,7 +126,6 @@ export default function App() {
     );
   }
 
-  // Show wizard for first run
   if (showWizard) {
     return (
       <Wizard
@@ -114,36 +151,5 @@ export default function App() {
     );
   }
 
-  // Main app view (kanban/dashboard)
-  return (
-    <main className="flex min-h-screen flex-col bg-background">
-      {/* App Bar with Connection Status */}
-      <header className="flex items-center justify-between border-b px-4 py-2">
-        <div className="flex items-center gap-2">
-          <h1 className="text-lg font-semibold">DjinnOS Desktop</h1>
-        </div>
-        <ConnectionStatus />
-      </header>
-      
-      <div className="flex flex-1 items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <h1 className="text-4xl font-bold text-foreground">DjinnOS Desktop</h1>
-          <p className="text-muted-foreground">
-            Connected to server on port {port}
-          </p>
-          <div className="flex gap-4">
-            <Button>Default Button</Button>
-            <Button variant="secondary">Secondary</Button>
-            <Button variant="outline">Outline</Button>
-            <Button variant="ghost">Ghost</Button>
-          </div>
-          <div className="flex gap-4">
-            <Button size="sm">Small</Button>
-            <Button size="default">Default</Button>
-            <Button size="lg">Large</Button>
-          </div>
-        </div>
-      </div>
-    </main>
-  );
+  return <MainLayout />;
 }
