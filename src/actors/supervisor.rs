@@ -1148,7 +1148,7 @@ impl AgentSupervisor {
 
                 // Detect context exhaustion and trigger a fresh continuation
                 // instead of failing/releasing the task.
-                if self.maybe_compact_on_context_exhaustion(&task_id, &result, &output) {
+                if self.maybe_compact_on_context_exhaustion(&task_id, &result, &output).await {
                     return;
                 }
 
@@ -1348,6 +1348,45 @@ impl AgentSupervisor {
         } else {
             self.prepare_worktree(&project_dir, &task).await?
         };
+
+        // For conflict resolver: start a merge of the target branch into the task
+        // worktree so conflict markers are present for the agent to resolve.
+        // Without this, the resolver edits files but the task branch never
+        // incorporates main's changes, causing the same conflict on re-merge.
+        if agent_type == AgentType::ConflictResolver {
+            if let Some(ref ctx) = conflict_ctx {
+                let target_ref = format!("origin/{}", ctx.merge_target);
+                let wt_git = self.app_state.git_actor(&worktree_path).await;
+                if let Ok(wt_git) = wt_git {
+                    // Fetch latest target first.
+                    let _ = wt_git
+                        .run_command(vec![
+                            "fetch".into(),
+                            "origin".into(),
+                            ctx.merge_target.clone(),
+                        ])
+                        .await;
+                    // Start the merge — this will leave conflict markers in the worktree.
+                    let merge_result = wt_git
+                        .run_command(vec!["merge".into(), target_ref.clone(), "--no-commit".into()])
+                        .await;
+                    if merge_result.is_ok() {
+                        // No conflict after all (main changed since last attempt).
+                        // Abort the merge and let the normal review flow handle it.
+                        let _ = wt_git
+                            .run_command(vec!["merge".into(), "--abort".into()])
+                            .await;
+                    } else {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            target_ref = %target_ref,
+                            "Supervisor: started merge in worktree for conflict resolver; markers present"
+                        );
+                    }
+                }
+            }
+        }
+
         let goose_logs_dir = goose::config::paths::Paths::in_state_dir("logs");
         if let Err(e) = std::fs::create_dir_all(&goose_logs_dir) {
             tracing::warn!(
@@ -2272,7 +2311,7 @@ impl AgentSupervisor {
     /// Detect context exhaustion at session end and trigger a fresh continuation
     /// instead of treating it as a normal failure/release. Returns `true` if
     /// compaction was initiated (caller should skip normal result handling).
-    fn maybe_compact_on_context_exhaustion(
+    async fn maybe_compact_on_context_exhaustion(
         &mut self,
         task_id: &str,
         result: &Result<(), String>,
@@ -2299,14 +2338,66 @@ impl AgentSupervisor {
             return false;
         }
 
-        // Only compact workers and conflict resolvers (not reviewers).
         let agent_type = self
             .session_agent_types
             .get(task_id)
             .copied()
             .unwrap_or(AgentType::Worker);
-        if !matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver) {
-            return false;
+
+        // For reviewers: compaction won't help (the prompt itself exceeds the
+        // context window). Release gracefully and block the task so it doesn't
+        // loop endlessly with the same model.
+        if matches!(agent_type, AgentType::TaskReviewer | AgentType::EpicReviewer) {
+            tracing::warn!(
+                task_id = %task_id,
+                agent_type = %agent_type.as_str(),
+                "Supervisor: context_length_exceeded on reviewer — prompt too large for model; blocking task"
+            );
+            let session = self.remove_session(task_id);
+            // Mark session as failed.
+            let (tokens_in, tokens_out) = {
+                let sm = self.session_manager.clone();
+                let sid = &session.goose_session_id;
+                if let Ok(s) = sm.get_session(sid, false).await {
+                    let ti = s.accumulated_input_tokens.or(s.input_tokens).unwrap_or(0) as i64;
+                    let to = s.accumulated_output_tokens.or(s.output_tokens).unwrap_or(0) as i64;
+                    (ti, to)
+                } else {
+                    (0, 0)
+                }
+            };
+            self.update_session_record(
+                session.record_id.as_deref(),
+                SessionStatus::Failed,
+                tokens_in,
+                tokens_out,
+            )
+            .await;
+            if let Some(wp) = session.worktree_path.as_ref() {
+                self.cleanup_worktree(task_id, wp).await;
+            }
+            // Record model failure so health tracker deprioritizes this model.
+            if let Some(model_id) = session.model_id.as_deref() {
+                self.app_state.health_tracker().record_failure(model_id);
+                self.app_state.persist_model_health_state().await;
+            }
+            let repo = TaskRepository::new(
+                self.app_state.db().clone(),
+                self.app_state.events().clone(),
+            );
+            let reason = "context_length_exceeded: review prompt too large for current model";
+            let _ = repo
+                .transition(
+                    task_id,
+                    TransitionAction::ReleaseTaskReview,
+                    "agent-supervisor",
+                    "system",
+                    Some(reason),
+                    None,
+                )
+                .await;
+            self.in_flight.remove(task_id);
+            return true;
         }
 
         let Some(handle) = self.sessions.remove(task_id) else {
