@@ -25,6 +25,7 @@ export interface ProviderCredential {
   provider_id: string;
   configured: boolean;
   valid: boolean;
+  api_key_masked?: string;
 }
 
 export async function fetchProviderCatalog(): Promise<Provider[]> {
@@ -147,4 +148,22 @@ export async function fetchCredentialList(): Promise<ProviderCredential[]> {
     throw new Error(`Failed to fetch credentials list: ${response.status}`);
   }
   return response.json();
+}
+
+
+export async function deleteProviderCredentials(providerId: string): Promise<void> {
+  const baseUrl = await getBaseUrl();
+  const response = await fetch(`${baseUrl}/credentials/delete`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      provider_id: providerId,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to delete credentials: ${response.status}`);
+  }
 }

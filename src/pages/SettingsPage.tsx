@@ -7,10 +7,12 @@ import {
   fetchCredentialList,
   fetchProviderCatalog,
   saveProviderCredentials,
+  validateProviderApiKey,
+  deleteProviderCredentials,
   type Provider,
   type ProviderCredential,
 } from '@/api/server';
-import { AlertCircleIcon, CheckCircle2Icon, Loader2Icon, XCircleIcon } from 'lucide-react';
+import { AlertCircleIcon, CheckCircle2Icon, CopyIcon, EyeIcon, EyeOffIcon, Loader2Icon, XCircleIcon } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 
 type SettingsCategory = 'providers' | 'projects' | 'general';
@@ -79,6 +81,10 @@ function ProvidersSettings() {
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [revealedProvider, setRevealedProvider] = useState<string | null>(null);
+  const [validationStatus, setValidationStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [testing, setTesting] = useState(false);
 
   useEffect(() => {
     const load = async () => {
@@ -98,6 +104,12 @@ function ProvidersSettings() {
     void load();
   }, []);
 
+  useEffect(() => {
+    if (!revealedProvider) return;
+    const timer = window.setTimeout(() => setRevealedProvider(null), 10000);
+    return () => window.clearTimeout(timer);
+  }, [revealedProvider]);
+
   const credentialByProvider = useMemo(
     () => new Map(credentials.map((entry) => [entry.provider_id, entry])),
     [credentials],
@@ -109,16 +121,70 @@ function ProvidersSettings() {
     return credential.valid ? 'connected' : 'error';
   };
 
+  const maskApiKey = (key: string): string => {
+    if (key.length <= 8) return key;
+    return `${key.slice(0, 4)}...${key.slice(-4)}`;
+  };
+
+  const handleExpand = (providerId: string, expanded: boolean) => {
+    const next = expanded ? null : providerId;
+    setExpandedProvider(next);
+    setApiKey('');
+    setValidationStatus(null);
+    setRevealedProvider(null);
+  };
+
   const handleSave = async () => {
-    if (!expandedProvider) return;
+    if (!expandedProvider || !apiKey.trim()) return;
     setSaving(true);
     try {
-      await saveProviderCredentials(expandedProvider, apiKey);
+      const validation = await validateProviderApiKey(expandedProvider, apiKey.trim());
+      if (!validation.valid) {
+        setValidationStatus({ type: 'error', message: validation.error ?? 'Validation failed' });
+        return;
+      }
+      await saveProviderCredentials(expandedProvider, apiKey.trim());
       const credentialList = await fetchCredentialList();
       setCredentials(credentialList);
+      setValidationStatus({ type: 'success', message: 'API key saved successfully' });
       setApiKey('');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleTestConnection = async (providerId: string) => {
+    const keyToTest = apiKey.trim();
+    const credential = credentialByProvider.get(providerId);
+    if (!keyToTest && !credential?.configured) {
+      setValidationStatus({ type: 'error', message: 'Enter an API key before testing connection' });
+      return;
+    }
+
+    setTesting(true);
+    try {
+      const result = await validateProviderApiKey(providerId, keyToTest);
+      if (result.valid) {
+        setValidationStatus({ type: 'success', message: 'Connection successful' });
+      } else {
+        setValidationStatus({ type: 'error', message: result.error ?? 'Connection failed' });
+      }
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleDelete = async (providerId: string) => {
+    if (!confirm('Delete this API key?')) return;
+    setDeleting(true);
+    try {
+      await deleteProviderCredentials(providerId);
+      const credentialList = await fetchCredentialList();
+      setCredentials(credentialList);
+      setValidationStatus({ type: 'success', message: 'API key deleted' });
+      setRevealedProvider(null);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -148,6 +214,9 @@ function ProvidersSettings() {
       {providers.map((provider) => {
         const status = getStatus(provider.id);
         const expanded = expandedProvider === provider.id;
+        const credential = credentialByProvider.get(provider.id);
+        const isRevealed = revealedProvider === provider.id;
+        const storedMasked = credential?.api_key_masked ? maskApiKey(credential.api_key_masked) : null;
 
         return (
           <div key={provider.id} className="space-y-2">
@@ -155,24 +224,68 @@ function ProvidersSettings() {
               provider={provider}
               status={status}
               expanded={expanded}
-              onClick={() => setExpandedProvider(expanded ? null : provider.id)}
+              onClick={() => handleExpand(provider.id, expanded)}
             />
 
             {expanded && (
-              <div className="rounded-lg border border-border bg-card p-4">
-                <h3 className="mb-3 text-sm font-medium">API Key Management</h3>
+              <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+                <h3 className="text-sm font-medium">API Key Management</h3>
+
+                {credential?.configured && storedMasked && (
+                  <div className="rounded-md border border-border p-3">
+                    <p className="text-xs text-muted-foreground mb-2">Stored key</p>
+                    <div className="flex items-center gap-2">
+                      <code className="text-sm">{isRevealed ? credential.api_key_masked : storedMasked}</code>
+                      <Button variant="ghost" size="icon" onClick={() => setRevealedProvider(isRevealed ? null : provider.id)}>
+                        {isRevealed ? <EyeOffIcon className="h-4 w-4" /> : <EyeIcon className="h-4 w-4" />}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => {
+                          const value = credential.api_key_masked ?? '';
+                          if (value) void navigator.clipboard.writeText(value);
+                        }}
+                      >
+                        <CopyIcon className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex gap-2">
                   <Input
                     type="password"
                     placeholder="Enter API key"
                     value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
+                    onChange={(e) => {
+                      setApiKey(e.target.value);
+                      setValidationStatus(null);
+                    }}
                   />
                   <Button onClick={() => void handleSave()} disabled={saving || !apiKey.trim()}>
                     {saving ? <Loader2Icon className="h-4 w-4 animate-spin" /> : 'Save'}
                   </Button>
                 </div>
-                <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+
+                <div className="flex items-center gap-2">
+                  <Button variant="outline" onClick={() => void handleTestConnection(provider.id)} disabled={testing}>
+                    {testing ? <Loader2Icon className="h-4 w-4 animate-spin" /> : 'Test connection'}
+                  </Button>
+                  {credential?.configured && (
+                    <Button variant="destructive" onClick={() => void handleDelete(provider.id)} disabled={deleting}>
+                      Delete
+                    </Button>
+                  )}
+                </div>
+
+                {validationStatus && (
+                  <div className={cn('text-xs', validationStatus.type === 'success' ? 'text-green-500' : 'text-red-500')}>
+                    {validationStatus.message}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   {status === 'connected' && <CheckCircle2Icon className="h-4 w-4 text-green-500" />}
                   {status === 'error' && <XCircleIcon className="h-4 w-4 text-red-500" />}
                   {status === 'unconfigured' && <AlertCircleIcon className="h-4 w-4 text-gray-500" />}
