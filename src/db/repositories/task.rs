@@ -1196,7 +1196,10 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, memory_refs,
+                    (SELECT COUNT(*) FROM blockers b
+                     JOIN tasks bt ON b.blocking_task_id = bt.id
+                     WHERE b.task_id = tasks.id AND bt.status != 'closed') AS unresolved_blocker_count
              FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
         );
         let mut task_q = sqlx::query_as::<_, Task>(&sql);

@@ -520,6 +520,7 @@ pub struct TaskListItem {
     pub closed_at: Option<String>,
     pub close_reason: Option<String>,
     pub merge_commit_sha: Option<String>,
+    pub unresolved_blocker_count: i64,
 }
 
 fn parse_string_array(raw: &str) -> Vec<String> {
@@ -592,6 +593,7 @@ fn task_to_list_item(t: &Task) -> TaskListItem {
         closed_at: base.closed_at,
         close_reason: base.close_reason,
         merge_commit_sha: base.merge_commit_sha,
+        unresolved_blocker_count: t.unresolved_blocker_count,
     }
 }
 

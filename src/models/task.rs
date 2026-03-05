@@ -29,6 +29,10 @@ pub struct Task {
     pub merge_commit_sha: Option<String>,
     /// JSON array of memory note permalinks associated with this task.
     pub memory_refs: String,
+    /// Number of unresolved blocker tasks (blocking tasks not yet closed).
+    /// Populated by list queries via subquery; defaults to 0 elsewhere.
+    #[sqlx(default)]
+    pub unresolved_blocker_count: i64,
 }
 
 /// A single entry in the task activity log (audit trail + comments).
