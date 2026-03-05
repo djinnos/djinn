@@ -3666,7 +3666,7 @@ impl AgentSupervisor {
 
         match agent_type {
             AgentType::Worker | AgentType::ConflictResolver => Some(
-                "Emit exactly one final marker now: WORKER_RESULT: DONE | PROGRESS: <what remains> | BLOCKED: <specific blocker>.",
+                "Emit exactly one final marker now: WORKER_RESULT: DONE | PROGRESS: <what remains>.",
             ),
             AgentType::TaskReviewer => Some(
                 "Emit exactly one final marker now: REVIEW_RESULT: VERIFIED | REOPEN | CANCEL. If REOPEN or CANCEL, also emit FEEDBACK: <what is missing>.",
