@@ -24,7 +24,7 @@ use crate::db::connection::Database;
 use crate::db::repositories::git_settings::GitSettingsRepository;
 use crate::db::repositories::task::{ReadyQuery, TaskRepository};
 use crate::events::DjinnEvent;
-use crate::models::task::{TaskStatus, TransitionAction};
+use crate::models::task::TransitionAction;
 use crate::provider::catalog::CatalogService;
 use crate::provider::health::HealthTracker;
 
@@ -701,33 +701,6 @@ impl CoordinatorActor {
                             error = %e,
                             "CoordinatorActor: dispatch failed"
                         );
-                        // If the paused session worktree is gone, the task is stuck and
-                        // will never dispatch successfully. Auto-recover it to open so the
-                        // next dispatch cycle picks it up fresh.
-                        if e.to_string().contains("paused session worktree no longer exists") {
-                            let repo = self.task_repo();
-                            match repo
-                                .transition(
-                                    &task.id,
-                                    TransitionAction::UserOverride,
-                                    "system",
-                                    "coordinator",
-                                    None,
-                                    Some(TaskStatus::Open),
-                                )
-                                .await
-                            {
-                                Ok(_) => tracing::info!(
-                                    task_id = %task.short_id,
-                                    "CoordinatorActor: auto-recovered task to open after missing worktree"
-                                ),
-                                Err(re) => tracing::warn!(
-                                    task_id = %task.short_id,
-                                    error = %re,
-                                    "CoordinatorActor: failed to auto-recover task after missing worktree"
-                                ),
-                            }
-                        }
                         break;
                     }
                 }

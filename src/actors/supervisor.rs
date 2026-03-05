@@ -196,6 +196,8 @@ pub enum SupervisorError {
         active: u32,
         max: u32,
     },
+    #[error("paused session stale for task {task_id} (worktree missing)")]
+    PausedSessionStale { task_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -1222,7 +1224,12 @@ impl AgentSupervisor {
         // Check for a paused session — resume it instead of starting fresh.
         if let Some(paused) = self.find_paused_session_record(&task_id).await {
             let context = self.resume_context_for_task(&task_id).await;
-            return self.resume_paused_session(task_id, project_path, model_id, paused, context).await;
+            match self.resume_paused_session(task_id.clone(), project_path.clone(), model_id.clone(), paused, context).await {
+                Err(SupervisorError::PausedSessionStale { .. }) => {
+                    // Stale paused session was finalized; fall through to fresh dispatch below.
+                }
+                other => return other,
+            }
         }
 
         if model_id == "test/mock" {
@@ -1949,10 +1956,21 @@ impl AgentSupervisor {
 
         // Verify worktree still exists.
         if !worktree_path.exists() || !worktree_path.is_dir() {
-            return Err(SupervisorError::Goose(format!(
-                "paused session worktree no longer exists: {}",
-                worktree_path.display()
-            )));
+            // Finalize the stale paused session so it won't be picked up again.
+            let session_repo = SessionRepository::new(
+                self.app_state.db().clone(),
+                self.app_state.events().clone(),
+            );
+            let _ = session_repo
+                .update(&paused.id, SessionStatus::Interrupted, paused.tokens_in, paused.tokens_out)
+                .await;
+            tracing::warn!(
+                task_id = %task_id,
+                session_id = %paused.id,
+                worktree = %worktree_path.display(),
+                "Supervisor: paused session worktree missing; finalized session as interrupted"
+            );
+            return Err(SupervisorError::PausedSessionStale { task_id: task_id.to_string() });
         }
 
         let max_for_model = self.max_for_model(&model_id);
