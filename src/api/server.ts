@@ -127,8 +127,6 @@ export interface Project {
   id: string;
   name: string;
   path: string;
-  branch?: string;
-  auto_merge?: boolean;
   created_at?: string;
   updated_at?: string;
 }
@@ -139,26 +137,7 @@ export async function fetchProjects(): Promise<Project[]> {
     id: project.id,
     name: project.name,
     path: project.path,
-    branch: project.branch,
-    auto_merge: project.auto_merge,
   }));
-}
-
-
-
-export async function updateProject(projectId: string, updates: { branch?: string; auto_merge?: boolean }): Promise<void> {
-  const projects = await callMcpTool("project_list");
-  const project = projects.projects.find((entry) => entry.id === projectId);
-  if (!project) {
-    throw new Error("Project not found");
-  }
-
-  await callMcpTool("project_add", {
-    name: project.name,
-    path: project.path,
-    branch: updates.branch ?? project.branch,
-    auto_merge: updates.auto_merge ?? project.auto_merge,
-  });
 }
 
 export async function addProject(path: string): Promise<Project> {
@@ -306,7 +285,7 @@ export function mapTaskFromMcp(task: TaskListMcpResponse["tasks"][number]): Task
     description: task.description,
     design: task.design ?? "",
     acceptanceCriteria: (task.acceptance_criteria ?? []).map((criterion) =>
-      typeof criterion === "string" ? criterion : criterion.criterion
+      typeof criterion === "string" ? { criterion, met: false } : { criterion: criterion.criterion, met: Boolean(criterion.met) }
     ),
     activity: [],
     status: mapTaskStatus(task.status),
@@ -321,6 +300,7 @@ export function mapTaskFromMcp(task: TaskListMcpResponse["tasks"][number]): Task
     sessionCount: typeof task.session_count === "number" ? task.session_count : undefined,
     trackedSeconds: typeof task.duration_seconds === "number" ? task.duration_seconds : undefined,
     activeSessionStartedAt: task.active_session?.started_at ?? null,
+    reopenCount: typeof task.reopen_count === "number" ? task.reopen_count : undefined,
   };
 }
 

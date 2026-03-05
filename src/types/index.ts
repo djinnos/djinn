@@ -7,13 +7,18 @@
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'blocked';
 export type TaskPriority = 'P0' | 'P1' | 'P2' | 'P3';
 
+export interface AcceptanceCriterion {
+  criterion: string;
+  met: boolean;
+}
+
 export interface Task {
   id: string;
   shortId?: string;
   title: string;
   description: string;
   design: string;
-  acceptanceCriteria: string[];
+  acceptanceCriteria: AcceptanceCriterion[];
   activity: string[];
   status: TaskStatus;
   reviewPhase?: 'needs_task_review' | 'in_task_review';
@@ -27,6 +32,7 @@ export interface Task {
   sessionCount?: number;
   trackedSeconds?: number;
   activeSessionStartedAt?: string | null;
+  reopenCount?: number;
 }
 
 export type EpicStatus = 'active' | 'completed' | 'archived';
@@ -45,6 +51,7 @@ export interface Epic {
   sessionCount?: number;
   trackedSeconds?: number;
   activeSessionStartedAt?: string | null;
+  reopenCount?: number;
 }
 
 // SSE Event payloads

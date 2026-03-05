@@ -1,16 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { NavLink, Navigate, useParams } from 'react-router-dom';
-import { fetchProjects, addProject, removeProject, updateProject, type Project } from '@/api/server';
 import { Input } from '@/components/ui/input';
 import { InlineError } from '@/components/InlineError';
 import { EmptyState } from '@/components/EmptyState';
 import { AgentConfig } from '@/components/AgentConfig';
 import { useProviders } from '@/hooks/settings/useProviders';
+import { useProjects } from '@/hooks/settings/useProjects';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
-import { selectDirectory } from '@/tauri/commands';
-import { toast } from 'sonner';
 
 type SettingsCategory = 'providers' | 'projects' | 'general' | 'agents';
 
@@ -160,73 +158,7 @@ function ProvidersSettings() {
 }
 
 function ProjectsSettings() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [busyProjectId, setBusyProjectId] = useState<string | null>(null);
-  const [isAdding, setIsAdding] = useState(false);
-  const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null);
-  const [projectDrafts, setProjectDrafts] = useState<Record<string, { branch: string; auto_merge: boolean }>>({});
-  const saveTimerRef = useRef<number | null>(null);
-
-  const loadProjects = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await fetchProjects();
-      setProjects(result);
-      setProjectDrafts(Object.fromEntries(result.map((project) => [project.id, { branch: project.branch ?? '', auto_merge: project.auto_merge ?? false }])));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load projects');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void loadProjects();
-    return () => {
-      if (saveTimerRef.current) {
-        window.clearTimeout(saveTimerRef.current);
-      }
-    };
-  }, []);
-
-  const handleAddProject = async () => {
-    setIsAdding(true);
-    setError(null);
-    try {
-      const path = await selectDirectory('Select Project Directory');
-      if (!path) return;
-      await addProject(path);
-      await loadProjects();
-      toast.success('Project added');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to add project';
-      setError(message);
-      toast.error('Could not add project', { description: message });
-    } finally {
-      setIsAdding(false);
-    }
-  };
-
-  const handleRemoveProject = async (project: Project) => {
-    if (!confirm(`Remove project "${project.name}"?`)) return;
-
-    setBusyProjectId(project.id);
-    setError(null);
-    try {
-      await removeProject(project.id);
-      await loadProjects();
-      toast.success('Project removed');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to remove project';
-      setError(message);
-      toast.error('Could not remove project', { description: message });
-    } finally {
-      setBusyProjectId(null);
-    }
-  };
+  const { projects, loading, error, busyProjectId, isAdding, loadProjects, handleAddProject, handleRemoveProject } = useProjects();
 
   if (loading) {
     return <div className="rounded-lg border border-border bg-card p-6">Loading projects...</div>;
@@ -251,96 +183,35 @@ function ProjectsSettings() {
           No projects registered yet.
         </div>
       ) : (
-        <>
-          <div className="space-y-2">
-            {projects.map((project) => {
-              const draft = projectDrafts[project.id] ?? { branch: '', auto_merge: false };
-              const expanded = expandedProjectId === project.id;
-              const triggerSave = (next: { branch: string; auto_merge: boolean }) => {
-                setProjectDrafts((prev) => ({ ...prev, [project.id]: next }));
-                if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-                saveTimerRef.current = window.setTimeout(() => {
-                  void updateProject(project.id, next).then(() => toast.success('Saved')).catch((err: unknown) => {
-                    const message = err instanceof Error ? err.message : 'Failed to save project';
-                    toast.error('Could not save project', { description: message });
-                  });
-                }, 500);
-              };
-
-              return (
-                <div key={project.id} className="rounded-lg border border-border bg-card p-4 space-y-3">
-                  <div className="flex items-center justify-between gap-4">
-                    <button className="min-w-0 text-left" onClick={() => setExpandedProjectId(expanded ? null : project.id)}>
-                      <div className="flex items-center gap-2">
-                        <p className="font-medium">{project.name}</p>
-                      </div>
-                      <p className="truncate text-xs text-muted-foreground">{project.path}</p>
-                    </button>
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => void handleRemoveProject(project)}
-                      disabled={busyProjectId === project.id}
-                    >
-                      {busyProjectId === project.id ? 'Removing...' : 'Remove'}
-                    </Button>
-                  </div>
-                  {expanded && (
-                    <div className="grid gap-3 pt-2 border-t border-border">
-                      <div className="space-y-1">
-                        <p className="text-sm font-medium">Target branch</p>
-                        <Input
-                          value={draft.branch}
-                          onChange={(e) => triggerSave({ ...draft, branch: e.target.value })}
-                          placeholder="main"
-                        />
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <p className="text-sm font-medium">Auto-merge</p>
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4"
-                          checked={draft.auto_merge}
-                          onChange={(e) => triggerSave({ ...draft, auto_merge: e.target.checked })}
-                        />
-                      </div>
-                    </div>
+        <div className="space-y-2">
+          {projects.map((project, index) => (
+            <div key={project.id} className="flex items-center justify-between rounded-lg border border-border bg-card p-4 gap-4">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="font-medium">{project.name}</p>
+                  {index === 0 && (
+                    <span className="rounded bg-secondary px-2 py-0.5 text-xs text-secondary-foreground">Default</span>
                   )}
                 </div>
-              );
-            })}
-          </div>
-        </>
+                <p className="truncate text-xs text-muted-foreground">{project.path}</p>
+              </div>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => void handleRemoveProject(project)}
+                disabled={busyProjectId === project.id}
+              >
+                {busyProjectId === project.id ? 'Removing...' : 'Remove'}
+              </Button>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
 }
 
 function GeneralSettings({ onResetWizard }: { onResetWizard: () => void }) {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [defaultProjectId, setDefaultProjectId] = useState<string>('');
-  const defaultSaveTimerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    void fetchProjects().then((result) => {
-      setProjects(result);
-      const savedDefault = localStorage.getItem('djinnos-default-project-id');
-      const fallback = result[0]?.id ?? '';
-      setDefaultProjectId(savedDefault && result.some((project) => project.id === savedDefault) ? savedDefault : fallback);
-    });
-    return () => {
-      if (defaultSaveTimerRef.current) window.clearTimeout(defaultSaveTimerRef.current);
-    };
-  }, []);
-
-  const saveDefaultProject = (projectId: string) => {
-    if (defaultSaveTimerRef.current) window.clearTimeout(defaultSaveTimerRef.current);
-    defaultSaveTimerRef.current = window.setTimeout(() => {
-      localStorage.setItem('djinnos-default-project-id', projectId);
-      toast.success('Saved');
-    }, 500);
-  };
-
   return (
     <div className="space-y-6">
       <div className="rounded-lg border border-border bg-card p-6">
@@ -352,22 +223,6 @@ function GeneralSettings({ onResetWizard }: { onResetWizard: () => void }) {
               <p className="text-sm text-muted-foreground">Dark mode is enabled by default</p>
             </div>
             <span className="rounded bg-secondary px-2 py-1 text-xs">Dark</span>
-          </div>
-          <div className="space-y-2">
-            <p className="font-medium">Default project</p>
-            <select
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              value={defaultProjectId}
-              onChange={(e) => {
-                const nextDefaultProjectId = e.target.value;
-                setDefaultProjectId(nextDefaultProjectId);
-                saveDefaultProject(nextDefaultProjectId);
-              }}
-            >
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>{project.name}</option>
-              ))}
-            </select>
           </div>
         </div>
       </div>
