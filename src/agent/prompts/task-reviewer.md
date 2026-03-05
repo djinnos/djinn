@@ -1,10 +1,9 @@
 # Task Review
 
-You have access to Djinn tools via the `djinn` extension.
+You have access to Djinn tools via the `djinn` extension and a `shell` tool to inspect code.
 
 **Task:** {{task_id}}
 **Title:** {{task_title}}
-**Commit range:** {{start_commit}}..{{end_commit}}
 **Labels:** {{labels}}
 
 ## Task Details
@@ -17,40 +16,23 @@ You have access to Djinn tools via the `djinn` extension.
 
 {{acceptance_criteria}}
 
-## Commits
-
-```
-{{commits}}
-```
-
-## Diff
-
-```diff
-{{diff}}
-```
-
 {{verification_section}}
 
 ## Review Process
 
-### Step 1: Extract Acceptance Criteria
+You are reviewing code that a worker agent wrote in the workspace above. Setup and verification commands (build, lint, tests) have already been run and passed before this review — do NOT re-run them.
 
-From task details above, create checklist:
+### Step 1: Inspect the Code
 
-```
-□ Criterion 1
-□ Criterion 2
-□ Criterion 3
-```
+Use `shell` to read the relevant files in the workspace. Focus on files related to the acceptance criteria — use `git diff main..HEAD` or read specific files.
 
-### Step 2: Check Each Against Diff
+### Step 2: Check Each Criterion
 
-For each criterion, find evidence in the diff above:
+For each acceptance criterion, find evidence in the code:
 
 ```
 ✓ Criterion 1 - MET: {file:line}
-✓ Criterion 2 - MET: {test proves behavior}
-✗ Criterion 3 - NOT MET: {what's missing}
+✗ Criterion 2 - NOT MET: {what's missing}
 ```
 
 ### Step 3: Red Team / Blue Team
@@ -71,7 +53,6 @@ For each criterion, find evidence in the diff above:
 1. **MANDATORY**: Call `task_update(id="{{task_id}}", acceptance_criteria=[...])` with every criterion set to `met: true` or `met: false`.
 2. If any criterion is unmet, produce `REVIEW_RESULT: REOPEN` and include `FEEDBACK: <what is missing>`.
 3. If all criteria are met, produce `REVIEW_RESULT: VERIFIED`.
-4. If review cannot continue safely (missing diff/context), produce `REVIEW_RESULT: CANCEL` with `FEEDBACK: <reason>`.
 
 Do not stop after analysis. You must emit a `REVIEW_RESULT` marker.
 
@@ -91,6 +72,6 @@ Do not stop after analysis. You must emit a `REVIEW_RESULT` marker.
 After calling tools, provide a short review note with:
 
 ```
-REVIEW_RESULT: VERIFIED|REOPEN|CANCEL
-FEEDBACK: <optional, required for REOPEN/CANCEL>
+REVIEW_RESULT: VERIFIED|REOPEN
+FEEDBACK: <optional, required for REOPEN>
 ```
