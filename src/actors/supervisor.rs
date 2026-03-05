@@ -2758,6 +2758,40 @@ impl AgentSupervisor {
         }
     }
 
+    /// Interrupt the paused worker session after a reviewer rejection, without
+    /// cleaning up the worktree. The next dispatch will create a fresh Goose
+    /// session that reads the existing worktree state cold — no poisoned history.
+    async fn interrupt_paused_worker_session(&self, task_id: &str) {
+        let repo =
+            SessionRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let Ok(Some(paused)) = repo.paused_for_task(task_id).await else {
+            return;
+        };
+        if let Err(e) = repo
+            .update(
+                &paused.id,
+                SessionStatus::Interrupted,
+                paused.tokens_in,
+                paused.tokens_out,
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task_id,
+                record_id = %paused.id,
+                error = %e,
+                "failed to interrupt paused worker session after reviewer rejection"
+            );
+        } else {
+            tracing::info!(
+                task_id = %task_id,
+                record_id = %paused.id,
+                goose_session_id = paused.goose_session_id.as_deref().unwrap_or("<none>"),
+                "Supervisor: interrupted paused worker session after reviewer rejection — next dispatch will be fresh"
+            );
+        }
+    }
+
     async fn update_session_record_paused(
         &self,
         record_id: Option<&str>,
@@ -3187,6 +3221,10 @@ impl AgentSupervisor {
                 tokens_out,
                 "Supervisor: applying session transition"
             );
+            let is_reviewer_rejection = matches!(
+                action,
+                TransitionAction::TaskReviewReject | TransitionAction::TaskReviewRejectConflict
+            );
             if let Err(e) = repo
                 .transition(
                     task_id,
@@ -3199,6 +3237,15 @@ impl AgentSupervisor {
                 .await
             {
                 tracing::warn!(task_id = %task_id, error = %e, "failed to transition task after session");
+            }
+
+            // After a reviewer rejection, interrupt any paused worker session so the
+            // next dispatch starts a fresh Goose session. Without this, the resumed
+            // worker sees its own "I already completed this" conversation history and
+            // outputs DONE immediately without doing real work → infinite reject loop.
+            // The worktree is preserved so the fresh worker can inspect existing state.
+            if is_reviewer_rejection {
+                self.interrupt_paused_worker_session(task_id).await;
             }
         } else {
             tracing::info!(
