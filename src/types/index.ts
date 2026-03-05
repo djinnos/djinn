@@ -11,6 +11,9 @@ export interface Task {
   id: string;
   title: string;
   description: string;
+  design: string;
+  acceptanceCriteria: string[];
+  activity: string[];
   status: TaskStatus;
   priority: TaskPriority;
   epicId: string | null;

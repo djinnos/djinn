@@ -4,6 +4,7 @@ type TaskCardProps = {
   task: Task;
   epic?: Epic;
   moving?: boolean;
+  onClick?: () => void;
 };
 
 const PRIORITY_STYLES: Record<Task["priority"], string> = {
@@ -37,10 +38,11 @@ function ownerInitials(owner: string | null): string {
   return parts.map((p) => p[0]?.toUpperCase() ?? "").join("");
 }
 
-export function TaskCard({ task, epic, moving = false }: TaskCardProps) {
+export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps) {
   return (
     <article
-      className={`rounded border bg-card p-2 text-sm transition-all duration-200 ease-in-out hover:-translate-y-px hover:shadow-sm ${moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"}`}
+      className={`rounded border bg-card p-2 text-sm transition-all duration-200 ease-in-out hover:-translate-y-px hover:shadow-sm ${moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"} ${onClick ? "cursor-pointer" : ""}`}
+      onClick={onClick}
     >
       <div className="mb-2 flex items-start justify-between gap-2">
         <h4 className="truncate font-medium" title={task.title}>

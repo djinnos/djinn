@@ -271,6 +271,11 @@ function mapTaskFromMcp(task: TaskListMcpResponse["tasks"][number]): Task {
     id: task.id,
     title: task.title,
     description: task.description,
+    design: task.design ?? "",
+    acceptanceCriteria: (task.acceptance_criteria ?? []).map((criterion) =>
+      typeof criterion === "string" ? criterion : criterion.criterion
+    ),
+    activity: [],
     status: mapTaskStatus(task.status),
     priority: mapPriority(task.priority),
     epicId: task.epic_id ?? null,

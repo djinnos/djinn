@@ -5,6 +5,7 @@ import { useEpicStore } from "@/stores/useEpicStore";
 import { taskStore } from "@/stores/taskStore";
 import type { Epic, Task, TaskPriority, TaskStatus } from "@/types";
 import { TaskCard } from "@/components/TaskCard";
+import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 
 const STATUS_COLUMNS: Array<{ key: TaskStatus; label: string }> = [
   { key: "pending", label: "Open" },
@@ -86,6 +87,7 @@ export function KanbanBoard() {
   );
   const [searchInput, setSearchInput] = useState<string>(searchParams.get("q") ?? "");
   const [textFilter, setTextFilter] = useState<string>(searchParams.get("q") ?? "");
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
   useEffect(() => {
     const timeout = setTimeout(() => setTextFilter(searchInput), 250);
@@ -263,6 +265,7 @@ export function KanbanBoard() {
                                   task={task}
                                   epic={task.epicId ? epics.get(task.epicId) : undefined}
                                   moving={!!movingTaskIds[task.id]}
+                                  onClick={() => setSelectedTask(task)}
                                 />
                               </li>
                             ))}
@@ -277,6 +280,13 @@ export function KanbanBoard() {
           );
         })}
       </div>
+
+      <TaskDetailPanel
+        open={!!selectedTask}
+        task={selectedTask}
+        epic={selectedTask?.epicId ? epics.get(selectedTask.epicId) : undefined}
+        onClose={() => setSelectedTask(null)}
+      />
     </div>
   );
 }
