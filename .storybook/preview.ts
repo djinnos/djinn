@@ -1,4 +1,4 @@
-import type { Preview } from "@storybook/react"
+import type { Preview } from "@storybook/react-vite"
 
 import "../src/index.css"
 
@@ -7,12 +7,17 @@ document.documentElement.classList.add("dark")
 const preview: Preview = {
   parameters: {
     backgrounds: {
-      default: "app-dark",
-      values: [
-        { name: "app-dark", value: "#09090b" },
-      ],
+      options: {
+        "app-dark": { name: "app-dark", value: "#09090b" }
+      }
     },
   },
+
+  initialGlobals: {
+    backgrounds: {
+      value: "app-dark"
+    }
+  }
 }
 
 export default preview
