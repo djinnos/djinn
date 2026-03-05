@@ -20,6 +20,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Kanban, LayoutDashboard, Settings } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { AuthGate } from "@/components/AuthGate";
 
 type Route = "kanban" | "roadmap" | "settings";
 
@@ -171,17 +172,14 @@ export default function App() {
     );
   }
 
-  return (
-    <main className="flex min-h-screen bg-background text-foreground">
-      {sidebarOpen && (
-        <aside className="w-64 border-r p-4">
-          <h2 className="mb-4 text-sm font-semibold uppercase text-muted-foreground">Sidebar</h2>
-          <div className="space-y-2 text-sm">
-            <p>Use Cmd+/ to toggle this panel.</p>
-          </div>
-        </aside>
-      )}
+  const sidebar = sidebarOpen ? (
+    <div className="space-y-2 text-sm">
+      <p>Use Cmd+/ to toggle this panel.</p>
+    </div>
+  ) : null;
 
+  return (
+    <AuthGate sidebarContent={sidebar}>
       <div className="flex min-h-screen flex-1 flex-col">
         <header className="flex items-center justify-between border-b px-4 py-2">
           <div className="flex items-center gap-2">
@@ -225,6 +223,6 @@ export default function App() {
           </CommandGroup>
         </CommandList>
       </CommandDialog>
-    </main>
+    </AuthGate>
   );
 }
