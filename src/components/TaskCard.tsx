@@ -2,7 +2,6 @@ import type { Epic, Task } from "@/types";
 import { TaskIdLabel } from "@/components/TaskIdLabel";
 import {
   CheckmarkCircle03Icon,
-  Clock01Icon,
   FullSignalIcon,
   Loading03Icon,
   LowSignalIcon,
@@ -116,8 +115,15 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
       className={`cursor-pointer rounded border bg-card p-2 text-sm transition-all duration-200 ease-in-out hover:bg-muted/30 ${moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"}`}
       onClick={onClick}
     >
-      <div className="mb-1">
+      <div className="mb-1 flex items-center justify-between gap-2">
         <TaskIdLabel taskId={task.id} shortId={task.shortId} />
+        <div
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border bg-background text-[10px] font-semibold uppercase"
+          title={task.owner ?? "Unassigned"}
+          aria-label={`Owner: ${task.owner ?? "Unassigned"}`}
+        >
+          {ownerInitials(task.owner)}
+        </div>
       </div>
 
       <div className="mb-2 flex items-start gap-2">
@@ -169,32 +175,22 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
         </h4>
       </div>
 
-      {shouldShowDuration ? (
-        <div className="mb-2 flex items-center gap-1 text-xs text-muted-foreground" title="Time spent">
-          <HugeiconsIcon icon={Clock01Icon} size={12} className="shrink-0" aria-hidden="true" />
-          <span>{formatCompactDuration(totalTrackedSeconds)}</span>
-        </div>
-      ) : null}
-
-      <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <PriorityBadge priority={task.priority} />
           <HugeiconsIcon icon={Task01Icon} size={16} className="shrink-0" aria-label="Task" title="Task" />
         </div>
-
-        <div
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border bg-background text-[10px] font-semibold uppercase"
-          title={task.owner ?? "Unassigned"}
-          aria-label={`Owner: ${task.owner ?? "Unassigned"}`}
-        >
-          {ownerInitials(task.owner)}
-        </div>
+        {task.sessionModelId || shouldShowDuration ? (
+          <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+            {task.sessionModelId ? (
+              <span className="max-w-[100px] truncate" title={task.sessionModelId}>{task.sessionModelId}</span>
+            ) : null}
+            {shouldShowDuration ? (
+              <span>{formatCompactDuration(totalTrackedSeconds)}</span>
+            ) : null}
+          </div>
+        ) : null}
       </div>
-      {task.sessionModelId ? (
-        <div className="mt-1 text-[10px] text-muted-foreground" title={task.sessionModelId}>
-          <span className="block truncate">{task.sessionModelId}</span>
-        </div>
-      ) : null}
     </article>
   );
 }
