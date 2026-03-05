@@ -405,11 +405,11 @@ impl CoordinatorActor {
     }
 
     async fn handle_event(&mut self, evt: DjinnEvent) {
-        if self.paused {
-            return;
-        }
         match &evt {
             // A task became dispatch-ready for any role → check dispatch.
+            // is_project_dispatch_enabled() handles global-pause + per-project
+            // resume, so we don't bail early here — a project-resumed project
+            // must still react to events even when globally paused.
             DjinnEvent::TaskCreated(t) | DjinnEvent::TaskUpdated(t)
                 if matches!(t.status.as_str(), "open" | "needs_task_review" | "closed") =>
             {
