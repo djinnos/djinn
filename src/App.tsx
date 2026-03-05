@@ -13,14 +13,14 @@ import { KanbanPage } from "@/pages/KanbanPage";
 import { RoadmapPage } from "@/pages/RoadmapPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { useWizardStore } from "@/stores/wizardStore";
-import { useSidebarStore } from "@/stores/sidebarStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
 import { ProjectSelector } from "@/components/ProjectSelector";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
 import { useSelectedProjectId } from "@/stores/useProjectStore";
 import { Button } from "@/components/ui/button";
-import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { useSidebar } from "@/hooks/useSidebar";
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 
 function WelcomeStep() {
   return (
@@ -64,18 +64,7 @@ function DoneState() {
 }
 
 function MainLayout() {
-  const { setActiveSection } = useSidebarStore();
-  const location = useLocation();
-
-  useEffect(() => {
-    if (location.pathname.startsWith('/roadmap')) {
-      setActiveSection('roadmap');
-    } else if (location.pathname.startsWith('/settings')) {
-      setActiveSection('settings');
-    } else {
-      setActiveSection('kanban');
-    }
-  }, [location.pathname, setActiveSection]);
+  const sidebar = useSidebar();
 
   return (
     <main className="flex min-h-screen flex-col bg-background">
@@ -87,7 +76,7 @@ function MainLayout() {
       </header>
 
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
+        <Sidebar {...sidebar} />
         <div className="flex-1 overflow-auto">
           <Routes>
             <Route path="/" element={<KanbanPage />} />
