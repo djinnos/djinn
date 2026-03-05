@@ -1,11 +1,11 @@
 // MCP tools for simplified execution control (ADR-009).
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::db::repositories::task::TaskRepository;
 use crate::mcp::server::DjinnMcpServer;
-use crate::mcp::tools::{ObjectJson, json_object};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ExecutionStartParams {
@@ -51,8 +51,115 @@ pub struct SessionForTaskParams {
     pub project: String,
 }
 
-fn json_error(message: impl Into<String>) -> Json<ObjectJson> {
-    json_object(serde_json::json!({ "ok": false, "error": message.into() }))
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ExecutionStartResponse {
+    pub ok: bool,
+    pub state: Option<String>,
+    pub resumed: Option<bool>,
+    pub scope: Option<String>,
+    pub project_id: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ExecutionPauseResponse {
+    pub ok: bool,
+    pub state: Option<String>,
+    pub mode: Option<String>,
+    pub scope: Option<String>,
+    pub project_id: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ExecutionResumeResponse {
+    pub ok: bool,
+    pub state: Option<String>,
+    pub scope: Option<String>,
+    pub project_id: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ExecutionStatusCapacity {
+    pub active: u32,
+    pub max: u32,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ExecutionStatusSession {
+    pub task_id: String,
+    pub model_id: String,
+    pub session_id: String,
+    pub duration_seconds: u64,
+    pub worktree_path: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ExecutionStatusMetrics {
+    pub tasks_dispatched: u64,
+    pub sessions_recovered: u64,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ExecutionStatusResponse {
+    pub ok: bool,
+    pub state: Option<String>,
+    pub scope: Option<String>,
+    pub project_id: Option<String>,
+    pub running_sessions: Option<usize>,
+    pub max_sessions: Option<u32>,
+    pub capacity: Option<HashMap<String, ExecutionStatusCapacity>>,
+    pub sessions: Option<Vec<ExecutionStatusSession>>,
+    pub metrics: Option<ExecutionStatusMetrics>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ExecutionKillTaskResponse {
+    pub ok: bool,
+    pub task_id: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct SessionForTaskSession {
+    pub model_id: String,
+    pub session_id: String,
+    pub duration_seconds: u64,
+    pub worktree_path: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum SessionForTaskPayload {
+    Running(SessionForTaskRunningPayload),
+    Idle(SessionForTaskIdlePayload),
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct SessionForTaskRunningPayload {
+    pub task_id: String,
+    pub model_id: String,
+    pub session_id: String,
+    pub duration_seconds: u64,
+    pub worktree_path: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct SessionForTaskIdlePayload {
+    pub task_id: String,
+    pub session: Option<SessionForTaskSession>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct SessionForTaskResponse {
+    pub ok: bool,
+    #[serde(flatten)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub payload: Option<SessionForTaskPayload>,
+    pub error: Option<String>,
 }
 
 #[tool_router(router = execution_tool_router, vis = "pub")]
@@ -60,12 +167,12 @@ impl DjinnMcpServer {
     async fn resolve_optional_project_id(
         &self,
         project: &Option<String>,
-    ) -> Result<Option<String>, Json<ObjectJson>> {
+    ) -> Result<Option<String>, String> {
         if let Some(path) = project {
             if let Some(project_id) = self.project_id_for_path(path).await {
                 return Ok(Some(project_id));
             }
-            return Err(json_error(format!("project not found: {path}")));
+            return Err(format!("project not found: {path}"));
         }
         Ok(None)
     }
@@ -75,13 +182,29 @@ impl DjinnMcpServer {
     pub async fn execution_start(
         &self,
         Parameters(p): Parameters<ExecutionStartParams>,
-    ) -> Json<ObjectJson> {
+    ) -> Json<ExecutionStartResponse> {
         let project_id = match self.resolve_optional_project_id(&p.project).await {
             Ok(id) => id,
-            Err(e) => return e,
+            Err(error) => {
+                return Json(ExecutionStartResponse {
+                    ok: false,
+                    state: None,
+                    resumed: None,
+                    scope: None,
+                    project_id: None,
+                    error: Some(error),
+                });
+            }
         };
         let Some(coordinator) = self.state.coordinator().await else {
-            return json_error("coordinator actor not initialized");
+            return Json(ExecutionStartResponse {
+                ok: false,
+                state: None,
+                resumed: None,
+                scope: None,
+                project_id: project_id.clone(),
+                error: Some("coordinator actor not initialized".to_string()),
+            });
         };
 
         // Trigger background health validation before dispatching (ADR-014).
@@ -92,33 +215,34 @@ impl DjinnMcpServer {
             tracing::warn!(error = %e, "execution_start: failed to trigger project health validation");
         }
 
-        let status_result = match project_id.as_deref() {
-            Some(id) => coordinator.get_project_status(id),
-            None => coordinator.get_status(),
-        };
-        let status = match status_result {
-            Ok(status) => status,
-            Err(e) => return json_error(e.to_string()),
-        };
-
-        let result = match project_id.as_deref() {
-            Some(id) if status.paused => coordinator.resume_project(id).await,
-            Some(id) => coordinator.trigger_dispatch_for_project(id).await,
-            None if status.paused => coordinator.resume().await,
-            None => coordinator.trigger_dispatch().await,
+        let (resumed, result) = match project_id.as_deref() {
+            Some(id) => {
+                let paused = coordinator.get_project_status(id).map(|s| s.paused).unwrap_or(false);
+                let r = if paused { coordinator.resume_project(id).await } else { coordinator.trigger_dispatch_for_project(id).await };
+                (paused, r)
+            }
+            None => (false, coordinator.resume().await),
         };
 
         if let Err(e) = result {
-            return json_error(e.to_string());
+            return Json(ExecutionStartResponse {
+                ok: false,
+                state: None,
+                resumed: None,
+                scope: None,
+                project_id: project_id.clone(),
+                error: Some(e.to_string()),
+            });
         }
 
-        json_object(serde_json::json!({
-            "ok": true,
-            "state": "active",
-            "resumed": status.paused,
-            "scope": if project_id.is_some() { "project" } else { "global" },
-            "project_id": project_id,
-        }))
+        Json(ExecutionStartResponse {
+            ok: true,
+            state: Some("active".to_string()),
+            resumed: Some(resumed),
+            scope: Some(if project_id.is_some() { "project" } else { "global" }.to_string()),
+            project_id,
+            error: None,
+        })
     }
 
     /// Pause active project execution phases.
@@ -128,13 +252,29 @@ impl DjinnMcpServer {
     pub async fn execution_pause(
         &self,
         Parameters(p): Parameters<ExecutionPauseParams>,
-    ) -> Json<ObjectJson> {
+    ) -> Json<ExecutionPauseResponse> {
         let project_id = match self.resolve_optional_project_id(&p.project).await {
             Ok(id) => id,
-            Err(e) => return e,
+            Err(error) => {
+                return Json(ExecutionPauseResponse {
+                    ok: false,
+                    state: None,
+                    mode: None,
+                    scope: None,
+                    project_id: None,
+                    error: Some(error),
+                });
+            }
         };
         let Some(coordinator) = self.state.coordinator().await else {
-            return json_error("coordinator actor not initialized");
+            return Json(ExecutionPauseResponse {
+                ok: false,
+                state: None,
+                mode: None,
+                scope: None,
+                project_id: project_id.clone(),
+                error: Some("coordinator actor not initialized".to_string()),
+            });
         };
 
         let mode = p.mode.as_deref().unwrap_or("graceful");
@@ -156,23 +296,45 @@ impl DjinnMcpServer {
                 coordinator.pause_immediate(reason).await
             }
             _ => {
-                return json_error(format!(
-                    "invalid pause mode '{mode}', expected 'graceful' or 'immediate'"
-                ));
+                return Json(ExecutionPauseResponse {
+                    ok: false,
+                    state: None,
+                    mode: Some(mode.to_string()),
+                    scope: None,
+                    project_id: project_id.clone(),
+                    error: Some(format!(
+                        "invalid pause mode '{mode}', expected 'graceful' or 'immediate'"
+                    )),
+                });
             }
         };
 
         if let Err(e) = pause_result {
-            return json_error(e.to_string());
+            return Json(ExecutionPauseResponse {
+                ok: false,
+                state: None,
+                mode: Some(mode.to_string()),
+                scope: None,
+                project_id: project_id.clone(),
+                error: Some(e.to_string()),
+            });
         }
 
-        json_object(serde_json::json!({
-            "ok": true,
-            "state": "paused",
-            "mode": mode,
-            "scope": if project_id.is_some() { "project" } else { "global" },
-            "project_id": project_id,
-        }))
+        Json(ExecutionPauseResponse {
+            ok: true,
+            state: Some("paused".to_string()),
+            mode: Some(mode.to_string()),
+            scope: Some(
+                if project_id.is_some() {
+                    "project"
+                } else {
+                    "global"
+                }
+                .to_string(),
+            ),
+            project_id,
+            error: None,
+        })
     }
 
     /// Resume the task executor.
@@ -180,13 +342,27 @@ impl DjinnMcpServer {
     pub async fn execution_resume(
         &self,
         Parameters(p): Parameters<ExecutionResumeParams>,
-    ) -> Json<ObjectJson> {
+    ) -> Json<ExecutionResumeResponse> {
         let project_id = match self.resolve_optional_project_id(&p.project).await {
             Ok(id) => id,
-            Err(e) => return e,
+            Err(error) => {
+                return Json(ExecutionResumeResponse {
+                    ok: false,
+                    state: None,
+                    scope: None,
+                    project_id: None,
+                    error: Some(error),
+                });
+            }
         };
         let Some(coordinator) = self.state.coordinator().await else {
-            return json_error("coordinator actor not initialized");
+            return Json(ExecutionResumeResponse {
+                ok: false,
+                state: None,
+                scope: None,
+                project_id: project_id.clone(),
+                error: Some("coordinator actor not initialized".to_string()),
+            });
         };
 
         let result = match project_id.as_deref() {
@@ -194,15 +370,29 @@ impl DjinnMcpServer {
             None => coordinator.resume().await,
         };
         if let Err(e) = result {
-            return json_error(e.to_string());
+            return Json(ExecutionResumeResponse {
+                ok: false,
+                state: None,
+                scope: None,
+                project_id: project_id.clone(),
+                error: Some(e.to_string()),
+            });
         }
 
-        json_object(serde_json::json!({
-            "ok": true,
-            "state": "active",
-            "scope": if project_id.is_some() { "project" } else { "global" },
-            "project_id": project_id,
-        }))
+        Json(ExecutionResumeResponse {
+            ok: true,
+            state: Some("active".to_string()),
+            scope: Some(
+                if project_id.is_some() {
+                    "project"
+                } else {
+                    "global"
+                }
+                .to_string(),
+            ),
+            project_id,
+            error: None,
+        })
     }
 
     /// Get execution status.
@@ -212,16 +402,51 @@ impl DjinnMcpServer {
     pub async fn execution_status(
         &self,
         Parameters(p): Parameters<ExecutionStatusParams>,
-    ) -> Json<ObjectJson> {
+    ) -> Json<ExecutionStatusResponse> {
         let project_id = match self.resolve_optional_project_id(&p.project).await {
             Ok(id) => id,
-            Err(e) => return e,
+            Err(error) => {
+                return Json(ExecutionStatusResponse {
+                    ok: false,
+                    state: None,
+                    scope: None,
+                    project_id: None,
+                    running_sessions: None,
+                    max_sessions: None,
+                    capacity: None,
+                    sessions: None,
+                    metrics: None,
+                    error: Some(error),
+                });
+            }
         };
         let Some(coordinator) = self.state.coordinator().await else {
-            return json_error("coordinator actor not initialized");
+            return Json(ExecutionStatusResponse {
+                ok: false,
+                state: None,
+                scope: None,
+                project_id: project_id.clone(),
+                running_sessions: None,
+                max_sessions: None,
+                capacity: None,
+                sessions: None,
+                metrics: None,
+                error: Some("coordinator actor not initialized".to_string()),
+            });
         };
         let Some(supervisor) = self.state.supervisor().await else {
-            return json_error("supervisor actor not initialized");
+            return Json(ExecutionStatusResponse {
+                ok: false,
+                state: None,
+                scope: None,
+                project_id: project_id.clone(),
+                running_sessions: None,
+                max_sessions: None,
+                capacity: None,
+                sessions: None,
+                metrics: None,
+                error: Some("supervisor actor not initialized".to_string()),
+            });
         };
 
         let coordinator_status_result = match project_id.as_deref() {
@@ -230,11 +455,37 @@ impl DjinnMcpServer {
         };
         let coordinator_status = match coordinator_status_result {
             Ok(status) => status,
-            Err(e) => return json_error(e.to_string()),
+            Err(e) => {
+                return Json(ExecutionStatusResponse {
+                    ok: false,
+                    state: None,
+                    scope: None,
+                    project_id: project_id.clone(),
+                    running_sessions: None,
+                    max_sessions: None,
+                    capacity: None,
+                    sessions: None,
+                    metrics: None,
+                    error: Some(e.to_string()),
+                });
+            }
         };
         let supervisor_status = match supervisor.get_status().await {
             Ok(status) => status,
-            Err(e) => return json_error(e.to_string()),
+            Err(e) => {
+                return Json(ExecutionStatusResponse {
+                    ok: false,
+                    state: None,
+                    scope: None,
+                    project_id: project_id.clone(),
+                    running_sessions: None,
+                    max_sessions: None,
+                    capacity: None,
+                    sessions: None,
+                    metrics: None,
+                    error: Some(e.to_string()),
+                });
+            }
         };
 
         let capacity = supervisor_status
@@ -243,43 +494,56 @@ impl DjinnMcpServer {
             .map(|(model, model_capacity)| {
                 (
                     model.clone(),
-                    serde_json::json!({
-                        "active": model_capacity.active,
-                        "max": model_capacity.max,
-                    }),
+                    ExecutionStatusCapacity {
+                        active: model_capacity.active,
+                        max: model_capacity.max,
+                    },
                 )
             })
-            .collect::<serde_json::Map<String, serde_json::Value>>();
+            .collect::<HashMap<_, _>>();
         let max_sessions: u32 = supervisor_status.capacity.values().map(|c| c.max).sum();
 
         let sessions = supervisor_status
             .running_sessions
             .into_iter()
-            .map(|session| {
-                serde_json::json!({
-                    "task_id": session.task_id,
-                    "model_id": session.model_id,
-                    "session_id": session.session_id,
-                    "duration_seconds": session.duration_seconds,
-                    "worktree_path": session.worktree_path,
-                })
+            .map(|session| ExecutionStatusSession {
+                task_id: session.task_id,
+                model_id: session.model_id,
+                session_id: session.session_id,
+                duration_seconds: session.duration_seconds,
+                worktree_path: session.worktree_path,
             })
             .collect::<Vec<_>>();
 
-        json_object(serde_json::json!({
-            "state": if coordinator_status.paused { "paused" } else { "active" },
-            "global_state": if coordinator_status.global_paused { "paused" } else { "active" },
-            "scope": if project_id.is_some() { "project" } else { "global" },
-            "project_id": project_id,
-            "running_sessions": supervisor_status.active_sessions,
-            "max_sessions": max_sessions,
-            "capacity": capacity,
-            "sessions": sessions,
-            "metrics": {
-                "tasks_dispatched": coordinator_status.tasks_dispatched,
-                "sessions_recovered": coordinator_status.sessions_recovered,
-            },
-        }))
+        Json(ExecutionStatusResponse {
+            ok: true,
+            state: Some(
+                if coordinator_status.paused {
+                    "paused"
+                } else {
+                    "active"
+                }
+                .to_string(),
+            ),
+            scope: Some(
+                if project_id.is_some() {
+                    "project"
+                } else {
+                    "global"
+                }
+                .to_string(),
+            ),
+            project_id,
+            running_sessions: Some(supervisor_status.active_sessions),
+            max_sessions: Some(max_sessions),
+            capacity: Some(capacity),
+            sessions: Some(sessions),
+            metrics: Some(ExecutionStatusMetrics {
+                tasks_dispatched: coordinator_status.tasks_dispatched,
+                sessions_recovered: coordinator_status.sessions_recovered,
+            }),
+            error: None,
+        })
     }
 
     /// Kill the active agent session for a task.
@@ -289,22 +553,37 @@ impl DjinnMcpServer {
     pub async fn execution_kill_task(
         &self,
         Parameters(p): Parameters<ExecutionKillTaskParams>,
-    ) -> Json<ObjectJson> {
-        if let Err(e) = self.validate_optional_project(&p.project).await {
-            return e;
+    ) -> Json<ExecutionKillTaskResponse> {
+        if let Some(path) = &p.project {
+            if self.project_id_for_path(path).await.is_none() {
+                return Json(ExecutionKillTaskResponse {
+                    ok: false,
+                    task_id: None,
+                    error: Some(format!("project not found: {path}")),
+                });
+            }
         }
         let Some(supervisor) = self.state.supervisor().await else {
-            return json_error("supervisor actor not initialized");
+            return Json(ExecutionKillTaskResponse {
+                ok: false,
+                task_id: None,
+                error: Some("supervisor actor not initialized".to_string()),
+            });
         };
 
         if let Err(e) = supervisor.kill_session(&p.task_id).await {
-            return json_error(e.to_string());
+            return Json(ExecutionKillTaskResponse {
+                ok: false,
+                task_id: Some(p.task_id),
+                error: Some(e.to_string()),
+            });
         }
 
-        json_object(serde_json::json!({
-            "ok": true,
-            "task_id": p.task_id,
-        }))
+        Json(ExecutionKillTaskResponse {
+            ok: true,
+            task_id: Some(p.task_id),
+            error: None,
+        })
     }
 
     /// Get the session ID and worktree path for a running task.
@@ -312,10 +591,16 @@ impl DjinnMcpServer {
     pub async fn session_for_task(
         &self,
         Parameters(p): Parameters<SessionForTaskParams>,
-    ) -> Json<ObjectJson> {
+    ) -> Json<SessionForTaskResponse> {
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
-            Err(e) => return json_error(e),
+            Err(e) => {
+                return Json(SessionForTaskResponse {
+                    ok: false,
+                    payload: None,
+                    error: Some(e),
+                });
+            }
         };
         let task_repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
         let Some(task) = task_repo
@@ -324,29 +609,51 @@ impl DjinnMcpServer {
             .ok()
             .flatten()
         else {
-            return json_error(format!("task not found: {}", p.task_id));
+            return Json(SessionForTaskResponse {
+                ok: false,
+                payload: None,
+                error: Some(format!("task not found: {}", p.task_id)),
+            });
         };
         let Some(supervisor) = self.state.supervisor().await else {
-            return json_error("supervisor actor not initialized");
+            return Json(SessionForTaskResponse {
+                ok: false,
+                payload: None,
+                error: Some("supervisor actor not initialized".to_string()),
+            });
         };
 
         let session = match supervisor.session_for_task(&task.id).await {
             Ok(session) => session,
-            Err(e) => return json_error(e.to_string()),
+            Err(e) => {
+                return Json(SessionForTaskResponse {
+                    ok: false,
+                    payload: None,
+                    error: Some(e.to_string()),
+                });
+            }
         };
 
         match session {
-            Some(session) => json_object(serde_json::json!({
-                "task_id": task.id,
-                "model_id": session.model_id,
-                "session_id": session.session_id,
-                "duration_seconds": session.duration_seconds,
-                "worktree_path": session.worktree_path,
-            })),
-            None => json_object(serde_json::json!({
-                "task_id": task.id,
-                "session": null,
-            })),
+            Some(session) => Json(SessionForTaskResponse {
+                ok: true,
+                payload: Some(SessionForTaskPayload::Running(SessionForTaskRunningPayload {
+                    task_id: task.id,
+                    model_id: session.model_id,
+                    session_id: session.session_id,
+                    duration_seconds: session.duration_seconds,
+                    worktree_path: session.worktree_path,
+                })),
+                error: None,
+            }),
+            None => Json(SessionForTaskResponse {
+                ok: true,
+                payload: Some(SessionForTaskPayload::Idle(SessionForTaskIdlePayload {
+                    task_id: task.id,
+                    session: None,
+                })),
+                error: None,
+            }),
         }
     }
 }

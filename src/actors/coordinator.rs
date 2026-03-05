@@ -49,7 +49,6 @@ pub enum CoordinatorError {
 #[derive(Debug, Clone)]
 pub struct CoordinatorStatus {
     pub paused: bool,
-    pub global_paused: bool,
     pub tasks_dispatched: u64,
     pub sessions_recovered: u64,
 }
@@ -58,9 +57,7 @@ pub struct CoordinatorStatus {
 /// never queue behind long-running dispatch passes.
 #[derive(Debug, Clone)]
 struct SharedCoordinatorState {
-    paused: bool,
     paused_projects: HashSet<String>,
-    resumed_projects: HashSet<String>,
     unhealthy_project_ids: HashSet<String>,
     dispatched: u64,
     recovered: u64,
@@ -68,19 +65,11 @@ struct SharedCoordinatorState {
 
 impl SharedCoordinatorState {
     fn to_status(&self, project_id: Option<&str>) -> CoordinatorStatus {
-        let project_paused = project_id.map(|id| {
-            if self.unhealthy_project_ids.contains(id) {
-                return true;
-            }
-            if self.paused {
-                !self.resumed_projects.contains(id)
-            } else {
-                self.paused_projects.contains(id)
-            }
+        let paused = project_id.is_some_and(|id| {
+            self.unhealthy_project_ids.contains(id) || self.paused_projects.contains(id)
         });
         CoordinatorStatus {
-            paused: project_paused.unwrap_or(self.paused),
-            global_paused: self.paused,
+            paused,
             tasks_dispatched: self.dispatched,
             sessions_recovered: self.recovered,
         }
@@ -141,6 +130,7 @@ struct CoordinatorActor {
     db: Database,
     events_tx: broadcast::Sender<DjinnEvent>,
     supervisor: AgentSupervisorHandle,
+    #[cfg_attr(test, allow(dead_code))]
     catalog: CatalogService,
     health: HealthTracker,
     // Sender clone for background tasks to send results back.
@@ -148,9 +138,7 @@ struct CoordinatorActor {
     // Watch channel for lock-free status reads.
     status_tx: watch::Sender<SharedCoordinatorState>,
     // State
-    paused: bool,
     paused_projects: HashSet<String>,
-    resumed_projects: HashSet<String>,
     dispatch_limit: usize,
     model_priorities: HashMap<String, Vec<String>>,
     // Per-project health: project_id → error message (only unhealthy projects appear here).
@@ -190,9 +178,7 @@ impl CoordinatorActor {
             health,
             self_sender,
             status_tx,
-            paused: true,
             paused_projects: HashSet::new(),
-            resumed_projects: HashSet::new(),
             dispatch_limit: 50,
             model_priorities: HashMap::new(),
             unhealthy_projects: HashMap::new(),
@@ -229,9 +215,7 @@ impl CoordinatorActor {
 
                 // 4. 30s safety-net tick for stuck detection (AGENT-08).
                 _ = self.tick.tick() => {
-                    if !self.paused {
-                        self.detect_and_recover_stuck_filtered(None).await;
-                    }
+                    self.detect_and_recover_stuck_filtered(None).await;
                 }
             }
         }
@@ -241,9 +225,7 @@ impl CoordinatorActor {
     /// Publish current state to the watch channel for lock-free status reads.
     fn publish_status(&self) {
         let _ = self.status_tx.send(SharedCoordinatorState {
-            paused: self.paused,
             paused_projects: self.paused_projects.clone(),
-            resumed_projects: self.resumed_projects.clone(),
             unhealthy_project_ids: self.unhealthy_projects.keys().cloned().collect(),
             dispatched: self.dispatched,
             recovered: self.recovered,
@@ -253,10 +235,8 @@ impl CoordinatorActor {
     async fn handle_message(&mut self, msg: CoordinatorMessage) {
         match msg {
             CoordinatorMessage::TriggerDispatch => {
-                if !self.paused {
-                    self.detect_and_recover_stuck_filtered(None).await;
-                    self.dispatch_ready_tasks(None).await;
-                }
+                self.detect_and_recover_stuck_filtered(None).await;
+                self.dispatch_ready_tasks(None).await;
             }
             CoordinatorMessage::TriggerProjectDispatch { project_id } => {
                 self.detect_and_recover_stuck_filtered(Some(&project_id))
@@ -267,15 +247,21 @@ impl CoordinatorActor {
                 interrupt_active,
                 reason,
             } => {
-                if !self.paused {
-                    tracing::info!("CoordinatorActor: paused");
-                    self.paused = true;
-                    self.paused_projects.clear();
-                    self.resumed_projects.clear();
-                    self.publish_status();
-                    if interrupt_active && let Err(e) = self.supervisor.interrupt_all(&reason).await
-                    {
-                        tracing::warn!(error = %e, "CoordinatorActor: failed to interrupt active sessions on pause");
+                // Global pause = pause every known project individually.
+                let repo = crate::db::repositories::project::ProjectRepository::new(
+                    self.db.clone(),
+                    self.events_tx.clone(),
+                );
+                if let Ok(projects) = repo.list().await {
+                    for p in projects {
+                        self.paused_projects.insert(p.id);
+                    }
+                }
+                tracing::info!(count = self.paused_projects.len(), "CoordinatorActor: paused all projects");
+                self.publish_status();
+                if interrupt_active {
+                    if let Err(e) = self.supervisor.interrupt_all(&reason).await {
+                        tracing::warn!(error = %e, "CoordinatorActor: failed to interrupt sessions on pause");
                     }
                 }
             }
@@ -284,11 +270,7 @@ impl CoordinatorActor {
                 interrupt_active,
                 reason,
             } => {
-                if self.paused {
-                    self.resumed_projects.remove(&project_id);
-                } else {
-                    self.paused_projects.insert(project_id.clone());
-                }
+                self.paused_projects.insert(project_id.clone());
                 self.publish_status();
                 if interrupt_active {
                     if let Err(e) = self.supervisor.interrupt_project(&project_id, &reason).await {
@@ -301,31 +283,22 @@ impl CoordinatorActor {
                 }
             }
             CoordinatorMessage::Resume => {
-                if self.paused {
-                    tracing::info!("CoordinatorActor: resumed");
-                    self.paused = false;
-                    self.paused_projects.clear();
-                    self.resumed_projects.clear();
-                    self.detect_and_recover_stuck_filtered(None).await;
-                    self.dispatch_ready_tasks(None).await;
-                    self.publish_status();
-                }
+                // Global resume = unpause every project and dispatch.
+                self.paused_projects.clear();
+                tracing::info!("CoordinatorActor: resumed all projects");
+                self.detect_and_recover_stuck_filtered(None).await;
+                self.dispatch_ready_tasks(None).await;
+                self.publish_status();
             }
             CoordinatorMessage::ResumeProject { project_id } => {
-                if self.paused {
-                    self.resumed_projects.insert(project_id.clone());
-                } else {
-                    self.paused_projects.remove(&project_id);
-                }
+                self.paused_projects.remove(&project_id);
                 self.detect_and_recover_stuck_filtered(Some(&project_id))
                     .await;
                 self.dispatch_ready_tasks(Some(&project_id)).await;
                 self.publish_status();
             }
             CoordinatorMessage::TriggerStuckScan => {
-                if !self.paused {
-                    self.detect_and_recover_stuck_filtered(None).await;
-                }
+                self.detect_and_recover_stuck_filtered(None).await;
             }
             CoordinatorMessage::UpdateDispatchLimit { limit } => {
                 let limit = limit.max(1);
@@ -393,10 +366,8 @@ impl CoordinatorActor {
                     "CoordinatorActor: lagged behind event stream, re-subscribing"
                 );
                 self.events = self.events_tx.subscribe();
-                if !self.paused {
-                    self.detect_and_recover_stuck_filtered(None).await;
-                    self.dispatch_ready_tasks(None).await;
-                }
+                self.detect_and_recover_stuck_filtered(None).await;
+                self.dispatch_ready_tasks(None).await;
             }
             Err(broadcast::error::RecvError::Closed) => {
                 tracing::warn!("CoordinatorActor: event broadcast channel closed");
@@ -425,14 +396,8 @@ impl CoordinatorActor {
     }
 
     fn is_project_dispatch_enabled(&self, project_id: &str) -> bool {
-        if self.unhealthy_projects.contains_key(project_id) {
-            return false;
-        }
-        if self.paused {
-            self.resumed_projects.contains(project_id)
-        } else {
-            !self.paused_projects.contains(project_id)
-        }
+        !self.unhealthy_projects.contains_key(project_id)
+            && !self.paused_projects.contains(project_id)
     }
 
     /// Resolve dispatch models for a given role from configured priorities,
@@ -1125,9 +1090,7 @@ impl CoordinatorHandle {
     ) -> Self {
         let (sender, receiver) = mpsc::channel(32);
         let initial_state = SharedCoordinatorState {
-            paused: true,
             paused_projects: HashSet::new(),
-            resumed_projects: HashSet::new(),
             unhealthy_project_ids: HashSet::new(),
             dispatched: 0,
             recovered: 0,
@@ -1333,13 +1296,13 @@ mod tests {
     // ── Status ───────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn initial_status_is_paused() {
+    async fn initial_status_is_active() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let handle = spawn_coordinator(&db, &tx);
 
         let status = handle.get_status().unwrap();
-        assert!(status.paused, "coordinator should start paused by default");
+        assert!(!status.paused, "coordinator should start active (no global pause state)");
         assert_eq!(status.tasks_dispatched, 0);
         assert_eq!(status.sessions_recovered, 0);
     }
@@ -1347,35 +1310,40 @@ mod tests {
     // ── Pause / Resume ───────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn pause_and_resume_toggle_state() {
+    async fn pause_project_and_resume_toggle_state() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let handle = spawn_coordinator(&db, &tx);
 
-        // Coordinator starts paused, so pause() is a no-op (no publish).
-        handle.pause().await.unwrap();
-        let status = handle.get_status().unwrap();
-        assert!(status.paused, "should be paused");
+        let project_id = "test-project-id";
 
-        handle.resume().await.unwrap();
-        handle.wait_for_status(|s| !s.paused).await;
-        let status = handle.get_status().unwrap();
-        assert!(!status.paused, "should be resumed");
+        // Pausing a project marks it paused in project-scoped status.
+        handle.pause_project(project_id).await.unwrap();
+        // Trigger a dispatch so the actor processes messages and publishes status.
+        handle.trigger_dispatch().await.unwrap();
+        handle.wait_for_status(|s| s.tasks_dispatched == 0).await;
+        assert!(handle.get_project_status(project_id).unwrap().paused);
+
+        // Resuming removes it from the paused set.
+        handle.resume_project(project_id).await.unwrap();
+        handle.wait_for_status(|s| s.sessions_recovered == 0).await;
+        assert!(!handle.get_project_status(project_id).unwrap().paused);
     }
 
     #[tokio::test]
-    async fn trigger_dispatch_while_paused_is_a_noop() {
+    async fn trigger_dispatch_while_project_paused_is_a_noop() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db.clone(), tx.clone());
+        repo.create(&epic.id, "T1", "", "", "task", 0, "").await.unwrap();
+
         let handle = spawn_coordinator(&db, &tx);
-
-        // Coordinator starts paused; dispatch while paused is a no-op (no publish).
-        handle.pause().await.unwrap();
-        handle.trigger_dispatch().await.unwrap();
-
-        let status = handle.get_status().unwrap();
-        // tasks_dispatched stays 0 because the coordinator doesn't dispatch while paused.
-        assert_eq!(status.tasks_dispatched, 0);
+        handle.pause_project(&epic.project_id).await.unwrap();
+        handle.trigger_dispatch_for_project(&epic.project_id).await.unwrap();
+        // Give the actor a moment to process; dispatched count stays 0.
+        tokio::task::yield_now().await;
+        assert_eq!(handle.get_status().unwrap().tasks_dispatched, 0);
     }
 
     // ── Dispatch on open-task event ──────────────────────────────────────────
@@ -1393,8 +1361,7 @@ mod tests {
             .unwrap();
 
         let handle = spawn_coordinator(&db, &tx);
-        handle.resume().await.unwrap();
-        // Resume internally runs dispatch; wait for it to complete.
+        handle.trigger_dispatch().await.unwrap();
         handle.wait_for_status(|s| s.tasks_dispatched >= 1).await;
 
         let status = handle.get_status().unwrap();
@@ -1437,8 +1404,8 @@ mod tests {
         .unwrap();
 
         let handle = spawn_coordinator(&db, &tx);
-        handle.resume().await.unwrap();
-        // Resume internally runs dispatch; wait for it to complete.
+        handle.trigger_dispatch().await.unwrap();
+        // Dispatch; wait for it to complete.
         handle.wait_for_status(|s| s.tasks_dispatched >= 1).await;
 
         let status = handle.get_status().unwrap();
@@ -1465,8 +1432,8 @@ mod tests {
         repo.set_status(&task.id, "in_progress").await.unwrap();
 
         let handle = spawn_coordinator(&db, &tx);
-        handle.resume().await.unwrap();
-        // Resume internally runs stuck detection; wait for recovery.
+        handle.trigger_dispatch().await.unwrap();
+        // Trigger dispatch to also run stuck detection; wait for recovery.
         handle.wait_for_status(|s| s.sessions_recovered >= 1).await;
 
         let status = handle.get_status().unwrap();
