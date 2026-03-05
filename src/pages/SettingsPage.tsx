@@ -8,11 +8,10 @@ import {
   fetchProviderCatalog,
   saveProviderCredentials,
   validateProviderApiKey,
-  deleteProviderCredentials,
+  addCustomProvider,
   type Provider,
   type ProviderCredential,
 } from '@/api/server';
-import { AlertCircleIcon, CheckCircle2Icon, CopyIcon, EyeIcon, EyeOffIcon, Loader2Icon, XCircleIcon } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { InlineError } from '@/components/InlineError';
 import { EmptyState } from '@/components/EmptyState';
@@ -20,7 +19,6 @@ import { showToast } from '@/lib/toast';
 import { AgentConfig } from '@/components/AgentConfig';
 
 type SettingsCategory = 'providers' | 'projects' | 'general' | 'agents';
-type ProviderStatus = 'connected' | 'error' | 'unconfigured';
 
 const categories: Array<{ key: SettingsCategory; label: string }> = [
   { key: 'providers', label: 'Providers' },
@@ -29,132 +27,83 @@ const categories: Array<{ key: SettingsCategory; label: string }> = [
   { key: 'agents', label: 'Agents' },
 ];
 
-function ProviderCard({
-  provider,
-  status,
-  expanded,
-  onClick,
-}: {
-  provider: Provider;
-  status: ProviderStatus;
-  expanded: boolean;
-  onClick: () => void;
-}) {
-  const statusStyles = {
-    connected: 'bg-green-500/15 text-green-500 border-green-500/25',
-    error: 'bg-red-500/15 text-red-500 border-red-500/25',
-    unconfigured: 'bg-muted text-muted-foreground border-border',
-  } as const;
-
-  const dotStyles = {
-    connected: 'bg-green-500',
-    error: 'bg-red-500',
-    unconfigured: 'bg-gray-500',
-  } as const;
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="w-full rounded-lg border border-border bg-card p-4 text-left transition-colors hover:bg-muted/40"
-    >
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-md bg-muted text-sm font-semibold uppercase">
-            {provider.name.slice(0, 2)}
-          </div>
-          <div>
-            <p className="font-medium">{provider.name}</p>
-            <p className="text-sm text-muted-foreground">{provider.description}</p>
-          </div>
-        </div>
-        <span className={cn('inline-flex items-center gap-2 rounded-full border px-2 py-1 text-xs', statusStyles[status])}>
-          <span className={cn('h-2 w-2 rounded-full', dotStyles[status])} />
-          {status}
-        </span>
-      </div>
-      {expanded && <p className="mt-3 text-xs text-muted-foreground">Click again to collapse</p>}
-    </button>
-  );
-}
-
 function ProvidersSettings() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [credentials, setCredentials] = useState<ProviderCredential[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
+  const [isAddOpen, setIsAddOpen] = useState(false);
+  const [selectedProviderId, setSelectedProviderId] = useState('');
   const [apiKey, setApiKey] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [revealedProvider, setRevealedProvider] = useState<string | null>(null);
   const [validationStatus, setValidationStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
-  const [testing, setTesting] = useState(false);
+  const [validating, setValidating] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [customName, setCustomName] = useState('');
+  const [customBaseUrl, setCustomBaseUrl] = useState('');
+
+  const loadData = async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [catalog, credentialList] = await Promise.all([fetchProviderCatalog(), fetchCredentialList()]);
+      setProviders(catalog);
+      setCredentials(credentialList);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load providers';
+      setLoadError(message);
+      showToast.error('Failed to load providers', { description: message });
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const load = async () => {
-      setLoading(true);
-      setLoadError(null);
-      try {
-        const [catalog, credentialList] = await Promise.all([fetchProviderCatalog(), fetchCredentialList()]);
-        setProviders(catalog);
-        setCredentials(credentialList);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to load providers';
-        setLoadError(message);
-        showToast.error('Failed to load providers', { description: message });
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    void load();
+    void loadData();
   }, []);
 
-  useEffect(() => {
-    if (!revealedProvider) return;
-    const timer = window.setTimeout(() => setRevealedProvider(null), 10000);
-    return () => window.clearTimeout(timer);
-  }, [revealedProvider]);
+  const credentialByProvider = useMemo(() => new Map(credentials.map((entry) => [entry.provider_id, entry])), [credentials]);
 
-  const credentialByProvider = useMemo(
-    () => new Map(credentials.map((entry) => [entry.provider_id, entry])),
-    [credentials],
-  );
+  const configuredProviders = providers.filter((p) => credentialByProvider.get(p.id)?.configured);
+  const unconfiguredProviders = providers.filter((p) => !credentialByProvider.get(p.id)?.configured);
+  const selectedProvider = providers.find((p) => p.id === selectedProviderId);
 
-  const getStatus = (providerId: string): ProviderStatus => {
-    const credential = credentialByProvider.get(providerId);
-    if (!credential || !credential.configured) return 'unconfigured';
-    return credential.valid ? 'connected' : 'error';
-  };
-
-  const maskApiKey = (key: string): string => {
-    if (key.length <= 8) return key;
-    return `${key.slice(0, 4)}...${key.slice(-4)}`;
-  };
-
-  const handleExpand = (providerId: string, expanded: boolean) => {
-    const next = expanded ? null : providerId;
-    setExpandedProvider(next);
+  const resetAddFlow = () => {
+    setSelectedProviderId('');
     setApiKey('');
     setValidationStatus(null);
-    setRevealedProvider(null);
+    setCustomName('');
+    setCustomBaseUrl('');
+  };
+
+  const validateInline = async () => {
+    if (!selectedProviderId || !apiKey.trim()) return;
+    setValidating(true);
+    try {
+      const result = await validateProviderApiKey(selectedProviderId, apiKey.trim());
+      if (result.valid) {
+        setValidationStatus({ type: 'success', message: 'API key is valid' });
+      } else {
+        setValidationStatus({ type: 'error', message: result.error ?? 'Validation failed' });
+      }
+    } finally {
+      setValidating(false);
+    }
   };
 
   const handleSave = async () => {
-    if (!expandedProvider || !apiKey.trim()) return;
+    if (!selectedProviderId || !apiKey.trim()) return;
     setSaving(true);
     try {
-      const validation = await validateProviderApiKey(expandedProvider, apiKey.trim());
+      const validation = await validateProviderApiKey(selectedProviderId, apiKey.trim());
       if (!validation.valid) {
         setValidationStatus({ type: 'error', message: validation.error ?? 'Validation failed' });
         return;
       }
-      await saveProviderCredentials(expandedProvider, apiKey.trim());
-      const credentialList = await fetchCredentialList();
-      setCredentials(credentialList);
-      setValidationStatus({ type: 'success', message: 'API key saved successfully' });
-      setApiKey('');
+      await saveProviderCredentials(selectedProviderId, apiKey.trim());
+      await loadData();
+      showToast.success('Provider added', { description: 'Credentials saved successfully.' });
+      setIsAddOpen(false);
+      resetAddFlow();
     } catch (error) {
       showToast.error('Could not save API key', { description: error instanceof Error ? error.message : 'Unknown error' });
     } finally {
@@ -162,57 +111,26 @@ function ProvidersSettings() {
     }
   };
 
-  const handleTestConnection = async (providerId: string) => {
-    const keyToTest = apiKey.trim();
-    const credential = credentialByProvider.get(providerId);
-    if (!keyToTest && !credential?.configured) {
-      setValidationStatus({ type: 'error', message: 'Enter an API key before testing connection' });
-      return;
-    }
-
-    setTesting(true);
+  const handleAddCustom = async () => {
+    if (!customName.trim()) return;
+    setSaving(true);
     try {
-      const result = await validateProviderApiKey(providerId, keyToTest);
-      if (result.valid) {
-        setValidationStatus({ type: 'success', message: 'Connection successful' });
-      } else {
-        setValidationStatus({ type: 'error', message: result.error ?? 'Connection failed' });
-      }
-    } catch (error) {
-      showToast.error('Connection test failed', { description: error instanceof Error ? error.message : 'Unknown error' });
+      await addCustomProvider({ name: customName.trim(), base_url: customBaseUrl.trim() || undefined });
+      await loadData();
+      showToast.success('Custom provider added');
+      setCustomName('');
+      setCustomBaseUrl('');
     } finally {
-      setTesting(false);
-    }
-  };
-
-  const handleDelete = async (providerId: string) => {
-    if (!confirm('Delete this API key?')) return;
-    setDeleting(true);
-    try {
-      await deleteProviderCredentials(providerId);
-      const credentialList = await fetchCredentialList();
-      setCredentials(credentialList);
-      setValidationStatus({ type: 'success', message: 'API key deleted' });
-      setRevealedProvider(null);
-    } catch (error) {
-      showToast.error('Failed to delete API key', { description: error instanceof Error ? error.message : 'Unknown error' });
-    } finally {
-      setDeleting(false);
+      setSaving(false);
     }
   };
 
   if (loading) {
-    return (
-      <div className="rounded-lg border border-border bg-card p-6">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2Icon className="h-4 w-4 animate-spin" /> Loading providers...
-        </div>
-      </div>
-    );
+    return <div className="rounded-lg border border-border bg-card p-6">Loading providers...</div>;
   }
 
   if (loadError) {
-    return <InlineError message={loadError} onRetry={() => window.location.reload()} />;
+    return <InlineError message={loadError} onRetry={() => void loadData()} />;
   }
 
   if (providers.length === 0) {
@@ -221,7 +139,7 @@ function ProvidersSettings() {
         title="No providers found"
         message="Add a provider to start connecting your workspace tools."
         actionLabel="Reload providers"
-        onAction={() => window.location.reload()}
+        onAction={() => void loadData()}
         illustration={<div className="text-4xl">🔌</div>}
       />
     );
@@ -229,95 +147,74 @@ function ProvidersSettings() {
 
   return (
     <div className="space-y-4">
-      {providers.map((provider) => {
-        const status = getStatus(provider.id);
-        const expanded = expandedProvider === provider.id;
-        const credential = credentialByProvider.get(provider.id);
-        const isRevealed = revealedProvider === provider.id;
-        const storedMasked = credential?.api_key_masked ? maskApiKey(credential.api_key_masked) : null;
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold">Configured Providers</h2>
+        <Button onClick={() => setIsAddOpen((v) => !v)}>{isAddOpen ? 'Close' : 'Add Provider'}</Button>
+      </div>
 
-        return (
-          <div key={provider.id} className="space-y-2">
-            <ProviderCard
-              provider={provider}
-              status={status}
-              expanded={expanded}
-              onClick={() => handleExpand(provider.id, expanded)}
-            />
-
-            {expanded && (
-              <div className="rounded-lg border border-border bg-card p-4 space-y-3">
-                <h3 className="text-sm font-medium">API Key Management</h3>
-
-                {credential?.configured && storedMasked && (
-                  <div className="rounded-md border border-border p-3">
-                    <p className="text-xs text-muted-foreground mb-2">Stored key</p>
-                    <div className="flex items-center gap-2">
-                      <code className="text-sm">{isRevealed ? credential.api_key_masked : storedMasked}</code>
-                      <Button variant="ghost" size="icon" onClick={() => setRevealedProvider(isRevealed ? null : provider.id)}>
-                        {isRevealed ? <EyeOffIcon className="h-4 w-4" /> : <EyeIcon className="h-4 w-4" />}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => {
-                          const value = credential.api_key_masked ?? '';
-                          if (value) void navigator.clipboard.writeText(value);
-                        }}
-                      >
-                        <CopyIcon className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  </div>
-                )}
-
-                <div className="flex gap-2">
-                  <Input
-                    type="password"
-                    placeholder="Enter API key"
-                    value={apiKey}
-                    onChange={(e) => {
-                      setApiKey(e.target.value);
-                      setValidationStatus(null);
-                    }}
-                  />
-                  <Button onClick={() => void handleSave()} disabled={saving || !apiKey.trim()}>
-                    {saving ? <Loader2Icon className="h-4 w-4 animate-spin" /> : 'Save'}
-                  </Button>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <Button variant="outline" onClick={() => void handleTestConnection(provider.id)} disabled={testing}>
-                    {testing ? <Loader2Icon className="h-4 w-4 animate-spin" /> : 'Test connection'}
-                  </Button>
-                  {credential?.configured && (
-                    <Button variant="destructive" onClick={() => void handleDelete(provider.id)} disabled={deleting}>
-                      Delete
-                    </Button>
-                  )}
-                </div>
-
-                {validationStatus && (
-                  <div className={cn('text-xs', validationStatus.type === 'success' ? 'text-green-500' : 'text-red-500')}>
-                    {validationStatus.message}
-                  </div>
-                )}
-
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  {status === 'connected' && <CheckCircle2Icon className="h-4 w-4 text-green-500" />}
-                  {status === 'error' && <XCircleIcon className="h-4 w-4 text-red-500" />}
-                  {status === 'unconfigured' && <AlertCircleIcon className="h-4 w-4 text-gray-500" />}
-                  Current status: {status}
-                </div>
-              </div>
-            )}
+      {isAddOpen && (
+        <div className="rounded-lg border border-border bg-card p-4 space-y-4">
+          <h3 className="font-medium">Provider catalog</h3>
+          <div className="space-y-2">
+            {unconfiguredProviders.map((provider) => (
+              <button
+                key={provider.id}
+                type="button"
+                className={cn('w-full rounded-md border p-3 text-left', selectedProviderId === provider.id && 'border-primary')}
+                onClick={() => {
+                  setSelectedProviderId(provider.id);
+                  setApiKey('');
+                  setValidationStatus(null);
+                }}
+              >
+                <p className="font-medium">{provider.name}</p>
+                <p className="text-xs text-muted-foreground">{provider.description}</p>
+              </button>
+            ))}
           </div>
-        );
-      })}
+
+          {selectedProvider && (
+            <div className="space-y-2">
+              <Input
+                type="password"
+                placeholder={`Enter ${selectedProvider.name} API key`}
+                value={apiKey}
+                onChange={(e) => {
+                  setApiKey(e.target.value);
+                  setValidationStatus(null);
+                }}
+                onBlur={() => void validateInline()}
+              />
+              {validationStatus && <p className={cn('text-xs', validationStatus.type === 'success' ? 'text-green-500' : 'text-red-500')}>{validationStatus.message}</p>}
+              <Button onClick={() => void handleSave()} disabled={saving || validating || !apiKey.trim()}>
+                {saving ? 'Saving...' : validating ? 'Validating...' : 'Save Provider'}
+              </Button>
+            </div>
+          )}
+
+          <div className="border-t pt-4 space-y-2">
+            <h4 className="text-sm font-medium">Add custom provider</h4>
+            <Input placeholder="Provider name" value={customName} onChange={(e) => setCustomName(e.target.value)} />
+            <Input placeholder="Base URL (optional)" value={customBaseUrl} onChange={(e) => setCustomBaseUrl(e.target.value)} />
+            <Button variant="outline" onClick={() => void handleAddCustom()} disabled={saving || !customName.trim()}>
+              Add Custom Provider
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {configuredProviders.map((provider) => (
+          <div key={provider.id} className="rounded-lg border border-border bg-card p-4">
+            <p className="font-medium">{provider.name}</p>
+            <p className="text-xs text-muted-foreground">Configured</p>
+          </div>
+        ))}
+        {configuredProviders.length === 0 && <p className="text-sm text-muted-foreground">No providers configured yet.</p>}
+      </div>
     </div>
   );
 }
-
 function ProjectsSettings() {
   return (
     <div className="rounded-lg border border-border bg-card p-6">

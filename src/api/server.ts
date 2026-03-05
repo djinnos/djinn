@@ -48,6 +48,11 @@ export interface Provider {
   requires_api_key: boolean;
 }
 
+export interface CustomProviderRequest {
+  name: string;
+  base_url?: string;
+}
+
 export interface ProviderCredential {
   provider_id: string;
   configured: boolean;
@@ -218,6 +223,26 @@ export async function deleteProviderCredentials(providerId: string): Promise<voi
   }
 }
 
+
+
+export async function addCustomProvider(payload: CustomProviderRequest): Promise<Provider> {
+  const baseUrl = await getBaseUrl();
+  const response = await fetch(`${baseUrl}/providers/add_custom`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to add custom provider: ${error || response.status}`);
+  }
+
+  return response.json();
+}
+
 function mapPriority(priority: number): TaskPriority {
   if (priority <= 0) return "P0";
   if (priority === 1) return "P1";
@@ -304,3 +329,4 @@ export async function fetchKanbanSnapshot(): Promise<KanbanSnapshot> {
     epics: (epicList.epics ?? []).map(mapEpicFromMcp),
   };
 }
+
