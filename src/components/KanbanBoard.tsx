@@ -4,6 +4,7 @@ import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
 import { taskStore } from "@/stores/taskStore";
 import type { Epic, Task, TaskPriority, TaskStatus } from "@/types";
+import { TaskCard } from "@/components/TaskCard";
 
 const STATUS_COLUMNS: Array<{ key: TaskStatus; label: string }> = [
   { key: "pending", label: "Open" },
@@ -257,11 +258,12 @@ export function KanbanBoard() {
                         {!isCollapsed && (
                           <ul className="flex flex-col gap-2 p-2 transition-all duration-300 ease-in-out">
                             {epicTasks.map((task) => (
-                              <li
-                                key={task.id}
-                                className={`rounded border bg-card p-2 text-sm transition-all duration-300 ease-in-out ${movingTaskIds[task.id] ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"}`}
-                              >
-                                {task.title}
+                              <li key={task.id}>
+                                <TaskCard
+                                  task={task}
+                                  epic={task.epicId ? epics.get(task.epicId) : undefined}
+                                  moving={!!movingTaskIds[task.id]}
+                                />
                               </li>
                             ))}
                           </ul>
