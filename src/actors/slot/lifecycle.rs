@@ -365,8 +365,8 @@ async fn compact_inline(
     app_state: &AppState,
     resume_context: Option<&str>,
 ) -> Result<CompactResult, String> {
-    // 1. Read conversation history + final token counts.
-    let (final_tokens_in, final_tokens_out, messages) =
+    // 1. Read conversation history, final token counts, and extension data from old session.
+    let (final_tokens_in, final_tokens_out, messages, old_extension_data) =
         match session_manager.get_session(old_session_id, true).await {
             Ok(s) => {
                 let tin = s.accumulated_input_tokens.or(s.input_tokens).unwrap_or(0) as i64;
@@ -375,11 +375,11 @@ async fn compact_inline(
                     .conversation
                     .map(|c| c.messages().clone())
                     .unwrap_or_default();
-                (tin.max(tokens_in), tout, msgs)
+                (tin.max(tokens_in), tout, msgs, Some(s.extension_data))
             }
             Err(e) => {
                 tracing::warn!(task_id = %task_id, error = %e, "compaction: failed to read Goose session");
-                (tokens_in, 0, vec![])
+                (tokens_in, 0, vec![], None)
             }
         };
 
@@ -442,6 +442,18 @@ async fn compact_inline(
         .create_session(worktree_path.to_owned(), task_name, SessionType::SubAgent)
         .await
         .map_err(|e| format!("compaction: failed to create new Goose session: {e}"))?;
+
+    // 4b. Carry over extension_data (todo state, etc.) from old session.
+    if let Some(ext_data) = old_extension_data {
+        if let Err(e) = session_manager
+            .update(&new_goose_session.id)
+            .extension_data(ext_data)
+            .apply()
+            .await
+        {
+            tracing::warn!(task_id = %task_id, error = %e, "compaction: failed to carry over extension_data");
+        }
+    }
 
     // 5. Create new Djinn session record.
     let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());

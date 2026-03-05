@@ -585,7 +585,64 @@ pub(crate) fn parse_model_id(model_id: &str) -> anyhow::Result<(String, String)>
 }
 
 pub(crate) fn extensions_for(agent_type: AgentType) -> Vec<goose::config::ExtensionConfig> {
-    vec![crate::agent::extension::config(agent_type)]
+    use goose::config::ExtensionConfig;
+
+    let mut exts = vec![
+        // Djinn frontend extension (task_show, task_update, memory_read, etc.)
+        crate::agent::extension::config(agent_type),
+        // Tree-sitter code analysis (read-only, all agent types)
+        ExtensionConfig::Platform {
+            name: "analyze".to_string(),
+            description: "Analyze code structure with tree-sitter".to_string(),
+            display_name: None,
+            bundled: None,
+            available_tools: vec![],
+        },
+        // Persistent todo list (survives compaction via extension_data, all agent types)
+        ExtensionConfig::Platform {
+            name: "todo".to_string(),
+            description: "Persistent task checklist".to_string(),
+            display_name: None,
+            bundled: None,
+            available_tools: vec![],
+        },
+    ];
+
+    match agent_type {
+        // Workers and conflict resolvers: full developer tools + subagent delegation
+        AgentType::Worker | AgentType::ConflictResolver => {
+            exts.push(ExtensionConfig::Platform {
+                name: "developer".to_string(),
+                description: "Write and edit files, list directory trees".to_string(),
+                display_name: None,
+                bundled: None,
+                available_tools: vec![
+                    "write".to_string(),
+                    "edit".to_string(),
+                    "tree".to_string(),
+                ],
+            });
+            exts.push(ExtensionConfig::Platform {
+                name: "summon".to_string(),
+                description: "Load knowledge and delegate tasks to subagents".to_string(),
+                display_name: None,
+                bundled: None,
+                available_tools: vec![],
+            });
+        }
+        // Reviewers: read-only developer tools (tree only), no subagents
+        AgentType::TaskReviewer | AgentType::EpicReviewer => {
+            exts.push(ExtensionConfig::Platform {
+                name: "developer".to_string(),
+                description: "List directory trees".to_string(),
+                display_name: None,
+                bundled: None,
+                available_tools: vec!["tree".to_string()],
+            });
+        }
+    }
+
+    exts
 }
 
 pub(crate) fn agent_type_for_task(task: &Task, has_conflict_context: bool) -> AgentType {
