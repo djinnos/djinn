@@ -1102,7 +1102,7 @@ impl AgentSupervisor {
                 "Emit exactly one final marker now: WORKER_RESULT: DONE.",
             ),
             AgentType::TaskReviewer => Some(
-                "Emit exactly one final marker now: REVIEW_RESULT: VERIFIED | REOPEN | CANCEL. If REOPEN or CANCEL, also emit FEEDBACK: <what is missing>.",
+                "Emit exactly one final marker now: REVIEW_RESULT: VERIFIED | REOPEN. If REOPEN, also emit FEEDBACK: <what is missing>.",
             ),
             AgentType::EpicReviewer => Some(
                 "Emit exactly one final marker now: EPIC_REVIEW_RESULT: CLEAN | ISSUES_FOUND. If ISSUES_FOUND, include concise actionable findings and create follow-up tasks in this epic before finishing.",
