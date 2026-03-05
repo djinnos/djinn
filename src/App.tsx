@@ -17,7 +17,7 @@ import { useSidebarStore } from "@/stores/sidebarStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 function WelcomeStep() {
   return (
@@ -30,16 +30,32 @@ function WelcomeStep() {
   );
 }
 
-function CompletionStep() {
+function DoneState() {
+  const navigate = useNavigate();
+  const { resetWizard } = useWizardStore();
+
+  const handleNavigate = (path: "/" | "/settings") => {
+    localStorage.removeItem("djinnos-wizard-storage");
+    resetWizard();
+    navigate(path);
+  };
+
   return (
-    <div className="flex flex-col gap-4 text-center">
-      <h2 className="text-2xl font-semibold">You're All Set!</h2>
-      <p className="text-muted-foreground">
-        Your workspace is ready. Start creating amazing things.
-      </p>
-      <Button onClick={() => window.location.reload()}>
-        Go to Dashboard
-      </Button>
+    <div className="flex min-h-screen flex-col bg-background">
+      <main className="flex flex-1 flex-col items-center justify-center p-6">
+        <div className="w-full max-w-md rounded-lg border border-border bg-card p-8 text-center">
+          <h2 className="text-2xl font-semibold">You're All Set!</h2>
+          <p className="mt-2 text-muted-foreground">
+            Setup is complete. What's next?
+          </p>
+          <div className="mt-6 flex flex-col gap-3">
+            <Button onClick={() => handleNavigate("/")}>View Kanban Board</Button>
+            <Button variant="outline" onClick={() => handleNavigate("/settings")}>
+              Explore Settings
+            </Button>
+          </div>
+        </div>
+      </main>
     </div>
   );
 }
@@ -86,8 +102,9 @@ function MainLayout() {
 export default function App() {
   const { status, error, retry, isRetrying } = useServerHealth();
   const { isFirstRun, isLoading: isFirstRunLoading } = useFirstRun();
-  const { isCompleted } = useWizardStore();
+  const { isCompleted, resetWizard } = useWizardStore();
   const [showWizard, setShowWizard] = useState(false);
+  const [showDoneState, setShowDoneState] = useState(false);
 
   useEventSource();
 
@@ -130,8 +147,16 @@ export default function App() {
   if (showWizard) {
     return (
       <Wizard
-        onComplete={() => setShowWizard(false)}
-        onSkip={() => setShowWizard(false)}
+        onComplete={() => {
+          setShowWizard(false);
+          setShowDoneState(true);
+        }}
+        onSkip={() => {
+          localStorage.removeItem("djinnos-wizard-storage");
+          resetWizard();
+          setShowWizard(false);
+          setShowDoneState(false);
+        }}
       >
         <WizardStep stepNumber={1}>
           <WelcomeStep />
@@ -145,11 +170,12 @@ export default function App() {
         <WizardStep stepNumber={4}>
           <ProjectSetupStep />
         </WizardStep>
-        <WizardStep stepNumber={5}>
-          <CompletionStep />
-        </WizardStep>
       </Wizard>
     );
+  }
+
+  if (showDoneState) {
+    return <DoneState />;
   }
 
   return <MainLayout />;
