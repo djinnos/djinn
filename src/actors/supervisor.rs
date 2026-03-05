@@ -2740,6 +2740,12 @@ impl AgentSupervisor {
         }
 
         if let Some(worktree_path) = session.worktree_path.as_ref() {
+            // After conflict resolution, re-run setup commands so the environment
+            // reflects any new dependencies introduced by the merge (e.g. pnpm install).
+            if is_worker_done && matches!(agent_type, AgentType::ConflictResolver) {
+                self.run_setup_commands(task_id, worktree_path).await;
+            }
+
             // Run verification commands after DONE signal, before committing.
             if is_worker_done {
                 if let Some(feedback) =
@@ -2897,6 +2903,42 @@ impl AgentSupervisor {
             let _ = coordinator
                 .trigger_dispatch_for_project(&task.project_id)
                 .await;
+        }
+    }
+
+    /// Runs the project's setup commands in the task worktree.
+    /// Called after conflict resolution to refresh the environment (e.g. reinstall
+    /// dependencies that changed as a result of merging main into the task branch).
+    /// Failures are logged as warnings but do not abort the session.
+    async fn run_setup_commands(&self, task_id: &str, worktree_path: &Path) {
+        let Ok(task) = self.load_task(task_id).await else { return };
+        let project_repo =
+            ProjectRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let Ok(Some(project)) = project_repo.get(&task.project_id).await else { return };
+        let specs: Vec<CommandSpec> =
+            serde_json::from_str(&project.setup_commands).unwrap_or_default();
+        if specs.is_empty() {
+            return;
+        }
+        tracing::info!(
+            task_id = %task_id,
+            command_count = specs.len(),
+            "Supervisor: re-running setup commands after conflict resolution"
+        );
+        match run_commands(&specs, worktree_path).await {
+            Ok(results) => {
+                if let Some(failure) = results.last().filter(|r| r.exit_code != 0) {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        command = %failure.name,
+                        exit_code = failure.exit_code,
+                        "Supervisor: setup command failed after conflict resolution (continuing)"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "Supervisor: setup commands error after conflict resolution");
+            }
         }
     }
 
