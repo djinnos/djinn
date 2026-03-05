@@ -5,14 +5,12 @@ use super::AgentType;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerSignal {
     Done,
-    Progress,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewerVerdict {
     Verified,
     Reopen,
-    Cancel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,12 +119,6 @@ impl ParsedAgentOutput {
             return;
         }
 
-        if upper.starts_with("PROGRESS") {
-            self.worker_signal = Some(WorkerSignal::Progress);
-            self.worker_reason = split_reason(normalized);
-            return;
-        }
-
         if raw_line.to_ascii_uppercase().contains("WORKER_RESULT") {
             tracing::warn!(line = %raw_line, "malformed WORKER_RESULT marker");
         }
@@ -143,7 +135,6 @@ impl ParsedAgentOutput {
         self.reviewer_verdict = match verdict.as_str() {
             "VERIFIED" => Some(ReviewerVerdict::Verified),
             "REOPEN" => Some(ReviewerVerdict::Reopen),
-            "CANCEL" => Some(ReviewerVerdict::Cancel),
             _ => {
                 tracing::warn!(value = %payload, "malformed REVIEW_RESULT marker");
                 self.reviewer_verdict
@@ -184,22 +175,15 @@ fn sanitize_line(line: &str) -> String {
         .to_string()
 }
 
-fn split_reason(payload: &str) -> Option<String> {
-    let mut parts = payload.splitn(2, ':');
-    let _ = parts.next();
-    let reason = parts.next()?.trim();
-    if reason.is_empty() {
-        None
-    } else {
-        Some(reason.to_string())
-    }
-}
-
 fn extract_runtime_error(line: &str) -> Option<&str> {
     let marker = "Execution error:";
     let idx = line.find(marker)?;
     let value = line[idx + marker.len()..].trim();
-    if value.is_empty() { None } else { Some(value) }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 #[cfg(test)]

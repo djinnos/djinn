@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 
 use tokio::sync::{mpsc, oneshot};
 
-const PUSH_MAX_ATTEMPTS: u32 = 3;
-const REBASE_MAX_ATTEMPTS: u32 = 3;
+pub(super) const PUSH_MAX_ATTEMPTS: u32 = 3;
+pub(super) const REBASE_MAX_ATTEMPTS: u32 = 3;
 
-fn is_retryable_git_command_error(err: &GitError) -> bool {
+pub(super) fn is_retryable_git_command_error(err: &GitError) -> bool {
     let GitError::CommandFailed { stderr, .. } = err else {
         return false;
     };
@@ -34,7 +34,7 @@ fn is_retryable_git_command_error(err: &GitError) -> bool {
     .any(|needle| s.contains(needle))
 }
 
-fn is_non_fast_forward_error(err: &GitError) -> bool {
+pub(super) fn is_non_fast_forward_error(err: &GitError) -> bool {
     let GitError::CommandFailed { stderr, .. } = err else {
         return false;
     };
@@ -42,7 +42,7 @@ fn is_non_fast_forward_error(err: &GitError) -> bool {
     s.contains("non-fast-forward") || s.contains("fetch first") || s.contains("rejected")
 }
 
-fn retry_delay(attempt: u32) -> std::time::Duration {
+pub(super) fn retry_delay(attempt: u32) -> std::time::Duration {
     let exp = attempt.saturating_sub(1).min(4);
     let base_ms = 200u64.saturating_mul(1u64 << exp);
     let jitter_ms = std::time::SystemTime::now()
@@ -139,9 +139,9 @@ pub struct WorktreeInfo {
 
 // ─── Messages ─────────────────────────────────────────────────────────────────
 
-type Reply<T> = oneshot::Sender<Result<T, GitError>>;
+pub(super) type Reply<T> = oneshot::Sender<Result<T, GitError>>;
 
-enum GitMessage {
+pub(super) enum GitMessage {
     /// Return the short name of the current branch (git2 read).
     GetCurrentBranch { respond_to: Reply<String> },
     /// Return a summary of the working-tree status (git2 read).
@@ -192,14 +192,17 @@ enum GitMessage {
 
 // ─── Actor ───────────────────────────────────────────────────────────────────
 
-struct GitActor {
-    path: PathBuf,
-    repo: git2::Repository,
-    receiver: mpsc::Receiver<GitMessage>,
+pub(super) struct GitActor {
+    pub(super) path: PathBuf,
+    pub(super) repo: git2::Repository,
+    pub(super) receiver: mpsc::Receiver<GitMessage>,
 }
 
 impl GitActor {
-    fn new(path: PathBuf, receiver: mpsc::Receiver<GitMessage>) -> Result<Self, GitError> {
+    pub(super) fn new(
+        path: PathBuf,
+        receiver: mpsc::Receiver<GitMessage>,
+    ) -> Result<Self, GitError> {
         let repo = git2::Repository::open(&path)?;
         Ok(Self {
             path,
@@ -208,7 +211,7 @@ impl GitActor {
         })
     }
 
-    async fn run(mut self) {
+    pub(super) async fn run(mut self) {
         tracing::debug!(path = %self.path.display(), "GitActor started");
         while let Some(msg) = self.receiver.recv().await {
             self.handle(msg).await;
@@ -216,7 +219,7 @@ impl GitActor {
         tracing::debug!(path = %self.path.display(), "GitActor stopped");
     }
 
-    async fn handle(&mut self, msg: GitMessage) {
+    pub(super) async fn handle(&mut self, msg: GitMessage) {
         match msg {
             GitMessage::GetCurrentBranch { respond_to } => {
                 let result = tokio::task::block_in_place(|| self.current_branch());
@@ -341,7 +344,10 @@ impl GitActor {
     // ── CLI writes ────────────────────────────────────────────────────────────
 
     /// Static so no `&self` crosses the await point (git2::Repository: !Sync).
-    async fn run_git_command(path: PathBuf, args: Vec<String>) -> Result<CommandOutput, GitError> {
+    pub(super) async fn run_git_command(
+        path: PathBuf,
+        args: Vec<String>,
+    ) -> Result<CommandOutput, GitError> {
         let output = tokio::process::Command::new("git")
             .args(&args)
             .current_dir(&path)
@@ -370,7 +376,7 @@ impl GitActor {
     }
 
     /// Create local `task/{short_id}` from `target_branch` (GIT-01).
-    async fn create_branch_impl(
+    pub(super) async fn create_branch_impl(
         path: PathBuf,
         short_id: String,
         target_branch: String,
@@ -404,296 +410,14 @@ impl GitActor {
         Ok(())
     }
 
-    /// Squash-merge `branch` into `target_branch` with `message` (GIT-03).
-    ///
-    /// Commit-failure awareness (GIT-07): any non-zero exit from `git commit`
-    /// is wrapped in `GitError::CommitRejected` with exact stdout/stderr.
-    async fn squash_merge_impl(
-        path: PathBuf,
-        branch: String,
-        target_branch: String,
-        message: String,
-    ) -> Result<MergeResult, GitError> {
-        // Retry the entire merge+push cycle on non-fast-forward push failures
-        // (main moved between our fetch and push). Max 3 attempts.
-        const MERGE_PUSH_MAX_ATTEMPTS: u32 = 3;
-        let mut last_error: Option<GitError> = None;
-
-        for attempt in 1..=MERGE_PUSH_MAX_ATTEMPTS {
-            // Fetch latest from remote.
-            let _ = Self::run_git_command(
-                path.clone(),
-                vec!["fetch".into(), "origin".into(), target_branch.clone()],
-            )
-            .await;
-
-            // Rebase the task branch onto origin/<target> before merging.
-            // This auto-resolves divergence that git can handle, reducing
-            // false merge conflicts when main has moved forward.
-            let origin_ref = format!("origin/{target_branch}");
-            let rebase_wt_name = format!(
-                ".rebase-{}-{}",
-                branch.replace('/', "-"),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0)
-            );
-            let rebase_wt_path = path.join(".djinn").join("worktrees").join(&rebase_wt_name);
-            let rebase_wt = rebase_wt_path.to_string_lossy().to_string();
-            if Self::run_git_command(
-                path.clone(),
-                vec![
-                    "worktree".into(),
-                    "add".into(),
-                    rebase_wt.clone(),
-                    branch.clone(),
-                ],
-            )
-            .await
-            .is_ok()
-            {
-                let rebase_ok = Self::run_git_command(
-                    rebase_wt_path.clone(),
-                    vec!["rebase".into(), origin_ref.clone()],
-                )
-                .await
-                .is_ok();
-                if !rebase_ok {
-                    // Abort failed rebase; the squash merge will report the real conflict.
-                    let _ = Self::run_git_command(
-                        rebase_wt_path.clone(),
-                        vec!["rebase".into(), "--abort".into()],
-                    )
-                    .await;
-                }
-                let _ = Self::run_git_command(
-                    path.clone(),
-                    vec![
-                        "worktree".into(),
-                        "remove".into(),
-                        "--force".into(),
-                        rebase_wt,
-                    ],
-                )
-                .await;
-            }
-
-            let temp_name = format!(
-                ".merge-{}-{}",
-                target_branch,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0)
-            );
-            let merge_wt_path = path.join(".djinn").join("worktrees").join(temp_name);
-            let merge_wt = merge_wt_path.to_string_lossy().to_string();
-            let origin_target = format!("origin/{target_branch}");
-
-            let add_result = Self::run_git_command(
-                path.clone(),
-                vec![
-                    "worktree".into(),
-                    "add".into(),
-                    "--detach".into(),
-                    merge_wt.clone(),
-                    origin_target,
-                ],
-            )
-            .await;
-
-            if let Err(err) = add_result {
-                return Err(err);
-            }
-
-            let merge_result = Self::squash_merge_detached_worktree_impl(
-                path.clone(),
-                merge_wt_path.clone(),
-                branch.clone(),
-                target_branch.clone(),
-                message.clone(),
-            )
-            .await;
-
-            let _ = Self::run_git_command(
-                path.clone(),
-                vec![
-                    "worktree".into(),
-                    "remove".into(),
-                    "--force".into(),
-                    merge_wt,
-                ],
-            )
-            .await;
-            let _ = Self::run_git_command(
-                path.clone(),
-                vec!["worktree".into(), "prune".into()],
-            )
-            .await;
-
-            match merge_result {
-                Ok(result) => return Ok(result),
-                Err(ref e) if attempt < MERGE_PUSH_MAX_ATTEMPTS && is_non_fast_forward_error(e) => {
-                    tracing::warn!(
-                        attempt,
-                        max_attempts = MERGE_PUSH_MAX_ATTEMPTS,
-                        error = %e,
-                        target_branch = %target_branch,
-                        "push rejected (non-fast-forward); re-fetching and retrying merge"
-                    );
-                    last_error = Some(merge_result.unwrap_err());
-                    let delay = retry_delay(attempt);
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| GitError::CommandFailed {
-            code: 1,
-            command: "squash_merge".into(),
-            cwd: path.display().to_string(),
-            stdout: String::new(),
-            stderr: "exhausted merge-push retry attempts".into(),
-        }))
-    }
-
-    async fn squash_merge_detached_worktree_impl(
-        repo_path: PathBuf,
-        wt_path: PathBuf,
-        branch: String,
-        target_branch: String,
-        message: String,
-    ) -> Result<MergeResult, GitError> {
-        // Stage all changes from the task branch as a squash (no commit yet).
-        if let Err(err) = Self::run_git_command(
-            wt_path.clone(),
-            vec!["merge".into(), "--squash".into(), branch],
-        )
-        .await
-        {
-            if matches!(err, GitError::CommandFailed { .. }) {
-                let files = Self::unmerged_files(wt_path.clone())
-                    .await
-                    .unwrap_or_default();
-                let _ =
-                    Self::run_git_command(wt_path, vec!["merge".into(), "--abort".into()]).await;
-                if !files.is_empty() {
-                    return Err(GitError::MergeConflict {
-                        target_branch,
-                        files,
-                    });
-                }
-            }
-            return Err(err);
-        }
-
-        let staged = Self::run_git_command(
-            wt_path.clone(),
-            vec!["diff".into(), "--cached".into(), "--name-only".into()],
-        )
-        .await?;
-        if staged.stdout.trim().is_empty() {
-            let out =
-                Self::run_git_command(wt_path.clone(), vec!["rev-parse".into(), "HEAD".into()])
-                    .await?;
-            return Ok(MergeResult {
-                commit_sha: out.stdout.trim().to_string(),
-            });
-        }
-
-        // Commit.
-        match Self::run_git_command(wt_path.clone(), vec!["commit".into(), "-m".into(), message])
-            .await
-        {
-            Ok(_) => {}
-            Err(GitError::CommandFailed {
-                code,
-                command,
-                cwd,
-                stdout,
-                stderr,
-            }) => {
-                return Err(GitError::CommitRejected {
-                    code,
-                    command,
-                    cwd,
-                    stdout,
-                    stderr,
-                });
-            }
-            Err(e) => return Err(e),
-        }
-
-        // Read the resulting commit SHA.
-        let out =
-            Self::run_git_command(wt_path.clone(), vec!["rev-parse".into(), "HEAD".into()]).await?;
-        let commit_sha = out.stdout.trim().to_string();
-
-        // Push merge commit directly to upstream target branch.
-        // Retry short-lived transport/ref-lock failures with jitter.
-        let push_refspec = format!("{commit_sha}:refs/heads/{target_branch}");
-        let mut last_push_error: Option<GitError> = None;
-        for attempt in 1..=PUSH_MAX_ATTEMPTS {
-            match Self::run_git_command(
-                repo_path.clone(),
-                vec!["push".into(), "origin".into(), push_refspec.clone()],
-            )
-            .await
-            {
-                Ok(_) => {
-                    last_push_error = None;
-                    break;
-                }
-                Err(e) if attempt < PUSH_MAX_ATTEMPTS && is_retryable_git_command_error(&e) => {
-                    let delay = retry_delay(attempt);
-                    tracing::warn!(
-                        attempt,
-                        max_attempts = PUSH_MAX_ATTEMPTS,
-                        delay_ms = delay.as_millis() as u64,
-                        error = %e,
-                        target_branch = %target_branch,
-                        "push failed during squash merge; retrying"
-                    );
-                    last_push_error = Some(e);
-                    tokio::time::sleep(delay).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        if let Some(e) = last_push_error {
-            return Err(e);
-        }
-
-        Ok(MergeResult { commit_sha })
-    }
-
-    async fn unmerged_files(path: PathBuf) -> Result<Vec<String>, GitError> {
-        let out = Self::run_git_command(
-            path,
-            vec![
-                "diff".into(),
-                "--name-only".into(),
-                "--diff-filter=U".into(),
-            ],
-        )
-        .await?;
-        Ok(out
-            .stdout
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect())
-    }
-
     /// Force-delete `branch` locally; also removes from origin (best effort).
     ///
     /// Uses `-D` because squash merges don't produce a merge commit, so git
     /// considers task branches "unmerged" even after a successful squash.
-    async fn delete_branch_impl(path: PathBuf, branch: String) -> Result<(), GitError> {
+    pub(super) async fn delete_branch_impl(
+        path: PathBuf,
+        branch: String,
+    ) -> Result<(), GitError> {
         // Force-delete local branch.
         Self::run_git_command(
             path.clone(),
@@ -709,102 +433,6 @@ impl GitActor {
         .await;
 
         Ok(())
-    }
-
-    /// Create a worktree at `{repo}/.djinn/worktrees/{task_short_id}/` on `branch` (GIT-02).
-    ///
-    /// Prunes stale worktree metadata first (GIT-06) so leftover entries from
-    /// crashed sessions don't block the new checkout.
-    async fn create_worktree_impl(
-        path: PathBuf,
-        task_short_id: String,
-        branch: String,
-        detach: bool,
-    ) -> Result<PathBuf, GitError> {
-        // GIT-06: prune stale worktree bookkeeping before creating.
-        let _ = Self::run_git_command(path.clone(), vec!["worktree".into(), "prune".into()]).await;
-
-        let wt_path = path.join(".djinn").join("worktrees").join(&task_short_id);
-
-        let mut args = vec!["worktree".into(), "add".into()];
-        if detach {
-            args.push("--detach".into());
-        }
-        args.push(wt_path.to_str().unwrap_or_default().into());
-        args.push(branch);
-
-        Self::run_git_command(path, args).await?;
-
-        Ok(wt_path)
-    }
-
-    /// Remove a worktree by path and prune stale entries (GIT-06).
-    async fn remove_worktree_impl(path: PathBuf, wt_path: PathBuf) -> Result<(), GitError> {
-        Self::run_git_command(
-            path.clone(),
-            vec![
-                "worktree".into(),
-                "remove".into(),
-                "--force".into(),
-                wt_path.to_str().unwrap_or_default().into(),
-            ],
-        )
-        .await?;
-
-        // GIT-06: prune after removal to clean up any remaining metadata.
-        let _ = Self::run_git_command(path, vec!["worktree".into(), "prune".into()]).await;
-
-        Ok(())
-    }
-
-    /// List all worktrees with structured metadata (GIT-02).
-    ///
-    /// Parses `git worktree list --porcelain` which emits blocks separated by
-    /// blank lines, each containing `worktree <path>`, `HEAD <sha>`, and
-    /// optionally `branch refs/heads/<name>`.
-    async fn list_worktrees_impl(path: PathBuf) -> Result<Vec<WorktreeInfo>, GitError> {
-        let out = Self::run_git_command(
-            path,
-            vec!["worktree".into(), "list".into(), "--porcelain".into()],
-        )
-        .await?;
-
-        let mut worktrees = Vec::new();
-        let mut wt_path: Option<PathBuf> = None;
-        let mut head: Option<String> = None;
-        let mut branch: Option<String> = None;
-
-        for line in out.stdout.lines() {
-            if line.is_empty() {
-                // End of a worktree block — flush.
-                if let (Some(p), Some(h)) = (wt_path.take(), head.take()) {
-                    worktrees.push(WorktreeInfo {
-                        path: p,
-                        branch: branch.take(),
-                        head: h,
-                    });
-                }
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("worktree ") {
-                wt_path = Some(PathBuf::from(rest));
-            } else if let Some(rest) = line.strip_prefix("HEAD ") {
-                head = Some(rest.to_string());
-            } else if let Some(rest) = line.strip_prefix("branch refs/heads/") {
-                branch = Some(rest.to_string());
-            }
-        }
-
-        // Flush last block (porcelain output may not end with a blank line).
-        if let (Some(p), Some(h)) = (wt_path, head) {
-            worktrees.push(WorktreeInfo {
-                path: p,
-                branch: branch.take(),
-                head: h,
-            });
-        }
-
-        Ok(worktrees)
     }
 }
 
@@ -993,6 +621,11 @@ pub fn get_or_spawn(
     registry.insert(path.to_path_buf(), handle.clone());
     Ok(handle)
 }
+
+// ─── Submodules ──────────────────────────────────────────────────────────────
+
+mod merge_ops;
+mod worktree;
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
