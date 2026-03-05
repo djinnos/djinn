@@ -70,7 +70,7 @@ export const PriorityLevels = {
 
 export const StatusStates = {
   render: () => (
-    <div className="grid max-w-5xl grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+    <div className="grid max-w-5xl grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
       <TaskCard task={{ ...baseTask, id: "task-pending", shortId: "st01", status: "pending", title: "Pending: collect acceptance criteria" }} epic={activeEpic} />
       <TaskCard
         task={{
@@ -89,13 +89,41 @@ export const StatusStates = {
       <TaskCard
         task={{
           ...baseTask,
-          id: "task-completed",
+          id: "task-needs-review",
           shortId: "st03",
+          status: "pending",
+          title: "Needs Review: validate SSE reconnection logic",
+          trackedSeconds: 35 * 60,
+          sessionCount: 2,
+          reviewPhase: "needs_task_review",
+        }}
+        epic={activeEpic}
+      />
+      <TaskCard
+        task={{
+          ...baseTask,
+          id: "task-in-review",
+          shortId: "st04",
+          status: "in_progress",
+          title: "In Review: agent reviewing kanban drag-and-drop",
+          trackedSeconds: 55 * 60,
+          activeSessionStartedAt: minutesAgo(8),
+          sessionCount: 3,
+          reviewPhase: "in_task_review",
+          sessionModelId: "claude-sonnet-4-6",
+        }}
+        epic={activeEpic}
+      />
+      <TaskCard
+        task={{
+          ...baseTask,
+          id: "task-completed",
+          shortId: "st05",
           status: "completed",
           title: "Completed: add board filter chips",
           trackedSeconds: 70 * 60,
           sessionCount: 4,
-          reviewPhase: "needs_task_review",
+          reviewPhase: undefined,
         }}
         epic={completedEpic}
       />
@@ -103,12 +131,15 @@ export const StatusStates = {
         task={{
           ...baseTask,
           id: "task-blocked",
-          shortId: "st04",
-          status: "blocked",
+          shortId: "st06",
+          status: "pending",
           title: "Blocked: waiting for API contract confirmation",
           owner: null,
           epicId: null,
-          reviewPhase: "in_task_review",
+          trackedSeconds: 42 * 60,
+          sessionCount: 3,
+          reviewPhase: undefined,
+          unresolvedBlockerCount: 2,
         }}
       />
     </div>

@@ -1,6 +1,18 @@
-import { showToast } from "@/lib/toast";
 import type { Epic, Task } from "@/types";
-import { Clock3 } from "lucide-react";
+import { TaskIdLabel } from "@/components/TaskIdLabel";
+import {
+  CheckmarkCircle03Icon,
+  Clock01Icon,
+  FullSignalIcon,
+  Loading03Icon,
+  LowSignalIcon,
+  MediumSignalIcon,
+  NoSignalIcon,
+  Progress01Icon,
+  Task01Icon,
+  UnavailableIcon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useMemo, useState } from "react";
 
 type TaskCardProps = {
@@ -10,42 +22,23 @@ type TaskCardProps = {
   onClick?: () => void;
 };
 
-const PRIORITY_BAR_COLORS: Record<Task["priority"], string> = {
-  P0: "bg-red-500",
-  P1: "bg-orange-500",
-  P2: "bg-amber-500",
-  P3: "bg-gray-400",
+const PRIORITY_CONFIG: Record<Task["priority"], { icon: typeof NoSignalIcon; color: string }> = {
+  P0: { icon: FullSignalIcon, color: "text-red-500" },
+  P1: { icon: MediumSignalIcon, color: "text-yellow-500" },
+  P2: { icon: LowSignalIcon, color: "text-green-500" },
+  P3: { icon: NoSignalIcon, color: "text-muted-foreground" },
 };
 
-const PRIORITY_BAR_COUNT: Record<Task["priority"], number> = {
-  P0: 4,
-  P1: 3,
-  P2: 2,
-  P3: 1,
-};
-
-function PriorityBars({ priority }: { priority: Task["priority"] }) {
-  const activeBars = PRIORITY_BAR_COUNT[priority];
-  const activeColor = PRIORITY_BAR_COLORS[priority];
-
+function PriorityBadge({ priority }: { priority: Task["priority"] }) {
+  const config = PRIORITY_CONFIG[priority];
   return (
-    <span
-      className="inline-flex h-4 items-end gap-0.5"
-      title={`Priority ${priority}`}
+    <HugeiconsIcon
+      icon={config.icon}
+      size={16}
+      className={`shrink-0 ${config.color}`}
       aria-label={`Priority ${priority}`}
-    >
-      {[0, 1, 2, 3].map((bar) => {
-        const height = ["h-1.5", "h-2.5", "h-3.5", "h-4"][bar];
-        const isActive = bar < activeBars;
-        return (
-          <span
-            key={bar}
-            className={`w-1 rounded-sm ${height} ${isActive ? activeColor : "bg-muted"}`}
-            aria-hidden="true"
-          />
-        );
-      })}
-    </span>
+      title={`Priority ${priority}`}
+    />
   );
 }
 
@@ -62,53 +55,10 @@ function formatCompactDuration(totalSeconds: number): string {
   return `${minutes}m`;
 }
 
-function getEpicEmoji(epic: Epic | undefined): string {
-  if (!epic) return "📌";
-  if (epic.status === "active") return "🚀";
-  if (epic.status === "completed") return "✅";
-  return "📦";
-}
-
-function getEpicDotColor(epic: Epic | undefined): string {
-  if (!epic) return "bg-gray-400";
-  if (epic.status === "active") return "bg-emerald-500";
-  if (epic.status === "completed") return "bg-blue-500";
-  return "bg-violet-500";
-}
-
-function getReviewIndicator(reviewPhase: Task["reviewPhase"]): { dotClass: string; animateClass?: string; title: string } | null {
-  if (reviewPhase === "needs_task_review") {
-    return { dotClass: "bg-amber-500", title: "Waiting for review" };
-  }
-  if (reviewPhase === "in_task_review") {
-    return { dotClass: "bg-blue-500", animateClass: "animate-spin", title: "Agent reviewing" };
-  }
-  return null;
-}
 
 
-function RunningSpinner() {
-  return (
-    <span
-      className="inline-block h-3 w-3 shrink-0 animate-spin rounded-full border border-blue-500 border-t-transparent opacity-80"
-      title="Task running"
-      aria-label="Task running"
-    />
-  );
-}
 
-function PartialProgressIcon() {
-  return (
-    <span
-      className="relative inline-block h-3 w-3 shrink-0 rounded-full border border-amber-500/90 opacity-90"
-      title="Task partially complete"
-      aria-label="Task partially complete"
-    >
-      <span className="absolute left-1/2 top-[1px] h-[4px] w-[1px] -translate-x-1/2 rounded-full bg-amber-500/90" aria-hidden="true" />
-      <span className="absolute left-1/2 top-1/2 h-[1px] w-[3px] -translate-y-1/2 rounded-full bg-amber-500/90" aria-hidden="true" />
-    </span>
-  );
-}
+
 
 function ownerInitials(owner: string | null): string {
   if (!owner) return "??";
@@ -120,15 +70,9 @@ function ownerInitials(owner: string | null): string {
   return parts.map((p) => p[0]?.toUpperCase() ?? "").join("");
 }
 
-async function copyTaskId(taskId: string): Promise<void> {
-  await navigator.clipboard.writeText(taskId);
-  showToast.success("Task ID copied");
-}
 
-export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps) {
-  const reviewIndicator = getReviewIndicator(task.reviewPhase);
+export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const isRunning = task.status === "in_progress";
-  const hasPartialProgress = task.status !== "in_progress" && task.status !== "pending";
   const [now, setNow] = useState(() => Date.now());
 
   const runningSessionStartMs = useMemo(() => {
@@ -169,55 +113,73 @@ export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps)
 
   return (
     <article
-      className={`rounded border bg-card p-2 text-sm transition-all duration-200 ease-in-out hover:-translate-y-px hover:shadow-sm ${moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"} ${onClick ? "cursor-pointer" : ""}`}
+      className={`cursor-pointer rounded border bg-card p-2 text-sm transition-all duration-200 ease-in-out hover:bg-muted/30 ${moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"}`}
       onClick={onClick}
     >
-      <div className="mb-1 flex items-center gap-1 text-[10px] text-muted-foreground">
-        <span className="font-semibold uppercase">{task.shortId ?? task.id.slice(0, 4)}</span>
-        <button
-          type="button"
-          className="inline-flex h-4 w-4 items-center justify-center rounded hover:bg-muted"
-          aria-label="Copy task ID"
-          title="Copy full task ID"
-          onClick={(event) => {
-            event.stopPropagation();
-            void copyTaskId(task.id);
-          }}
-        >
-          ⧉
-        </button>
+      <div className="mb-1">
+        <TaskIdLabel taskId={task.id} shortId={task.shortId} />
       </div>
 
-      <div className="mb-2 flex items-start justify-between gap-2">
-        <h4 className="truncate font-medium" title={task.title}>
+      <div className="mb-2 flex items-start gap-2">
+        <div className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
+          {(task.unresolvedBlockerCount ?? 0) > 0 ? (
+            <HugeiconsIcon
+              icon={UnavailableIcon}
+              size={16}
+              className="shrink-0 text-red-500"
+              title={`Blocked by ${task.unresolvedBlockerCount} task${task.unresolvedBlockerCount === 1 ? "" : "s"}`}
+              aria-label="Blocked"
+            />
+          ) : isRunning || task.reviewPhase === "in_task_review" ? (
+            <HugeiconsIcon
+              icon={Loading03Icon}
+              size={16}
+              className={`shrink-0 animate-spin ${task.reviewPhase === "in_task_review" ? "text-yellow-400" : "text-purple-500"}`}
+              title={task.reviewPhase === "in_task_review" ? "In review" : "Task running"}
+              aria-label={task.reviewPhase === "in_task_review" ? "In review" : "Task running"}
+            />
+          ) : task.reviewPhase === "needs_task_review" ? (
+            <HugeiconsIcon
+              icon={Progress01Icon}
+              size={16}
+              className="shrink-0 text-yellow-400"
+              title="Needs review"
+              aria-label="Needs review"
+            />
+          ) : task.status === "completed" ? (
+            <HugeiconsIcon
+              icon={CheckmarkCircle03Icon}
+              size={16}
+              className="shrink-0 text-emerald-500"
+              title="Completed"
+              aria-label="Completed"
+            />
+          ) : (
+            <HugeiconsIcon
+              icon={Progress01Icon}
+              size={16}
+              className="shrink-0 text-muted-foreground/40"
+              aria-label="Not started"
+              title="Not started"
+            />
+          )}
+        </div>
+        <h4 className="font-medium leading-snug" title={task.title}>
           {task.title}
         </h4>
-        {isRunning ? <RunningSpinner /> : null}
-        {hasPartialProgress ? <PartialProgressIcon /> : null}
-        {reviewIndicator ? (
-          <span
-            className={`h-2 w-2 shrink-0 rounded-full ${reviewIndicator.dotClass} ${reviewIndicator.animateClass ?? ""}`}
-            title={reviewIndicator.title}
-            aria-label={reviewIndicator.title}
-          />
-        ) : null}
-        <PriorityBars priority={task.priority} />
       </div>
 
       {shouldShowDuration ? (
         <div className="mb-2 flex items-center gap-1 text-xs text-muted-foreground" title="Time spent">
-          <Clock3 className="h-3 w-3 shrink-0" aria-hidden="true" />
+          <HugeiconsIcon icon={Clock01Icon} size={12} className="shrink-0" aria-hidden="true" />
           <span>{formatCompactDuration(totalTrackedSeconds)}</span>
         </div>
       ) : null}
 
       <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-        <div className="flex min-w-0 items-center gap-1" title={epic?.title ?? "No Epic"}>
-          <span className={`h-2 w-2 shrink-0 rounded-full ${getEpicDotColor(epic)}`} aria-hidden="true" />
-          <span role="img" aria-label="epic emoji" className="shrink-0">
-            {getEpicEmoji(epic)}
-          </span>
-          <span className="truncate">{epic?.title ?? "No Epic"}</span>
+        <div className="flex items-center gap-2">
+          <PriorityBadge priority={task.priority} />
+          <HugeiconsIcon icon={Task01Icon} size={16} className="shrink-0" aria-label="Task" title="Task" />
         </div>
 
         <div

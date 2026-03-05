@@ -7,10 +7,12 @@ import type { Epic, Task, TaskPriority, TaskStatus } from "@/types";
 import { TaskCard } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 
-const STATUS_COLUMNS: Array<{ key: TaskStatus; label: string; accentClass: string }> = [
+type ColumnKey = TaskStatus | "in_review";
+
+const STATUS_COLUMNS: Array<{ key: ColumnKey; label: string; accentClass: string }> = [
   { key: "pending", label: "Open", accentClass: "border-violet-500" },
   { key: "in_progress", label: "In Progress", accentClass: "border-purple-500" },
-  { key: "blocked", label: "In Review", accentClass: "border-amber-500" },
+  { key: "in_review", label: "In Review", accentClass: "border-amber-500" },
   { key: "completed", label: "Closed", accentClass: "border-emerald-500" },
 ];
 
@@ -159,26 +161,27 @@ export function KanbanBoard({
   }, [tasks, epicFilter, ownerFilter, priorityFilters, textFilter]);
 
   const groupedByStatusThenEpic = useMemo(() => {
-    const byStatus = new Map<TaskStatus, Map<string, Task[]>>();
+    const byColumn = new Map<ColumnKey, Map<string, Task[]>>();
 
     for (const column of STATUS_COLUMNS) {
-      byStatus.set(column.key, new Map());
+      byColumn.set(column.key, new Map());
     }
 
     for (const task of filteredTasks) {
       const epicKey = task.epicId ?? "no-epic";
-      const statusMap = byStatus.get(task.status);
-      if (!statusMap) continue;
+      const columnKey: ColumnKey = task.reviewPhase ? "in_review" : task.status;
+      const columnMap = byColumn.get(columnKey);
+      if (!columnMap) continue;
 
-      const existing = statusMap.get(epicKey) ?? [];
+      const existing = columnMap.get(epicKey) ?? [];
       existing.push(task);
-      statusMap.set(epicKey, existing);
+      columnMap.set(epicKey, existing);
     }
 
-    return byStatus;
+    return byColumn;
   }, [filteredTasks]);
 
-  const toggleEpic = (columnKey: TaskStatus, epicKey: string) => {
+  const toggleEpic = (columnKey: ColumnKey, epicKey: string) => {
     const collapseKey = `${columnKey}:${epicKey}`;
     setCollapsedEpics((prev) => ({ ...prev, [collapseKey]: !prev[collapseKey] }));
   };

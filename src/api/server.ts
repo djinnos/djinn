@@ -263,11 +263,7 @@ export function mapPriority(priority: number): TaskPriority {
 
 export function mapTaskStatus(status: string): TaskStatus {
   if (status === "in_progress") return "in_progress";
-  if (status === "blocked" || status === "needs_task_review" || status === "in_task_review") {
-    return "blocked";
-  }
   if (status === "closed") return "completed";
-  if (status === "draft" || status === "open") return "pending";
   return "pending";
 }
 
@@ -301,6 +297,7 @@ export function mapTaskFromMcp(task: TaskListMcpResponse["tasks"][number]): Task
     trackedSeconds: typeof task.duration_seconds === "number" ? task.duration_seconds : undefined,
     activeSessionStartedAt: task.active_session?.started_at ?? null,
     reopenCount: typeof task.reopen_count === "number" ? task.reopen_count : undefined,
+    unresolvedBlockerCount: typeof task.unresolved_blocker_count === "number" ? task.unresolved_blocker_count : undefined,
   };
 }
 

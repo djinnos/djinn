@@ -4,7 +4,7 @@
  * These types mirror the server-side types for full-entity SSE events.
  */
 
-export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'blocked';
+export type TaskStatus = 'pending' | 'in_progress' | 'completed';
 export type TaskPriority = 'P0' | 'P1' | 'P2' | 'P3';
 
 export interface AcceptanceCriterion {
@@ -33,6 +33,7 @@ export interface Task {
   trackedSeconds?: number;
   activeSessionStartedAt?: string | null;
   reopenCount?: number;
+  unresolvedBlockerCount?: number;
 }
 
 export type EpicStatus = 'active' | 'completed' | 'archived';

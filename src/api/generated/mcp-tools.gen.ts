@@ -419,7 +419,6 @@ export namespace EpicTasksOutputSchema {
   created_at: string
   updated_at: string
   closed_at?: string
-  blocked_from_status?: string
   close_reason?: string
   merge_commit_sha?: string
   [k: string]: any
@@ -1183,10 +1182,10 @@ export type MemoryWriteOutput = MemoryWriteOutputSchema.MemoryWriteOutput;
 export namespace ModelHealthInputSchema {
   export interface ModelHealthInput {
   /**
-   * Action to perform: status (view all), reset (reset one model),
+   * Action to perform: status (view all, default), reset (reset one model),
    * reset_all (reset all models), enable (re-enable auto-disabled model).
    */
-  action: string
+  action?: string
   /**
    * Model ID (required for reset and enable actions).
    */
@@ -1343,6 +1342,50 @@ export namespace ProjectCommandsSetOutputSchema {
 
 }
 export type ProjectCommandsSetOutput = ProjectCommandsSetOutputSchema.ProjectCommandsSetOutput;
+export namespace ProjectConfigGetInputSchema {
+  export interface ProjectConfigGetInput {
+  project: string
+  [k: string]: any
+  }
+
+}
+export type ProjectConfigGetInput = ProjectConfigGetInputSchema.ProjectConfigGetInput;
+export namespace ProjectConfigGetOutputSchema {
+  export interface ProjectConfigGetOutput {
+  status: string
+  project: string
+  target_branch: string
+  auto_merge: boolean
+  sync_enabled: boolean
+  sync_remote?: string
+  [k: string]: any
+  }
+
+}
+export type ProjectConfigGetOutput = ProjectConfigGetOutputSchema.ProjectConfigGetOutput;
+export namespace ProjectConfigSetInputSchema {
+  export interface ProjectConfigSetInput {
+  project: string
+  key: string
+  value: string
+  [k: string]: any
+  }
+
+}
+export type ProjectConfigSetInput = ProjectConfigSetInputSchema.ProjectConfigSetInput;
+export namespace ProjectConfigSetOutputSchema {
+  export interface ProjectConfigSetOutput {
+  status: string
+  project: string
+  target_branch: string
+  auto_merge: boolean
+  sync_enabled: boolean
+  sync_remote?: string
+  [k: string]: any
+  }
+
+}
+export type ProjectConfigSetOutput = ProjectConfigSetOutputSchema.ProjectConfigSetOutput;
 export namespace ProjectListInputSchema {
   export interface ProjectListInput {
   [k: string]: any
@@ -1990,9 +2033,9 @@ export type TaskActivityListOutput = TaskActivityListOutputSchema.TaskActivityLi
 export namespace TaskBlockedListInputSchema {
   export interface TaskBlockedListInput {
   /**
-   * Absolute project path.
+   * Absolute project path. Optional — task IDs are globally unique.
    */
-  project: string
+  project?: string
   /**
    * Task UUID or short_id.
    */
@@ -2272,7 +2315,6 @@ export namespace TaskListOutputSchema {
   created_at: string
   updated_at: string
   closed_at?: string
-  blocked_from_status?: string
   close_reason?: string
   merge_commit_sha?: string
   [k: string]: any
@@ -2341,9 +2383,9 @@ export type TaskReadyOutput = TaskReadyOutputSchema.TaskReadyOutput;
 export namespace TaskShowInputSchema {
   export interface TaskShowInput {
   /**
-   * Absolute project path.
+   * Absolute project path. Optional — task IDs are globally unique.
    */
-  project: string
+  project?: string
   /**
    * Task UUID or short_id.
    */
@@ -2504,20 +2546,20 @@ export namespace TaskTransitionInputSchema {
   /**
    * Transition action: accept, start, submit_task_review, task_review_start,
    * task_review_reject, task_review_reject_conflict, task_review_approve,
-   * reopen, close, release, release_task_review, block, unblock, force_close,
+   * reopen, close, release, release_task_review, force_close,
    * user_override.
    */
   action: string
   /**
    * Required for: task_review_reject, task_review_reject_conflict,
-   * reopen, release, release_task_review, block, force_close.
+   * reopen, release, release_task_review, force_close.
    */
   reason?: string
   actor_id?: string
   actor_role?: string
   /**
    * Required when action = "user_override". Allowed values: draft, open, needs_task_review,
-   * in_task_review, in_progress, blocked, closed.
+   * in_task_review, in_progress, closed.
    */
   target_status?: string
   [k: string]: any
@@ -2590,7 +2632,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_commands_get" | "project_commands_set" | "project_list" | "project_remove" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_add" | "task_blockers_list" | "task_blockers_remove" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_transition" | "task_update";
+export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_commands_get" | "project_commands_set" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_add" | "task_blockers_list" | "task_blockers_remove" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "board_health": { input: BoardHealthInput; output: BoardHealthOutput };
@@ -2634,6 +2676,8 @@ export interface McpToolMap {
   "project_add": { input: ProjectAddInput; output: ProjectAddOutput };
   "project_commands_get": { input: ProjectCommandsGetInput; output: ProjectCommandsGetOutput };
   "project_commands_set": { input: ProjectCommandsSetInput; output: ProjectCommandsSetOutput };
+  "project_config_get": { input: ProjectConfigGetInput; output: ProjectConfigGetOutput };
+  "project_config_set": { input: ProjectConfigSetInput; output: ProjectConfigSetOutput };
   "project_list": { input: ProjectListInput; output: ProjectListOutput };
   "project_remove": { input: ProjectRemoveInput; output: ProjectRemoveOutput };
   "provider_add_custom": { input: ProviderAddCustomInput; output: ProviderAddCustomOutput };
