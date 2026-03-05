@@ -29,8 +29,14 @@ function getEpicEmoji(epicId: string): string {
   return emojis[Math.abs(hash) % emojis.length];
 }
 
-export function RoadmapView() {
-  const epics = useAllEpics();
+interface RoadmapViewProps {
+  mockEpics?: Epic[];
+  mockTasks?: Task[];
+}
+
+export function RoadmapView({ mockEpics, mockTasks }: RoadmapViewProps = {}) {
+  const storeEpics = useAllEpics();
+  const epics = mockEpics ?? storeEpics;
   const sortedEpics = useMemo(() => sortEpics(epics), [epics]);
   const [expandAllSignal, setExpandAllSignal] = useState(0);
   const [collapseAllSignal, setCollapseAllSignal] = useState(0);
@@ -59,6 +65,7 @@ export function RoadmapView() {
             expandAllSignal={expandAllSignal}
             collapseAllSignal={collapseAllSignal}
             onTaskClick={setSelectedTask}
+            mockTasks={mockTasks?.filter((task) => task.epicId === epic.id)}
           />
         ))}
       </div>

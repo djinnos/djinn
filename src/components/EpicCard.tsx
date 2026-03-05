@@ -11,6 +11,8 @@ import type { Epic, Task, TaskStatus } from "@/types";
 import { ChevronDown } from "lucide-react";
 
 interface EpicCardProps {
+  mockTasks?: Task[];
+  defaultExpanded?: boolean;
   epic: Epic;
   emoji?: string;
   expandAllSignal?: number;
@@ -61,10 +63,13 @@ export function EpicCard({
   expandAllSignal,
   collapseAllSignal,
   onTaskClick,
+  mockTasks,
+  defaultExpanded = false,
 }: EpicCardProps) {
-  const tasks = useTasksByEpic(epic.id);
+  const storeTasks = useTasksByEpic(epic.id);
+  const tasks = mockTasks ?? storeTasks;
   const { percentage, closed, total } = calculateProgress(tasks);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
 
   useEffect(() => {
     if (expandAllSignal !== undefined) setExpanded(true);
