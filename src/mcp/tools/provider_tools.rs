@@ -6,8 +6,8 @@ use std::collections::HashSet;
 use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::custom_provider::CustomProviderRepository;
 use crate::mcp::server::DjinnMcpServer;
-use crate::mcp::tools::AnyJson;
 use crate::models::provider::{CustomProvider, Model, Provider, SeedModel};
+use crate::provider::health::ModelHealth;
 use crate::provider::validate::{self, ValidationRequest};
 use goose::config::Config as GooseConfig;
 use goose::config::paths::Paths as GoosePaths;
@@ -15,37 +15,23 @@ use goose::providers::base::{ProviderMetadata, ProviderType};
 
 // ── Shared response helpers ───────────────────────────────────────────────────
 
-fn provider_to_json(p: &Provider) -> serde_json::Value {
-    serde_json::json!({
-        "id":                   p.id,
-        "name":                 p.name,
-        "npm":                  p.npm,
-        "env_vars":             p.env_vars,
-        "base_url":             p.base_url,
-        "docs_url":             p.docs_url,
-        "is_openai_compatible": p.is_openai_compatible,
-        // Server-computed connection state (credential vault and/or OAuth token present).
-        "connected": false,
-    })
-}
-
-fn model_to_json(m: &Model) -> serde_json::Value {
-    serde_json::json!({
-        "id":             m.id,
-        "provider_id":    m.provider_id,
-        "name":           m.name,
-        "tool_call":      m.tool_call,
-        "reasoning":      m.reasoning,
-        "attachment":     m.attachment,
-        "context_window": m.context_window,
-        "output_limit":   m.output_limit,
-        "pricing": {
-            "input_per_million":       m.pricing.input_per_million,
-            "output_per_million":      m.pricing.output_per_million,
-            "cache_read_per_million":  m.pricing.cache_read_per_million,
-            "cache_write_per_million": m.pricing.cache_write_per_million,
-        }
-    })
+fn model_to_output(m: &Model) -> ProviderModelOutput {
+    ProviderModelOutput {
+        id: m.id.clone(),
+        provider_id: m.provider_id.clone(),
+        name: m.name.clone(),
+        tool_call: m.tool_call,
+        reasoning: m.reasoning,
+        attachment: m.attachment,
+        context_window: m.context_window,
+        output_limit: m.output_limit,
+        pricing: ModelPricingOutput {
+            input_per_million: m.pricing.input_per_million,
+            output_per_million: m.pricing.output_per_million,
+            cache_read_per_million: m.pricing.cache_read_per_million,
+            cache_write_per_million: m.pricing.cache_write_per_million,
+        },
+    }
 }
 
 pub(crate) fn canonical_provider_id(id: &str) -> String {
@@ -169,22 +155,63 @@ pub struct ModelHealthInput {
 #[derive(Serialize, JsonSchema)]
 pub struct ModelHealthResponse {
     pub action: String,
-    pub models: Vec<AnyJson>,
+    pub models: Vec<ModelHealthOutput>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ModelHealthOutput {
+    pub model_id: String,
+    pub auto_disabled: bool,
+    pub consecutive_failures: u32,
+    pub total_failures: u32,
+    pub total_successes: u32,
+    pub disable_ttl_trips: u32,
+    pub cooldown_seconds_remaining: Option<u64>,
+}
+
+impl From<ModelHealth> for ModelHealthOutput {
+    fn from(value: ModelHealth) -> Self {
+        Self {
+            model_id: value.model_id,
+            auto_disabled: value.auto_disabled,
+            consecutive_failures: value.consecutive_failures,
+            total_failures: value.total_failures,
+            total_successes: value.total_successes,
+            disable_ttl_trips: value.disable_ttl_trips,
+            cooldown_seconds_remaining: value.cooldown_seconds_remaining,
+        }
+    }
 }
 
 // ── provider_catalog ──────────────────────────────────────────────────────────
 
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderCatalogResponse {
-    pub providers: Vec<AnyJson>,
+    pub providers: Vec<ProviderCatalogItem>,
     pub total: i64,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProviderCatalogItem {
+    pub id: String,
+    pub name: String,
+    pub npm: String,
+    pub env_vars: Vec<String>,
+    pub base_url: String,
+    pub docs_url: String,
+    pub is_openai_compatible: bool,
+    pub connected: bool,
+    pub oauth_supported: bool,
+    pub oauth_keys: Vec<String>,
+    pub connection_methods: Vec<String>,
 }
 
 // ── provider_connected ────────────────────────────────────────────────────────
 
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderConnectedResponse {
-    pub providers: Vec<AnyJson>,
+    pub providers: Vec<ProviderCatalogItem>,
     pub total: i64,
 }
 
@@ -199,15 +226,36 @@ pub struct ProviderModelsInput {
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderModelsResponse {
     pub provider_id: String,
-    pub models: Vec<AnyJson>,
+    pub models: Vec<ProviderModelOutput>,
     pub total: i64,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ModelPricingOutput {
+    pub input_per_million: f64,
+    pub output_per_million: f64,
+    pub cache_read_per_million: f64,
+    pub cache_write_per_million: f64,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProviderModelOutput {
+    pub id: String,
+    pub provider_id: String,
+    pub name: String,
+    pub tool_call: bool,
+    pub reasoning: bool,
+    pub attachment: bool,
+    pub context_window: i64,
+    pub output_limit: i64,
+    pub pricing: ModelPricingOutput,
 }
 
 // ── provider_models_connected ─────────────────────────────────────────────────
 
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderModelsConnectedResponse {
-    pub models: Vec<AnyJson>,
+    pub models: Vec<ProviderModelOutput>,
     pub total: i64,
 }
 
@@ -241,7 +289,7 @@ pub struct ProviderModelLookupInput {
 pub struct ProviderModelLookupResponse {
     pub model_id: String,
     pub found: bool,
-    pub model: AnyJson,
+    pub model: Option<ProviderModelOutput>,
 }
 
 // ── provider_validate ─────────────────────────────────────────────────────────
@@ -313,13 +361,14 @@ impl DjinnMcpServer {
         match action {
             "status" => {
                 let all = tracker.all_health();
-                let models: Vec<AnyJson> = all
-                    .iter()
-                    .map(|h| AnyJson::from(serde_json::to_value(h).unwrap_or_default()))
+                let models: Vec<ModelHealthOutput> = all
+                    .into_iter()
+                    .map(ModelHealthOutput::from)
                     .collect();
                 Json(ModelHealthResponse {
                     action: "status".into(),
                     models,
+                    error: None,
                 })
             }
             "reset" => {
@@ -329,14 +378,14 @@ impl DjinnMcpServer {
                     let h = tracker.model_health(model_id);
                     Json(ModelHealthResponse {
                         action: "reset".into(),
-                        models: vec![AnyJson::from(serde_json::to_value(&h).unwrap_or_default())],
+                        models: vec![ModelHealthOutput::from(h)],
+                        error: None,
                     })
                 } else {
                     Json(ModelHealthResponse {
                         action: "reset".into(),
-                        models: vec![AnyJson::from(
-                            serde_json::json!({"error": "model parameter required for reset"}),
-                        )],
+                        models: vec![],
+                        error: Some("model parameter required for reset".into()),
                     })
                 }
             }
@@ -346,6 +395,7 @@ impl DjinnMcpServer {
                 Json(ModelHealthResponse {
                     action: "reset_all".into(),
                     models: vec![],
+                    error: None,
                 })
             }
             "enable" => {
@@ -355,22 +405,23 @@ impl DjinnMcpServer {
                     let h = tracker.model_health(model_id);
                     Json(ModelHealthResponse {
                         action: "enable".into(),
-                        models: vec![AnyJson::from(serde_json::to_value(&h).unwrap_or_default())],
+                        models: vec![ModelHealthOutput::from(h)],
+                        error: None,
                     })
                 } else {
                     Json(ModelHealthResponse {
                         action: "enable".into(),
-                        models: vec![AnyJson::from(
-                            serde_json::json!({"error": "model parameter required for enable"}),
-                        )],
+                        models: vec![],
+                        error: Some("model parameter required for enable".into()),
                     })
                 }
             }
             _ => Json(ModelHealthResponse {
                 action: action.to_owned(),
-                models: vec![AnyJson::from(
-                    serde_json::json!({"error": format!("unknown action '{action}'; valid: status, reset, reset_all, enable")}),
-                )],
+                models: vec![],
+                error: Some(format!(
+                    "unknown action '{action}'; valid: status, reset, reset_all, enable"
+                )),
             }),
         }
     }
@@ -398,31 +449,33 @@ impl DjinnMcpServer {
             }
         };
 
-        let providers: Vec<AnyJson> = self
+        let providers: Vec<ProviderCatalogItem> = self
             .state
             .catalog()
             .list_providers()
             .iter()
             .filter(|p| is_provider_usable_by_goose(p, &goose_ids))
             .map(|p| {
-                let mut value = provider_to_json(p);
-                if let Some(obj) = value.as_object_mut() {
-                    let oauth_keys = oauth_keys_for_provider(&p.id, &goose_entries);
-                    let (connected, methods) = provider_connection_status(
-                        p,
-                        &oauth_keys,
-                        &credential_provider_ids,
-                        &credential_key_names,
-                    );
-                    obj.insert("connected".into(), serde_json::json!(connected));
-                    obj.insert(
-                        "oauth_supported".into(),
-                        serde_json::json!(!oauth_keys.is_empty()),
-                    );
-                    obj.insert("oauth_keys".into(), serde_json::json!(oauth_keys));
-                    obj.insert("connection_methods".into(), serde_json::json!(methods));
+                let oauth_keys = oauth_keys_for_provider(&p.id, &goose_entries);
+                let (connected, methods) = provider_connection_status(
+                    p,
+                    &oauth_keys,
+                    &credential_provider_ids,
+                    &credential_key_names,
+                );
+                ProviderCatalogItem {
+                    id: p.id.clone(),
+                    name: p.name.clone(),
+                    npm: p.npm.clone(),
+                    env_vars: p.env_vars.clone(),
+                    base_url: p.base_url.clone(),
+                    docs_url: p.docs_url.clone(),
+                    is_openai_compatible: p.is_openai_compatible,
+                    connected,
+                    oauth_supported: !oauth_keys.is_empty(),
+                    oauth_keys,
+                    connection_methods: methods.into_iter().map(str::to_string).collect(),
                 }
-                AnyJson::from(value)
             })
             .collect();
         let total = i64::try_from(providers.len()).unwrap_or(i64::MAX);
@@ -450,14 +503,13 @@ impl DjinnMcpServer {
             }
         };
 
-        let providers: Vec<AnyJson> = self
+        let providers: Vec<ProviderCatalogItem> = self
             .state
             .catalog()
             .list_providers()
             .iter()
             .filter(|p| is_provider_usable_by_goose(p, &goose_ids))
             .filter_map(|p| {
-                let mut value = provider_to_json(p);
                 let oauth_keys = oauth_keys_for_provider(&p.id, &goose_entries);
                 let (connected, methods) = provider_connection_status(
                     p,
@@ -468,16 +520,19 @@ impl DjinnMcpServer {
                 if !connected {
                     return None;
                 }
-                if let Some(obj) = value.as_object_mut() {
-                    obj.insert("connected".into(), serde_json::json!(true));
-                    obj.insert(
-                        "oauth_supported".into(),
-                        serde_json::json!(!oauth_keys.is_empty()),
-                    );
-                    obj.insert("oauth_keys".into(), serde_json::json!(oauth_keys));
-                    obj.insert("connection_methods".into(), serde_json::json!(methods));
-                }
-                Some(AnyJson::from(value))
+                Some(ProviderCatalogItem {
+                    id: p.id.clone(),
+                    name: p.name.clone(),
+                    npm: p.npm.clone(),
+                    env_vars: p.env_vars.clone(),
+                    base_url: p.base_url.clone(),
+                    docs_url: p.docs_url.clone(),
+                    is_openai_compatible: p.is_openai_compatible,
+                    connected: true,
+                    oauth_supported: !oauth_keys.is_empty(),
+                    oauth_keys,
+                    connection_methods: methods.into_iter().map(str::to_string).collect(),
+                })
             })
             .collect();
         let total = i64::try_from(providers.len()).unwrap_or(i64::MAX);
@@ -515,12 +570,12 @@ impl DjinnMcpServer {
             });
         }
 
-        let models: Vec<AnyJson> = self
+        let models: Vec<ProviderModelOutput> = self
             .state
             .catalog()
             .list_models(&provider.id)
             .iter()
-            .map(|m| AnyJson::from(model_to_json(m)))
+            .map(model_to_output)
             .collect();
         let total = i64::try_from(models.len()).unwrap_or(i64::MAX);
         Json(ProviderModelsResponse {
@@ -570,14 +625,14 @@ impl DjinnMcpServer {
             .map(|p| p.id.clone())
             .collect();
 
-        let models: Vec<AnyJson> = connected_provider_ids
+        let models: Vec<ProviderModelOutput> = connected_provider_ids
             .iter()
             .flat_map(|pid| {
                 self.state
                     .catalog()
                     .list_models(pid)
                     .into_iter()
-                    .map(|m| AnyJson::from(model_to_json(&m)))
+                    .map(|m| model_to_output(&m))
             })
             .collect();
         let total = i64::try_from(models.len()).unwrap_or(i64::MAX);
@@ -668,12 +723,12 @@ impl DjinnMcpServer {
             Some(m) => Json(ProviderModelLookupResponse {
                 model_id,
                 found: true,
-                model: AnyJson::from(model_to_json(&m)),
+                model: Some(model_to_output(&m)),
             }),
             None => Json(ProviderModelLookupResponse {
                 model_id,
                 found: false,
-                model: AnyJson::from(serde_json::Value::Null),
+                model: None,
             }),
         }
     }

@@ -5,7 +5,6 @@ use tokio::fs;
 
 use crate::db::repositories::credential::CredentialRepository;
 use crate::mcp::server::DjinnMcpServer;
-use crate::mcp::tools::AnyJson;
 use crate::mcp::tools::provider_tools::is_goose_builtin_provider;
 use crate::models::provider::{Model, Provider};
 
@@ -112,7 +111,16 @@ pub struct CredentialSetResponse {
 
 #[derive(Serialize, JsonSchema)]
 pub struct CredentialListResponse {
-    pub credentials: Vec<AnyJson>,
+    pub credentials: Vec<CredentialSummary>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct CredentialSummary {
+    pub id: String,
+    pub provider_id: String,
+    pub key_name: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 // ── credential_delete ─────────────────────────────────────────────────────────
@@ -211,14 +219,12 @@ impl DjinnMcpServer {
         let credentials = match repo.list().await {
             Ok(creds) => creds
                 .iter()
-                .map(|c| {
-                    AnyJson::from(serde_json::json!({
-                        "id":          c.id,
-                        "provider_id": c.provider_id,
-                        "key_name":    c.key_name,
-                        "created_at":  c.created_at,
-                        "updated_at":  c.updated_at,
-                    }))
+                .map(|c| CredentialSummary {
+                    id: c.id.clone(),
+                    provider_id: c.provider_id.clone(),
+                    key_name: c.key_name.clone(),
+                    created_at: c.created_at.clone(),
+                    updated_at: c.updated_at.clone(),
                 })
                 .collect(),
             Err(e) => {
