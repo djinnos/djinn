@@ -1995,6 +1995,18 @@ impl AgentSupervisor {
         let task = self.load_task(&task_id).await?;
         let agent_type = self.agent_type_for_task(&task, false);
 
+        // Don't resume a worker session as a reviewer (or vice versa).
+        // The paused session has the wrong system prompt and conversation history.
+        if paused.agent_type != agent_type.as_str() {
+            tracing::info!(
+                task_id = %task_id,
+                paused_agent_type = %paused.agent_type,
+                needed_agent_type = %agent_type.as_str(),
+                "Supervisor: paused session agent type mismatch; skipping resume"
+            );
+            return Err(SupervisorError::PausedSessionStale { task_id });
+        }
+
         tracing::info!(
             task_id = %task.short_id,
             task_uuid = %task.id,
