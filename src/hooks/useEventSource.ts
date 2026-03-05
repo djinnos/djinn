@@ -15,6 +15,7 @@ import { sseStore, type SSEEvent, type SSEEventType } from "../stores/sseStore";
 import { getServerPort } from "../tauri";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
 import { fetchKanbanSnapshot } from "@/api/server";
+import { useSelectedProject } from "@/stores/useProjectStore";
 import { taskStore } from "@/stores/taskStore";
 import { epicStore } from "@/stores/epicStore";
 
@@ -23,7 +24,9 @@ const MAX_RECONNECT_DELAY = 30000;
 const RECONNECT_MULTIPLIER = 2;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
-export function useEventSource() {
+export function useEventSource(projectId?: string | null) {
+  const selectedProject = useSelectedProject();
+  const selectedProjectPath = selectedProject?.path ?? null;
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cleanupHandlersRef = useRef<(() => void) | null>(null);
@@ -36,7 +39,7 @@ export function useEventSource() {
 
     snapshotLoadRef.current = (async () => {
       try {
-        const snapshot = await fetchKanbanSnapshot();
+        const snapshot = await fetchKanbanSnapshot(selectedProjectPath);
         taskStore.getState().setTasks(snapshot.tasks);
         epicStore.getState().setEpics(snapshot.epics);
       } catch (error) {
@@ -86,9 +89,12 @@ export function useEventSource() {
         
         // Build URL with Last-Event-ID if available
         let url = `http://127.0.0.1:${port}/events`;
+        if (projectId) {
+          url += `?project_id=${encodeURIComponent(projectId)}`;
+        }
         const lastEventId = sseStore.getState().lastEventId;
         if (lastEventId) {
-          url += `?lastEventId=${encodeURIComponent(lastEventId)}`;
+          url += (url.includes("?") ? "&" : "?") + `lastEventId=${encodeURIComponent(lastEventId)}`;
         }
 
         if (!isActive) return;
@@ -226,7 +232,7 @@ export function useEventSource() {
         cleanupHandlersRef.current = null;
       }
     };
-  }, []);
+  }, [projectId, selectedProjectPath]);
 
   return {
     eventSource: eventSourceRef.current,

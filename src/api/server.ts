@@ -301,30 +301,29 @@ export interface KanbanSnapshot {
   epics: Epic[];
 }
 
-export async function fetchKanbanSnapshot(): Promise<KanbanSnapshot> {
-  const projects = await callMcpTool("project_list");
-  const projectPath = projects.projects[0]?.path ?? null;
+export async function fetchKanbanSnapshot(projectPath?: string | null): Promise<KanbanSnapshot> {
+  const resolvedProjectPath = projectPath ?? null;
 
-  if (!projectPath) {
+  if (!resolvedProjectPath) {
     return { projectPath: null, tasks: [], epics: [] };
   }
 
   const [taskList, epicList] = await Promise.all([
     callMcpTool("task_list", {
-      project: projectPath,
+      project: resolvedProjectPath,
       issue_type: "!epic",
       limit: 500,
       offset: 0,
     }),
     callMcpTool("epic_list", {
-      project: projectPath,
+      project: resolvedProjectPath,
       limit: 500,
       offset: 0,
     }),
   ]);
 
   return {
-    projectPath,
+    projectPath: resolvedProjectPath,
     tasks: taskList.tasks.map(mapTaskFromMcp),
     epics: (epicList.epics ?? []).map(mapEpicFromMcp),
   };

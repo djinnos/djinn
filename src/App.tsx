@@ -16,6 +16,9 @@ import { useWizardStore } from "@/stores/wizardStore";
 import { useSidebarStore } from "@/stores/sidebarStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
+import { ProjectSelector } from "@/components/ProjectSelector";
+import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
+import { useSelectedProjectId } from "@/stores/useProjectStore";
 import { Button } from "@/components/ui/button";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
@@ -80,7 +83,7 @@ function MainLayout() {
         <div className="flex items-center gap-2">
           <h1 className="text-sm font-semibold text-foreground">DjinnOS Desktop</h1>
         </div>
-        <ConnectionStatus />
+        <div className="flex items-center gap-4"><ProjectSelector /><ConnectionStatus /></div>
       </header>
 
       <div className="flex flex-1 overflow-hidden">
@@ -103,10 +106,13 @@ export default function App() {
   const { status, error, retry, isRetrying } = useServerHealth();
   const { isFirstRun, isLoading: isFirstRunLoading } = useFirstRun();
   const { isCompleted, resetWizard } = useWizardStore();
+  const selectedProjectId = useSelectedProjectId();
+
+  useProjectsBootstrap();
   const [showWizard, setShowWizard] = useState(false);
   const [showDoneState, setShowDoneState] = useState(false);
 
-  useEventSource();
+  useEventSource(selectedProjectId);
 
   useEffect(() => {
     if (isFirstRunLoading) return;

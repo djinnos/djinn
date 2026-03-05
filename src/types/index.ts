@@ -46,3 +46,11 @@ export interface EpicUpdatedPayload extends Epic {}
 export interface EpicDeletedPayload {
   id: string;
 }
+
+
+export interface Project {
+  id: string;
+  name: string;
+  path?: string;
+  description?: string;
+}
