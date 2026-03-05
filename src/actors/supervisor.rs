@@ -33,7 +33,6 @@ use crate::commands::{CommandSpec, run_commands};
 use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::epic::EpicRepository;
 use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
-use crate::db::repositories::git_settings::GitSettingsRepository;
 use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;

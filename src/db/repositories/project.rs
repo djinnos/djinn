@@ -6,7 +6,7 @@ use crate::events::DjinnEvent;
 use crate::models::project::Project;
 
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, sqlx::FromRow)]
 pub struct ProjectConfig {
     pub target_branch: String,
     pub auto_merge: bool,
