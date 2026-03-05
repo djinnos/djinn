@@ -97,6 +97,19 @@ function RunningSpinner() {
   );
 }
 
+function PartialProgressIcon() {
+  return (
+    <span
+      className="relative inline-block h-3 w-3 shrink-0 rounded-full border border-amber-500/90 opacity-90"
+      title="Task partially complete"
+      aria-label="Task partially complete"
+    >
+      <span className="absolute left-1/2 top-[1px] h-[4px] w-[1px] -translate-x-1/2 rounded-full bg-amber-500/90" aria-hidden="true" />
+      <span className="absolute left-1/2 top-1/2 h-[1px] w-[3px] -translate-y-1/2 rounded-full bg-amber-500/90" aria-hidden="true" />
+    </span>
+  );
+}
+
 function ownerInitials(owner: string | null): string {
   if (!owner) return "??";
   const parts = owner
@@ -114,6 +127,8 @@ async function copyTaskId(taskId: string): Promise<void> {
 
 export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps) {
   const reviewIndicator = getReviewIndicator(task.reviewPhase);
+  const isRunning = task.status === "in_progress";
+  const hasPartialProgress = task.status !== "in_progress" && task.status !== "pending";
   const [now, setNow] = useState(() => Date.now());
 
   const runningSessionStartMs = useMemo(() => {
@@ -177,7 +192,8 @@ export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps)
         <h4 className="truncate font-medium" title={task.title}>
           {task.title}
         </h4>
-        {task.status === "in_progress" ? <RunningSpinner /> : null}
+        {isRunning ? <RunningSpinner /> : null}
+        {hasPartialProgress ? <PartialProgressIcon /> : null}
         {reviewIndicator ? (
           <span
             className={`h-2 w-2 shrink-0 rounded-full ${reviewIndicator.dotClass} ${reviewIndicator.animateClass ?? ""}`}
