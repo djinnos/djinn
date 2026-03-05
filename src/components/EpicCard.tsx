@@ -6,12 +6,12 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { useTasksByEpic } from "@/stores/useTaskStore";
 import type { Epic, Task, TaskStatus } from "@/types";
 import { ChevronDown } from "lucide-react";
 
 interface EpicCardProps {
   epic: Epic;
+  tasks: Task[];
   emoji?: string;
   expandAllSignal?: number;
   collapseAllSignal?: number;
@@ -57,12 +57,12 @@ function getStatusBadge(status: TaskStatus): { dot: string; label: string } {
 
 export function EpicCard({
   epic,
+  tasks,
   emoji = "🎯",
   expandAllSignal,
   collapseAllSignal,
   onTaskClick,
 }: EpicCardProps) {
-  const tasks = useTasksByEpic(epic.id);
   const { percentage, closed, total } = calculateProgress(tasks);
   const [expanded, setExpanded] = useState(false);
 

@@ -5,12 +5,12 @@
 import { useMemo, useState } from "react";
 import { EpicCard } from "./EpicCard";
 import { TaskDetailPanel } from "./TaskDetailPanel";
-import { useAllEpics } from "@/stores/useEpicStore";
-import type { Epic, Task } from "@/types";
+import type { Task } from "@/types";
+import { useRoadmapData } from "@/hooks/useRoadmapData";
 import { Button } from "@/components/ui/button";
 
-function sortEpics(epics: Epic[]): Epic[] {
-  const priorityOrder: Record<Epic["priority"], number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
+function sortEpics<T extends { priority: "P0"|"P1"|"P2"|"P3"; createdAt: string }>(epics: T[]): T[] {
+  const priorityOrder: Record<"P0" | "P1" | "P2" | "P3", number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
   return [...epics].sort((a, b) => {
     const priorityDiff = priorityOrder[a.priority] - priorityOrder[b.priority];
     if (priorityDiff !== 0) return priorityDiff;
@@ -30,7 +30,7 @@ function getEpicEmoji(epicId: string): string {
 }
 
 export function RoadmapView() {
-  const epics = useAllEpics();
+  const epics = useRoadmapData();
   const sortedEpics = useMemo(() => sortEpics(epics), [epics]);
   const [expandAllSignal, setExpandAllSignal] = useState(0);
   const [collapseAllSignal, setCollapseAllSignal] = useState(0);
@@ -55,6 +55,7 @@ export function RoadmapView() {
           <EpicCard
             key={epic.id}
             epic={epic}
+            tasks={epic.tasks}
             emoji={getEpicEmoji(epic.id)}
             expandAllSignal={expandAllSignal}
             collapseAllSignal={collapseAllSignal}
