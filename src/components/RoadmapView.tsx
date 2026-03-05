@@ -1,41 +1,23 @@
 /**
  * RoadmapView page component - Lists all epics with their progress
- * 
- * Fetches epics from epicStore and tasks from taskStore.
- * Displays EpicCards sorted by priority (P0 first) then creation order.
  */
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { EpicCard } from "./EpicCard";
+import { TaskDetailPanel } from "./TaskDetailPanel";
 import { useAllEpics } from "@/stores/useEpicStore";
-import type { Epic } from "@/types";
+import type { Epic, Task } from "@/types";
+import { Button } from "@/components/ui/button";
 
-/**
- * Sort epics by priority (P0 < P1 < P2 < P3) then by creation date (newest first)
- */
 function sortEpics(epics: Epic[]): Epic[] {
-  const priorityOrder: Record<Epic["priority"], number> = {
-    P0: 0,
-    P1: 1,
-    P2: 2,
-    P3: 3,
-  };
-
+  const priorityOrder: Record<Epic["priority"], number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
   return [...epics].sort((a, b) => {
-    // First sort by priority
     const priorityDiff = priorityOrder[a.priority] - priorityOrder[b.priority];
-    if (priorityDiff !== 0) {
-      return priorityDiff;
-    }
-    // Then by creation date (newest first)
+    if (priorityDiff !== 0) return priorityDiff;
     return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
   });
 }
 
-/**
- * Get a deterministic emoji for an epic based on its ID
- * This ensures the same epic always gets the same emoji
- */
 function getEpicEmoji(epicId: string): string {
   const emojis = ["🚀", "🎯", "⭐", "🔥", "💎", "🎨", "⚡", "🔧", "📊", "🎪", "🏆", "🌟"];
   let hash = 0;
@@ -50,38 +32,38 @@ function getEpicEmoji(epicId: string): string {
 export function RoadmapView() {
   const epics = useAllEpics();
   const sortedEpics = useMemo(() => sortEpics(epics), [epics]);
+  const [expandAllSignal, setExpandAllSignal] = useState(0);
+  const [collapseAllSignal, setCollapseAllSignal] = useState(0);
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
   if (epics.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center p-8 text-center">
-        <div className="mb-4 text-4xl" role="img" aria-label="empty roadmap">
-          🗺️
-        </div>
-        <h2 className="mb-2 text-lg font-semibold">No Epics Yet</h2>
-        <p className="text-sm text-muted-foreground">
-          Create your first epic to start tracking progress on the roadmap.
-        </p>
-      </div>
-    );
+    return <div className="flex flex-col items-center justify-center p-8 text-center">No Epics Yet</div>;
   }
 
   return (
     <div className="space-y-4 p-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Roadmap</h1>
-        <span className="text-sm text-muted-foreground">
-          {epics.length} epic{epics.length !== 1 ? "s" : ""}
-        </span>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => setExpandAllSignal((n) => n + 1)}>Expand all</Button>
+          <Button variant="outline" size="sm" onClick={() => setCollapseAllSignal((n) => n + 1)}>Collapse all</Button>
+        </div>
       </div>
+
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {sortedEpics.map((epic) => (
-          <EpicCard 
-            key={epic.id} 
-            epic={epic} 
+          <EpicCard
+            key={epic.id}
+            epic={epic}
             emoji={getEpicEmoji(epic.id)}
+            expandAllSignal={expandAllSignal}
+            collapseAllSignal={collapseAllSignal}
+            onTaskClick={setSelectedTask}
           />
         ))}
       </div>
+
+      <TaskDetailPanel task={selectedTask} open={selectedTask !== null} onClose={() => setSelectedTask(null)} />
     </div>
   );
 }

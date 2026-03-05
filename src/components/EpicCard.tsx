@@ -1,22 +1,23 @@
 /**
- * EpicCard component - Displays epic information with progress bar and task count
- * 
- * Shows: emoji, title, colored border/accent, progress bar (closed/total %), task count badge
+ * EpicCard component - Displays epic information with progress bar and expandable task list
  */
 
+import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { useTasksByEpic } from "@/stores/useTaskStore";
-import type { Epic, Task } from "@/types";
+import type { Epic, Task, TaskStatus } from "@/types";
+import { ChevronDown } from "lucide-react";
 
 interface EpicCardProps {
   epic: Epic;
   emoji?: string;
+  expandAllSignal?: number;
+  collapseAllSignal?: number;
+  onTaskClick?: (task: Task) => void;
 }
 
-/**
- * Get border color class based on epic priority
- */
 function getPriorityBorderColor(priority: Epic["priority"]): string {
   switch (priority) {
     case "P0":
@@ -32,42 +33,74 @@ function getPriorityBorderColor(priority: Epic["priority"]): string {
   }
 }
 
-/**
- * Calculate progress percentage of closed tasks
- */
 function calculateProgress(tasks: Task[]): { percentage: number; closed: number; total: number } {
   const total = tasks.length;
-  if (total === 0) {
-    return { percentage: 0, closed: 0, total: 0 };
-  }
+  if (total === 0) return { percentage: 0, closed: 0, total: 0 };
   const closed = tasks.filter((task) => task.status === "completed" || task.status === "canceled").length;
   const percentage = Math.round((closed / total) * 100);
   return { percentage, closed, total };
 }
 
-export function EpicCard({ epic, emoji = "🎯" }: EpicCardProps) {
+function getStatusBadge(status: TaskStatus): { dot: string; label: string } {
+  switch (status) {
+    case "completed":
+      return { dot: "bg-green-500", label: "Completed" };
+    case "in_progress":
+      return { dot: "bg-blue-500", label: "In Progress" };
+    case "blocked":
+      return { dot: "bg-red-500", label: "Blocked" };
+    case "canceled":
+      return { dot: "bg-gray-500", label: "Canceled" };
+    case "pending":
+    default:
+      return { dot: "bg-amber-500", label: "Pending" };
+  }
+}
+
+export function EpicCard({
+  epic,
+  emoji = "🎯",
+  expandAllSignal,
+  collapseAllSignal,
+  onTaskClick,
+}: EpicCardProps) {
   const tasks = useTasksByEpic(epic.id);
   const { percentage, closed, total } = calculateProgress(tasks);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    if (expandAllSignal !== undefined) setExpanded(true);
+  }, [expandAllSignal]);
+
+  useEffect(() => {
+    if (collapseAllSignal !== undefined) setExpanded(false);
+  }, [collapseAllSignal]);
 
   return (
     <Card className={`overflow-hidden ${getPriorityBorderColor(epic.priority)}`}>
-      <CardHeader className="pb-2">
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <span className="text-lg" role="img" aria-label="epic emoji">
-              {emoji}
-            </span>
-            <CardTitle className="line-clamp-2 text-sm font-medium">
-              {epic.title}
-            </CardTitle>
+      <button
+        type="button"
+        className="w-full text-left"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+      >
+        <CardHeader className="pb-2">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-lg" role="img" aria-label="epic emoji">{emoji}</span>
+              <CardTitle className="line-clamp-2 text-sm font-medium">{epic.title}</CardTitle>
+            </div>
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary" className="shrink-0">
+                {closed} / {total} done
+              </Badge>
+              <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? "rotate-180" : ""}`} />
+            </div>
           </div>
-          <Badge variant="secondary" className="shrink-0">
-            {closed} / {total} done
-          </Badge>
-        </div>
-      </CardHeader>
+        </CardHeader>
+      </button>
+
       <CardContent className="pt-0">
-        {/* Progress bar */}
         <div className="flex items-center gap-3">
           <div className="relative h-2 flex-1 overflow-hidden rounded-full bg-muted">
             <div
@@ -80,9 +113,38 @@ export function EpicCard({ epic, emoji = "🎯" }: EpicCardProps) {
               aria-label={`${percentage}% of tasks completed`}
             />
           </div>
-          <span className="text-xs font-medium text-muted-foreground w-10 text-right">
-            {percentage}%
-          </span>
+          <span className="w-10 text-right text-xs font-medium text-muted-foreground">{percentage}%</span>
+        </div>
+
+        <div
+          className={`grid transition-all duration-300 ease-in-out ${expanded ? "grid-rows-[1fr] opacity-100 mt-3" : "grid-rows-[0fr] opacity-0"}`}
+        >
+          <div className="min-h-0 overflow-hidden">
+            {tasks.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No tasks yet.</p>
+            ) : (
+              <div className="space-y-1">
+                {tasks.map((task) => {
+                  const status = getStatusBadge(task.status);
+                  return (
+                    <Button
+                      key={task.id}
+                      variant="ghost"
+                      className="h-auto w-full justify-start px-2 py-1.5"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onTaskClick?.(task);
+                      }}
+                    >
+                      <span className={`mr-2 inline-block h-2 w-2 rounded-full ${status.dot}`} aria-hidden="true" />
+                      <span className="mr-2 text-[11px] text-muted-foreground">{status.label}</span>
+                      <span className="truncate text-sm">{task.title}</span>
+                    </Button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       </CardContent>
     </Card>
