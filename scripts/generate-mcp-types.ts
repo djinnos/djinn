@@ -23,7 +23,12 @@ type Options = {
   source: "snapshot" | "live";
   outFile: string;
   snapshotFile: string;
-  mcpUrl: string;
+  mcpUrl?: string;
+};
+
+type DaemonInfo = {
+  port?: number;
+  pid?: number;
 };
 
 const __filename = fileURLToPath(import.meta.url);
@@ -48,9 +53,44 @@ function parseArgs(): Options {
     desktopRoot,
     get("--snapshot") ?? "../server/tests/fixtures/mcp_tools_schema_snapshot.json"
   );
-  const mcpUrl = get("--url") ?? process.env.DJINN_MCP_URL ?? "http://127.0.0.1:3000/mcp";
+  const mcpUrl = get("--url") ?? process.env.DJINN_MCP_URL;
 
   return { source, outFile, snapshotFile, mcpUrl };
+}
+
+function isLiveProcess(pid: number): boolean {
+  if (pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function getMcpUrl(options: Options): Promise<string> {
+  if (options.mcpUrl) {
+    return options.mcpUrl;
+  }
+
+  const daemonPath = path.resolve(process.env.HOME ?? "", ".djinn", "daemon.json");
+  try {
+    const raw = await readFile(daemonPath, "utf8");
+    const parsed = JSON.parse(raw) as DaemonInfo;
+    if (
+      typeof parsed.port === "number" &&
+      parsed.port > 0 &&
+      parsed.port <= 65535 &&
+      typeof parsed.pid === "number" &&
+      isLiveProcess(parsed.pid)
+    ) {
+      return `http://127.0.0.1:${parsed.port}/mcp`;
+    }
+  } catch {
+    // Ignore daemon discovery errors and fall back.
+  }
+
+  return "http://127.0.0.1:3000/mcp";
 }
 
 function toPascalCase(input: string): string {
@@ -85,6 +125,10 @@ function normalizeSchema(raw: JsonSchema | undefined): JsonSchema {
         }
 
         if (key === "format" && (current === "uint" || current === "uint32" || current === "uint64")) {
+          continue;
+        }
+
+        if (key === "nullable") {
           continue;
         }
 
@@ -137,7 +181,7 @@ function indentBlock(input: string): string {
 async function generate(options: Options): Promise<void> {
   const tools =
     options.source === "live"
-      ? await loadToolsFromLive(options.mcpUrl)
+      ? await loadToolsFromLive(await getMcpUrl(options))
       : await loadToolsFromSnapshot(options.snapshotFile);
 
   const sorted = [...tools].sort((a, b) => a.name.localeCompare(b.name));
