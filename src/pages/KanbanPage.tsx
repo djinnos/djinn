@@ -1,6 +1,7 @@
 import { useTaskStore } from '@/stores/taskStore';
 import { useEpicStore } from '@/stores/epicStore';
 import { EmptyState } from '@/components/EmptyState';
+import { KanbanBoard } from '@/components/KanbanBoard';
 
 export function KanbanPage() {
   const { tasks } = useTaskStore();
@@ -34,12 +35,7 @@ export function KanbanPage() {
             illustration={<div className="text-4xl">🗺️</div>}
           />
         ) : (
-          <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-border bg-card/50 p-8">
-            <div className="text-center">
-              <p className="text-muted-foreground">Kanban board coming soon</p>
-              <p className="mt-2 text-xs text-muted-foreground/60">{tasks.size} tasks · {epics.size} epics</p>
-            </div>
-          </div>
+          <KanbanBoard />
         )}
       </div>
     </div>
