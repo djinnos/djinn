@@ -1,10 +1,11 @@
 import { showToast } from "@/lib/toast";
-import type { Task } from "@/types";
+import type { Epic, Task } from "@/types";
 import { Clock3 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 type TaskCardProps = {
   task: Task;
+  epic?: Epic;
   moving?: boolean;
   onClick?: () => void;
 };
@@ -61,6 +62,20 @@ function formatCompactDuration(totalSeconds: number): string {
   return `${minutes}m`;
 }
 
+function getEpicEmoji(epic: Epic | undefined): string {
+  if (!epic) return "📌";
+  if (epic.status === "active") return "🚀";
+  if (epic.status === "completed") return "✅";
+  return "📦";
+}
+
+function getEpicDotColor(epic: Epic | undefined): string {
+  if (!epic) return "bg-gray-400";
+  if (epic.status === "active") return "bg-emerald-500";
+  if (epic.status === "completed") return "bg-blue-500";
+  return "bg-violet-500";
+}
+
 function getReviewIndicator(reviewPhase: Task["reviewPhase"]): { dotClass: string; animateClass?: string; title: string } | null {
   if (reviewPhase === "needs_task_review") {
     return { dotClass: "bg-amber-500", title: "Waiting for review" };
@@ -70,6 +85,7 @@ function getReviewIndicator(reviewPhase: Task["reviewPhase"]): { dotClass: strin
   }
   return null;
 }
+
 
 function RunningSpinner() {
   return (
@@ -109,7 +125,7 @@ async function copyTaskId(taskId: string): Promise<void> {
   showToast.success("Task ID copied");
 }
 
-export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
+export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps) {
   const reviewIndicator = getReviewIndicator(task.reviewPhase);
   const isRunning = task.status === "in_progress";
   const hasPartialProgress = task.status !== "in_progress" && task.status !== "pending";
@@ -195,7 +211,15 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
         </div>
       ) : null}
 
-      <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground">
+      <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+        <div className="flex min-w-0 items-center gap-1" title={epic?.title ?? "No Epic"}>
+          <span className={`h-2 w-2 shrink-0 rounded-full ${getEpicDotColor(epic)}`} aria-hidden="true" />
+          <span role="img" aria-label="epic emoji" className="shrink-0">
+            {getEpicEmoji(epic)}
+          </span>
+          <span className="truncate">{epic?.title ?? "No Epic"}</span>
+        </div>
+
         <div
           className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border bg-background text-[10px] font-semibold uppercase"
           title={task.owner ?? "Unassigned"}

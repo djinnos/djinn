@@ -1,20 +1,18 @@
-import type { Project } from "@/types";
+import { useProjectStore, useProjects, useSelectedProjectId } from "@/stores/useProjectStore";
 
-type ProjectSelectorProps = {
-  projects: Project[];
-  selectedId: string | null;
-  onSelect: (projectId: string | null) => void;
-};
+export function ProjectSelector() {
+  const projects = useProjects();
+  const selectedProjectId = useSelectedProjectId();
+  const setSelectedProjectId = useProjectStore((state) => state.setSelectedProjectId);
 
-export function ProjectSelector({ projects, selectedId, onSelect }: ProjectSelectorProps) {
   return (
     <div className="flex items-center gap-2">
       <label htmlFor="project-selector" className="text-sm text-muted-foreground">Project</label>
       <select
         id="project-selector"
         className="rounded border bg-background px-2 py-1 text-sm"
-        value={selectedId ?? ""}
-        onChange={(e) => onSelect(e.target.value || null)}
+        value={selectedProjectId ?? ""}
+        onChange={(e) => setSelectedProjectId(e.target.value || null)}
       >
         {projects.map((project) => (
           <option key={project.id} value={project.id}>

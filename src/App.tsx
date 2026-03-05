@@ -13,14 +13,14 @@ import { KanbanPage } from "@/pages/KanbanPage";
 import { RoadmapPage } from "@/pages/RoadmapPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { useWizardStore } from "@/stores/wizardStore";
+import { useSidebarStore } from "@/stores/sidebarStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
 import { ProjectSelector } from "@/components/ProjectSelector";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
-import { useProjectStore, useProjects, useSelectedProjectId } from "@/stores/useProjectStore";
+import { useSelectedProjectId } from "@/stores/useProjectStore";
 import { Button } from "@/components/ui/button";
-import { useSidebar } from "@/hooks/useSidebar";
-import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 function WelcomeStep() {
   return (
@@ -64,10 +64,18 @@ function DoneState() {
 }
 
 function MainLayout() {
-  const sidebar = useSidebar();
-  const projects = useProjects();
-  const selectedProjectId = useSelectedProjectId();
-  const setSelectedProjectId = useProjectStore((state) => state.setSelectedProjectId);
+  const { setActiveSection } = useSidebarStore();
+  const location = useLocation();
+
+  useEffect(() => {
+    if (location.pathname.startsWith('/roadmap')) {
+      setActiveSection('roadmap');
+    } else if (location.pathname.startsWith('/settings')) {
+      setActiveSection('settings');
+    } else {
+      setActiveSection('kanban');
+    }
+  }, [location.pathname, setActiveSection]);
 
   return (
     <main className="flex min-h-screen flex-col bg-background">
@@ -75,18 +83,11 @@ function MainLayout() {
         <div className="flex items-center gap-2">
           <h1 className="text-sm font-semibold text-foreground">DjinnOS Desktop</h1>
         </div>
-        <div className="flex items-center gap-4">
-          <ProjectSelector
-            projects={projects}
-            selectedId={selectedProjectId}
-            onSelect={setSelectedProjectId}
-          />
-          <ConnectionStatus />
-        </div>
+        <div className="flex items-center gap-4"><ProjectSelector /><ConnectionStatus /></div>
       </header>
 
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar {...sidebar} />
+        <Sidebar />
         <div className="flex-1 overflow-auto">
           <Routes>
             <Route path="/" element={<KanbanPage />} />
@@ -100,7 +101,6 @@ function MainLayout() {
     </main>
   );
 }
-
 
 export default function App() {
   const { status, error, retry, isRetrying } = useServerHealth();
