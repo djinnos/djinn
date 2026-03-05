@@ -125,7 +125,7 @@ CREATE TABLE sessions (
     agent_type       TEXT NOT NULL,
     started_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     ended_at         TEXT,
-    status           TEXT NOT NULL CHECK(status IN ('running', 'completed', 'interrupted', 'failed', 'paused')),
+    status           TEXT NOT NULL CHECK(status IN ('running', 'completed', 'interrupted', 'failed', 'paused', 'compacted')),
     tokens_in        INTEGER NOT NULL DEFAULT 0,
     tokens_out       INTEGER NOT NULL DEFAULT 0,
     worktree_path    TEXT,
