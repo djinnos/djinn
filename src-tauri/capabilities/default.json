@@ -15,6 +15,7 @@
     "process:allow-exit",
     "core:window:allow-show",
     "deep-link:default",
-    "deep-link:allow-get-current"
+    "deep-link:allow-get-current",
+    "dialog:default"
   ]
 }

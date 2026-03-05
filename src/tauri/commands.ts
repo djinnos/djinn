@@ -7,6 +7,19 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+
+export interface AuthUser {
+  sub: string;
+  name?: string;
+  email?: string;
+  picture?: string;
+}
+
+export interface AuthState {
+  isAuthenticated: boolean;
+  user: AuthUser | null;
+}
+
 /**
  * Get the server port from the Tauri backend.
  * @returns The port number the backend server is running on
@@ -37,36 +50,34 @@ export async function retryServerDiscovery(): Promise<number> {
   return invoke("retry_server_discovery");
 }
 
+/**
+ * Open a native directory picker dialog.
+ * @param title Optional dialog title
+ * @returns The selected directory path or null if cancelled
+ */
+export async function selectDirectory(title?: string): Promise<string | null> {
+  const result = await invoke<string | null>("select_directory", { title });
+  return result;
+}
 
-export type AuthUser = {
-  sub: string;
-  name?: string;
-  email?: string;
-  picture?: string;
-};
-
-export type AuthState = {
-  isAuthenticated: boolean;
-  user: AuthUser | null;
-};
 
 /**
- * Get current auth state from Tauri backend.
+ * Get current authentication state.
  */
 export async function authGetState(): Promise<AuthState> {
-  return invoke("auth_get_state");
+  return invoke<AuthState>("auth_get_state");
 }
 
 /**
- * Start browser-based PKCE login flow.
+ * Start OAuth login flow.
  */
 export async function authLogin(): Promise<void> {
-  return invoke("auth_login");
+  await invoke("auth_login");
 }
 
 /**
- * Logout user, revoke session best-effort, and clear local auth state.
+ * Logout current authenticated user.
  */
 export async function authLogout(): Promise<void> {
-  return invoke("auth_logout");
+  await invoke("auth_logout");
 }

@@ -74,3 +74,61 @@ export async function saveProviderCredentials(
     throw new Error(`Failed to save credentials: ${response.status}`);
   }
 }
+
+// Project-related types and API functions
+
+export interface Project {
+  id: string;
+  name: string;
+  path: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectListResponse {
+  projects: Project[];
+}
+
+export async function fetchProjects(): Promise<Project[]> {
+  const baseUrl = await getBaseUrl();
+  const response = await fetch(`${baseUrl}/projects`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch projects: ${response.status}`);
+  }
+  const data: ProjectListResponse = await response.json();
+  return data.projects;
+}
+
+export async function addProject(path: string): Promise<Project> {
+  const baseUrl = await getBaseUrl();
+  const response = await fetch(`${baseUrl}/projects/add`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ path }),
+  });
+  
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to add project: ${error || response.status}`);
+  }
+  
+  return response.json();
+}
+
+// Provider configuration check
+
+export interface ProviderConfigStatus {
+  configured: boolean;
+  providers: string[];
+}
+
+export async function fetchProviderConfigStatus(): Promise<ProviderConfigStatus> {
+  const baseUrl = await getBaseUrl();
+  const response = await fetch(`${baseUrl}/providers/configured`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch provider config status: ${response.status}`);
+  }
+  return response.json();
+}

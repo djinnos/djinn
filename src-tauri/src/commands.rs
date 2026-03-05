@@ -388,3 +388,20 @@ pub fn is_token_expired() -> Result<bool, String> {
 pub async fn logout() -> Result<(), String> {
     token_refresh::logout().await
 }
+
+/// Open a native directory picker dialog
+#[tauri::command]
+pub async fn select_directory(
+    window: tauri::Window,
+    title: Option<String>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    
+    let folder_path = window
+        .dialog()
+        .file()
+        .set_title(title.as_deref().unwrap_or("Select Directory"))
+        .blocking_pick_folder();
+    
+    Ok(folder_path)
+}

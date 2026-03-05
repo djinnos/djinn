@@ -26,6 +26,7 @@ pub fn run() {
                 .set_focus();
         }))
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(server::init_server_state()))
         .manage(auth_callback_manager.clone())
         .setup(move |app| {
@@ -189,6 +190,7 @@ pub fn run() {
             commands::get_auth_state,
             commands::is_token_expired,
             commands::logout,
+            commands::select_directory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
