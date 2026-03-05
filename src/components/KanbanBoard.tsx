@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
+import { taskStore } from "@/stores/taskStore";
 import type { Epic, Task, TaskPriority, TaskStatus } from "@/types";
 
 const STATUS_COLUMNS: Array<{ key: TaskStatus; label: string }> = [
@@ -31,6 +32,48 @@ export function KanbanBoard() {
   const epics = useEpicStore((state) => state.epics);
   const [searchParams, setSearchParams] = useSearchParams();
   const [collapsedEpics, setCollapsedEpics] = useState<Record<string, boolean>>({});
+  const [movingTaskIds, setMovingTaskIds] = useState<Record<string, boolean>>({});
+  const previousTaskStatusesRef = useRef<Map<string, TaskStatus>>(new Map());
+
+  useEffect(() => {
+    const unsubscribe = taskStore.subscribe(
+      (state) => state.tasks,
+      (nextTasks) => {
+        const previousStatuses = previousTaskStatusesRef.current;
+        const nextStatuses = new Map<string, TaskStatus>();
+        const changedTaskIds: string[] = [];
+
+        nextTasks.forEach((task, id) => {
+          nextStatuses.set(id, task.status);
+          const previousStatus = previousStatuses.get(id);
+
+          if (previousStatus !== undefined && previousStatus !== task.status) {
+            changedTaskIds.push(id);
+          }
+        });
+
+        previousTaskStatusesRef.current = nextStatuses;
+
+        if (changedTaskIds.length === 0) return;
+
+        setMovingTaskIds((prev) => {
+          const next = { ...prev };
+          for (const taskId of changedTaskIds) next[taskId] = true;
+          return next;
+        });
+
+        window.setTimeout(() => {
+          setMovingTaskIds((prev) => {
+            const next = { ...prev };
+            for (const taskId of changedTaskIds) delete next[taskId];
+            return next;
+          });
+        }, 350);
+      }
+    );
+
+    return unsubscribe;
+  }, []);
 
   const [epicFilter, setEpicFilter] = useState<string>(searchParams.get("epic") ?? "");
   const [ownerFilter, setOwnerFilter] = useState<string>(searchParams.get("owner") ?? "");
@@ -184,7 +227,7 @@ export function KanbanBoard() {
           return (
             <section
               key={column.key}
-              className="flex min-w-[260px] flex-1 flex-col rounded-lg border bg-card"
+              className="flex min-w-[260px] flex-1 flex-col rounded-lg border bg-card transition-all duration-300 ease-in-out"
             >
               <header className="border-b px-3 py-2 text-sm font-semibold">
                 {column.label} ({taskCount})
@@ -199,7 +242,7 @@ export function KanbanBoard() {
                     const isCollapsed = !!collapsedEpics[collapseKey];
 
                     return (
-                      <div key={epicKey} className="rounded-md border bg-background">
+                      <div key={epicKey} className="rounded-md border bg-background transition-all duration-300 ease-in-out">
                         <button
                           type="button"
                           onClick={() => toggleEpic(column.key, epicKey)}
@@ -212,9 +255,12 @@ export function KanbanBoard() {
                         </button>
 
                         {!isCollapsed && (
-                          <ul className="flex flex-col gap-2 p-2">
+                          <ul className="flex flex-col gap-2 p-2 transition-all duration-300 ease-in-out">
                             {epicTasks.map((task) => (
-                              <li key={task.id} className="rounded border bg-card p-2 text-sm">
+                              <li
+                                key={task.id}
+                                className={`rounded border bg-card p-2 text-sm transition-all duration-300 ease-in-out ${movingTaskIds[task.id] ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"}`}
+                              >
                                 {task.title}
                               </li>
                             ))}
