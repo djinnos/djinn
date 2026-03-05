@@ -28,15 +28,35 @@ function getEpicTitle(epic: Epic | undefined, epicId: string | null): string {
   return epic?.title ?? "Unknown Epic";
 }
 
-export function KanbanBoard() {
-  const tasks = useTaskStore((state) => Array.from(state.tasks.values()));
-  const epics = useEpicStore((state) => state.epics);
+type KanbanBoardProps = {
+  tasks?: Task[];
+  epics?: Map<string, Epic>;
+  initialCollapsedEpics?: string[];
+  disableSearchParamSync?: boolean;
+};
+
+export function KanbanBoard({
+  tasks: tasksProp,
+  epics: epicsProp,
+  initialCollapsedEpics,
+  disableSearchParamSync,
+}: KanbanBoardProps = {}) {
+  const storeTasks = useTaskStore((state) => Array.from(state.tasks.values()));
+  const storeEpics = useEpicStore((state) => state.epics);
+  const tasks = tasksProp ?? storeTasks;
+  const epics = epicsProp ?? storeEpics;
   const [searchParams, setSearchParams] = useSearchParams();
-  const [collapsedEpics, setCollapsedEpics] = useState<Record<string, boolean>>({});
+  const [collapsedEpics, setCollapsedEpics] = useState<Record<string, boolean>>(() => {
+    const next: Record<string, boolean> = {};
+    for (const key of initialCollapsedEpics ?? []) next[key] = true;
+    return next;
+  });
   const [movingTaskIds, setMovingTaskIds] = useState<Record<string, boolean>>({});
   const previousTaskStatusesRef = useRef<Map<string, TaskStatus>>(new Map());
 
   useEffect(() => {
+    if (tasksProp) return;
+
     const unsubscribe = taskStore.subscribe(
       (state) => state.tasks,
       (nextTasks) => {
@@ -74,7 +94,7 @@ export function KanbanBoard() {
     );
 
     return unsubscribe;
-  }, []);
+  }, [tasksProp]);
 
   const [epicFilter, setEpicFilter] = useState<string>(searchParams.get("epic") ?? "");
   const [ownerFilter, setOwnerFilter] = useState<string>(searchParams.get("owner") ?? "");
@@ -94,6 +114,8 @@ export function KanbanBoard() {
   }, [searchInput]);
 
   useEffect(() => {
+    if (disableSearchParamSync) return;
+
     const next = new URLSearchParams(searchParams);
 
     if (epicFilter) next.set("epic", epicFilter);
@@ -109,7 +131,7 @@ export function KanbanBoard() {
     else next.delete("q");
 
     setSearchParams(next, { replace: true });
-  }, [epicFilter, ownerFilter, priorityFilters, textFilter, searchParams, setSearchParams]);
+  }, [epicFilter, ownerFilter, priorityFilters, textFilter, searchParams, setSearchParams, disableSearchParamSync]);
 
   const epicOptions = useMemo(
     () => Array.from(epics.values()).sort((a, b) => a.title.localeCompare(b.title)),
