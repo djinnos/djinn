@@ -90,6 +90,17 @@ pub fn git_metadata_dir(worktree: &Path) -> Option<PathBuf> {
     if resolved.is_dir() { Some(resolved) } else { None }
 }
 
+/// Resolve the main `.git/` directory for a worktree.
+///
+/// The worktree's `.git` file points to `<repo>/.git/worktrees/{id}`, so the
+/// main `.git/` dir is two levels up. Write access to this directory is needed
+/// for merge operations that write objects, refs, and packed-refs.
+pub fn git_dir(worktree: &Path) -> Option<PathBuf> {
+    let meta = git_metadata_dir(worktree)?;
+    // meta = <repo>/.git/worktrees/{id} — go up two levels to reach .git/
+    meta.parent()?.parent().map(PathBuf::from)
+}
+
 // ─── Backend detection ────────────────────────────────────────────────────────
 
 /// Probe the OS and return the best available sandbox backend.

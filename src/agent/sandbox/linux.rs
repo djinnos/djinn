@@ -13,7 +13,7 @@ use landlock::{
     ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
 };
 
-use super::{Sandbox, git_metadata_dir};
+use super::{Sandbox, git_dir, git_metadata_dir};
 
 /// Landlock-based filesystem sandbox for Linux ≥ 5.13.
 ///
@@ -63,9 +63,15 @@ fn apply_policy(worktree: &Path, git_meta: Option<&Path>) -> anyhow::Result<()> 
         .add_rule(PathBeneath::new(PathFd::new("/dev/zero")?, full_access))?
         .add_rule(PathBeneath::new(PathFd::new("/dev/urandom")?, full_access))?;
 
-    // Git worktree metadata dir (e.g. .git/worktrees/{id}/) needs write access
-    // for operations like merge, rebase, checkout that create lock files.
-    if let Some(meta) = git_meta {
+    // Full .git/ dir needs write access for merge operations: object writes
+    // (.git/objects/), ref updates (.git/refs/, .git/packed-refs), and
+    // per-worktree state (.git/worktrees/{id}/ORIG_HEAD.lock etc.).
+    if let Some(dot_git) = git_dir(worktree) {
+        if dot_git.is_dir() {
+            ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(&dot_git)?, full_access))?;
+        }
+    } else if let Some(meta) = git_meta {
+        // Fallback: at least allow the worktree metadata dir.
         ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(meta)?, full_access))?;
     }
 
