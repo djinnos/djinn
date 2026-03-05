@@ -9,14 +9,19 @@ import {
   saveProviderCredentials,
   validateProviderApiKey,
   addCustomProvider,
+  fetchProjects,
+  addProject,
+  removeProject,
   type Provider,
   type ProviderCredential,
+  type Project,
 } from '@/api/server';
 import { Input } from '@/components/ui/input';
 import { InlineError } from '@/components/InlineError';
 import { EmptyState } from '@/components/EmptyState';
 import { showToast } from '@/lib/toast';
 import { AgentConfig } from '@/components/AgentConfig';
+import { selectDirectory } from '@/tauri/commands';
 
 type SettingsCategory = 'providers' | 'projects' | 'general' | 'agents';
 
@@ -216,12 +221,112 @@ function ProvidersSettings() {
   );
 }
 function ProjectsSettings() {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busyProjectId, setBusyProjectId] = useState<string | null>(null);
+  const [isAdding, setIsAdding] = useState(false);
+
+  const loadProjects = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await fetchProjects();
+      setProjects(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load projects');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadProjects();
+  }, []);
+
+  const handleAddProject = async () => {
+    setIsAdding(true);
+    setError(null);
+    try {
+      const path = await selectDirectory('Select Project Directory');
+      if (!path) return;
+      await addProject(path);
+      await loadProjects();
+      showToast.success('Project added');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to add project';
+      setError(message);
+      showToast.error('Could not add project', { description: message });
+    } finally {
+      setIsAdding(false);
+    }
+  };
+
+  const handleRemoveProject = async (project: Project) => {
+    if (!confirm(`Remove project "${project.name}"?`)) return;
+
+    setBusyProjectId(project.id);
+    setError(null);
+    try {
+      await removeProject(project.id);
+      await loadProjects();
+      showToast.success('Project removed');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to remove project';
+      setError(message);
+      showToast.error('Could not remove project', { description: message });
+    } finally {
+      setBusyProjectId(null);
+    }
+  };
+
+  if (loading) {
+    return <div className="rounded-lg border border-border bg-card p-6">Loading projects...</div>;
+  }
+
   return (
-    <div className="rounded-lg border border-border bg-card p-6">
-      <h2 className="mb-2 text-lg font-semibold">Projects</h2>
-      <p className="text-sm text-muted-foreground">
-        Configure project-specific preferences and defaults.
-      </p>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Projects</h2>
+          <p className="text-sm text-muted-foreground">Registered projects and defaults.</p>
+        </div>
+        <Button onClick={() => void handleAddProject()} disabled={isAdding}>
+          {isAdding ? 'Adding...' : 'Add Project'}
+        </Button>
+      </div>
+
+      {error && <InlineError message={error} onRetry={() => void loadProjects()} />}
+
+      {projects.length === 0 ? (
+        <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
+          No projects registered yet.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {projects.map((project, index) => (
+            <div key={project.id} className="flex items-center justify-between rounded-lg border border-border bg-card p-4 gap-4">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="font-medium">{project.name}</p>
+                  {index === 0 && (
+                    <span className="rounded bg-secondary px-2 py-0.5 text-xs text-secondary-foreground">Default</span>
+                  )}
+                </div>
+                <p className="truncate text-xs text-muted-foreground">{project.path}</p>
+              </div>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => void handleRemoveProject(project)}
+                disabled={busyProjectId === project.id}
+              >
+                {busyProjectId === project.id ? 'Removing...' : 'Remove'}
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

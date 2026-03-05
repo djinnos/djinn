@@ -224,6 +224,17 @@ export async function deleteProviderCredentials(providerId: string): Promise<voi
 }
 
 
+export async function removeProject(projectId: string): Promise<void> {
+  const projects = await callMcpTool("project_list");
+  const project = projects.projects.find((entry) => entry.id === projectId);
+  if (!project) {
+    throw new Error("Project not found");
+  }
+
+  await callMcpTool("project_remove", {
+    name: project.name,
+  });
+}
 
 export async function addCustomProvider(payload: CustomProviderRequest): Promise<Provider> {
   const baseUrl = await getBaseUrl();
