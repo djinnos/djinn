@@ -4,13 +4,13 @@
 export namespace BoardHealthInputSchema {
   export interface BoardHealthInput {
   /**
-   * Absolute project path.
-   */
-  project: string
-  /**
    * Hours before an in_progress task is considered stale (default: 24).
    */
   stale_threshold_hours?: number
+  /**
+   * Absolute project path.
+   */
+  project: string
   [k: string]: any
   }
 
@@ -26,13 +26,13 @@ export type BoardHealthOutput = BoardHealthOutputSchema.BoardHealthOutput;
 export namespace BoardReconcileInputSchema {
   export interface BoardReconcileInput {
   /**
-   * Absolute project path.
-   */
-  project: string
-  /**
    * Hours before an in_progress task is considered stale (default: 24).
    */
   stale_threshold_hours?: number
+  /**
+   * Absolute project path.
+   */
+  project: string
   [k: string]: any
   }
 
@@ -58,11 +58,11 @@ export namespace CredentialDeleteInputSchema {
 export type CredentialDeleteInput = CredentialDeleteInputSchema.CredentialDeleteInput;
 export namespace CredentialDeleteOutputSchema {
   export interface CredentialDeleteOutput {
-  deleted: boolean
-  error?: string
-  key_name: string
   ok: boolean
   success: boolean
+  deleted: boolean
+  key_name: string
+  error?: string
   [k: string]: any
   }
 
@@ -81,10 +81,10 @@ export namespace CredentialListOutputSchema {
   [k: string]: any
   }
   export interface CredentialSummary {
-  created_at: string
   id: string
-  key_name: string
   provider_id: string
+  key_name: string
+  created_at: string
   updated_at: string
   [k: string]: any
   }
@@ -94,17 +94,17 @@ export type CredentialListOutput = CredentialListOutputSchema.CredentialListOutp
 export namespace CredentialSetInputSchema {
   export interface CredentialSetInput {
   /**
-   * The raw API key value to store encrypted.
+   * Provider ID this key belongs to (e.g. 'anthropic', 'openai').
    */
-  api_key: string
+  provider_id: string
   /**
    * Env-var style key name (e.g. 'ANTHROPIC_API_KEY').
    */
   key_name: string
   /**
-   * Provider ID this key belongs to (e.g. 'anthropic', 'openai').
+   * The raw API key value to store encrypted.
    */
-  provider_id: string
+  api_key: string
   [k: string]: any
   }
 
@@ -112,11 +112,11 @@ export namespace CredentialSetInputSchema {
 export type CredentialSetInput = CredentialSetInputSchema.CredentialSetInput;
 export namespace CredentialSetOutputSchema {
   export interface CredentialSetOutput {
-  error?: string
-  id: string
-  key_name: string
   ok: boolean
   success: boolean
+  id: string
+  key_name: string
+  error?: string
   [k: string]: any
   }
 
@@ -125,13 +125,13 @@ export type CredentialSetOutput = CredentialSetOutputSchema.CredentialSetOutput;
 export namespace EpicCloseInputSchema {
   export interface EpicCloseInput {
   /**
-   * Epic UUID or short_id.
-   */
-  id: string
-  /**
    * Absolute project path.
    */
   project: string
+  /**
+   * Epic UUID or short_id.
+   */
+  id: string
   [k: string]: any
   }
 
@@ -139,17 +139,17 @@ export namespace EpicCloseInputSchema {
 export type EpicCloseInput = EpicCloseInputSchema.EpicCloseInput;
 export namespace EpicCloseOutputSchema {
   export interface EpicCloseOutput {
-  closed_at?: string
-  color?: string
-  created_at?: string
+  id?: string
+  short_id?: string
   description?: string
   emoji?: string
-  error?: string
-  id?: string
-  owner?: string
-  short_id?: string
+  color?: string
   status?: string
+  owner?: string
+  created_at?: string
   updated_at?: string
+  closed_at?: string
+  error?: string
   [k: string]: any
   }
 
@@ -158,14 +158,14 @@ export type EpicCloseOutput = EpicCloseOutputSchema.EpicCloseOutput;
 export namespace EpicCountInputSchema {
   export interface EpicCountInput {
   /**
-   * Group results by: "status".
-   */
-  group_by?: string
-  /**
    * Absolute project path.
    */
   project: string
   status?: string
+  /**
+   * Group results by: "status".
+   */
+  group_by?: string
   [k: string]: any
   }
 
@@ -173,14 +173,14 @@ export namespace EpicCountInputSchema {
 export type EpicCountInput = EpicCountInputSchema.EpicCountInput;
 export namespace EpicCountOutputSchema {
   export interface EpicCountOutput {
-  error?: string
-  groups?: EpicCountGroup[]
   total_count?: number
+  groups?: EpicCountGroup[]
+  error?: string
   [k: string]: any
   }
   export interface EpicCountGroup {
-  count: number
   key: string
+  count: number
   [k: string]: any
   }
 
@@ -188,14 +188,14 @@ export namespace EpicCountOutputSchema {
 export type EpicCountOutput = EpicCountOutputSchema.EpicCountOutput;
 export namespace EpicCreateInputSchema {
   export interface EpicCreateInput {
-  color?: string
-  description?: string
-  emoji?: string
-  owner?: string
   /**
    * Absolute project path.
    */
   project: string
+  description?: string
+  emoji?: string
+  color?: string
+  owner?: string
   [k: string]: any
   }
 
@@ -203,17 +203,17 @@ export namespace EpicCreateInputSchema {
 export type EpicCreateInput = EpicCreateInputSchema.EpicCreateInput;
 export namespace EpicCreateOutputSchema {
   export interface EpicCreateOutput {
-  closed_at?: string
-  color?: string
-  created_at?: string
+  id?: string
+  short_id?: string
   description?: string
   emoji?: string
-  error?: string
-  id?: string
-  owner?: string
-  short_id?: string
+  color?: string
   status?: string
+  owner?: string
+  created_at?: string
   updated_at?: string
+  closed_at?: string
+  error?: string
   [k: string]: any
   }
 
@@ -222,13 +222,13 @@ export type EpicCreateOutput = EpicCreateOutputSchema.EpicCreateOutput;
 export namespace EpicDeleteInputSchema {
   export interface EpicDeleteInput {
   /**
-   * Epic UUID or short_id.
-   */
-  id: string
-  /**
    * Absolute project path.
    */
   project: string
+  /**
+   * Epic UUID or short_id.
+   */
+  id: string
   [k: string]: any
   }
 
@@ -236,9 +236,9 @@ export namespace EpicDeleteInputSchema {
 export type EpicDeleteInput = EpicDeleteInputSchema.EpicDeleteInput;
 export namespace EpicDeleteOutputSchema {
   export interface EpicDeleteOutput {
+  ok?: boolean
   deleted_task_count?: number
   error?: string
-  ok?: boolean
   [k: string]: any
   }
 
@@ -246,21 +246,21 @@ export namespace EpicDeleteOutputSchema {
 export type EpicDeleteOutput = EpicDeleteOutputSchema.EpicDeleteOutput;
 export namespace EpicListInputSchema {
   export interface EpicListInput {
-  limit?: number
-  offset?: number
   /**
    * Absolute project path.
    */
   project: string
-  /**
-   * Sort order: "created" (default), "created_desc", "updated", "updated_desc".
-   */
-  sort?: string
   status?: string
   /**
    * Full-text search on title and description.
    */
   text?: string
+  /**
+   * Sort order: "created" (default), "created_desc", "updated", "updated_desc".
+   */
+  sort?: string
+  limit?: number
+  offset?: number
   [k: string]: any
   }
 
@@ -269,24 +269,24 @@ export type EpicListInput = EpicListInputSchema.EpicListInput;
 export namespace EpicListOutputSchema {
   export interface EpicListOutput {
   epics?: EpicModel[]
-  error?: string
-  has_more?: boolean
+  total_count?: number
   limit?: number
   offset?: number
-  total_count?: number
+  has_more?: boolean
+  error?: string
   [k: string]: any
   }
   export interface EpicModel {
-  closed_at?: string
-  color: string
-  created_at: string
+  id: string
+  short_id: string
   description: string
   emoji: string
-  id: string
-  owner: string
-  short_id: string
+  color: string
   status: string
+  owner: string
+  created_at: string
   updated_at: string
+  closed_at?: string
   [k: string]: any
   }
 
@@ -295,13 +295,13 @@ export type EpicListOutput = EpicListOutputSchema.EpicListOutput;
 export namespace EpicReopenInputSchema {
   export interface EpicReopenInput {
   /**
-   * Epic UUID or short_id.
-   */
-  id: string
-  /**
    * Absolute project path.
    */
   project: string
+  /**
+   * Epic UUID or short_id.
+   */
+  id: string
   [k: string]: any
   }
 
@@ -309,17 +309,17 @@ export namespace EpicReopenInputSchema {
 export type EpicReopenInput = EpicReopenInputSchema.EpicReopenInput;
 export namespace EpicReopenOutputSchema {
   export interface EpicReopenOutput {
-  closed_at?: string
-  color?: string
-  created_at?: string
+  id?: string
+  short_id?: string
   description?: string
   emoji?: string
-  error?: string
-  id?: string
-  owner?: string
-  short_id?: string
+  color?: string
   status?: string
+  owner?: string
+  created_at?: string
   updated_at?: string
+  closed_at?: string
+  error?: string
   [k: string]: any
   }
 
@@ -328,13 +328,13 @@ export type EpicReopenOutput = EpicReopenOutputSchema.EpicReopenOutput;
 export namespace EpicShowInputSchema {
   export interface EpicShowInput {
   /**
-   * Epic UUID or short_id.
-   */
-  id: string
-  /**
    * Absolute project path.
    */
   project: string
+  /**
+   * Epic UUID or short_id.
+   */
+  id: string
   [k: string]: any
   }
 
@@ -342,21 +342,21 @@ export namespace EpicShowInputSchema {
 export type EpicShowInput = EpicShowInputSchema.EpicShowInput;
 export namespace EpicShowOutputSchema {
   export interface EpicShowOutput {
-  closed_at?: string
-  closed_count?: number
-  color?: string
-  created_at?: string
+  id?: string
+  short_id?: string
   description?: string
   emoji?: string
-  error?: string
-  id?: string
-  in_progress_count?: number
-  open_count?: number
-  owner?: string
-  short_id?: string
+  color?: string
   status?: string
-  task_count?: number
+  owner?: string
+  created_at?: string
   updated_at?: string
+  closed_at?: string
+  task_count?: number
+  open_count?: number
+  in_progress_count?: number
+  closed_count?: number
+  error?: string
   [k: string]: any
   }
 
@@ -365,25 +365,25 @@ export type EpicShowOutput = EpicShowOutputSchema.EpicShowOutput;
 export namespace EpicTasksInputSchema {
   export interface EpicTasksInput {
   /**
+   * Absolute project path.
+   */
+  project: string
+  /**
    * Epic UUID or short_id.
    */
   epic_id: string
+  status?: string
   /**
    * Filter by issue type: "task", "feature", or "bug".
    */
   issue_type?: string
-  limit?: number
-  offset?: number
-  /**
-   * Absolute project path.
-   */
-  project: string
   /**
    * Sort order: "priority" (default), "created", "created_desc",
    * "updated", "updated_desc", "closed".
    */
   sort?: string
-  status?: string
+  limit?: number
+  offset?: number
   [k: string]: any
   }
 
@@ -393,35 +393,35 @@ export namespace EpicTasksOutputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
 
   export interface EpicTasksOutput {
-  error?: string
-  has_more?: boolean
-  limit?: number
-  offset?: number
   tasks?: EpicTaskModel[]
   total_count?: number
+  limit?: number
+  offset?: number
+  has_more?: boolean
+  error?: string
   [k: string]: any
   }
   export interface EpicTaskModel {
-  acceptance_criteria: AcceptanceCriterionItem[]
-  blocked_from_status?: string
-  close_reason?: string
-  closed_at?: string
-  continuation_count: number
-  created_at: string
+  id: string
+  short_id: string
+  epic_id?: string
   description: string
   design: string
-  epic_id?: string
-  id: string
   issue_type: string
+  status: string
+  priority: number
+  owner: string
   labels: string[]
   memory_refs: string[]
-  merge_commit_sha?: string
-  owner: string
-  priority: number
+  acceptance_criteria: AcceptanceCriterionItem[]
   reopen_count: number
-  short_id: string
-  status: string
+  continuation_count: number
+  created_at: string
   updated_at: string
+  closed_at?: string
+  blocked_from_status?: string
+  close_reason?: string
+  merge_commit_sha?: string
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
@@ -434,18 +434,18 @@ export namespace EpicTasksOutputSchema {
 export type EpicTasksOutput = EpicTasksOutputSchema.EpicTasksOutput;
 export namespace EpicUpdateInputSchema {
   export interface EpicUpdateInput {
-  color?: string
-  description?: string
-  emoji?: string
-  /**
-   * Epic UUID or short_id.
-   */
-  id: string
-  owner?: string
   /**
    * Absolute project path.
    */
   project: string
+  /**
+   * Epic UUID or short_id.
+   */
+  id: string
+  description?: string
+  emoji?: string
+  color?: string
+  owner?: string
   [k: string]: any
   }
 
@@ -453,17 +453,17 @@ export namespace EpicUpdateInputSchema {
 export type EpicUpdateInput = EpicUpdateInputSchema.EpicUpdateInput;
 export namespace EpicUpdateOutputSchema {
   export interface EpicUpdateOutput {
-  closed_at?: string
-  color?: string
-  created_at?: string
+  id?: string
+  short_id?: string
   description?: string
   emoji?: string
-  error?: string
-  id?: string
-  owner?: string
-  short_id?: string
+  color?: string
   status?: string
+  owner?: string
+  created_at?: string
   updated_at?: string
+  closed_at?: string
+  error?: string
   [k: string]: any
   }
 
@@ -472,13 +472,13 @@ export type EpicUpdateOutput = EpicUpdateOutputSchema.EpicUpdateOutput;
 export namespace ExecutionKillTaskInputSchema {
   export interface ExecutionKillTaskInput {
   /**
-   * Project path (accepted for API compatibility, currently unused).
-   */
-  project?: string
-  /**
    * Task ID to interrupt.
    */
   task_id: string
+  /**
+   * Project path (accepted for API compatibility, currently unused).
+   */
+  project?: string
   [k: string]: any
   }
 
@@ -486,9 +486,9 @@ export namespace ExecutionKillTaskInputSchema {
 export type ExecutionKillTaskInput = ExecutionKillTaskInputSchema.ExecutionKillTaskInput;
 export namespace ExecutionKillTaskOutputSchema {
   export interface ExecutionKillTaskOutput {
-  error?: string
   ok: boolean
   task_id?: string
+  error?: string
   [k: string]: any
   }
 
@@ -497,13 +497,13 @@ export type ExecutionKillTaskOutput = ExecutionKillTaskOutputSchema.ExecutionKil
 export namespace ExecutionPauseInputSchema {
   export interface ExecutionPauseInput {
   /**
-   * Pause mode: "graceful" (default) or "immediate".
-   */
-  mode?: string
-  /**
    * Optional project path for project-scoped execution pause.
    */
   project?: string
+  /**
+   * Pause mode: "graceful" (default) or "immediate".
+   */
+  mode?: string
   /**
    * Optional reason used when mode is "immediate".
    */
@@ -515,12 +515,12 @@ export namespace ExecutionPauseInputSchema {
 export type ExecutionPauseInput = ExecutionPauseInputSchema.ExecutionPauseInput;
 export namespace ExecutionPauseOutputSchema {
   export interface ExecutionPauseOutput {
-  error?: string
-  mode?: string
   ok: boolean
-  project_id?: string
-  scope?: string
   state?: string
+  mode?: string
+  scope?: string
+  project_id?: string
+  error?: string
   [k: string]: any
   }
 
@@ -539,11 +539,11 @@ export namespace ExecutionResumeInputSchema {
 export type ExecutionResumeInput = ExecutionResumeInputSchema.ExecutionResumeInput;
 export namespace ExecutionResumeOutputSchema {
   export interface ExecutionResumeOutput {
-  error?: string
   ok: boolean
-  project_id?: string
-  scope?: string
   state?: string
+  scope?: string
+  project_id?: string
+  error?: string
   [k: string]: any
   }
 
@@ -562,12 +562,12 @@ export namespace ExecutionStartInputSchema {
 export type ExecutionStartInput = ExecutionStartInputSchema.ExecutionStartInput;
 export namespace ExecutionStartOutputSchema {
   export interface ExecutionStartOutput {
-  error?: string
   ok: boolean
-  project_id?: string
+  state?: string
   resumed?: boolean
   scope?: string
-  state?: string
+  project_id?: string
+  error?: string
   [k: string]: any
   }
 
@@ -586,18 +586,18 @@ export namespace ExecutionStatusInputSchema {
 export type ExecutionStatusInput = ExecutionStatusInputSchema.ExecutionStatusInput;
 export namespace ExecutionStatusOutputSchema {
   export interface ExecutionStatusOutput {
+  ok: boolean
+  state?: string
+  scope?: string
+  project_id?: string
+  running_sessions?: number
+  max_sessions?: number
   capacity?: {
   [k: string]: ExecutionStatusCapacity
   }
-  error?: string
-  max_sessions?: number
-  metrics?: (ExecutionStatusMetrics | null)
-  ok: boolean
-  project_id?: string
-  running_sessions?: number
-  scope?: string
   sessions?: ExecutionStatusSession[]
-  state?: string
+  metrics: ExecutionStatusMetrics
+  error?: string
   [k: string]: any
   }
   export interface ExecutionStatusCapacity {
@@ -605,17 +605,17 @@ export namespace ExecutionStatusOutputSchema {
   max: number
   [k: string]: any
   }
-  export interface ExecutionStatusMetrics {
-  sessions_recovered: number
-  tasks_dispatched: number
-  [k: string]: any
-  }
   export interface ExecutionStatusSession {
-  duration_seconds: number
+  task_id: string
   model_id: string
   session_id: string
-  task_id: string
+  duration_seconds: number
   worktree_path?: string
+  [k: string]: any
+  }
+  export interface ExecutionStatusMetrics {
+  tasks_dispatched: number
+  sessions_recovered: number
   [k: string]: any
   }
 
@@ -623,8 +623,8 @@ export namespace ExecutionStatusOutputSchema {
 export type ExecutionStatusOutput = ExecutionStatusOutputSchema.ExecutionStatusOutput;
 export namespace MemoryBrokenLinksInputSchema {
   export interface MemoryBrokenLinksInput {
-  folder?: string
   project: string
+  folder?: string
   [k: string]: any
   }
 
@@ -640,10 +640,10 @@ export namespace MemoryBrokenLinksOutputSchema {
    * A wikilink pointing to a note that does not exist.
    */
   export interface BrokenLink {
-  raw_text: string
   source_id: string
   source_permalink: string
   source_title: string
+  raw_text: string
   [k: string]: any
   }
 
@@ -651,6 +651,12 @@ export namespace MemoryBrokenLinksOutputSchema {
 export type MemoryBrokenLinksOutput = MemoryBrokenLinksOutputSchema.MemoryBrokenLinksOutput;
 export namespace MemoryBuildContextInputSchema {
   export interface MemoryBuildContextInput {
+  project: string
+  /**
+   * Memory URI: "memory://folder/note", "folder/note", or "folder/*" for all
+   * notes in a folder.
+   */
+  url: string
   /**
    * Link traversal depth (default 1).
    */
@@ -659,12 +665,6 @@ export namespace MemoryBuildContextInputSchema {
    * Maximum related notes to return (default 10).
    */
   max_related?: number
-  project: string
-  /**
-   * Memory URI: "memory://folder/note", "folder/note", or "folder/*" for all
-   * notes in a folder.
-   */
-  url: string
   [k: string]: any
   }
 
@@ -672,33 +672,33 @@ export namespace MemoryBuildContextInputSchema {
 export type MemoryBuildContextInput = MemoryBuildContextInputSchema.MemoryBuildContextInput;
 export namespace MemoryBuildContextOutputSchema {
   export interface MemoryBuildContextOutput {
-  error?: string
   primary: MemoryNoteView[]
   related: NoteCompact[]
+  error?: string
   [k: string]: any
   }
   export interface MemoryNoteView {
+  id: string
+  project_id: string
+  permalink: string
+  file_path: string
+  note_type: string
+  folder: string
+  tags: string[]
   content: string
   created_at: string
-  file_path: string
-  folder: string
-  id: string
-  last_accessed: string
-  note_type: string
-  permalink: string
-  project_id: string
-  tags: string[]
   updated_at: string
+  last_accessed: string
   [k: string]: any
   }
   /**
    * Compact note summary (no full content) for list and recent queries.
    */
   export interface NoteCompact {
-  folder: string
   id: string
-  note_type: string
   permalink: string
+  note_type: string
+  folder: string
   updated_at: string
   [k: string]: any
   }
@@ -724,8 +724,8 @@ export namespace MemoryCatalogOutputSchema {
 export type MemoryCatalogOutput = MemoryCatalogOutputSchema.MemoryCatalogOutput;
 export namespace MemoryDeleteInputSchema {
   export interface MemoryDeleteInput {
-  identifier: string
   project: string
+  identifier: string
   [k: string]: any
   }
 
@@ -733,8 +733,8 @@ export namespace MemoryDeleteInputSchema {
 export type MemoryDeleteInput = MemoryDeleteInputSchema.MemoryDeleteInput;
 export namespace MemoryDeleteOutputSchema {
   export interface MemoryDeleteOutput {
-  error?: string
   ok: boolean
+  error?: string
   [k: string]: any
   }
 
@@ -742,8 +742,8 @@ export namespace MemoryDeleteOutputSchema {
 export type MemoryDeleteOutput = MemoryDeleteOutputSchema.MemoryDeleteOutput;
 export namespace MemoryDiffInputSchema {
   export interface MemoryDiffInput {
-  permalink: string
   project: string
+  permalink: string
   /**
    * Specific commit SHA. Omit to get the diff for the most recent change.
    */
@@ -764,11 +764,7 @@ export namespace MemoryDiffOutputSchema {
 export type MemoryDiffOutput = MemoryDiffOutputSchema.MemoryDiffOutput;
 export namespace MemoryEditInputSchema {
   export interface MemoryEditInput {
-  content: string
-  /**
-   * Required for find_replace: exact text to search for.
-   */
-  find_text?: string
+  project: string
   /**
    * Note permalink or title.
    */
@@ -777,7 +773,11 @@ export namespace MemoryEditInputSchema {
    * Operation: "append", "prepend", "find_replace", "replace_section".
    */
   operation: string
-  project: string
+  content: string
+  /**
+   * Required for find_replace: exact text to search for.
+   */
+  find_text?: string
   /**
    * Required for replace_section: heading text identifying the section.
    */
@@ -794,18 +794,18 @@ export namespace MemoryEditInputSchema {
 export type MemoryEditInput = MemoryEditInputSchema.MemoryEditInput;
 export namespace MemoryEditOutputSchema {
   export interface MemoryEditOutput {
+  id?: string
+  project_id?: string
+  permalink?: string
+  file_path?: string
+  note_type?: string
+  folder?: string
+  tags?: string[]
   content?: string
   created_at?: string
-  error?: string
-  file_path?: string
-  folder?: string
-  id?: string
-  last_accessed?: string
-  note_type?: string
-  permalink?: string
-  project_id?: string
-  tags?: string[]
   updated_at?: string
+  last_accessed?: string
+  error?: string
   [k: string]: any
   }
 
@@ -821,32 +821,32 @@ export namespace MemoryGraphInputSchema {
 export type MemoryGraphInput = MemoryGraphInputSchema.MemoryGraphInput;
 export namespace MemoryGraphOutputSchema {
   export interface MemoryGraphOutput {
+  nodes: GraphNode[]
   edges: GraphEdge[]
   error?: string
-  nodes: GraphNode[]
-  [k: string]: any
-  }
-  /**
-   * A resolved wikilink edge between two notes.
-   */
-  export interface GraphEdge {
-  raw_text: string
-  source_id: string
-  target_id: string
   [k: string]: any
   }
   /**
    * A knowledge graph node (note with connection metadata).
    */
   export interface GraphNode {
+  id: string
+  permalink: string
+  note_type: string
+  folder: string
   /**
    * Total resolved edges incident to this node (inbound + outbound).
    */
   connection_count: number
-  folder: string
-  id: string
-  note_type: string
-  permalink: string
+  [k: string]: any
+  }
+  /**
+   * A resolved wikilink edge between two notes.
+   */
+  export interface GraphEdge {
+  source_id: string
+  target_id: string
+  raw_text: string
   [k: string]: any
   }
 
@@ -865,19 +865,19 @@ export namespace MemoryHealthInputSchema {
 export type MemoryHealthInput = MemoryHealthInputSchema.MemoryHealthInput;
 export namespace MemoryHealthOutputSchema {
   export interface MemoryHealthOutput {
+  total_notes?: number
   broken_link_count?: number
-  error?: string
   orphan_note_count?: number
   stale_notes_by_folder?: StaleFolder[]
-  total_notes?: number
+  error?: string
   [k: string]: any
   }
   /**
    * Stale-note count for one folder.
    */
   export interface StaleFolder {
-  count: number
   folder: string
+  count: number
   [k: string]: any
   }
 
@@ -885,9 +885,9 @@ export namespace MemoryHealthOutputSchema {
 export type MemoryHealthOutput = MemoryHealthOutputSchema.MemoryHealthOutput;
 export namespace MemoryHistoryInputSchema {
   export interface MemoryHistoryInput {
-  limit?: number
-  permalink: string
   project: string
+  permalink: string
+  limit?: number
   [k: string]: any
   }
 
@@ -895,18 +895,18 @@ export namespace MemoryHistoryInputSchema {
 export type MemoryHistoryInput = MemoryHistoryInputSchema.MemoryHistoryInput;
 export namespace MemoryHistoryOutputSchema {
   export interface MemoryHistoryOutput {
-  error?: string
   history: GitLogEntry[]
+  error?: string
   [k: string]: any
   }
   /**
    * A single git commit entry for note history.
    */
   export interface GitLogEntry {
+  sha: string
+  message: string
   author: string
   date: string
-  message: string
-  sha: string
   [k: string]: any
   }
 
@@ -914,12 +914,12 @@ export namespace MemoryHistoryOutputSchema {
 export type MemoryHistoryOutput = MemoryHistoryOutputSchema.MemoryHistoryOutput;
 export namespace MemoryListInputSchema {
   export interface MemoryListInput {
+  project: string
+  folder: string
   /**
    * Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels.
    */
   depth?: number
-  folder: string
-  project: string
   [k: string]: any
   }
 
@@ -927,18 +927,18 @@ export namespace MemoryListInputSchema {
 export type MemoryListInput = MemoryListInputSchema.MemoryListInput;
 export namespace MemoryListOutputSchema {
   export interface MemoryListOutput {
-  error?: string
   notes: NoteCompact[]
+  error?: string
   [k: string]: any
   }
   /**
    * Compact note summary (no full content) for list and recent queries.
    */
   export interface NoteCompact {
-  folder: string
   id: string
-  note_type: string
   permalink: string
+  note_type: string
+  folder: string
   updated_at: string
   [k: string]: any
   }
@@ -947,8 +947,8 @@ export namespace MemoryListOutputSchema {
 export type MemoryListOutput = MemoryListOutputSchema.MemoryListOutput;
 export namespace MemoryMoveInputSchema {
   export interface MemoryMoveInput {
-  identifier: string
   project: string
+  identifier: string
   /**
    * New note type to move the note to.
    */
@@ -960,18 +960,18 @@ export namespace MemoryMoveInputSchema {
 export type MemoryMoveInput = MemoryMoveInputSchema.MemoryMoveInput;
 export namespace MemoryMoveOutputSchema {
   export interface MemoryMoveOutput {
+  id?: string
+  project_id?: string
+  permalink?: string
+  file_path?: string
+  note_type?: string
+  folder?: string
+  tags?: string[]
   content?: string
   created_at?: string
-  error?: string
-  file_path?: string
-  folder?: string
-  id?: string
-  last_accessed?: string
-  note_type?: string
-  permalink?: string
-  project_id?: string
-  tags?: string[]
   updated_at?: string
+  last_accessed?: string
+  error?: string
   [k: string]: any
   }
 
@@ -979,8 +979,8 @@ export namespace MemoryMoveOutputSchema {
 export type MemoryMoveOutput = MemoryMoveOutputSchema.MemoryMoveOutput;
 export namespace MemoryOrphansInputSchema {
   export interface MemoryOrphansInput {
-  folder?: string
   project: string
+  folder?: string
   [k: string]: any
   }
 
@@ -988,18 +988,18 @@ export namespace MemoryOrphansInputSchema {
 export type MemoryOrphansInput = MemoryOrphansInputSchema.MemoryOrphansInput;
 export namespace MemoryOrphansOutputSchema {
   export interface MemoryOrphansOutput {
-  error?: string
   orphans: OrphanNote[]
+  error?: string
   [k: string]: any
   }
   /**
    * A note with zero inbound wikilinks (potential dead-end).
    */
   export interface OrphanNote {
-  folder: string
   id: string
-  note_type: string
   permalink: string
+  note_type: string
+  folder: string
   [k: string]: any
   }
 
@@ -1007,11 +1007,11 @@ export namespace MemoryOrphansOutputSchema {
 export type MemoryOrphansOutput = MemoryOrphansOutputSchema.MemoryOrphansOutput;
 export namespace MemoryReadInputSchema {
   export interface MemoryReadInput {
+  project: string
   /**
    * Note permalink (e.g. "decisions/my-adr") or title.
    */
   identifier: string
-  project: string
   [k: string]: any
   }
 
@@ -1019,18 +1019,18 @@ export namespace MemoryReadInputSchema {
 export type MemoryReadInput = MemoryReadInputSchema.MemoryReadInput;
 export namespace MemoryReadOutputSchema {
   export interface MemoryReadOutput {
+  id?: string
+  project_id?: string
+  permalink?: string
+  file_path?: string
+  note_type?: string
+  folder?: string
+  tags?: string[]
   content?: string
   created_at?: string
-  error?: string
-  file_path?: string
-  folder?: string
-  id?: string
-  last_accessed?: string
-  note_type?: string
-  permalink?: string
-  project_id?: string
-  tags?: string[]
   updated_at?: string
+  last_accessed?: string
+  error?: string
   [k: string]: any
   }
 
@@ -1038,12 +1038,12 @@ export namespace MemoryReadOutputSchema {
 export type MemoryReadOutput = MemoryReadOutputSchema.MemoryReadOutput;
 export namespace MemoryRecentInputSchema {
   export interface MemoryRecentInput {
-  limit?: number
   project: string
   /**
    * Timeframe string, e.g. "7d", "24h", "today", "last week". Default: "7d".
    */
   timeframe?: string
+  limit?: number
   [k: string]: any
   }
 
@@ -1051,18 +1051,18 @@ export namespace MemoryRecentInputSchema {
 export type MemoryRecentInput = MemoryRecentInputSchema.MemoryRecentInput;
 export namespace MemoryRecentOutputSchema {
   export interface MemoryRecentOutput {
-  error?: string
   notes: NoteCompact[]
+  error?: string
   [k: string]: any
   }
   /**
    * Compact note summary (no full content) for list and recent queries.
    */
   export interface NoteCompact {
-  folder: string
   id: string
-  note_type: string
   permalink: string
+  note_type: string
+  folder: string
   updated_at: string
   [k: string]: any
   }
@@ -1079,11 +1079,11 @@ export namespace MemoryReindexInputSchema {
 export type MemoryReindexInput = MemoryReindexInputSchema.MemoryReindexInput;
 export namespace MemoryReindexOutputSchema {
   export interface MemoryReindexOutput {
+  updated: number
   created: number
   deleted: number
-  error?: string
   unchanged: number
-  updated: number
+  error?: string
   [k: string]: any
   }
 
@@ -1091,11 +1091,11 @@ export namespace MemoryReindexOutputSchema {
 export type MemoryReindexOutput = MemoryReindexOutputSchema.MemoryReindexOutput;
 export namespace MemorySearchInputSchema {
   export interface MemorySearchInput {
-  folder?: string
-  limit?: number
   project: string
   query: string
+  folder?: string
   type?: string
+  limit?: number
   [k: string]: any
   }
 
@@ -1103,15 +1103,15 @@ export namespace MemorySearchInputSchema {
 export type MemorySearchInput = MemorySearchInputSchema.MemorySearchInput;
 export namespace MemorySearchOutputSchema {
   export interface MemorySearchOutput {
-  error?: string
   results: MemorySearchResultItem[]
+  error?: string
   [k: string]: any
   }
   export interface MemorySearchResultItem {
-  folder: string
   id: string
-  note_type: string
   permalink: string
+  folder: string
+  note_type: string
   snippet: string
   [k: string]: any
   }
@@ -1120,8 +1120,8 @@ export namespace MemorySearchOutputSchema {
 export type MemorySearchOutput = MemorySearchOutputSchema.MemorySearchOutput;
 export namespace MemoryTaskRefsInputSchema {
   export interface MemoryTaskRefsInput {
-  permalink: string
   project: string
+  permalink: string
   [k: string]: any
   }
 
@@ -1129,8 +1129,8 @@ export namespace MemoryTaskRefsInputSchema {
 export type MemoryTaskRefsInput = MemoryTaskRefsInputSchema.MemoryTaskRefsInput;
 export namespace MemoryTaskRefsOutputSchema {
   export interface MemoryTaskRefsOutput {
-  error?: string
   tasks: MemoryTaskRefItem[]
+  error?: string
   [k: string]: any
   }
   export interface MemoryTaskRefItem {
@@ -1144,18 +1144,18 @@ export namespace MemoryTaskRefsOutputSchema {
 export type MemoryTaskRefsOutput = MemoryTaskRefsOutputSchema.MemoryTaskRefsOutput;
 export namespace MemoryWriteInputSchema {
   export interface MemoryWriteInput {
-  content: string
   /**
    * Absolute path to the project directory.
    */
   project: string
-  tags?: string[]
+  content: string
   /**
    * Note type: adr, pattern, research, requirement, reference, design,
    * session, persona, journey, design_spec, competitive, tech_spike,
    * brief (singleton), roadmap (singleton).
    */
   type: string
+  tags?: string[]
   [k: string]: any
   }
 
@@ -1163,18 +1163,18 @@ export namespace MemoryWriteInputSchema {
 export type MemoryWriteInput = MemoryWriteInputSchema.MemoryWriteInput;
 export namespace MemoryWriteOutputSchema {
   export interface MemoryWriteOutput {
+  id?: string
+  project_id?: string
+  permalink?: string
+  file_path?: string
+  note_type?: string
+  folder?: string
+  tags?: string[]
   content?: string
   created_at?: string
-  error?: string
-  file_path?: string
-  folder?: string
-  id?: string
-  last_accessed?: string
-  note_type?: string
-  permalink?: string
-  project_id?: string
-  tags?: string[]
   updated_at?: string
+  last_accessed?: string
+  error?: string
   [k: string]: any
   }
 
@@ -1199,18 +1199,18 @@ export type ModelHealthInput = ModelHealthInputSchema.ModelHealthInput;
 export namespace ModelHealthOutputSchema {
   export interface ModelHealthOutput {
   action: string
-  error?: string
   models: ModelHealthOutput1[]
+  error?: string
   [k: string]: any
   }
   export interface ModelHealthOutput1 {
+  model_id: string
   auto_disabled: boolean
   consecutive_failures: number
-  cooldown_seconds_remaining?: number
-  disable_ttl_trips: number
-  model_id: string
   total_failures: number
   total_successes: number
+  disable_ttl_trips: number
+  cooldown_seconds_remaining?: number
   [k: string]: any
   }
 
@@ -1233,8 +1233,8 @@ export namespace ProjectAddInputSchema {
 export type ProjectAddInput = ProjectAddInputSchema.ProjectAddInput;
 export namespace ProjectAddOutputSchema {
   export interface ProjectAddOutput {
-  project: ProjectInfo
   status: string
+  project: ProjectInfo
   [k: string]: any
   }
   export interface ProjectInfo {
@@ -1259,9 +1259,9 @@ export namespace ProjectCommandsGetInputSchema {
 export type ProjectCommandsGetInput = ProjectCommandsGetInputSchema.ProjectCommandsGetInput;
 export namespace ProjectCommandsGetOutputSchema {
   export interface ProjectCommandsGetOutput {
+  status: string
   project: string
   setup_commands: ProjectCommandSpec[]
-  status: string
   verification_commands: ProjectCommandSpec[]
   [k: string]: any
   }
@@ -1270,13 +1270,13 @@ export namespace ProjectCommandsGetOutputSchema {
    */
   export interface ProjectCommandSpec {
   /**
-   * Shell command executed via `sh -c`.
-   */
-  command: string
-  /**
    * Human-readable label for this command.
    */
   name: string
+  /**
+   * Shell command executed via `sh -c`.
+   */
+  command: string
   /**
    * Optional timeout in seconds (default: 300).
    */
@@ -1307,13 +1307,13 @@ export namespace ProjectCommandsSetInputSchema {
    */
   export interface ProjectCommandSpec {
   /**
-   * Shell command executed via `sh -c`.
-   */
-  command: string
-  /**
    * Human-readable label for this command.
    */
   name: string
+  /**
+   * Shell command executed via `sh -c`.
+   */
+  command: string
   /**
    * Optional timeout in seconds (default: 300).
    */
@@ -1325,8 +1325,8 @@ export namespace ProjectCommandsSetInputSchema {
 export type ProjectCommandsSetInput = ProjectCommandsSetInputSchema.ProjectCommandsSetInput;
 export namespace ProjectCommandsSetOutputSchema {
   export interface ProjectCommandsSetOutput {
-  project: string
   status: string
+  project: string
   /**
    * Commands that failed validation (non-zero exit). Empty on success.
    */
@@ -1336,8 +1336,8 @@ export namespace ProjectCommandsSetOutputSchema {
   export interface CommandValidationError {
   command_name: string
   exit_code: number
-  stderr: string
   stdout: string
+  stderr: string
   [k: string]: any
   }
 
@@ -1377,8 +1377,8 @@ export namespace ProjectRemoveInputSchema {
 export type ProjectRemoveInput = ProjectRemoveInputSchema.ProjectRemoveInput;
 export namespace ProjectRemoveOutputSchema {
   export interface ProjectRemoveOutput {
-  project: ProjectInfo
   status: string
+  project: ProjectInfo
   [k: string]: any
   }
   export interface ProjectInfo {
@@ -1393,14 +1393,6 @@ export type ProjectRemoveOutput = ProjectRemoveOutputSchema.ProjectRemoveOutput;
 export namespace ProviderAddCustomInputSchema {
   export interface ProviderAddCustomInput {
   /**
-   * Root URL for OpenAI-compatible API calls (e.g. https://api.my-llm.com/v1).
-   */
-  base_url: string
-  /**
-   * Environment variable name for the API key (e.g. MY_LLM_API_KEY).
-   */
-  env_var: string
-  /**
    * Unique provider slug (e.g. 'my-llm'). Must not collide with models.dev IDs.
    */
   id: string
@@ -1408,6 +1400,14 @@ export namespace ProviderAddCustomInputSchema {
    * Human-readable display name (e.g. 'My LLM').
    */
   name: string
+  /**
+   * Root URL for OpenAI-compatible API calls (e.g. https://api.my-llm.com/v1).
+   */
+  base_url: string
+  /**
+   * Environment variable name for the API key (e.g. MY_LLM_API_KEY).
+   */
+  env_var: string
   /**
    * Optional seed models to pre-populate the model picker.
    */
@@ -1424,10 +1424,10 @@ export namespace ProviderAddCustomInputSchema {
 export type ProviderAddCustomInput = ProviderAddCustomInputSchema.ProviderAddCustomInput;
 export namespace ProviderAddCustomOutputSchema {
   export interface ProviderAddCustomOutput {
-  error?: string
-  id: string
   ok: boolean
   success: boolean
+  id: string
+  error?: string
   [k: string]: any
   }
 
@@ -1447,17 +1447,17 @@ export namespace ProviderCatalogOutputSchema {
   [k: string]: any
   }
   export interface ProviderCatalogItem {
-  base_url: string
-  connected: boolean
-  connection_methods: string[]
-  docs_url: string
-  env_vars: string[]
   id: string
-  is_openai_compatible: boolean
   name: string
   npm: string
-  oauth_keys: string[]
+  env_vars: string[]
+  base_url: string
+  docs_url: string
+  is_openai_compatible: boolean
+  connected: boolean
   oauth_supported: boolean
+  oauth_keys: string[]
+  connection_methods: string[]
   [k: string]: any
   }
 
@@ -1477,17 +1477,17 @@ export namespace ProviderConnectedOutputSchema {
   [k: string]: any
   }
   export interface ProviderCatalogItem {
-  base_url: string
-  connected: boolean
-  connection_methods: string[]
-  docs_url: string
-  env_vars: string[]
   id: string
-  is_openai_compatible: boolean
   name: string
   npm: string
-  oauth_keys: string[]
+  env_vars: string[]
+  base_url: string
+  docs_url: string
+  is_openai_compatible: boolean
+  connected: boolean
   oauth_supported: boolean
+  oauth_keys: string[]
+  connection_methods: string[]
   [k: string]: any
   }
 
@@ -1506,28 +1506,28 @@ export namespace ProviderModelLookupInputSchema {
 export type ProviderModelLookupInput = ProviderModelLookupInputSchema.ProviderModelLookupInput;
 export namespace ProviderModelLookupOutputSchema {
   export interface ProviderModelLookupOutput {
-  found: boolean
-  model?: (ProviderModelOutput | null)
   model_id: string
+  found: boolean
+  model: ProviderModelOutput
   [k: string]: any
   }
   export interface ProviderModelOutput {
+  id: string
+  provider_id: string
+  name: string
+  tool_call: boolean
+  reasoning: boolean
   attachment: boolean
   context_window: number
-  id: string
-  name: string
   output_limit: number
   pricing: ModelPricingOutput
-  provider_id: string
-  reasoning: boolean
-  tool_call: boolean
   [k: string]: any
   }
   export interface ModelPricingOutput {
-  cache_read_per_million: number
-  cache_write_per_million: number
   input_per_million: number
   output_per_million: number
+  cache_read_per_million: number
+  cache_write_per_million: number
   [k: string]: any
   }
 
@@ -1546,28 +1546,28 @@ export namespace ProviderModelsInputSchema {
 export type ProviderModelsInput = ProviderModelsInputSchema.ProviderModelsInput;
 export namespace ProviderModelsOutputSchema {
   export interface ProviderModelsOutput {
-  models: ProviderModelOutput[]
   provider_id: string
+  models: ProviderModelOutput[]
   total: number
   [k: string]: any
   }
   export interface ProviderModelOutput {
+  id: string
+  provider_id: string
+  name: string
+  tool_call: boolean
+  reasoning: boolean
   attachment: boolean
   context_window: number
-  id: string
-  name: string
   output_limit: number
   pricing: ModelPricingOutput
-  provider_id: string
-  reasoning: boolean
-  tool_call: boolean
   [k: string]: any
   }
   export interface ModelPricingOutput {
-  cache_read_per_million: number
-  cache_write_per_million: number
   input_per_million: number
   output_per_million: number
+  cache_read_per_million: number
+  cache_write_per_million: number
   [k: string]: any
   }
 
@@ -1587,22 +1587,22 @@ export namespace ProviderModelsConnectedOutputSchema {
   [k: string]: any
   }
   export interface ProviderModelOutput {
+  id: string
+  provider_id: string
+  name: string
+  tool_call: boolean
+  reasoning: boolean
   attachment: boolean
   context_window: number
-  id: string
-  name: string
   output_limit: number
   pricing: ModelPricingOutput
-  provider_id: string
-  reasoning: boolean
-  tool_call: boolean
   [k: string]: any
   }
   export interface ModelPricingOutput {
-  cache_read_per_million: number
-  cache_write_per_million: number
   input_per_million: number
   output_per_million: number
+  cache_read_per_million: number
+  cache_write_per_million: number
   [k: string]: any
   }
 
@@ -1621,13 +1621,13 @@ export namespace ProviderOauthStartInputSchema {
 export type ProviderOauthStartInput = ProviderOauthStartInputSchema.ProviderOauthStartInput;
 export namespace ProviderOauthStartOutputSchema {
   export interface ProviderOauthStartOutput {
-  configured_keys: string[]
-  error?: string
+  ok: boolean
+  success: boolean
+  provider_id: string
   goose_provider_id?: string
   oauth_supported: boolean
-  ok: boolean
-  provider_id: string
-  success: boolean
+  configured_keys: string[]
+  error?: string
   [k: string]: any
   }
 
@@ -1636,13 +1636,13 @@ export type ProviderOauthStartOutput = ProviderOauthStartOutputSchema.ProviderOa
 export namespace ProviderValidateInputSchema {
   export interface ProviderValidateInput {
   /**
-   * API key to validate.
-   */
-  api_key: string
-  /**
    * Provider API base URL (e.g. https://api.openai.com/v1). The probe appends /models.
    */
   base_url: string
+  /**
+   * API key to validate.
+   */
+  api_key: string
   /**
    * Optional provider identifier for logging/diagnostics.
    */
@@ -1654,11 +1654,11 @@ export namespace ProviderValidateInputSchema {
 export type ProviderValidateInput = ProviderValidateInputSchema.ProviderValidateInput;
 export namespace ProviderValidateOutputSchema {
   export interface ProviderValidateOutput {
-  error: string
-  error_kind: string
-  http_status: number
-  models: string[]
   ok: boolean
+  error_kind: string
+  error: string
+  models: string[]
+  http_status: number
   [k: string]: any
   }
 
@@ -1677,26 +1677,26 @@ export namespace SessionActiveInputSchema {
 export type SessionActiveInput = SessionActiveInputSchema.SessionActiveInput;
 export namespace SessionActiveOutputSchema {
   export interface SessionActiveOutput {
-  error?: string
-  recovery_triggered?: boolean
   sessions?: SessionToolSession[]
   stale_sessions?: SessionToolSession[]
+  recovery_triggered?: boolean
+  error?: string
   [k: string]: any
   }
   export interface SessionToolSession {
-  agent_type: string
-  continuation_of?: string
-  ended_at?: string
-  goose_session_id?: string
   id: string
-  model_id: string
   project_id: string
-  started_at: string
-  status: string
   task_id: string
+  model_id: string
+  agent_type: string
+  started_at: string
+  ended_at?: string
+  status: string
   tokens_in: number
   tokens_out: number
   worktree_path?: string
+  goose_session_id?: string
+  continuation_of?: string
   [k: string]: any
   }
 
@@ -1705,13 +1705,13 @@ export type SessionActiveOutput = SessionActiveOutputSchema.SessionActiveOutput;
 export namespace SessionForTaskInputSchema {
   export interface SessionForTaskInput {
   /**
-   * Absolute project path.
-   */
-  project: string
-  /**
    * Task ID to query.
    */
   task_id: string
+  /**
+   * Absolute project path.
+   */
+  project: string
   [k: string]: any
   }
 
@@ -1719,14 +1719,14 @@ export namespace SessionForTaskInputSchema {
 export type SessionForTaskInput = SessionForTaskInputSchema.SessionForTaskInput;
 export namespace SessionForTaskOutputSchema {
   export interface SessionForTaskOutput {
-  duration_seconds?: number
-  error?: string
-  model_id?: string
   ok: boolean
-  session?: string
-  session_id?: string
   task_id: string
+  model_id?: string
+  session_id?: string
+  duration_seconds?: number
   worktree_path?: string
+  session?: string
+  error?: string
   [k: string]: any
   }
 
@@ -1735,19 +1735,19 @@ export type SessionForTaskOutput = SessionForTaskOutputSchema.SessionForTaskOutp
 export namespace SessionListInputSchema {
   export interface SessionListInput {
   /**
-   * When true, return sessions in continuation-chain order (oldest root first, each
-   * subsequent session linked via continuation_of) instead of started_at DESC.
-   * Useful for rendering the session timeline with compaction boundaries.
+   * Task UUID or short_id.
    */
-  chain_ordered?: boolean
+  task_id: string
   /**
    * Absolute project path (required).
    */
   project: string
   /**
-   * Task UUID or short_id.
+   * When true, return sessions in continuation-chain order (oldest root first, each
+   * subsequent session linked via continuation_of) instead of started_at DESC.
+   * Useful for rendering the session timeline with compaction boundaries.
    */
-  task_id: string
+  chain_ordered?: boolean
   [k: string]: any
   }
 
@@ -1755,25 +1755,25 @@ export namespace SessionListInputSchema {
 export type SessionListInput = SessionListInputSchema.SessionListInput;
 export namespace SessionListOutputSchema {
   export interface SessionListOutput {
-  error?: string
-  sessions?: SessionToolSession[]
   task_id?: string
+  sessions?: SessionToolSession[]
+  error?: string
   [k: string]: any
   }
   export interface SessionToolSession {
-  agent_type: string
-  continuation_of?: string
-  ended_at?: string
-  goose_session_id?: string
   id: string
-  model_id: string
   project_id: string
-  started_at: string
-  status: string
   task_id: string
+  model_id: string
+  agent_type: string
+  started_at: string
+  ended_at?: string
+  status: string
   tokens_in: number
   tokens_out: number
   worktree_path?: string
+  goose_session_id?: string
+  continuation_of?: string
   [k: string]: any
   }
 
@@ -1796,20 +1796,20 @@ export namespace SessionShowInputSchema {
 export type SessionShowInput = SessionShowInputSchema.SessionShowInput;
 export namespace SessionShowOutputSchema {
   export interface SessionShowOutput {
-  agent_type?: string
-  continuation_of?: string
-  ended_at?: string
-  error?: string
-  goose_session_id?: string
   id?: string
-  model_id?: string
   project_id?: string
-  started_at?: string
-  status?: string
   task_id?: string
+  model_id?: string
+  agent_type?: string
+  started_at?: string
+  ended_at?: string
+  status?: string
   tokens_in?: number
   tokens_out?: number
   worktree_path?: string
+  goose_session_id?: string
+  continuation_of?: string
+  error?: string
   [k: string]: any
   }
 
@@ -1828,11 +1828,11 @@ export namespace SettingsGetInputSchema {
 export type SettingsGetInput = SettingsGetInputSchema.SettingsGetInput;
 export namespace SettingsGetOutputSchema {
   export interface SettingsGetOutput {
-  error?: string
-  exists: boolean
   key: string
+  exists: boolean
+  settings: DjinnSettings
   raw_value?: string
-  settings?: (DjinnSettings | null)
+  error?: string
   [k: string]: any
   }
   /**
@@ -1844,16 +1844,16 @@ export namespace SettingsGetOutputSchema {
    */
   dispatch_limit?: number
   /**
-   * Per-model concurrent session caps, e.g. `{"openai/gpt-4o": 4}`.
-   */
-  max_sessions?: {
-  [k: string]: number
-  }
-  /**
    * Per-role ordered model lists, e.g. `{"worker": ["openai/gpt-4o"]}`.
    */
   model_priority?: {
   [k: string]: string[]
+  }
+  /**
+   * Per-model concurrent session caps, e.g. `{"openai/gpt-4o": 4}`.
+   */
+  max_sessions?: {
+  [k: string]: number
   }
   }
 
@@ -1868,9 +1868,9 @@ export namespace SettingsResetInputSchema {
 export type SettingsResetInput = SettingsResetInputSchema.SettingsResetInput;
 export namespace SettingsResetOutputSchema {
   export interface SettingsResetOutput {
+  ok: boolean
   deleted: boolean
   error?: string
-  ok: boolean
   [k: string]: any
   }
 
@@ -1883,23 +1883,23 @@ export namespace SettingsSetInputSchema {
    */
   dispatch_limit?: number
   /**
-   * Per-model concurrent session caps (e.g. {"chatgpt_codex/gpt-5.3-codex": 4}). Omit to keep current value.
+   * Ordered model list for the 'worker' role (e.g. ["chatgpt_codex/gpt-5.3-codex"]). Omit to keep current value.
    */
-  max_sessions?: {
-  [k: string]: number
-  }
-  /**
-   * Ordered model list for the 'conflict_resolver' role. Omit to keep current value.
-   */
-  model_priority_conflict_resolver?: string[]
+  model_priority_worker?: string[]
   /**
    * Ordered model list for the 'task_reviewer' role. Omit to keep current value.
    */
   model_priority_task_reviewer?: string[]
   /**
-   * Ordered model list for the 'worker' role (e.g. ["chatgpt_codex/gpt-5.3-codex"]). Omit to keep current value.
+   * Ordered model list for the 'conflict_resolver' role. Omit to keep current value.
    */
-  model_priority_worker?: string[]
+  model_priority_conflict_resolver?: string[]
+  /**
+   * Per-model concurrent session caps (e.g. {"chatgpt_codex/gpt-5.3-codex": 4}). Omit to keep current value.
+   */
+  max_sessions?: {
+  [k: string]: number
+  }
   [k: string]: any
   }
 
@@ -1907,9 +1907,9 @@ export namespace SettingsSetInputSchema {
 export type SettingsSetInput = SettingsSetInputSchema.SettingsSetInput;
 export namespace SettingsSetOutputSchema {
   export interface SettingsSetOutput {
+  ok: boolean
   applied: boolean
   error?: string
-  ok: boolean
   [k: string]: any
   }
 
@@ -1917,8 +1917,8 @@ export namespace SettingsSetOutputSchema {
 export type SettingsSetOutput = SettingsSetOutputSchema.SettingsSetOutput;
 export namespace SystemLogsInputSchema {
   export interface SystemLogsInput {
-  level?: string
   lines?: number
+  level?: string
   [k: string]: any
   }
 
@@ -1926,10 +1926,10 @@ export namespace SystemLogsInputSchema {
 export type SystemLogsInput = SystemLogsInputSchema.SystemLogsInput;
 export namespace SystemLogsOutputSchema {
   export interface SystemLogsOutput {
-  error?: string
   file: string
-  filtered: boolean
   lines: string[]
+  filtered: boolean
+  error?: string
   [k: string]: any
   }
 
@@ -1954,6 +1954,14 @@ export type SystemPingOutput = SystemPingOutputSchema.SystemPingOutput;
 export namespace TaskActivityListInputSchema {
   export interface TaskActivityListInput {
   /**
+   * Absolute project path.
+   */
+  project: string
+  /**
+   * Task UUID or short_id (optional — omit to query all tasks).
+   */
+  id?: string
+  /**
    * Filter by event_type (e.g. "status_changed", "comment").
    */
   event_type?: string
@@ -1962,19 +1970,11 @@ export namespace TaskActivityListInputSchema {
    */
   from_time?: string
   /**
-   * Task UUID or short_id (optional — omit to query all tasks).
-   */
-  id?: string
-  limit?: number
-  offset?: number
-  /**
-   * Absolute project path.
-   */
-  project: string
-  /**
    * ISO-8601 upper bound on created_at.
    */
   to_time?: string
+  limit?: number
+  offset?: number
   [k: string]: any
   }
 
@@ -1990,13 +1990,13 @@ export type TaskActivityListOutput = TaskActivityListOutputSchema.TaskActivityLi
 export namespace TaskBlockedListInputSchema {
   export interface TaskBlockedListInput {
   /**
-   * Task UUID or short_id.
-   */
-  id: string
-  /**
    * Absolute project path.
    */
   project: string
+  /**
+   * Task UUID or short_id.
+   */
+  id: string
   [k: string]: any
   }
 
@@ -2012,17 +2012,17 @@ export type TaskBlockedListOutput = TaskBlockedListOutputSchema.TaskBlockedListO
 export namespace TaskBlockersAddInputSchema {
   export interface TaskBlockersAddInput {
   /**
-   * Task UUID or short_id of the task that blocks it.
+   * Absolute project path.
    */
-  blocking_id: string
+  project: string
   /**
    * Task UUID or short_id (the task being blocked).
    */
   id: string
   /**
-   * Absolute project path.
+   * Task UUID or short_id of the task that blocks it.
    */
-  project: string
+  blocking_id: string
   [k: string]: any
   }
 
@@ -2038,13 +2038,13 @@ export type TaskBlockersAddOutput = TaskBlockersAddOutputSchema.TaskBlockersAddO
 export namespace TaskBlockersListInputSchema {
   export interface TaskBlockersListInput {
   /**
-   * Task UUID or short_id.
-   */
-  id: string
-  /**
    * Absolute project path.
    */
   project: string
+  /**
+   * Task UUID or short_id.
+   */
+  id: string
   [k: string]: any
   }
 
@@ -2060,17 +2060,17 @@ export type TaskBlockersListOutput = TaskBlockersListOutputSchema.TaskBlockersLi
 export namespace TaskBlockersRemoveInputSchema {
   export interface TaskBlockersRemoveInput {
   /**
-   * Task UUID or short_id of the blocker to remove.
+   * Absolute project path.
    */
-  blocking_id: string
+  project: string
   /**
    * Task UUID or short_id (the blocked task).
    */
   id: string
   /**
-   * Absolute project path.
+   * Task UUID or short_id of the blocker to remove.
    */
-  project: string
+  blocking_id: string
   [k: string]: any
   }
 
@@ -2098,13 +2098,13 @@ export namespace TaskClaimInputSchema {
    */
   priority_max?: number
   /**
-   * Absolute project path.
-   */
-  project: string
-  /**
    * Session ID of the claiming agent (recorded as actor_id in the activity log).
    */
   session_id?: string
+  /**
+   * Absolute project path.
+   */
+  project: string
   [k: string]: any
   }
 
@@ -2119,20 +2119,20 @@ export namespace TaskClaimOutputSchema {
 export type TaskClaimOutput = TaskClaimOutputSchema.TaskClaimOutput;
 export namespace TaskCommentAddInputSchema {
   export interface TaskCommentAddInput {
-  actor_id?: string
-  actor_role?: string
   /**
-   * Comment body text.
+   * Absolute project path.
    */
-  body: string
+  project: string
   /**
    * Task UUID or short_id.
    */
   id: string
   /**
-   * Absolute project path.
+   * Comment body text.
    */
-  project: string
+  body: string
+  actor_id?: string
+  actor_role?: string
   [k: string]: any
   }
 
@@ -2148,18 +2148,18 @@ export type TaskCommentAddOutput = TaskCommentAddOutputSchema.TaskCommentAddOutp
 export namespace TaskCountInputSchema {
   export interface TaskCountInput {
   /**
-   * Group results by: "status", "priority", "issue_type", or "epic".
-   */
-  group_by?: string
-  issue_type?: string
-  label?: string
-  priority?: number
-  /**
    * Absolute project path.
    */
   project: string
   status?: string
+  issue_type?: string
+  priority?: number
+  label?: string
   text?: string
+  /**
+   * Group results by: "status", "priority", "issue_type", or "epic".
+   */
+  group_by?: string
   [k: string]: any
   }
 
@@ -2176,9 +2176,10 @@ export namespace TaskCreateInputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
 
   export interface TaskCreateInput {
-  acceptance_criteria?: AcceptanceCriterionItem[]
-  description?: string
-  design?: string
+  /**
+   * Absolute project path.
+   */
+  project: string
   /**
    * Parent epic ID — UUID or short_id (required).
    */
@@ -2187,13 +2188,12 @@ export namespace TaskCreateInputSchema {
    * Task type: "task" (default), "feature", or "bug".
    */
   issue_type?: string
-  labels?: string[]
-  owner?: string
+  description?: string
+  design?: string
   priority?: number
-  /**
-   * Absolute project path.
-   */
-  project: string
+  owner?: string
+  labels?: string[]
+  acceptance_criteria?: AcceptanceCriterionItem[]
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
@@ -2214,30 +2214,30 @@ export type TaskCreateOutput = TaskCreateOutputSchema.TaskCreateOutput;
 export namespace TaskListInputSchema {
   export interface TaskListInput {
   /**
+   * Absolute project path.
+   */
+  project: string
+  status?: string
+  /**
    * Positive ("task") or negative ("!epic") issue_type filter.
    */
   issue_type?: string
+  priority?: number
   /**
    * Filter by label value.
    */
   label?: string
-  limit?: number
-  offset?: number
-  priority?: number
   /**
-   * Absolute project path.
+   * Full-text search on title and description.
    */
-  project: string
+  text?: string
   /**
    * Sort order: "priority" (default), "created", "created_desc",
    * "updated", "updated_desc", "closed".
    */
   sort?: string
-  status?: string
-  /**
-   * Full-text search on title and description.
-   */
-  text?: string
+  limit?: number
+  offset?: number
   [k: string]: any
   }
 
@@ -2247,34 +2247,34 @@ export namespace TaskListOutputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
 
   export interface TaskListOutput {
-  has_more: boolean
-  limit: number
-  offset: number
   tasks: TaskListItem[]
   total_count: number
+  limit: number
+  offset: number
+  has_more: boolean
   [k: string]: any
   }
   export interface TaskListItem {
-  acceptance_criteria: AcceptanceCriterionItem[]
-  blocked_from_status?: string
-  close_reason?: string
-  closed_at?: string
-  continuation_count: number
-  created_at: string
+  id: string
+  short_id: string
+  epic_id?: string
   description: string
   design: string
-  epic_id?: string
-  id: string
   issue_type: string
+  status: string
+  priority: number
+  owner: string
   labels: string[]
   memory_refs: string[]
-  merge_commit_sha?: string
-  owner: string
-  priority: number
+  acceptance_criteria: AcceptanceCriterionItem[]
   reopen_count: number
-  short_id: string
-  status: string
+  continuation_count: number
+  created_at: string
   updated_at: string
+  closed_at?: string
+  blocked_from_status?: string
+  close_reason?: string
+  merge_commit_sha?: string
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
@@ -2313,7 +2313,6 @@ export namespace TaskReadyInputSchema {
    * Filter by label value.
    */
   label?: string
-  limit?: number
   /**
    * Filter by owner email.
    */
@@ -2322,6 +2321,7 @@ export namespace TaskReadyInputSchema {
    * Maximum priority to include (0=highest, higher numbers=lower priority).
    */
   priority_max?: number
+  limit?: number
   /**
    * Absolute project path.
    */
@@ -2341,13 +2341,13 @@ export type TaskReadyOutput = TaskReadyOutputSchema.TaskReadyOutput;
 export namespace TaskShowInputSchema {
   export interface TaskShowInput {
   /**
-   * Task UUID or short_id.
-   */
-  id: string
-  /**
    * Absolute project path.
    */
   project: string
+  /**
+   * Task UUID or short_id.
+   */
+  id: string
   [k: string]: any
   }
 
@@ -2374,9 +2374,9 @@ export namespace TaskSyncDisableInputSchema {
 export type TaskSyncDisableInput = TaskSyncDisableInputSchema.TaskSyncDisableInput;
 export namespace TaskSyncDisableOutputSchema {
   export interface TaskSyncDisableOutput {
-  error?: string
   ok?: boolean
   team_wide?: boolean
+  error?: string
   [k: string]: any
   }
 
@@ -2395,10 +2395,10 @@ export namespace TaskSyncEnableInputSchema {
 export type TaskSyncEnableInput = TaskSyncEnableInputSchema.TaskSyncEnableInput;
 export namespace TaskSyncEnableOutputSchema {
   export interface TaskSyncEnableOutput {
-  error?: string
-  note?: string
   ok?: boolean
   tasks_exported?: number
+  note?: string
+  error?: string
   [k: string]: any
   }
 
@@ -2417,16 +2417,16 @@ export namespace TaskSyncExportInputSchema {
 export type TaskSyncExportInput = TaskSyncExportInputSchema.TaskSyncExportInput;
 export namespace TaskSyncExportOutputSchema {
   export interface TaskSyncExportOutput {
+  ok?: boolean
   channels?: SyncChannelResult[]
   error?: string
-  ok?: boolean
   [k: string]: any
   }
   export interface SyncChannelResult {
   channel: string
+  ok: boolean
   count?: number
   error?: string
-  ok: boolean
   [k: string]: any
   }
 
@@ -2445,16 +2445,16 @@ export namespace TaskSyncImportInputSchema {
 export type TaskSyncImportInput = TaskSyncImportInputSchema.TaskSyncImportInput;
 export namespace TaskSyncImportOutputSchema {
   export interface TaskSyncImportOutput {
+  ok?: boolean
   channels?: SyncChannelResult[]
   error?: string
-  ok?: boolean
   [k: string]: any
   }
   export interface SyncChannelResult {
   channel: string
+  ok: boolean
   count?: number
   error?: string
-  ok: boolean
   [k: string]: any
   }
 
@@ -2478,14 +2478,14 @@ export namespace TaskSyncStatusOutputSchema {
   [k: string]: any
   }
   export interface SyncChannelStatus {
-  backoff_secs: number
+  name: string
   branch: string
   enabled: boolean
-  failure_count: number
-  last_error?: string
-  last_synced_at?: string
-  name: string
   project_path?: string
+  last_synced_at?: string
+  last_error?: string
+  failure_count: number
+  backoff_secs: number
   [k: string]: any
   }
 
@@ -2494,27 +2494,27 @@ export type TaskSyncStatusOutput = TaskSyncStatusOutputSchema.TaskSyncStatusOutp
 export namespace TaskTransitionInputSchema {
   export interface TaskTransitionInput {
   /**
+   * Absolute project path.
+   */
+  project: string
+  /**
+   * Task UUID or short_id.
+   */
+  id: string
+  /**
    * Transition action: accept, start, submit_task_review, task_review_start,
    * task_review_reject, task_review_reject_conflict, task_review_approve,
    * reopen, close, release, release_task_review, block, unblock, force_close,
    * user_override.
    */
   action: string
-  actor_id?: string
-  actor_role?: string
-  /**
-   * Task UUID or short_id.
-   */
-  id: string
-  /**
-   * Absolute project path.
-   */
-  project: string
   /**
    * Required for: task_review_reject, task_review_reject_conflict,
    * reopen, release, release_task_review, block, force_close.
    */
   reason?: string
+  actor_id?: string
+  actor_role?: string
   /**
    * Required when action = "user_override". Allowed values: draft, open, needs_task_review,
    * in_task_review, in_progress, blocked, closed.
@@ -2537,19 +2537,17 @@ export namespace TaskUpdateInputSchema {
 
   export interface TaskUpdateInput {
   /**
-   * Full replacement for acceptance_criteria.
+   * Absolute project path.
    */
-  acceptance_criteria?: AcceptanceCriterionItem[]
-  description?: string
-  design?: string
-  /**
-   * New parent epic UUID or short_id.
-   */
-  epic_id?: string
+  project: string
   /**
    * Task UUID or short_id.
    */
   id: string
+  description?: string
+  design?: string
+  priority?: number
+  owner?: string
   /**
    * Labels to add.
    */
@@ -2559,6 +2557,14 @@ export namespace TaskUpdateInputSchema {
    */
   labels_remove?: string[]
   /**
+   * Full replacement for acceptance_criteria.
+   */
+  acceptance_criteria?: AcceptanceCriterionItem[]
+  /**
+   * New parent epic UUID or short_id.
+   */
+  epic_id?: string
+  /**
    * Memory note permalinks to add to this task.
    */
   memory_refs_add?: string[]
@@ -2566,12 +2572,6 @@ export namespace TaskUpdateInputSchema {
    * Memory note permalinks to remove from this task.
    */
   memory_refs_remove?: string[]
-  owner?: string
-  priority?: number
-  /**
-   * Absolute project path.
-   */
-  project: string
   [k: string]: any
   }
   export interface AcceptanceCriterionStatus {
