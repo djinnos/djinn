@@ -232,7 +232,7 @@ export function KanbanBoard() {
               className="flex min-w-[260px] flex-1 flex-col rounded-lg border bg-card transition-all duration-300 ease-in-out"
             >
               <header className={`border-b-2 px-3 py-2 text-sm font-semibold ${column.accentClass}`}>
-                {column.label} ({taskCount})
+                {column.label} {taskCount}
               </header>
 
               <div className="flex-1 overflow-y-auto p-3">
