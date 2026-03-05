@@ -3085,6 +3085,112 @@
       }
     },
     {
+      "name": "project_config_get",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "title": "ProjectConfigGetParams",
+        "type": "object"
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "auto_merge": {
+            "type": "boolean"
+          },
+          "project": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "sync_enabled": {
+            "type": "boolean"
+          },
+          "sync_remote": {
+            "nullable": true,
+            "type": "string"
+          },
+          "target_branch": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "project",
+          "target_branch",
+          "auto_merge",
+          "sync_enabled"
+        ],
+        "title": "ProjectConfigResponse",
+        "type": "object"
+      }
+    },
+    {
+      "name": "project_config_set",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "key",
+          "value"
+        ],
+        "title": "ProjectConfigSetParams",
+        "type": "object"
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "auto_merge": {
+            "type": "boolean"
+          },
+          "project": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "sync_enabled": {
+            "type": "boolean"
+          },
+          "sync_remote": {
+            "nullable": true,
+            "type": "string"
+          },
+          "target_branch": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "project",
+          "target_branch",
+          "auto_merge",
+          "sync_enabled"
+        ],
+        "title": "ProjectConfigResponse",
+        "type": "object"
+      }
+    },
+    {
       "name": "project_list",
       "input_schema": {
         "properties": {},

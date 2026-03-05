@@ -1145,6 +1145,13 @@ impl AgentSupervisor {
                     result = if result.is_ok() { "ok" } else { "error" },
                     "Supervisor: session completion received"
                 );
+
+                // Detect context exhaustion and trigger a fresh continuation
+                // instead of failing/releasing the task.
+                if self.maybe_compact_on_context_exhaustion(&task_id, &result, &output) {
+                    return;
+                }
+
                 let session = self.remove_session(&task_id);
                 self.handle_session_result(&task_id, session, result, output)
                     .await;
@@ -2262,6 +2269,107 @@ impl AgentSupervisor {
 
     // ── Compaction ────────────────────────────────────────────────────────────
 
+    /// Detect context exhaustion at session end and trigger a fresh continuation
+    /// instead of treating it as a normal failure/release. Returns `true` if
+    /// compaction was initiated (caller should skip normal result handling).
+    fn maybe_compact_on_context_exhaustion(
+        &mut self,
+        task_id: &str,
+        result: &Result<(), String>,
+        output: &ParsedAgentOutput,
+    ) -> bool {
+        let is_context_error = match result {
+            Err(reason) => {
+                let lower = reason.to_lowercase();
+                lower.contains("context length exceeded")
+                    || lower.contains("context_length_exceeded")
+                    || lower.contains("context limit exceeded")
+            }
+            Ok(()) => {
+                // Goose handled it internally but gave up after compaction attempts.
+                output.runtime_error.as_deref().map_or(false, |e| {
+                    let lower = e.to_lowercase();
+                    lower.contains("context length exceeded")
+                        || lower.contains("context limit exceeded")
+                })
+            }
+        };
+
+        if !is_context_error {
+            return false;
+        }
+
+        // Only compact workers and conflict resolvers (not reviewers).
+        let agent_type = self
+            .session_agent_types
+            .get(task_id)
+            .copied()
+            .unwrap_or(AgentType::Worker);
+        if !matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver) {
+            return false;
+        }
+
+        let Some(handle) = self.sessions.remove(task_id) else {
+            return false;
+        };
+
+        let goose_session_id = handle.session_id.clone();
+        let worktree_path = handle.worktree_path;
+        let model_id = self.session_models.remove(task_id).unwrap_or_default();
+        let agent_type = self
+            .session_agent_types
+            .remove(task_id)
+            .unwrap_or(AgentType::Worker);
+        let project_id = self.session_projects.remove(task_id).unwrap_or_default();
+        let old_record_id = self.task_session_records.remove(task_id);
+
+        // Don't decrement capacity — the compaction slot replaces the old one.
+        self.compacting_tasks.insert(task_id.to_owned());
+        // Suppress the interrupted_sessions guard (session already completed).
+
+        let context_window = self
+            .app_state
+            .catalog()
+            .find_model(&model_id)
+            .map(|m| m.context_window)
+            .unwrap_or(200_000);
+
+        tracing::info!(
+            task_id = %task_id,
+            goose_session_id = %goose_session_id,
+            agent_type = %agent_type.as_str(),
+            "Supervisor: context exhaustion detected at session end; triggering fresh continuation"
+        );
+
+        let sender = self.sender.clone();
+        let session_manager = self.session_manager.clone();
+        let app_state = self.app_state.clone();
+
+        // Session is already done — no join handle to wait on. Spawn compaction directly.
+        let task_id_owned = task_id.to_owned();
+        tokio::spawn(async move {
+            perform_compaction(
+                task_id_owned,
+                agent_type,
+                project_id,
+                goose_session_id,
+                old_record_id,
+                model_id,
+                worktree_path,
+                context_window,
+                // tokens_in: use context_window as a signal that we're at the limit
+                context_window,
+                session_manager,
+                app_state,
+                sender,
+                None,
+            )
+            .await;
+        });
+
+        true
+    }
+
     async fn handle_compaction_needed(
         &mut self,
         task_id: String,
@@ -2703,6 +2811,21 @@ impl AgentSupervisor {
     }
 
     async fn cleanup_worktree(&self, task_id: &str, worktree_path: &Path) {
+        // Guard: don't destroy a worktree if a paused session still references it.
+        // The paused session will be resumed later with this worktree.
+        let session_repo =
+            SessionRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        if let Ok(Some(paused)) = session_repo.paused_for_task(task_id).await {
+            if paused.worktree_path.as_deref() == Some(worktree_path.to_str().unwrap_or("")) {
+                tracing::info!(
+                    task_id = %task_id,
+                    worktree = %worktree_path.display(),
+                    "Supervisor: skipping worktree cleanup — paused session still references it"
+                );
+                return;
+            }
+        }
+
         let task = match self.load_task(task_id).await {
             Ok(task) => task,
             Err(e) => {
@@ -3890,6 +4013,30 @@ impl AgentSupervisor {
             .join(".djinn")
             .join("worktrees")
             .join(&task.short_id);
+
+        // If a paused session still references this worktree, reuse it
+        // instead of destroying and recreating. This prevents "worktree
+        // missing" errors when a session is resumed after dispatch.
+        let session_repo =
+            SessionRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+        let has_paused_session = session_repo
+            .paused_for_task(&task.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        if has_paused_session
+            && stale_worktree_path.exists()
+            && stale_worktree_path.join(".git").exists()
+        {
+            tracing::info!(
+                task_id = %task.short_id,
+                worktree = %stale_worktree_path.display(),
+                "Supervisor: reusing existing worktree from paused session"
+            );
+            return Ok(stale_worktree_path);
+        }
+
         let _ = git.remove_worktree(&stale_worktree_path).await;
         if stale_worktree_path.exists() {
             let _ = std::fs::remove_dir_all(&stale_worktree_path);

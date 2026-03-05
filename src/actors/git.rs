@@ -34,6 +34,14 @@ fn is_retryable_git_command_error(err: &GitError) -> bool {
     .any(|needle| s.contains(needle))
 }
 
+fn is_non_fast_forward_error(err: &GitError) -> bool {
+    let GitError::CommandFailed { stderr, .. } = err else {
+        return false;
+    };
+    let s = stderr.to_lowercase();
+    s.contains("non-fast-forward") || s.contains("fetch first") || s.contains("rejected")
+}
+
 fn retry_delay(attempt: u32) -> std::time::Duration {
     let exp = attempt.saturating_sub(1).min(4);
     let base_ms = 200u64.saturating_mul(1u64 << exp);
@@ -406,67 +414,150 @@ impl GitActor {
         target_branch: String,
         message: String,
     ) -> Result<MergeResult, GitError> {
-        // Prefer a detached temporary merge worktree based on origin/<target>
-        // so local checked-out branches are never mutated during merge.
-        let _ = Self::run_git_command(
-            path.clone(),
-            vec!["fetch".into(), "origin".into(), target_branch.clone()],
-        )
-        .await;
+        // Retry the entire merge+push cycle on non-fast-forward push failures
+        // (main moved between our fetch and push). Max 3 attempts.
+        const MERGE_PUSH_MAX_ATTEMPTS: u32 = 3;
+        let mut last_error: Option<GitError> = None;
 
-        let temp_name = format!(
-            ".merge-{}-{}",
-            target_branch,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
-        );
-        let merge_wt_path = path.join(".djinn").join("worktrees").join(temp_name);
-        let merge_wt = merge_wt_path.to_string_lossy().to_string();
-        let origin_target = format!("origin/{target_branch}");
+        for attempt in 1..=MERGE_PUSH_MAX_ATTEMPTS {
+            // Fetch latest from remote.
+            let _ = Self::run_git_command(
+                path.clone(),
+                vec!["fetch".into(), "origin".into(), target_branch.clone()],
+            )
+            .await;
 
-        let add_result = Self::run_git_command(
-            path.clone(),
-            vec![
-                "worktree".into(),
-                "add".into(),
-                "--detach".into(),
-                merge_wt.clone(),
-                origin_target,
-            ],
-        )
-        .await;
+            // Rebase the task branch onto origin/<target> before merging.
+            // This auto-resolves divergence that git can handle, reducing
+            // false merge conflicts when main has moved forward.
+            let origin_ref = format!("origin/{target_branch}");
+            let rebase_wt_name = format!(
+                ".rebase-{}-{}",
+                branch.replace('/', "-"),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0)
+            );
+            let rebase_wt_path = path.join(".djinn").join("worktrees").join(&rebase_wt_name);
+            let rebase_wt = rebase_wt_path.to_string_lossy().to_string();
+            if Self::run_git_command(
+                path.clone(),
+                vec![
+                    "worktree".into(),
+                    "add".into(),
+                    rebase_wt.clone(),
+                    branch.clone(),
+                ],
+            )
+            .await
+            .is_ok()
+            {
+                let rebase_ok = Self::run_git_command(
+                    rebase_wt_path.clone(),
+                    vec!["rebase".into(), origin_ref.clone()],
+                )
+                .await
+                .is_ok();
+                if !rebase_ok {
+                    // Abort failed rebase; the squash merge will report the real conflict.
+                    let _ = Self::run_git_command(
+                        rebase_wt_path.clone(),
+                        vec!["rebase".into(), "--abort".into()],
+                    )
+                    .await;
+                }
+                let _ = Self::run_git_command(
+                    path.clone(),
+                    vec![
+                        "worktree".into(),
+                        "remove".into(),
+                        "--force".into(),
+                        rebase_wt,
+                    ],
+                )
+                .await;
+            }
 
-        if let Err(err) = add_result {
-            // Never fall back to root-worktree merges. If the detached merge
-            // worktree cannot be created, fail fast to keep the user's root
-            // checkout untouched.
-            return Err(err);
+            let temp_name = format!(
+                ".merge-{}-{}",
+                target_branch,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0)
+            );
+            let merge_wt_path = path.join(".djinn").join("worktrees").join(temp_name);
+            let merge_wt = merge_wt_path.to_string_lossy().to_string();
+            let origin_target = format!("origin/{target_branch}");
+
+            let add_result = Self::run_git_command(
+                path.clone(),
+                vec![
+                    "worktree".into(),
+                    "add".into(),
+                    "--detach".into(),
+                    merge_wt.clone(),
+                    origin_target,
+                ],
+            )
+            .await;
+
+            if let Err(err) = add_result {
+                return Err(err);
+            }
+
+            let merge_result = Self::squash_merge_detached_worktree_impl(
+                path.clone(),
+                merge_wt_path.clone(),
+                branch.clone(),
+                target_branch.clone(),
+                message.clone(),
+            )
+            .await;
+
+            let _ = Self::run_git_command(
+                path.clone(),
+                vec![
+                    "worktree".into(),
+                    "remove".into(),
+                    "--force".into(),
+                    merge_wt,
+                ],
+            )
+            .await;
+            let _ = Self::run_git_command(
+                path.clone(),
+                vec!["worktree".into(), "prune".into()],
+            )
+            .await;
+
+            match merge_result {
+                Ok(result) => return Ok(result),
+                Err(ref e) if attempt < MERGE_PUSH_MAX_ATTEMPTS && is_non_fast_forward_error(e) => {
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = MERGE_PUSH_MAX_ATTEMPTS,
+                        error = %e,
+                        target_branch = %target_branch,
+                        "push rejected (non-fast-forward); re-fetching and retrying merge"
+                    );
+                    last_error = Some(merge_result.unwrap_err());
+                    let delay = retry_delay(attempt);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
         }
 
-        let merge_result = Self::squash_merge_detached_worktree_impl(
-            path.clone(),
-            merge_wt_path.clone(),
-            branch,
-            target_branch.clone(),
-            message,
-        )
-        .await;
-
-        let _ = Self::run_git_command(
-            path.clone(),
-            vec![
-                "worktree".into(),
-                "remove".into(),
-                "--force".into(),
-                merge_wt,
-            ],
-        )
-        .await;
-        let _ = Self::run_git_command(path, vec!["worktree".into(), "prune".into()]).await;
-
-        merge_result
+        Err(last_error.unwrap_or_else(|| GitError::CommandFailed {
+            code: 1,
+            command: "squash_merge".into(),
+            cwd: path.display().to_string(),
+            stdout: String::new(),
+            stderr: "exhausted merge-push retry attempts".into(),
+        }))
     }
 
     async fn squash_merge_detached_worktree_impl(
