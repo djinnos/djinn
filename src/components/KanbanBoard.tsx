@@ -7,11 +7,11 @@ import type { Epic, Task, TaskPriority, TaskStatus } from "@/types";
 import { TaskCard } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 
-const STATUS_COLUMNS: Array<{ key: TaskStatus; label: string }> = [
-  { key: "pending", label: "Open" },
-  { key: "in_progress", label: "In Progress" },
-  { key: "blocked", label: "In Review" },
-  { key: "completed", label: "Closed" },
+const STATUS_COLUMNS: Array<{ key: TaskStatus; label: string; accentClass: string }> = [
+  { key: "pending", label: "Open", accentClass: "border-violet-500" },
+  { key: "in_progress", label: "In Progress", accentClass: "border-purple-500" },
+  { key: "blocked", label: "In Review", accentClass: "border-amber-500" },
+  { key: "completed", label: "Closed", accentClass: "border-emerald-500" },
 ];
 
 const PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3"];
@@ -231,7 +231,7 @@ export function KanbanBoard() {
               key={column.key}
               className="flex min-w-[260px] flex-1 flex-col rounded-lg border bg-card transition-all duration-300 ease-in-out"
             >
-              <header className="border-b px-3 py-2 text-sm font-semibold">
+              <header className={`border-b-2 px-3 py-2 text-sm font-semibold ${column.accentClass}`}>
                 {column.label} ({taskCount})
               </header>
 
