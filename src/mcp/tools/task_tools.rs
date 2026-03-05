@@ -434,6 +434,7 @@ pub struct ActivityEntryResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct TaskActivityListResponse {
     pub entries: Vec<ActivityEntryResponse>,
+    #[schemars(with = "i64")]
     pub count: usize,
 }
 

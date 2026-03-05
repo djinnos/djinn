@@ -82,7 +82,9 @@ pub struct ExecutionResumeResponse {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ExecutionStatusCapacity {
+    #[schemars(with = "i64")]
     pub active: u32,
+    #[schemars(with = "i64")]
     pub max: u32,
 }
 
@@ -91,13 +93,16 @@ pub struct ExecutionStatusSession {
     pub task_id: String,
     pub model_id: String,
     pub session_id: String,
+    #[schemars(with = "i64")]
     pub duration_seconds: u64,
     pub worktree_path: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ExecutionStatusMetrics {
+    #[schemars(with = "i64")]
     pub tasks_dispatched: u64,
+    #[schemars(with = "i64")]
     pub sessions_recovered: u64,
 }
 
@@ -107,10 +112,14 @@ pub struct ExecutionStatusResponse {
     pub state: Option<String>,
     pub scope: Option<String>,
     pub project_id: Option<String>,
+    #[schemars(with = "Option<i64>")]
     pub running_sessions: Option<usize>,
+    #[schemars(with = "Option<i64>")]
     pub max_sessions: Option<u32>,
     pub capacity: Option<HashMap<String, ExecutionStatusCapacity>>,
     pub sessions: Option<Vec<ExecutionStatusSession>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "ExecutionStatusMetrics")]
     pub metrics: Option<ExecutionStatusMetrics>,
     pub error: Option<String>,
 }
@@ -128,6 +137,7 @@ pub struct SessionForTaskResponse {
     pub task_id: String,
     pub model_id: Option<String>,
     pub session_id: Option<String>,
+    #[schemars(with = "Option<i64>")]
     pub duration_seconds: Option<u64>,
     pub worktree_path: Option<String>,
     pub session: Option<String>,

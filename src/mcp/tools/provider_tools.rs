@@ -163,10 +163,15 @@ pub struct ModelHealthResponse {
 pub struct ModelHealthOutput {
     pub model_id: String,
     pub auto_disabled: bool,
+    #[schemars(with = "i64")]
     pub consecutive_failures: u32,
+    #[schemars(with = "i64")]
     pub total_failures: u32,
+    #[schemars(with = "i64")]
     pub total_successes: u32,
+    #[schemars(with = "i64")]
     pub disable_ttl_trips: u32,
+    #[schemars(with = "Option<i64>")]
     pub cooldown_seconds_remaining: Option<u64>,
 }
 
@@ -290,6 +295,8 @@ pub struct ProviderModelLookupInput {
 pub struct ProviderModelLookupResponse {
     pub model_id: String,
     pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "ProviderModelOutput")]
     pub model: Option<ProviderModelOutput>,
 }
 

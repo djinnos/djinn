@@ -45,6 +45,7 @@ pub struct TaskSyncStatusParams {
 pub struct SyncChannelResult {
     pub channel: String,
     pub ok: bool,
+    #[schemars(with = "Option<i64>")]
     pub count: Option<usize>,
     pub error: Option<String>,
 }
@@ -68,7 +69,9 @@ pub struct SyncChannelStatus {
     pub project_path: Option<String>,
     pub last_synced_at: Option<String>,
     pub last_error: Option<String>,
+    #[schemars(with = "i64")]
     pub failure_count: u32,
+    #[schemars(with = "i64")]
     pub backoff_secs: u64,
 }
 
@@ -92,6 +95,7 @@ pub struct TaskSyncEnableResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<i64>")]
     pub tasks_exported: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,

@@ -19,6 +19,8 @@ pub struct SettingsGetParams {
 pub struct SettingsGetResponse {
     pub key: String,
     pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "DjinnSettings")]
     pub settings: Option<DjinnSettings>,
     pub raw_value: Option<String>,
     pub error: Option<String>,
