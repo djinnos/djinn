@@ -26,17 +26,17 @@
 
 ## Instructions
 
-1. Resolve only the listed merge conflicts and any direct follow-up compile/test issues.
+1. Resolve only the listed merge conflicts — fix conflict markers in the conflicting files.
 2. Keep both branch intents where possible; do not remove behavior unless required.
-3. Run tests/build checks needed to validate conflict resolution.
-4. Commit your conflict resolution with a focused message.
-5. End with exactly one marker:
+3. Commit your conflict resolution with a focused message.
+4. End with exactly one marker:
    - `WORKER_RESULT: DONE`
    - `WORKER_RESULT: BLOCKED: <concrete reason>`
 
 ## Rules
 
 - Stay within scope: conflict resolution only.
+- Do not run build checks, `tsc`, tests, or linters — build validation is handled externally after your session.
 - Do not do unrelated refactors.
 - Stage only files you changed.
 - Never run destructive git commands.
