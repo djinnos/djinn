@@ -36,3 +36,37 @@ export async function getServerStatus(): Promise<{
 export async function retryServerDiscovery(): Promise<number> {
   return invoke("retry_server_discovery");
 }
+
+
+export type AuthUser = {
+  sub: string;
+  name?: string;
+  email?: string;
+  picture?: string;
+};
+
+export type AuthState = {
+  isAuthenticated: boolean;
+  user: AuthUser | null;
+};
+
+/**
+ * Get current auth state from Tauri backend.
+ */
+export async function authGetState(): Promise<AuthState> {
+  return invoke("auth_get_state");
+}
+
+/**
+ * Start browser-based PKCE login flow.
+ */
+export async function authLogin(): Promise<void> {
+  return invoke("auth_login");
+}
+
+/**
+ * Logout user, revoke session best-effort, and clear local auth state.
+ */
+export async function authLogout(): Promise<void> {
+  return invoke("auth_logout");
+}

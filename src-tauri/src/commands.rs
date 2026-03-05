@@ -48,6 +48,26 @@ use tauri_plugin_opener::OpenerExt;
 static PKCE_PARAMS: Lazy<StdMutex<Option<PkceParams>>> = Lazy::new(|| StdMutex::new(None));
 static AUTH_SESSION: Lazy<StdMutex<Option<AuthSession>>> = Lazy::new(|| StdMutex::new(None));
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthStateResponse {
+    pub is_authenticated: bool,
+    pub user: Option<UserProfile>,
+}
+
+fn build_auth_state_response(session: Option<&AuthSession>) -> AuthStateResponse {
+    AuthStateResponse {
+        is_authenticated: session.is_some(),
+        user: session.and_then(|s| s.user_profile.clone()),
+    }
+}
+
+fn emit_auth_state_changed(app: &AppHandle, state: &AuthStateResponse) {
+    if let Err(e) = app.emit("auth:state-changed", state) {
+        log::warn!("Failed to emit auth:state-changed event: {}", e);
+    }
+}
+
 /// Greet command - sample command for testing
 #[tauri::command]
 pub fn greet(name: &str) -> String {
@@ -151,6 +171,44 @@ pub async fn clear_refresh_token() -> Result<(), String> {
     clear_token().await
 }
 
+#[tauri::command]
+pub fn auth_get_state() -> Result<AuthStateResponse, String> {
+    let session = AUTH_SESSION
+        .lock()
+        .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+
+    Ok(build_auth_state_response(session.as_ref()))
+}
+
+#[tauri::command]
+pub async fn auth_login(app: AppHandle) -> Result<(), String> {
+    initiate_oauth_login(app).await
+}
+
+#[tauri::command]
+pub async fn auth_logout(app: AppHandle) -> Result<(), String> {
+    // Best-effort remote revocation/logout; local state clear must still happen
+    let _ = token_refresh::logout().await;
+
+    {
+        let mut session = AUTH_SESSION
+            .lock()
+            .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+        *session = None;
+    }
+
+    clear_token().await?;
+    token_refresh::clear_token_state();
+
+    let state = AuthStateResponse {
+        is_authenticated: false,
+        user: None,
+    };
+    emit_auth_state_changed(&app, &state);
+
+    Ok(())
+}
+
 /// Initiate OAuth login with Clerk
 ///
 /// Generates PKCE parameters, stores them for later verification,
@@ -183,6 +241,7 @@ pub async fn initiate_oauth_login(app: tauri::AppHandle) -> Result<(), String> {
 /// Exchange authorization code for tokens at Clerk token endpoint
 #[tauri::command]
 pub async fn exchange_auth_code(
+    app: AppHandle,
     code: String,
     code_verifier: String,
     redirect_uri: String,
@@ -225,11 +284,12 @@ pub async fn exchange_auth_code(
     let mut auth_session = AUTH_SESSION
         .lock()
         .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
-    *auth_session = Some(AuthSession {
+    let session = AuthSession {
         access_token: token_response.access_token.clone(),
         expires_in: Some(token_response.expires_in),
         user_profile: user_profile.clone(),
-    });
+    };
+    *auth_session = Some(session.clone());
     drop(auth_session);
 
     // Store refresh token
@@ -247,6 +307,9 @@ pub async fn exchange_auth_code(
         user_id: user_profile.as_ref().map(|p| p.sub.clone()),
     };
     token_refresh::set_token_state(token_state);
+
+    let state = build_auth_state_response(Some(&session));
+    emit_auth_state_changed(&app, &state);
 
     user_profile.ok_or_else(|| "Missing id_token in token response".to_string())
 }
