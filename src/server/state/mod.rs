@@ -220,6 +220,13 @@ impl AppState {
         self.interrupt_stale_sessions_on_startup().await;
 
         self.reindex_all_projects_on_startup().await;
+
+        // Watch .djinn/ directories for KB note changes and auto-reindex.
+        crate::watchers::spawn_kb_watchers(
+            self.db().clone(),
+            self.events().clone(),
+            self.cancel().clone(),
+        );
     }
 
     async fn interrupt_stale_sessions_on_startup(&self) {

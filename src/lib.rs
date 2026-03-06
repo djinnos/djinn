@@ -13,6 +13,7 @@ pub mod provider;
 pub mod server;
 pub mod sse;
 pub mod sync;
+pub mod watchers;
 
 #[cfg(test)]
 pub mod test_helpers;
