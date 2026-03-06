@@ -11,6 +11,7 @@ import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
 import { selectDirectory } from '@/tauri/commands';
 import { toast } from 'sonner';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 type SettingsCategory = 'providers' | 'projects' | 'agents';
 
@@ -42,6 +43,7 @@ function ProvidersSettings() {
   const [apiKey, setApiKey] = useState('');
   const [customName, setCustomName] = useState('');
   const [customBaseUrl, setCustomBaseUrl] = useState('');
+  const [catalogFilter, setCatalogFilter] = useState('');
 
   const selectedProvider = providers.find((p) => p.id === selectedProviderId);
 
@@ -88,17 +90,24 @@ function ProvidersSettings() {
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
+    <div className="flex flex-col gap-4 flex-1 min-h-0">
+      <div className="flex items-center justify-between shrink-0">
         <h2 className="text-lg font-semibold">Configured Providers</h2>
         <Button onClick={() => setIsAddOpen((v) => !v)}>{isAddOpen ? 'Close' : 'Add Provider'}</Button>
       </div>
 
       {isAddOpen && (
-        <div className="rounded-lg border border-border bg-card p-4 space-y-4">
+        <div className="rounded-lg border border-border bg-card p-4 flex flex-col gap-4 flex-1 min-h-0">
           <h3 className="font-medium">Provider catalog</h3>
-          <div className="space-y-2">
-            {unconfiguredProviders.map((provider) => (
+          <Input
+            placeholder="Filter providers..."
+            value={catalogFilter}
+            onChange={(e) => setCatalogFilter(e.target.value)}
+          />
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-2 p-0.5">
+            {unconfiguredProviders
+              .filter((p) => !catalogFilter || p.name.toLowerCase().includes(catalogFilter.toLowerCase()))
+              .map((provider) => (
               <button
                 key={provider.id}
                 type="button"
@@ -134,7 +143,7 @@ function ProvidersSettings() {
             </div>
           )}
 
-          <div className="border-t pt-4 space-y-2">
+          <div className="border-t pt-4 space-y-2 shrink-0">
             <h4 className="text-sm font-medium">Add custom provider</h4>
             <Input placeholder="Provider name" value={customName} onChange={(e) => setCustomName(e.target.value)} />
             <Input placeholder="Base URL (optional)" value={customBaseUrl} onChange={(e) => setCustomBaseUrl(e.target.value)} />
@@ -145,7 +154,7 @@ function ProvidersSettings() {
         </div>
       )}
 
-      <div className="space-y-2">
+      <div className="space-y-2 shrink-0">
         {configuredProviders.map((provider) => (
           <div key={provider.id} className="rounded-lg border border-border bg-card p-4">
             <p className="font-medium">{provider.name}</p>
@@ -330,13 +339,22 @@ export function SettingsPage() {
   const agentConfig = useAgentConfig();
 
   return (
-    <div className="flex h-full flex-col p-6">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-foreground">Settings</h1>
-        <p className="mt-1 text-muted-foreground">Configure your workspace preferences</p>
+    <div className="flex h-full flex-col overflow-hidden p-6">
+      <div
+        className="mb-6 shrink-0 cursor-default select-none"
+        onMouseDown={(e) => { if (e.button === 0 && e.target === e.currentTarget) void getCurrentWindow().startDragging(); }}
+      >
+        <h1
+          className="text-2xl font-bold text-foreground"
+          onMouseDown={(e) => { if (e.button === 0) void getCurrentWindow().startDragging(); }}
+        >Settings</h1>
+        <p
+          className="mt-1 text-muted-foreground"
+          onMouseDown={(e) => { if (e.button === 0) void getCurrentWindow().startDragging(); }}
+        >Configure your workspace preferences</p>
       </div>
 
-      <div className="flex flex-1 flex-col gap-6 md:flex-row">
+      <div className="flex min-h-0 flex-1 flex-col gap-6 md:flex-row">
         <aside className="md:w-56 md:shrink-0">
           <nav className="flex flex-row gap-2 overflow-x-auto md:flex-col md:overflow-visible">
             {categories.map((item) => (
@@ -358,7 +376,7 @@ export function SettingsPage() {
           </nav>
         </aside>
 
-        <section className="min-w-0 flex-1">
+        <section className="min-h-0 min-w-0 flex-1 flex flex-col overflow-y-auto pb-6">
           {category === 'providers' && <ProvidersSettings />}
           {category === 'projects' && <ProjectsSettings />}
           {category === 'agents' && <AgentConfig {...agentConfig} />}
