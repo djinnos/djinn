@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
+import { useProjects, useSelectedProjectId, useProjectStore } from "@/stores/useProjectStore";
 import { taskStore } from "@/stores/taskStore";
 import type { Epic, Task, TaskPriority, TaskStatus } from "@/types";
 import { TaskCard } from "@/components/TaskCard";
@@ -11,6 +12,10 @@ import {
   ArrowRight01Icon,
   CheckmarkCircle03Icon,
   CircleIcon,
+  FullSignalIcon,
+  LowSignalIcon,
+  MediumSignalIcon,
+  NoSignalIcon,
   Progress02Icon,
   Progress04Icon,
   type UnavailableIcon,
@@ -50,6 +55,13 @@ const STATUS_COLUMNS: Array<{
 
 const PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3"];
 
+const PRIORITY_ICONS: Record<TaskPriority, { icon: typeof FullSignalIcon; color: string; activeColor: string }> = {
+  P0: { icon: FullSignalIcon, color: "text-muted-foreground/50", activeColor: "text-red-500" },
+  P1: { icon: MediumSignalIcon, color: "text-muted-foreground/50", activeColor: "text-yellow-500" },
+  P2: { icon: LowSignalIcon, color: "text-muted-foreground/50", activeColor: "text-green-500" },
+  P3: { icon: NoSignalIcon, color: "text-muted-foreground/50", activeColor: "text-muted-foreground" },
+};
+
 function getEpicEmoji(epic: Epic | undefined): string {
   if (!epic) return "📌";
   if (epic.status === "active") return "🚀";
@@ -77,6 +89,9 @@ export function KanbanBoard({
 }: KanbanBoardProps = {}) {
   const storeTasks = useTaskStore((state) => Array.from(state.tasks.values()));
   const storeEpics = useEpicStore((state) => state.epics);
+  const projects = useProjects();
+  const selectedProjectId = useSelectedProjectId();
+  const setSelectedProjectId = useProjectStore((state) => state.setSelectedProjectId);
   const tasks = tasksProp ?? storeTasks;
   const epics = epicsProp ?? storeEpics;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -130,8 +145,12 @@ export function KanbanBoard({
     return unsubscribe;
   }, [tasksProp]);
 
-  const [epicFilter, setEpicFilter] = useState<string>(searchParams.get("epic") ?? "");
-  const [ownerFilter, setOwnerFilter] = useState<string>(searchParams.get("owner") ?? "");
+  const [epicFilters, setEpicFilters] = useState<string[]>(
+    (searchParams.get("epic") ?? "").split(",").filter(Boolean)
+  );
+  const [ownerFilters, setOwnerFilters] = useState<string[]>(
+    (searchParams.get("owner") ?? "").split(",").filter(Boolean)
+  );
   const [priorityFilters, setPriorityFilters] = useState<TaskPriority[]>(
     (searchParams.get("priority") ?? "")
       .split(",")
@@ -152,10 +171,10 @@ export function KanbanBoard({
 
     const next = new URLSearchParams(searchParams);
 
-    if (epicFilter) next.set("epic", epicFilter);
+    if (epicFilters.length > 0) next.set("epic", epicFilters.join(","));
     else next.delete("epic");
 
-    if (ownerFilter) next.set("owner", ownerFilter);
+    if (ownerFilters.length > 0) next.set("owner", ownerFilters.join(","));
     else next.delete("owner");
 
     if (priorityFilters.length > 0) next.set("priority", priorityFilters.join(","));
@@ -165,7 +184,7 @@ export function KanbanBoard({
     else next.delete("q");
 
     setSearchParams(next, { replace: true });
-  }, [epicFilter, ownerFilter, priorityFilters, textFilter, searchParams, setSearchParams, disableSearchParamSync]);
+  }, [epicFilters, ownerFilters, priorityFilters, textFilter, searchParams, setSearchParams, disableSearchParamSync]);
 
   const epicOptions = useMemo(
     () => Array.from(epics.values()).sort((a, b) => a.title.localeCompare(b.title)),
@@ -184,13 +203,13 @@ export function KanbanBoard({
     const q = textFilter.trim().toLowerCase();
 
     return tasks.filter((task) => {
-      if (epicFilter && (task.epicId ?? "") !== epicFilter) return false;
-      if (ownerFilter && (task.owner ?? "") !== ownerFilter) return false;
+      if (epicFilters.length > 0 && !epicFilters.includes(task.epicId ?? "")) return false;
+      if (ownerFilters.length > 0 && !ownerFilters.includes(task.owner ?? "")) return false;
       if (priorityFilters.length > 0 && !priorityFilters.includes(task.priority)) return false;
       if (q && !task.title.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [tasks, epicFilter, ownerFilter, priorityFilters, textFilter]);
+  }, [tasks, epicFilters, ownerFilters, priorityFilters, textFilter]);
 
   const groupedByStatusThenEpic = useMemo(() => {
     const byColumn = new Map<ColumnKey, Map<string, Task[]>>();
@@ -219,19 +238,43 @@ export function KanbanBoard({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className="flex h-full min-h-0 flex-col gap-5">
+      <div className="flex flex-wrap items-center gap-3 px-4">
         <Combobox
-          value={epicFilter}
-          onValueChange={(v) => setEpicFilter(v ?? "")}
+          value={selectedProjectId ?? ""}
+          onValueChange={(v) => setSelectedProjectId(v || null)}
+          itemToStringLabel={(id) => projects.find((p) => p.id === id)?.name ?? id}
         >
-          <ComboboxInput placeholder="All epics" className="w-40" />
+          <ComboboxInput placeholder="Project" className="w-44" />
           <ComboboxContent>
             <ComboboxList>
+              {projects.map((project) => (
+                <ComboboxItem key={project.id} value={project.id}>
+                  {project.name}
+                </ComboboxItem>
+              ))}
+            </ComboboxList>
+          </ComboboxContent>
+        </Combobox>
+
+        <Combobox
+          multiple
+          value={epicFilters}
+          onValueChange={(v) => setEpicFilters(v ?? [])}
+          itemToStringLabel={(id) => {
+            const epic = epics.get(id);
+            return epic ? `${getEpicEmoji(epic)} ${epic.title}` : id;
+          }}
+        >
+          <ComboboxInput
+            placeholder={epicFilters.length > 0 ? `${epicFilters.length} epic${epicFilters.length > 1 ? "s" : ""}` : "All epics"}
+            className="w-40"
+          />
+          <ComboboxContent className="!min-w-80">
+            <ComboboxList>
               <ComboboxEmpty>No epics found</ComboboxEmpty>
-              <ComboboxItem value="">All epics</ComboboxItem>
               {epicOptions.map((epic) => (
-                <ComboboxItem key={epic.id} value={epic.id}>
+                <ComboboxItem key={epic.id} value={epic.id} className="truncate">
                   {getEpicEmoji(epic)} {epic.title}
                 </ComboboxItem>
               ))}
@@ -239,39 +282,55 @@ export function KanbanBoard({
           </ComboboxContent>
         </Combobox>
 
-        <Combobox
-          value={priorityFilters.join(",")}
-          onValueChange={(v) => {
-            const val = v ?? "";
-            setPriorityFilters(
-              val ? val.split(",").filter((p): p is TaskPriority => PRIORITIES.includes(p as TaskPriority)) : []
+        <div className="flex h-8 items-center gap-1 rounded-lg border border-input px-1.5 dark:bg-input/30">
+          {PRIORITIES.map((priority) => {
+            const config = PRIORITY_ICONS[priority];
+            const isActive = priorityFilters.includes(priority);
+            const noFilters = priorityFilters.length === 0;
+            return (
+              <button
+                key={priority}
+                type="button"
+                title={priority}
+                onClick={() =>
+                  setPriorityFilters((prev) =>
+                    prev.includes(priority)
+                      ? prev.filter((p) => p !== priority)
+                      : [...prev, priority]
+                  )
+                }
+                className={cn(
+                  "flex h-7 w-7 items-center justify-center rounded-md transition-colors",
+                  isActive
+                    ? "bg-muted"
+                    : "hover:bg-muted/50"
+                )}
+              >
+                <HugeiconsIcon
+                  icon={config.icon}
+                  size={16}
+                  className={cn(
+                    "shrink-0 transition-colors",
+                    isActive ? config.activeColor : noFilters ? config.activeColor : config.color
+                  )}
+                />
+              </button>
             );
-          }}
+          })}
+        </div>
+
+        <Combobox
+          multiple
+          value={ownerFilters}
+          onValueChange={(v) => setOwnerFilters(v ?? [])}
         >
           <ComboboxInput
-            placeholder={priorityFilters.length > 0 ? `Priority (${priorityFilters.length})` : "Priority"}
-            className="w-32"
+            placeholder={ownerFilters.length > 0 ? `${ownerFilters.length} owner${ownerFilters.length > 1 ? "s" : ""}` : "All owners"}
+            className="w-36"
           />
           <ComboboxContent>
             <ComboboxList>
-              {PRIORITIES.map((priority) => (
-                <ComboboxItem key={priority} value={priority}>
-                  {priority}
-                </ComboboxItem>
-              ))}
-            </ComboboxList>
-          </ComboboxContent>
-        </Combobox>
-
-        <Combobox
-          value={ownerFilter}
-          onValueChange={(v) => setOwnerFilter(v ?? "")}
-        >
-          <ComboboxInput placeholder="All owners" className="w-36" />
-          <ComboboxContent>
-            <ComboboxList>
               <ComboboxEmpty>No owners found</ComboboxEmpty>
-              <ComboboxItem value="">All owners</ComboboxItem>
               {ownerOptions.map((owner) => (
                 <ComboboxItem key={owner} value={owner}>
                   {owner}
@@ -293,7 +352,7 @@ export function KanbanBoard({
         </InputGroup>
       </div>
 
-      <div className="flex min-h-0 flex-1 gap-4 overflow-x-auto pb-1">
+      <div className="flex min-h-0 flex-1 gap-5 overflow-x-auto pb-1">
         {STATUS_COLUMNS.map((column) => {
           const statusMap = groupedByStatusThenEpic.get(column.key) ?? new Map<string, Task[]>();
           const epicGroups = Array.from(statusMap.entries());
@@ -302,11 +361,11 @@ export function KanbanBoard({
           return (
             <Card
               key={column.key}
-              className="min-w-[260px] flex-1 gap-0 py-0 transition-all duration-300 ease-in-out"
+              className="min-w-[280px] flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
             >
               <div className="flex flex-col">
-                <div className="px-3 py-2 text-sm font-semibold">
-                  <div className="flex items-center gap-2">
+                <div className="px-4 pb-2.5 pt-3.5 text-sm font-semibold">
+                  <div className="flex items-center gap-2.5">
                     <HugeiconsIcon
                       icon={column.icon}
                       className="size-4 shrink-0 text-muted-foreground"
@@ -315,13 +374,13 @@ export function KanbanBoard({
                     <span className="text-xs leading-none text-muted-foreground">{taskCount}</span>
                   </div>
                 </div>
-                <div className="px-2">
+                <div className="px-3">
                   <div className={cn("h-0.5 w-full rounded-full", column.colorClass, column.glowClass)} />
                 </div>
               </div>
 
-              <CardContent className="flex-1 overflow-y-auto pt-3">
-                <div className="flex flex-col gap-3">
+              <CardContent className="flex-1 overflow-y-auto px-3 pt-4">
+                <div className="flex flex-col gap-3.5">
                   {epicGroups.map(([epicKey, epicTasks]) => {
                     const firstTaskEpicId = epicTasks[0]?.epicId ?? null;
                     const epic = firstTaskEpicId ? epics.get(firstTaskEpicId) : undefined;
@@ -329,15 +388,16 @@ export function KanbanBoard({
                     const isCollapsed = !!collapsedEpics[collapseKey];
 
                     return (
-                      <Card key={epicKey} size="sm" className="gap-0 bg-zinc-800/50 py-2">
+                      <Card key={epicKey} size="sm" className="gap-0 bg-muted/30 py-3 ring-white/[0.04]">
                         <CardContent>
                           <button
                             type="button"
                             onClick={() => toggleEpic(column.key, epicKey)}
-                            className="flex w-full items-center justify-between gap-2 rounded-md px-1 py-1 text-left text-sm font-medium transition-colors hover:bg-muted/40"
+                            className="flex w-full items-center justify-between gap-2 rounded-md px-1 py-1.5 text-left text-sm font-medium transition-colors hover:bg-muted/40"
                           >
-                            <span className="truncate">
-                              {getEpicEmoji(epic)} {getEpicTitle(epic, firstTaskEpicId)}
+                            <span className="flex items-center gap-2 truncate">
+                              <span className="shrink-0 text-xs leading-none">{getEpicEmoji(epic)}</span>
+                              <span className="truncate">{getEpicTitle(epic, firstTaskEpicId)}</span>
                             </span>
                             <HugeiconsIcon
                               icon={isCollapsed ? ArrowRight01Icon : ArrowDown01Icon}
@@ -346,7 +406,7 @@ export function KanbanBoard({
                           </button>
 
                           {!isCollapsed && (
-                            <ul className="flex flex-col gap-2 pt-2">
+                            <ul className="flex flex-col gap-3 pt-2.5">
                               {epicTasks.map((task) => (
                                 <li key={task.id}>
                                   <TaskCard

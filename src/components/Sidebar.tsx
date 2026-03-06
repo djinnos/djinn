@@ -1,13 +1,13 @@
 import { useSidebarStore } from '@/stores/sidebarStore';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { 
-  LayoutGrid, 
-  CalendarDays, 
-  Settings, 
+import {
+  Settings,
   PanelLeft,
   Command
 } from 'lucide-react';
+import { Flag02Icon, KanbanIcon } from '@hugeicons/core-free-icons';
+import { HugeiconsIcon } from '@hugeicons/react';
 import { useEffect, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
@@ -74,12 +74,12 @@ export function Sidebar() {
     {
       id: 'kanban' as const,
       label: 'Kanban',
-      icon: <LayoutGrid className="h-4 w-4" />,
+      icon: <HugeiconsIcon icon={KanbanIcon} size={16} />,
     },
     {
       id: 'roadmap' as const,
-      label: 'Roadmap',
-      icon: <CalendarDays className="h-4 w-4" />,
+      label: 'Epics',
+      icon: <HugeiconsIcon icon={Flag02Icon} size={16} />,
     },
   ];
 
@@ -91,7 +91,7 @@ export function Sidebar() {
       )}
     >
       {/* Header */}
-      <div className="flex h-14 items-center border-b px-3">
+      <div className="flex h-12 items-center border-b px-3">
         {!isCollapsed && (
           <span className="flex-1 text-sm font-semibold text-sidebar-foreground truncate">
             DjinnOS

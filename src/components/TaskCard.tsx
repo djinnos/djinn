@@ -109,12 +109,12 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
     <Card
       size="sm"
       className={cn(
-        "cursor-pointer bg-secondary transition-all duration-200 ease-in-out hover:bg-secondary/80",
+        "cursor-pointer bg-zinc-800 py-2 ring-white/[0.06] transition-all duration-200 ease-in-out hover:bg-zinc-700/80 hover:ring-white/[0.1]",
         moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"
       )}
       onClick={onClick}
     >
-      <CardContent className="flex flex-col gap-2">
+      <CardContent className="flex flex-col gap-1.5">
         <div className="flex items-center justify-between gap-2">
           <TaskIdLabel taskId={task.id} shortId={task.shortId} />
           <div

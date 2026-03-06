@@ -7,8 +7,8 @@ import { WizardStep } from "@/components/WizardStep";
 import { ServerCheckStep } from "@/components/ServerCheckStep";
 import { ProviderSetupStep } from "@/components/ProviderSetupStep";
 import { ProjectSetupStep } from "@/components/ProjectSetupStep";
-import { ConnectionStatus } from "@/components/ConnectionStatus";
 import { Sidebar } from "@/components/Sidebar";
+import { Titlebar } from "@/components/Titlebar";
 import { KanbanPage } from "@/pages/KanbanPage";
 import { RoadmapPage } from "@/pages/RoadmapPage";
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -16,7 +16,6 @@ import { useWizardStore } from "@/stores/wizardStore";
 import { useSidebarStore } from "@/stores/sidebarStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
-import { ProjectSelector } from "@/components/ProjectSelector";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
 import { useSelectedProjectId } from "@/stores/useProjectStore";
 import { Button } from "@/components/ui/button";
@@ -78,14 +77,8 @@ function MainLayout() {
   }, [location.pathname, setActiveSection]);
 
   return (
-    <main className="flex min-h-screen flex-col bg-background">
-      <header className="flex h-14 items-center justify-between border-b px-4">
-        <div className="flex items-center gap-2">
-          <h1 className="text-sm font-semibold text-foreground">DjinnOS Desktop</h1>
-        </div>
-        <div className="flex items-center gap-4"><ProjectSelector /><ConnectionStatus /></div>
-      </header>
-
+    <main className="flex h-screen flex-col overflow-hidden bg-background">
+      <Titlebar />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
         <div className="flex-1 overflow-auto">

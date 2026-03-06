@@ -12,11 +12,6 @@ export function KanbanPage() {
 
   return (
     <div className="flex h-full min-w-0 flex-col p-6">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-foreground">Kanban Board</h1>
-        <p className="mt-1 text-muted-foreground">Manage your tasks and workflow</p>
-      </div>
-
       <div className="flex-1 min-h-0">
         {noTasks ? (
           <EmptyState
