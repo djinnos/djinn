@@ -5,7 +5,7 @@ description: Break planned work into tasks on the Djinn board. Reads plan contex
 
 # Breakdown Workflow
 
-The mechanical counterpart to `/plan`. Reads the plan context (roadmap, ADRs, scope notes, requirements) and creates tasks on the Djinn board under the appropriate epics. No feature-to-task decomposition -- just creates tasks directly as flat items under epics, sequenced with blockers.
+The mechanical counterpart to `/planning`. Reads the plan context (roadmap, ADRs, scope notes, requirements) and creates tasks on the Djinn board under the appropriate epics. No feature-to-task decomposition -- just creates tasks directly as flat items under epics, sequenced with blockers.
 
 ## Tools
 
@@ -50,7 +50,7 @@ Read the planning artifacts needed to create tasks.
    - Check existing tasks: `task_list(project=PROJECT)` and `epic_tasks(project=PROJECT, epic_id=...)` for each epic
    - Identify phases/areas that have scope notes but no tasks yet
    - If multiple areas are ready, ask the user which to break down
-   - If nothing is ready, tell the user to run `/plan` first
+   - If nothing is ready, tell the user to run `/planning` first
 
 3. **Load requirements:** `memory_search(type="requirement")`
    - Match REQ-IDs for the target phase/area

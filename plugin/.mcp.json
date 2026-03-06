@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "djinn": {
-      "type": "stdio",
-      "command": "djinn-server",
-      "args": ["--mcp-connect"]
-    }
-  }
-}
