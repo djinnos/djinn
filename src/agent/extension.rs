@@ -761,39 +761,27 @@ fn tool_shell() -> RmcpTool {
 }
 
 /// Truncate shell output to prevent blowing the context window.
-/// Mirrors Goose's developer shell limits: 2000 lines / 50 KB.
+/// Hard cap at MAX_BYTES to ensure the result never exceeds a safe size,
+/// regardless of how long individual lines are.
 fn truncate_shell_output(raw: &str) -> String {
-    const MAX_LINES: usize = 2000;
     const MAX_BYTES: usize = 50_000;
-    const PREVIEW_LINES: usize = 200;
 
-    let lines: Vec<&str> = raw.split('\n').collect();
-    let exceeded_lines = lines.len() > MAX_LINES;
-    let exceeded_bytes = raw.len() > MAX_BYTES;
-
-    if !exceeded_lines && !exceeded_bytes {
+    if raw.len() <= MAX_BYTES {
         return raw.to_string();
     }
 
-    let preview_start = lines.len().saturating_sub(PREVIEW_LINES);
-    let preview = lines[preview_start..].join("\n");
-
-    let reason = if exceeded_lines {
-        format!(
-            "Output exceeded {} line limit ({} lines total).",
-            MAX_LINES,
-            lines.len()
-        )
-    } else {
-        format!(
-            "Output exceeded {} byte limit ({} bytes total).",
-            MAX_BYTES,
-            raw.len()
-        )
-    };
+    // Take the last MAX_BYTES worth of content so the model sees the tail.
+    let start = raw.len() - MAX_BYTES;
+    // Align to a char boundary.
+    let start = raw.ceil_char_boundary(start);
+    // Skip to the next newline to avoid a partial first line.
+    let start = raw[start..].find('\n').map(|i| start + i + 1).unwrap_or(start);
+    let preview = &raw[start..];
 
     format!(
-        "{preview}\n\n[{reason} Use shell commands like `head`, `tail`, or `sed -n '100,200p'` to read sections.]"
+        "{preview}\n\n[Output truncated: {total} bytes total, showing last {shown} bytes. Use shell commands like `head`, `tail`, or `sed -n '100,200p'` to read sections.]",
+        total = raw.len(),
+        shown = preview.len(),
     )
 }
 
