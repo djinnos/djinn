@@ -122,6 +122,9 @@ pub struct ExecutionStatusResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(with = "ExecutionStatusMetrics")]
     pub metrics: Option<ExecutionStatusMetrics>,
+    /// Per-project health issues blocking execution (project_id → error message).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_issues: Option<HashMap<String, String>>,
     pub error: Option<String>,
 }
 
@@ -414,6 +417,7 @@ impl DjinnMcpServer {
                     capacity: None,
                     sessions: None,
                     metrics: None,
+                    project_issues: None,
                     error: Some(error),
                 });
             }
@@ -429,6 +433,7 @@ impl DjinnMcpServer {
                 capacity: None,
                 sessions: None,
                 metrics: None,
+                project_issues: None,
                 error: Some("coordinator actor not initialized".to_string()),
             });
         };
@@ -443,6 +448,7 @@ impl DjinnMcpServer {
                 capacity: None,
                 sessions: None,
                 metrics: None,
+                project_issues: None,
                 error: Some("slot pool actor not initialized".to_string()),
             });
         };
@@ -464,6 +470,7 @@ impl DjinnMcpServer {
                     capacity: None,
                     sessions: None,
                     metrics: None,
+                    project_issues: None,
                     error: Some(e.to_string()),
                 });
             }
@@ -481,6 +488,7 @@ impl DjinnMcpServer {
                     capacity: None,
                     sessions: None,
                     metrics: None,
+                    project_issues: None,
                     error: Some(e.to_string()),
                 });
             }
@@ -559,6 +567,11 @@ impl DjinnMcpServer {
                 tasks_dispatched: coordinator_status.tasks_dispatched,
                 sessions_recovered: coordinator_status.sessions_recovered,
             }),
+            project_issues: if coordinator_status.unhealthy_projects.is_empty() {
+                None
+            } else {
+                Some(coordinator_status.unhealthy_projects)
+            },
             error: None,
         })
     }

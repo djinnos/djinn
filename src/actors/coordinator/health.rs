@@ -40,6 +40,61 @@ impl CoordinatorActor {
             let verify_cmds: Vec<CommandSpec> =
                 serde_json::from_str(&row.verification_commands).unwrap_or_default();
 
+            // ── Pre-flight: verify git remote 'origin' exists ────────────
+            // The squash-merge flow assumes `origin` is available. Without it,
+            // execution loops infinitely (merge fails → task released → repeat).
+            // This is a fast local check — no network calls.
+            let project_path = std::path::PathBuf::from(&row.path);
+            if project_path.exists() {
+                let origin_check = tokio::process::Command::new("git")
+                    .args(["remote", "get-url", "origin"])
+                    .current_dir(&project_path)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .await;
+                match origin_check {
+                    Ok(status) if !status.success() => {
+                        let err = format!(
+                            "No git remote 'origin' configured. Execution requires a remote to merge completed work. \
+                             Add one with: git remote add origin <url> && git push -u origin main"
+                        );
+                        tracing::warn!(
+                            project_id = %row.id,
+                            "CoordinatorActor: project missing git remote 'origin' — blocking dispatch"
+                        );
+                        let _ = self.self_sender
+                            .send(CoordinatorMessage::SetProjectHealth {
+                                project_id: row.id.clone(),
+                                healthy: false,
+                                error: Some(err),
+                            })
+                            .await;
+                        continue;
+                    }
+                    Err(e) => {
+                        let err = format!(
+                            "Failed to check git remote 'origin': {e}. \
+                             Ensure git is installed and the project path is a valid repository."
+                        );
+                        tracing::warn!(
+                            project_id = %row.id,
+                            error = %e,
+                            "CoordinatorActor: failed to run git remote check"
+                        );
+                        let _ = self.self_sender
+                            .send(CoordinatorMessage::SetProjectHealth {
+                                project_id: row.id.clone(),
+                                healthy: false,
+                                error: Some(err),
+                            })
+                            .await;
+                        continue;
+                    }
+                    _ => {} // origin exists, proceed
+                }
+            }
+
             if setup_cmds.is_empty() && verify_cmds.is_empty() {
                 // No commands configured — always healthy; clear any stale failure.
                 if self.unhealthy_projects.remove(&row.id).is_some() {

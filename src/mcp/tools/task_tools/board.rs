@@ -11,7 +11,17 @@ pub(super) async fn board_health_impl(
     let repo = TaskRepository::new(server.state.db().clone(), server.state.events().clone());
     match repo.board_health(stale_hours).await {
         Ok(report) => match serde_json::from_value::<BoardHealthResponse>(report) {
-            Ok(parsed) => Json(ErrorOr::Ok(parsed)),
+            Ok(mut parsed) => {
+                // Surface any project health issues from the coordinator.
+                if let Some(coordinator) = server.state.coordinator().await {
+                    if let Ok(status) = coordinator.get_status() {
+                        if !status.unhealthy_projects.is_empty() {
+                            parsed.project_issues = Some(status.unhealthy_projects);
+                        }
+                    }
+                }
+                Json(ErrorOr::Ok(parsed))
+            }
             Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
         },
         Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),

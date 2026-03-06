@@ -432,6 +432,9 @@ pub struct BoardHealthResponse {
     pub stale_tasks: Vec<BoardHealthTaskItem>,
     pub review_queue: Vec<BoardHealthReviewItem>,
     pub stale_threshold_hours: i64,
+    /// Per-project health issues blocking execution (project_id → error message).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_issues: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]

@@ -54,6 +54,9 @@ pub struct CoordinatorStatus {
     pub paused: bool,
     pub tasks_dispatched: u64,
     pub sessions_recovered: u64,
+    /// Per-project health errors (project_id → error message).
+    /// Only populated when queried for a specific project.
+    pub unhealthy_projects: HashMap<String, String>,
 }
 
 /// Internal snapshot published via `watch` channel so `get_status()` reads
@@ -62,6 +65,7 @@ pub struct CoordinatorStatus {
 struct SharedCoordinatorState {
     paused_projects: HashSet<String>,
     unhealthy_project_ids: HashSet<String>,
+    unhealthy_project_errors: HashMap<String, String>,
     dispatched: u64,
     recovered: u64,
 }
@@ -71,10 +75,23 @@ impl SharedCoordinatorState {
         let paused = project_id.is_some_and(|id| {
             self.unhealthy_project_ids.contains(id) || self.paused_projects.contains(id)
         });
+        let unhealthy_projects = match project_id {
+            Some(id) => self
+                .unhealthy_project_errors
+                .get(id)
+                .map(|err| {
+                    let mut m = HashMap::new();
+                    m.insert(id.to_string(), err.clone());
+                    m
+                })
+                .unwrap_or_default(),
+            None => self.unhealthy_project_errors.clone(),
+        };
         CoordinatorStatus {
             paused,
             tasks_dispatched: self.dispatched,
             sessions_recovered: self.recovered,
+            unhealthy_projects,
         }
     }
 }
@@ -231,6 +248,7 @@ impl CoordinatorActor {
         let _ = self.status_tx.send(SharedCoordinatorState {
             paused_projects: self.paused_projects.clone(),
             unhealthy_project_ids: self.unhealthy_projects.keys().cloned().collect(),
+            unhealthy_project_errors: self.unhealthy_projects.clone(),
             dispatched: self.dispatched,
             recovered: self.recovered,
         });
@@ -533,6 +551,7 @@ impl CoordinatorHandle {
         let initial_state = SharedCoordinatorState {
             paused_projects: HashSet::new(),
             unhealthy_project_ids: HashSet::new(),
+            unhealthy_project_errors: HashMap::new(),
             dispatched: 0,
             recovered: 0,
         };

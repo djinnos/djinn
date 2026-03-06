@@ -1,5 +1,7 @@
 // MCP tools for task board operations (CRUD, listing, queries).
 
+use std::collections::HashMap;
+
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
