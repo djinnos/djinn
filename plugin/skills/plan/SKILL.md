@@ -19,7 +19,7 @@ The thinking space for ongoing project steering. Use `/plan` to discuss what nee
 
 ## Do NOT Use
 
-- **Task tools** (task_create, task_update, task_list, task_blockers_add, task_claim, task_transition, epic_tasks): Planning does not modify the task board. That is `/breakdown`'s job.
+- **Task tools** (task_create, task_update, task_list, task_claim, task_transition, epic_tasks): Planning does not modify the task board. That is `/breakdown`'s job.
 - **Epic tools** (epic_create, epic_update): Epic creation happens in `/init-project` or `/breakdown`.
 - **Execution tools** (execution_*, session_for_task): Owned by the coordinator.
 - **Sync tools** (task_sync_*): Infrastructure concern.

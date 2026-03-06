@@ -84,10 +84,9 @@ task_create(
     "Password 'test&123' authenticates successfully",
     "Password 'test+456' authenticates successfully"
   ],
-  priority=1
+  priority=1,
+  blocked_by=["other-task-id"]  # optional: set blockers atomically at creation
 )
-# If it depends on something, add a blocker after creation:
-# task_blockers_add(project=PROJECT, id="this-bug-id", blocking_id="other-task-id")
 
 ```
 
@@ -199,10 +198,16 @@ task_transition(
 
 ## Blocker Management
 
-### Add blocker relationship
+### Set blockers at creation (preferred)
 ```
-# Task B is blocked by Task A
-task_blockers_add(project=PROJECT, id="task-b-id", blocking_id="task-a-id")
+# Task B is blocked by Task A -- set atomically at creation
+task_create(project=PROJECT, title="Task B", ..., blocked_by=["task-a-id"])
+```
+
+### Add/remove blockers after creation
+```
+task_update(project=PROJECT, id="task-b-id", blocked_by_add=["task-a-id"])
+task_update(project=PROJECT, id="task-b-id", blocked_by_remove=["task-a-id"])
 ```
 
 ### List what blocks a task
@@ -213,11 +218,6 @@ task_blockers_list(project=PROJECT, id="task-id")
 ### List what a task blocks
 ```
 task_blocked_list(project=PROJECT, id="task-id")
-```
-
-### Remove blocker
-```
-task_blockers_remove(project=PROJECT, id="task-id", blocking_id="task-a-id")
 ```
 
 ## Querying Tasks

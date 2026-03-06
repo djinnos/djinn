@@ -21,7 +21,7 @@ The heavy-lift discovery engine for new projects. Detects greenfield vs brownfie
 
 ## Do NOT Use
 
-- **Task tools** (task_create, task_update, task_list, task_blockers_add): Init creates epics only. Tasks are created by `/breakdown`.
+- **Task tools** (task_create, task_update, task_list): Init creates epics only. Tasks are created by `/breakdown`.
 - **Execution tools** (execution_*, session_for_task): Owned by the coordinator.
 - **Task lifecycle tools** (task_claim, task_transition): For execution, not planning.
 - **Sync tools** (task_sync_*): Infrastructure concern.

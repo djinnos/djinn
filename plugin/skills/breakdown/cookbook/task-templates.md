@@ -103,20 +103,29 @@ task_create(
 - `2` = Medium (integration)
 - `3` = Low (nice-to-have)
 
+**Acceptance criteria must be code-testable.** Every criterion must be verifiable by an agent through unit tests, integration tests, or code inspection. Never use production metrics, manual verification, or environment-dependent checks.
+
+Good: `"POST /api/login returns 401 with invalid credentials"`
+Good: `"Unit test verifies JWT token contains user_id claim"`
+Bad: `"System handles 1000 concurrent users in production"`
+Bad: `"Stakeholder approves the design"`
+
 ---
 
 ## Dependency Ordering via Blockers
 
-Execution order is controlled by blockers. The Djinn coordinator dispatches any open task with no unresolved blockers.
+Execution order is controlled by blockers. **The Djinn coordinator dispatches any open task with no unresolved blockers IMMEDIATELY.** Use `blocked_by` on `task_create` to set blockers atomically -- the task is never visible without its blockers.
 
 **Only block on real technical or logical dependencies.**
 
 ### Three-Stage Example
 
-**Stage 1 -- Foundation (no blockers):**
+**Create foundation tasks first (no blockers), then downstream tasks with `blocked_by` referencing upstream IDs.**
+
+**Stage 1 -- Foundation (no blockers, create these first):**
 
 ```
-task_a = task_create(
+task_create(
   project=PROJECT,
   title="Create user database schema",
   issue_type="task",
@@ -129,7 +138,7 @@ task_a = task_create(
 )
 # Returns: { id: "a1b2" }
 
-task_b = task_create(
+task_create(
   project=PROJECT,
   title="Set up JWT signing configuration",
   issue_type="task",
@@ -146,7 +155,7 @@ task_b = task_create(
 **Stage 2 -- Core logic (blocked by Stage 1):**
 
 ```
-task_c = task_create(
+task_create(
   project=PROJECT,
   title="Create login API endpoint",
   issue_type="task",
@@ -155,18 +164,16 @@ task_c = task_create(
     {"criterion": "Returns JWT pair on valid credentials", "met": false},
     {"criterion": "Returns 401 on invalid credentials", "met": false}
   ],
-  priority=1
+  priority=1,
+  blocked_by=["a1b2", "c3d4"]
 )
-# Returns: { id: "e5f6" }
-
-task_blockers_add(project=PROJECT, id="e5f6", blocking_id="a1b2")  # needs schema
-task_blockers_add(project=PROJECT, id="e5f6", blocking_id="c3d4")  # needs JWT config
+# Returns: { id: "e5f6" } -- created already blocked, never dispatched prematurely
 ```
 
 **Stage 3 -- Integration (blocked by Stage 2):**
 
 ```
-task_d = task_create(
+task_create(
   project=PROJECT,
   title="Add auth middleware to protected routes",
   issue_type="task",
@@ -175,19 +182,18 @@ task_d = task_create(
     {"criterion": "Protected routes return 401 without valid token", "met": false},
     {"criterion": "Valid tokens pass through to route handler", "met": false}
   ],
-  priority=2
+  priority=2,
+  blocked_by=["e5f6"]
 )
 # Returns: { id: "g7h8" }
-
-task_blockers_add(project=PROJECT, id="g7h8", blocking_id="e5f6")
 ```
 
 ### Ordering Rules
 
-1. Foundation tasks have no blockers
-2. Use `task_blockers_add()` after creation for each dependency
-3. `task_create` does NOT accept `blocked_by` -- always use `task_blockers_add()` separately
-4. Only block on real dependencies -- if two tasks CAN run in parallel, let them
+1. **Create tasks in dependency order** -- foundation first, then downstream
+2. **Use `blocked_by` on `task_create`** to set blockers atomically at creation time
+3. Only block on real dependencies -- if two tasks CAN run in parallel, let them
+4. Use `task_update(blocked_by_add=..., blocked_by_remove=...)` to adjust blockers after creation
 
 ---
 
@@ -250,4 +256,10 @@ memory_edit(
 
 7. **Omitting `project` on task/epic tools.** Always pass `project=PROJECT`.
 
-8. **Trying to pass `blocked_by` to `task_create`.** Use `task_blockers_add()` after creation.
+8. **Not using `blocked_by` on `task_create`.** Always pass `blocked_by` at creation time to set blockers atomically. The coordinator dispatches unblocked tasks immediately.
+
+9. **Creating downstream tasks before upstream tasks.** The `blocked_by` IDs must exist at creation time. Always create foundation tasks first.
+
+10. **Using non-code-testable acceptance criteria.** "Handles 1000 concurrent users" or "stakeholder approves" cannot be verified by an agent. Use criteria testable via unit/integration tests or code inspection.
+
+11. **Not checking for premature dispatch.** If you created a task without blockers by mistake, check `session_for_task` to see if a session already picked it up.

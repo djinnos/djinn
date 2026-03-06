@@ -131,15 +131,20 @@ When splitting, create independent peer tasks -- NOT parent-child:
 
 ## Dependency Ordering
 
-**Blockers are THE execution sequence mechanism.** The Djinn coordinator dispatches any open task with no unresolved blockers. If you don't set blockers, tasks run in parallel.
+**Blockers are THE execution sequence mechanism.** The Djinn coordinator dispatches any open task with no unresolved blockers IMMEDIATELY. Use `blocked_by` on `task_create` to set blockers atomically at creation time.
 
 ```
-# Registration must exist before email verification can be built
-task_blockers_add(
-  project=PROJECT,
-  id="email-verification-id",
-  blocking_id="registration-id",
+# Create foundation task first (no blockers)
+task_create(project=PROJECT, title="Registration flow", ..., priority=0)
+# Returns: { id: "registration-id" }
+
+# Create downstream task with blocker set atomically
+task_create(project=PROJECT, title="Email verification", ..., priority=1,
+  blocked_by=["registration-id"]
 )
+
+# Adjust blockers after creation with task_update
+task_update(project=PROJECT, id="some-task", blocked_by_add=["new-dep-id"])
 ```
 
 **When to add blockers:**
@@ -221,4 +226,4 @@ memory_edit(
 
 7. **Omitting `project` on task/epic tools.** Always pass `project=PROJECT`.
 
-8. **Trying to pass `blocked_by` to `task_create`.** Use `task_blockers_add()` after creation.
+8. **Not using `blocked_by` on `task_create`.** Always pass `blocked_by` at creation time. The coordinator dispatches unblocked tasks immediately.

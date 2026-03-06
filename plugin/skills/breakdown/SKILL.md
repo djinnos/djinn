@@ -15,10 +15,9 @@ The mechanical counterpart to `/plan`. Reads the plan context (roadmap, ADRs, sc
 | memory_search | Find relevant notes by keyword, type, or tag |
 | memory_build_context | Traverse wikilinks from a seed note for full context |
 | memory_edit | Append backlinks to memory notes (Relations sections) |
-| task_create | Create tasks under epics |
-| task_update | Update tasks -- add/remove memory_refs, change fields after creation |
+| task_create | Create tasks under epics with `blocked_by` for atomic dependency setting |
+| task_update | Update tasks -- add/remove memory_refs, blocked_by, change fields after creation |
 | task_list | Check existing tasks, verify no duplicates |
-| task_blockers_add | Set dependency ordering between tasks |
 | epic_create | Create epics if they don't exist |
 | epic_list | List existing epics to avoid duplicates |
 | epic_tasks | List children of an epic to see existing tasks |
@@ -80,26 +79,48 @@ If the work involves domain areas with no existing research, investigate gaps be
    - Write findings: `memory_write(type="research", title="{Domain} Research", ...)`
 4. If all domains are covered, skip this step
 
-### Step 3: Create Tasks
+### Step 3: Create Tasks In Dependency Order
 
-For each deliverable in the scope note's In Scope section, create a task.
+**CRITICAL: The coordinator dispatches any open task with no unresolved blockers IMMEDIATELY.** You must create tasks in dependency order -- foundation first, then downstream -- and use `blocked_by` on `task_create` to set blockers atomically at creation time.
+
+**Creation sequence:**
+1. Create all foundation tasks first (no blockers needed -- these are the starting points)
+2. For each downstream task: pass `blocked_by` with the IDs of its upstream dependencies
+3. Always create upstream tasks before downstream tasks so their IDs exist
 
 **Task creation pattern:**
 ```
+# 1. Create foundation task (no blockers)
 task_create(
   project=PROJECT,
-  title="{specific deliverable}",
+  title="{foundation deliverable}",
   issue_type="task",
   epic_id="{matching_epic_id}",
   description="{what this accomplishes and its scope}",
   design="{implementation approach, ADR references, technical decisions}",
   acceptance_criteria=[
-    {"criterion": "{testable condition}", "met": false},
-    {"criterion": "{testable condition}", "met": false}
+    {"criterion": "{code-testable condition}", "met": false},
+    {"criterion": "{code-testable condition}", "met": false}
   ],
-  priority={0-3},
+  priority=0,
   memory_refs=["{requirements_permalink}", "{adr_permalink}"]
 )
+# Returns: { id: "a1b2" }
+
+# 2. Create downstream task with blockers set atomically
+task_create(
+  project=PROJECT,
+  title="{downstream deliverable}",
+  issue_type="task",
+  epic_id="{matching_epic_id}",
+  description="...",
+  design="...",
+  acceptance_criteria=[...],
+  priority=1,
+  memory_refs=[...],
+  blocked_by=["a1b2"]
+)
+# Returns: { id: "c3d4" } -- created already blocked, never dispatched prematurely
 ```
 
 **Use `issue_type="feature"` when** the item is a user-facing deliverable (login UI, search page, onboarding flow). **Use `issue_type="task"` when** the item is internal implementation work (database schema, middleware, config). They are peers -- do NOT decompose features into sub-tasks.
@@ -112,27 +133,17 @@ task_create(
 - `2` = Medium (integration)
 - `3` = Low (nice-to-have)
 
-### Step 4: Set Blocker Dependencies
+**Acceptance criteria must be code-testable.** Every criterion must be verifiable by an agent through unit tests, integration tests, or code inspection. Never use:
+- Production metrics ("20 transactions processed per second")
+- Manual verification ("user confirms the flow feels right")
+- Environment-dependent checks ("works in staging")
 
-Define execution order through blockers.
+Good: "POST /api/login returns 401 with invalid credentials"
+Good: "Unit test verifies JWT token contains user_id claim"
+Bad: "System handles 1000 concurrent users in production"
+Bad: "Stakeholder approves the design"
 
-**Blockers are THE execution sequence mechanism.** The Djinn coordinator dispatches any open task with no unresolved blockers. If you don't set blockers, tasks run in parallel.
-
-1. **Foundation tasks**: No blockers -- starting points (schemas, configs, interfaces)
-2. **Core logic tasks**: Blocked by foundation tasks they depend on
-3. **Integration tasks**: Blocked by core logic tasks they depend on
-
-```
-task_blockers_add(project=PROJECT, id="{downstream_task}", blocking_id="{upstream_task}")
-```
-
-**Two failure modes to avoid:**
-- **Missing blocker**: Task dispatched before its dependency exists. Agent fails.
-- **False blocker**: Unnecessary serialization. Slows execution.
-
-Only block on real technical or logical dependencies.
-
-### Step 5: Validate
+### Step 4: Validate
 
 Verify the task decomposition covers the plan.
 
@@ -159,7 +170,7 @@ For each REQ-ID in scope:
 
 After 3 iterations with remaining gaps, report them and proceed.
 
-### Step 6: Bidirectional Linking
+### Step 5: Bidirectional Linking
 
 Establish traceability between memory and tasks.
 
@@ -174,7 +185,7 @@ Establish traceability between memory and tasks.
    )
    ```
 
-### Step 7: Summary
+### Step 6: Summary
 
 Present results:
 
