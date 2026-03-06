@@ -17,6 +17,8 @@ pub struct TaskCreateParams {
     pub owner: Option<String>,
     pub labels: Option<Vec<String>>,
     pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
+    /// Memory note permalinks to attach to this task at creation.
+    pub memory_refs: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]

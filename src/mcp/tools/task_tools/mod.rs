@@ -124,6 +124,8 @@ impl DjinnMcpServer {
             .map(|v| !v.is_empty())
             .unwrap_or(false);
 
+        let mut task = task;
+
         if has_labels || has_ac {
             let labels_json = p
                 .labels
@@ -136,7 +138,7 @@ impl DjinnMcpServer {
                 .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
                 .unwrap_or_else(|| task.acceptance_criteria.clone());
 
-            let updated = repo
+            if let Ok(t) = repo
                 .update(
                     &task.id,
                     &task.title,
@@ -147,9 +149,19 @@ impl DjinnMcpServer {
                     &labels_json,
                     &ac_json,
                 )
-                .await;
-            if let Ok(t) = updated {
-                return Json(ErrorOr::Ok(task_to_response(&t)));
+                .await
+            {
+                task = t;
+            }
+        }
+
+        // Apply memory_refs if provided.
+        if let Some(ref refs) = p.memory_refs {
+            if !refs.is_empty() {
+                let refs_json = serde_json::to_string(refs).unwrap_or_else(|_| "[]".into());
+                if let Ok(t) = repo.update_memory_refs(&task.id, &refs_json).await {
+                    task = t;
+                }
             }
         }
 
