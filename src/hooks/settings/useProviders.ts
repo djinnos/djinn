@@ -56,6 +56,8 @@ export function useProviders() {
   const configuredProviders = useMemo(() => providers.filter((p) => credentialByProvider.get(p.id)?.configured), [providers, credentialByProvider]);
   const unconfiguredProviders = useMemo(() => providers.filter((p) => !credentialByProvider.get(p.id)?.configured), [providers, credentialByProvider]);
 
+  const { removeModelsByProvider, saveSettings: saveAgentSettings, loadProviderModels } = useSettingsStore();
+
   const validateInline = useCallback(async (providerId: string, apiKey: string) => {
     if (!providerId || !apiKey.trim()) return;
     setValidating(true);
@@ -82,6 +84,7 @@ export function useProviders() {
       }
       await saveProviderCredentials(providerId, apiKey.trim());
       await loadData();
+      await loadProviderModels();
       showToast.success('Provider added', { description: 'Credentials saved successfully.' });
       return true;
     } catch (error) {
@@ -90,7 +93,7 @@ export function useProviders() {
     } finally {
       setSaving(false);
     }
-  }, [loadData]);
+  }, [loadData, loadProviderModels]);
 
   const addCustom = useCallback(async (name: string, baseUrl: string) => {
     if (!name.trim()) return false;
@@ -98,14 +101,13 @@ export function useProviders() {
     try {
       await addCustomProvider({ name: name.trim(), base_url: baseUrl.trim() || undefined });
       await loadData();
+      await loadProviderModels();
       showToast.success('Custom provider added');
       return true;
     } finally {
       setSaving(false);
     }
-  }, [loadData]);
-
-  const { removeModelsByProvider, saveSettings: saveAgentSettings } = useSettingsStore();
+  }, [loadData, loadProviderModels]);
 
   const removeProvider = useCallback(async (providerId: string) => {
     try {
@@ -113,11 +115,12 @@ export function useProviders() {
       removeModelsByProvider(providerId);
       await saveAgentSettings();
       await loadData();
+      await loadProviderModels();
       showToast.success('Provider removed');
     } catch (error) {
       showToast.error('Could not remove provider', { description: error instanceof Error ? error.message : 'Unknown error' });
     }
-  }, [loadData, removeModelsByProvider, saveAgentSettings]);
+  }, [loadData, loadProviderModels, removeModelsByProvider, saveAgentSettings]);
 
   return {
     providers,
