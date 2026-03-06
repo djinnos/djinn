@@ -469,11 +469,14 @@ async fn call_shell(
     .map_err(|_| format!("shell timed out after {} ms", timeout_ms))?
     .map_err(|e| format!("failed to run shell command: {e}"))?;
 
+    let stdout = truncate_shell_output(&String::from_utf8_lossy(&output.stdout));
+    let stderr = truncate_shell_output(&String::from_utf8_lossy(&output.stderr));
+
     Ok(serde_json::json!({
         "ok": output.status.success(),
         "exit_code": output.status.code(),
-        "stdout": String::from_utf8_lossy(&output.stdout),
-        "stderr": String::from_utf8_lossy(&output.stderr),
+        "stdout": stdout,
+        "stderr": stderr,
         "workdir": workdir,
     }))
 }
@@ -754,6 +757,43 @@ fn tool_shell() -> RmcpTool {
                 "timeout_ms": {"type": "integer"}
             }
         }),
+    )
+}
+
+/// Truncate shell output to prevent blowing the context window.
+/// Mirrors Goose's developer shell limits: 2000 lines / 50 KB.
+fn truncate_shell_output(raw: &str) -> String {
+    const MAX_LINES: usize = 2000;
+    const MAX_BYTES: usize = 50_000;
+    const PREVIEW_LINES: usize = 200;
+
+    let lines: Vec<&str> = raw.split('\n').collect();
+    let exceeded_lines = lines.len() > MAX_LINES;
+    let exceeded_bytes = raw.len() > MAX_BYTES;
+
+    if !exceeded_lines && !exceeded_bytes {
+        return raw.to_string();
+    }
+
+    let preview_start = lines.len().saturating_sub(PREVIEW_LINES);
+    let preview = lines[preview_start..].join("\n");
+
+    let reason = if exceeded_lines {
+        format!(
+            "Output exceeded {} line limit ({} lines total).",
+            MAX_LINES,
+            lines.len()
+        )
+    } else {
+        format!(
+            "Output exceeded {} byte limit ({} bytes total).",
+            MAX_BYTES,
+            raw.len()
+        )
+    };
+
+    format!(
+        "{preview}\n\n[{reason} Use shell commands like `head`, `tail`, or `sed -n '100,200p'` to read sections.]"
     )
 }
 
