@@ -333,6 +333,7 @@ export function mapEpicFromMcp(epic: NonNullable<EpicListMcpResponse["epics"]>[n
     id: epic.id,
     title: epic.title,
     description: epic.description,
+    emoji: epic.emoji,
     status: mapEpicStatus(epic.status),
     priority: "P2",
     labels: [],

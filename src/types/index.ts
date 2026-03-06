@@ -42,6 +42,7 @@ export interface Epic {
   id: string;
   title: string;
   description: string;
+  emoji: string;
   status: EpicStatus;
   priority: TaskPriority;
   labels: string[];

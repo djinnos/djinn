@@ -8,6 +8,7 @@ const epic: Epic = {
   id: "epic-kanban-quality",
   title: "Kanban Quality Improvements",
   description: "Raise task board UX quality through better observability and documentation.",
+  emoji: "⚡",
   status: "active",
   priority: "P1",
   labels: ["kanban", "ux", "storybook"],

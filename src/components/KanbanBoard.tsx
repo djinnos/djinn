@@ -63,10 +63,7 @@ const PRIORITY_ICONS: Record<TaskPriority, { icon: typeof FullSignalIcon; color:
 };
 
 function getEpicEmoji(epic: Epic | undefined): string {
-  if (!epic) return "📌";
-  if (epic.status === "active") return "🚀";
-  if (epic.status === "completed") return "✅";
-  return "📦";
+  return epic?.emoji ?? "📌";
 }
 
 function getEpicTitle(epic: Epic | undefined, epicId: string | null): string {

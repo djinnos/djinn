@@ -5,6 +5,7 @@ const makeEpic = (id: string, title: string, priority: Epic["priority"], created
   id,
   title,
   description: "Epic description",
+  emoji: "🚀",
   priority,
   status: "active",
   labels: [],

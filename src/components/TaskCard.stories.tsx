@@ -8,6 +8,7 @@ const activeEpic: Epic = {
   id: "epic-platform-foundation",
   title: "Platform Foundation",
   description: "Core infrastructure and tooling for Kanban workflows.",
+  emoji: "🚀",
   status: "active",
   priority: "P1",
   labels: ["platform", "kanban"],

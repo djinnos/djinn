@@ -18,16 +18,6 @@ function sortEpics(epics: Epic[]): Epic[] {
   });
 }
 
-function getEpicEmoji(epicId: string): string {
-  const emojis = ["🚀", "🎯", "⭐", "🔥", "💎", "🎨", "⚡", "🔧", "📊", "🎪", "🏆", "🌟"];
-  let hash = 0;
-  for (let i = 0; i < epicId.length; i++) {
-    const char = epicId.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
-  return emojis[Math.abs(hash) % emojis.length];
-}
 
 interface RoadmapViewProps {
   mockEpics?: Epic[];
@@ -61,7 +51,7 @@ export function RoadmapView({ mockEpics, mockTasks }: RoadmapViewProps = {}) {
           <EpicCard
             key={epic.id}
             epic={epic}
-            emoji={getEpicEmoji(epic.id)}
+            emoji={epic.emoji}
             expandAllSignal={expandAllSignal}
             collapseAllSignal={collapseAllSignal}
             onTaskClick={setSelectedTask}
