@@ -135,6 +135,7 @@ mod commands;
 mod epic_review;
 mod helpers;
 mod lifecycle;
+mod pool;
 mod worktree;
 
 pub use actor::*;
@@ -142,4 +143,5 @@ pub(crate) use commands::*;
 pub(crate) use epic_review::*;
 pub(crate) use helpers::*;
 pub use lifecycle::run_task_lifecycle;
+pub use pool::*;
 pub(crate) use worktree::*;
