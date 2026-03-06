@@ -8,18 +8,20 @@ import {
 } from 'lucide-react';
 import { Flag02Icon, KanbanIcon } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
+import logoSvg from '@/assets/logo.svg';
 import { useEffect, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 interface NavItemProps {
   icon: React.ReactNode;
   label: string;
+  hotkey?: string;
   isActive: boolean;
   isCollapsed: boolean;
   onClick: () => void;
 }
 
-function NavItem({ icon, label, isActive, isCollapsed, onClick }: NavItemProps) {
+function NavItem({ icon, label, hotkey, isActive, isCollapsed, onClick }: NavItemProps) {
   return (
     <Button
       variant={isActive ? 'secondary' : 'ghost'}
@@ -30,13 +32,20 @@ function NavItem({ icon, label, isActive, isCollapsed, onClick }: NavItemProps) 
         isCollapsed ? 'h-10 w-10 justify-center' : 'h-9 px-3',
         isActive && 'bg-secondary text-secondary-foreground'
       )}
-      title={isCollapsed ? label : undefined}
+      title={isCollapsed ? `${label}${hotkey ? ` (${hotkey.toUpperCase()})` : ''}` : undefined}
     >
       <span className="flex h-4 w-4 items-center justify-center shrink-0">
         {icon}
       </span>
       {!isCollapsed && (
-        <span className="text-sm font-medium truncate">{label}</span>
+        <>
+          <span className="text-sm font-medium truncate flex-1 text-left">{label}</span>
+          {hotkey && (
+            <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono text-[10px] text-muted-foreground/50">
+              {hotkey.toUpperCase()}
+            </kbd>
+          )}
+        </>
       )}
     </Button>
   );
@@ -47,13 +56,33 @@ export function Sidebar() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Keyboard shortcut: Cmd+/ to toggle sidebar
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if ((e.metaKey || e.ctrlKey) && e.key === '/') {
       e.preventDefault();
       toggleCollapse();
+      return;
     }
-  }, [toggleCollapse]);
+
+    // Skip hotkeys when typing in inputs
+    const tag = (e.target as HTMLElement).tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target as HTMLElement).isContentEditable) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    switch (e.key.toLowerCase()) {
+      case 'k':
+        e.preventDefault();
+        navigate('/');
+        break;
+      case 'e':
+        e.preventDefault();
+        navigate('/roadmap');
+        break;
+      case 's':
+        e.preventDefault();
+        navigate('/settings');
+        break;
+    }
+  }, [toggleCollapse, navigate]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
@@ -75,27 +104,42 @@ export function Sidebar() {
       id: 'kanban' as const,
       label: 'Kanban',
       icon: <HugeiconsIcon icon={KanbanIcon} size={16} />,
+      hotkey: 'k',
     },
     {
       id: 'roadmap' as const,
       label: 'Epics',
       icon: <HugeiconsIcon icon={Flag02Icon} size={16} />,
+      hotkey: 'e',
     },
   ];
 
   return (
     <aside
       className={cn(
-        'flex flex-col border-r bg-sidebar transition-all duration-200 ease-in-out',
+        'flex h-screen flex-col border-r bg-sidebar transition-all duration-200 ease-in-out',
         isCollapsed ? 'w-14' : 'w-64'
       )}
     >
       {/* Header */}
       <div className="flex h-12 items-center border-b px-3">
+        <div className={cn("flex items-center gap-2", isCollapsed ? "mx-auto" : "flex-1")}>
+          <img src={logoSvg} alt="Djinn" className="h-5 w-5 shrink-0" />
+          {!isCollapsed && (
+            <span className="text-sm font-semibold text-sidebar-foreground truncate">
+              Djinn
+            </span>
+          )}
+        </div>
         {!isCollapsed && (
-          <span className="flex-1 text-sm font-semibold text-sidebar-foreground truncate">
-            DjinnOS
-          </span>
+          <div className="flex items-center gap-1 text-[10px] text-sidebar-foreground/50">
+            <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono">
+              <Command className="h-2.5 w-2.5" />
+            </kbd>
+            <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono">
+              /
+            </kbd>
+          </div>
         )}
         <Button
           variant="ghost"
@@ -114,43 +158,28 @@ export function Sidebar() {
         </Button>
       </div>
 
-      {/* Main Navigation */}
+      {/* Navigation */}
       <nav className="flex-1 overflow-y-auto p-2 space-y-1">
         {navItems.map((item) => (
           <NavItem
             key={item.id}
             icon={item.icon}
             label={item.label}
+            hotkey={item.hotkey}
             isActive={activeSection === item.id}
             isCollapsed={isCollapsed}
             onClick={() => navigate(item.id === 'kanban' ? '/' : `/${item.id}`)}
           />
         ))}
-      </nav>
-
-      {/* Bottom Section - Settings */}
-      <div className="border-t p-2">
         <NavItem
           icon={<Settings className="h-4 w-4" />}
           label="Settings"
+          hotkey="s"
           isActive={activeSection === 'settings'}
           isCollapsed={isCollapsed}
           onClick={() => navigate('/settings')}
         />
-        
-        {/* Keyboard shortcut hint */}
-        {!isCollapsed && (
-          <div className="mt-2 flex items-center justify-center gap-1 text-[10px] text-sidebar-foreground/50">
-            <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono">
-              <Command className="h-2.5 w-2.5" />
-            </kbd>
-            <span>+</span>
-            <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono text-[10px]">
-              /
-            </kbd>
-          </div>
-        )}
-      </div>
+      </nav>
     </aside>
   );
 }
