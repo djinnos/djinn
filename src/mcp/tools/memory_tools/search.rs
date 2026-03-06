@@ -21,7 +21,7 @@ impl DjinnMcpServer {
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
         let limit = p.limit.unwrap_or(10).clamp(1, 100) as usize;
 
-        let results = repo
+        let results = match repo
             .search(
                 &project_id,
                 &p.query,
@@ -30,7 +30,15 @@ impl DjinnMcpServer {
                 limit,
             )
             .await
-            .unwrap_or_default();
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return Json(MemorySearchResponse {
+                    results: vec![],
+                    error: Some(format!("search failed: {e}")),
+                });
+            }
+        };
 
         let items: Vec<MemorySearchResultItem> = results
             .into_iter()

@@ -1,9 +1,35 @@
 use super::*;
 
+/// Sanitize a user query into valid FTS5 syntax.
+///
+/// Strips FTS5 operators and special characters, then wraps each remaining
+/// token in double-quotes so they are treated as literal terms joined by
+/// implicit AND.  Returns `None` if the query contains no usable tokens.
+fn sanitize_fts5_query(raw: &str) -> Option<String> {
+    let tokens: Vec<&str> = raw
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| {
+            let t = t.to_uppercase();
+            !t.is_empty() && t != "AND" && t != "OR" && t != "NOT" && t != "NEAR"
+        })
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    Some(
+        tokens
+            .into_iter()
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
 impl NoteRepository {
     /// Full-text search with BM25 ranking and content snippets.
     ///
-    /// `query` is an FTS5 query string (e.g. `"rust database"`).
+    /// `query` is a natural-language search string. It is sanitized into safe
+    /// FTS5 syntax before execution.
     /// Results are ordered by relevance (best match first).
     pub async fn search(
         &self,
@@ -14,6 +40,10 @@ impl NoteRepository {
         limit: usize,
     ) -> Result<Vec<NoteSearchResult>> {
         self.db.ensure_initialized().await?;
+
+        let Some(safe_query) = sanitize_fts5_query(query) else {
+            return Ok(vec![]);
+        };
 
         let folder = folder.unwrap_or("");
         let note_type = note_type.unwrap_or("");
@@ -31,7 +61,7 @@ impl NoteRepository {
              ORDER BY bm25(notes_fts)
              LIMIT ?5",
         )
-        .bind(query)
+        .bind(&safe_query)
         .bind(project_id)
         .bind(folder)
         .bind(note_type)
