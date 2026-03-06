@@ -34,7 +34,6 @@ struct ModelState {
     disable_ttl_trips: u32,
 }
 
-
 impl ModelState {
     fn is_available(&self) -> bool {
         if !self.auto_disabled {

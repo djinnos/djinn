@@ -1,18 +1,11 @@
 // AgentSupervisor — 1x global, manages in-process Goose session lifecycle.
 
-mod compaction;
 mod dispatch;
-mod epic_review;
-mod git_worktree;
 mod helpers;
-mod provider;
 mod run_loop;
 mod session_mgmt;
 mod session_ops;
 mod tokens;
-
-pub(super) use compaction::perform_compaction;
-
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -21,42 +14,18 @@ use std::sync::Arc;
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
-use goose::agents::{
-    Agent as GooseAgent, AgentConfig as GooseAgentConfig, GoosePlatform,
-    SessionConfig as GooseSessionConfig,
-};
-use goose::config::{Config as GooseConfig, GooseMode, PermissionManager};
-use goose::conversation::message::{Message as GooseMessage, MessageContent};
-use goose::model::ModelConfig;
-use goose::providers;
-use goose::providers::base::ProviderMetadata;
-use serde::{Deserialize, Serialize};
+use goose::config::Config as GooseConfig;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::actors::git::GitError;
-use crate::agent::extension;
-use crate::agent::output_parser::{
-    EpicReviewVerdict, ParsedAgentOutput, ReviewerVerdict, WorkerSignal,
-};
-use crate::agent::prompts::{TaskContext, render_prompt};
-use crate::agent::{AgentType, GooseSessionHandle, SessionManager, SessionType};
-use crate::commands::{CommandSpec, run_commands};
-use crate::db::repositories::credential::CredentialRepository;
-use crate::db::repositories::epic::EpicRepository;
-use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
-use crate::db::repositories::project::ProjectRepository;
+use crate::actors::slot::SlotEvent;
+use crate::agent::{AgentType, GooseSessionHandle, SessionManager};
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
-use crate::events::DjinnEvent;
-use crate::models::session::{SessionRecord, SessionStatus};
+use crate::models::session::SessionStatus;
 use crate::models::task::{Task, TransitionAction};
 use crate::server::AppState;
-
-pub(super) const MERGE_CONFLICT_PREFIX: &str = "merge_conflict:";
-pub(super) const MERGE_VALIDATION_PREFIX: &str = "merge_validation_failed:";
 static GOOSE_BUILTINS_REGISTERED: Once = Once::new();
 
 pub(super) fn register_goose_builtin_extensions() {
@@ -68,118 +37,6 @@ pub(super) fn register_goose_builtin_extensions() {
                 .collect();
         goose::builtin_extension::register_builtin_extensions(builtins);
     });
-}
-
-/// Format a JSON array of `CommandSpec` objects into a markdown bullet list of names.
-/// Returns `None` if the array is empty or cannot be parsed.
-pub(super) fn format_command_names(json: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct NameOnly {
-        name: String,
-    }
-    let specs: Vec<NameOnly> = serde_json::from_str(json).unwrap_or_default();
-    if specs.is_empty() {
-        return None;
-    }
-    Some(
-        specs
-            .into_iter()
-            .map(|s| format!("- `{}`", s.name))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
-}
-
-pub(super) fn runtime_fs_diagnostics(project_path: &str, worktree_path: &Path) -> String {
-    let project = Path::new(project_path);
-    let worktree_git = worktree_path.join(".git");
-    format!(
-        "project_exists={} worktree_exists={} worktree_is_dir={} worktree_git_exists={} worktree_path={} project_path={}",
-        project.exists(),
-        worktree_path.exists(),
-        worktree_path.is_dir(),
-        worktree_git.exists(),
-        worktree_path.display(),
-        project.display(),
-    )
-}
-
-pub(super) fn runtime_env_diagnostics(session_id: &str, project_path: &str, worktree_path: &Path) -> String {
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "<unavailable>".to_string());
-    let home = std::env::var("HOME").unwrap_or_else(|_| "<unset>".to_string());
-    let xdg_config = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| "<unset>".to_string());
-    let xdg_data = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| "<unset>".to_string());
-    let path = std::env::var("PATH").unwrap_or_else(|_| "<unset>".to_string());
-
-    let sessions_dir = PathBuf::from(&home).join(".djinn").join("sessions");
-    let sessions_db = sessions_dir.join("sessions").join("sessions.db");
-    format!(
-        "session_id={} cwd={} home={} xdg_config_home={} xdg_data_home={} project_exists={} worktree_exists={} worktree_git_exists={} sessions_dir_exists={} sessions_db_exists={} worktree_path={} project_path={} path={}",
-        session_id,
-        cwd,
-        home,
-        xdg_config,
-        xdg_data,
-        Path::new(project_path).exists(),
-        worktree_path.exists(),
-        worktree_path.join(".git").exists(),
-        sessions_dir.exists(),
-        sessions_db.exists(),
-        worktree_path.display(),
-        project_path,
-        path,
-    )
-}
-
-pub(super) fn log_snippet(text: &str, max_chars: usize) -> String {
-    let trimmed = text.trim();
-    let mut out = String::new();
-    for ch in trimmed.chars().take(max_chars) {
-        out.push(ch);
-    }
-    if trimmed.chars().count() > max_chars {
-        out.push('…');
-    }
-    if out.is_empty() {
-        "<empty>".to_string()
-    } else {
-        out
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct MergeConflictMetadata {
-    pub(super) conflicting_files: Vec<String>,
-    pub(super) base_branch: String,
-    pub(super) merge_target: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct MergeValidationFailureMetadata {
-    pub(super) base_branch: String,
-    pub(super) merge_target: String,
-    pub(super) command: String,
-    pub(super) cwd: String,
-    pub(super) exit_code: i32,
-    pub(super) stdout: String,
-    pub(super) stderr: String,
-}
-
-impl MergeValidationFailureMetadata {
-    pub(super) fn as_prompt_context(&self) -> String {
-        format!(
-            "Post-review merge validation failed. Fix the underlying issue, rerun verification, and commit the fix.\n\nmerge_base_branch: {}\nmerge_target_branch: {}\ncommand: git {}\nexit_code: {}\ncwd: {}\nstdout:\n{}\nstderr:\n{}",
-            self.base_branch,
-            self.merge_target,
-            self.command,
-            self.exit_code,
-            self.cwd,
-            self.stdout,
-            self.stderr,
-        )
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -277,369 +134,22 @@ pub(super) enum SupervisorMessage {
         default_max: u32,
         respond_to: Reply<()>,
     },
-    SessionCompleted {
-        task_id: String,
-        result: Result<(), String>,
-        output: ParsedAgentOutput,
-    },
-    ResumeSession {
-        task_id: String,
-        model_id: String,
-        goose_session_id: String,
-        worktree_path: PathBuf,
-        resume_prompt: String,
-        tokens_in: i64,
-        old_record_id: Option<String>,
-    },
-    CompactionNeeded {
-        task_id: String,
-        old_goose_session_id: String,
-        tokens_in: i64,
-        context_window: i64,
-    },
-    /// Compaction succeeded: new Goose session and agent are ready; supervisor registers them.
-    CompactionComplete {
-        task_id: String,
-        model_id: String,
-        agent_type: AgentType,
-        project_id: String,
-        new_goose_session_id: String,
-        new_record_id: String,
-        agent: Arc<GooseAgent>,
-        worktree_path: PathBuf,
-        summary: String,
-        context_window: i64,
-    },
-    /// Compaction failed after the old session was cancelled; supervisor must release the task.
-    CompactionAborted {
-        task_id: String,
-        model_id: String,
-        agent_type: AgentType,
-        worktree_path: Option<PathBuf>,
-    },
 }
 
-pub(super) struct SessionClosure {
-    pub(super) model_id: Option<String>,
-    pub(super) agent_type: AgentType,
-    pub(super) goose_session_id: String,
-    pub(super) record_id: Option<String>,
-    pub(super) worktree_path: Option<PathBuf>,
-}
-
-/// Spawns the agent reply loop task. Used by both fresh dispatch and session resume.
-/// `reply_cancel` is a *clone* of the session's cancellation token (caller retains the original
-/// for the GooseSessionHandle). `kickoff` is the first message sent to the agent.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn spawn_reply_task(
-    agent: Arc<GooseAgent>,
-    session_id: String,
-    task_id: String,
-    project_path: String,
-    worktree_path: PathBuf,
-    agent_type: AgentType,
-    kickoff: GooseMessage,
-    reply_cancel: CancellationToken,
-    global_cancel: CancellationToken,
-    sender: mpsc::Sender<SupervisorMessage>,
-    app_state: AppState,
-    context_window: i64,
-    session_manager: Arc<SessionManager>,
-) -> tokio::task::JoinHandle<anyhow::Result<()>> {
-    tokio::spawn(async move {
-        let mut output = ParsedAgentOutput::new(agent_type);
-        let run_result: anyhow::Result<()> = async {
-            let mut pending_message = Some(kickoff);
-            let mut saw_any_event = false;
-            let mut saw_any_tool_use = false;
-            let assistant_role = GooseMessage::assistant().role;
-            let mut assistant_message_count: usize = 0;
-            let mut assistant_fragments: Vec<String> = Vec::new();
-            let mut compaction_signaled = false;
-
-            let push_fragment = |fragments: &mut Vec<String>, value: String| {
-                const MAX_FRAGMENTS: usize = 12;
-                let normalized = value.replace('\n', "\\n").trim().to_string();
-                if normalized.is_empty() {
-                    return;
-                }
-                let snippet: String = normalized.chars().take(160).collect();
-                if fragments.len() >= MAX_FRAGMENTS {
-                    fragments.remove(0);
-                }
-                fragments.push(snippet);
-            };
-
-            while let Some(next_message) = pending_message.take() {
-                let env_diag = runtime_env_diagnostics(
-                    &session_id,
-                    &project_path,
-                    &worktree_path,
-                );
-                tracing::info!(
-                    task_id = %task_id,
-                    session_id = %session_id,
-                    worktree = %worktree_path.display(),
-                    "Supervisor: starting Goose reply; {}",
-                    env_diag
-                );
-
-                let mut stream = agent
-                    .reply(
-                        next_message,
-                        GooseSessionConfig {
-                            id: session_id.clone(),
-                            schedule_id: None,
-                            max_turns: Some(300),
-                            retry_config: None,
-                        },
-                        Some(reply_cancel.clone()),
-                    )
-                    .await
-                    .map_err(|e| {
-                        let diag = runtime_fs_diagnostics(&project_path, &worktree_path);
-                        let env_diag = runtime_env_diagnostics(&session_id, &project_path, &worktree_path);
-                        anyhow::anyhow!(
-                            "agent reply init failed: display={} debug={:?}; {}; {}",
-                            e, e, diag, env_diag
-                        )
-                    })?;
-
-                let mut interrupted: Option<&'static str> = None;
-                let mut saw_round_event = false;
-                loop {
-                    tokio::select! {
-                        _ = reply_cancel.cancelled() => {
-                            interrupted = Some("session cancelled");
-                            break;
-                        }
-                        _ = global_cancel.cancelled() => {
-                            interrupted = Some("supervisor shutting down");
-                            break;
-                        }
-                        evt = stream.next() => {
-                            let Some(evt) = evt else { break; };
-                            let evt = evt.map_err(|e| {
-                                let diag = runtime_fs_diagnostics(&project_path, &worktree_path);
-                                let env_diag = runtime_env_diagnostics(&session_id, &project_path, &worktree_path);
-                                anyhow::anyhow!(
-                                    "agent stream event failed: display={} debug={:?}; {}; {}",
-                                    e, e, diag, env_diag
-                                )
-                            })?;
-                            saw_any_event = true;
-                            saw_round_event = true;
-                            if let goose::agents::AgentEvent::Message(msg) = &evt
-                                && msg.role == assistant_role
-                            {
-                                assistant_message_count += 1;
-                                for content in &msg.content {
-                                    match content {
-                                        MessageContent::Text(text) => {
-                                            output.ingest_text(&text.text);
-                                            push_fragment(&mut assistant_fragments, format!("text:{}", text.text));
-                                        }
-                                        MessageContent::ToolRequest(req) => {
-                                            push_fragment(&mut assistant_fragments, format!("tool_request:{}", req.id));
-                                            saw_any_tool_use = true;
-                                            output.ingest_text(&content.to_string());
-                                        }
-                                        MessageContent::FrontendToolRequest(req) => {
-                                            push_fragment(&mut assistant_fragments, format!("frontend_tool_request:{}", req.id));
-                                            saw_any_tool_use = true;
-                                            output.ingest_text(&content.to_string());
-                                        }
-                                        _ => {
-                                            push_fragment(&mut assistant_fragments, format!("{}", content));
-                                            output.ingest_text(&content.to_string());
-                                        }
-                                    }
-                                }
-
-                                // After each agent turn, read token usage and emit a telemetry
-                                // event. Also check against the 80% compaction threshold.
-                                {
-                                    let goose_session = session_manager.get_session(&session_id, false).await;
-                                    let (tokens_in, tokens_out) = if let Ok(s) = goose_session {
-                                        let ti = s.accumulated_input_tokens
-                                            .or(s.input_tokens)
-                                            .unwrap_or(0) as i64;
-                                        let to = s.accumulated_output_tokens
-                                            .or(s.output_tokens)
-                                            .unwrap_or(0) as i64;
-                                        (ti, to)
-                                    } else {
-                                        AgentSupervisor::tokens_from_goose_sqlite(&session_id)
-                                            .await
-                                            .unwrap_or((0, 0))
-                                    };
-                                    let usage_pct = if context_window > 0 {
-                                        tokens_in as f64 / context_window as f64
-                                    } else {
-                                        0.0
-                                    };
-                                    let _ = app_state.events().send(DjinnEvent::SessionTokenUpdate {
-                                        session_id: session_id.clone(),
-                                        task_id: task_id.clone(),
-                                        tokens_in,
-                                        tokens_out,
-                                        context_window,
-                                        usage_pct,
-                                    });
-                                    if !compaction_signaled && context_window > 0 && usage_pct >= 0.8 {
-                                        compaction_signaled = true;
-                                        tracing::info!(
-                                            task_id = %task_id,
-                                            session_id = %session_id,
-                                            tokens_in,
-                                            context_window,
-                                            threshold_pct = 80,
-                                            "Supervisor: compaction threshold reached; signalling supervisor"
-                                        );
-                                        let _ = sender
-                                            .send(SupervisorMessage::CompactionNeeded {
-                                                task_id: task_id.clone(),
-                                                old_goose_session_id: session_id.clone(),
-                                                tokens_in,
-                                                context_window,
-                                            })
-                                            .await;
-                                    }
-                                }
-                            }
-                            extension::handle_event(&app_state, &agent, &evt, &worktree_path).await;
-                        }
-                    }
-                }
-
-                if let Some(reason) = interrupted {
-                    return Err(anyhow::anyhow!(reason));
-                }
-
-                if !saw_round_event {
-                    let diag = runtime_fs_diagnostics(&project_path, &worktree_path);
-                    return Err(anyhow::anyhow!(
-                        "agent stream ended without any events; {}",
-                        diag
-                    ));
-                }
-            }
-
-            if !saw_any_event {
-                let diag = runtime_fs_diagnostics(&project_path, &worktree_path);
-                return Err(anyhow::anyhow!("agent session produced no events; {}", diag));
-            }
-
-            // Session complete — send a single nudge if the marker is missing
-            if saw_any_tool_use && AgentSupervisor::missing_required_marker(agent_type, &output)
-                && let Some(nudge) = AgentSupervisor::missing_marker_nudge(agent_type, &output) {
-                    tracing::info!(
-                        task_id = %task_id,
-                        agent_type = %agent_type.as_str(),
-                        "Supervisor: session ended without required marker; sending post-session nudge"
-                    );
-                    let nudge_msg = GooseMessage::user().with_text(nudge);
-                    let mut stream = agent
-                        .reply(
-                            nudge_msg,
-                            GooseSessionConfig {
-                                id: session_id.clone(),
-                                schedule_id: None,
-                                max_turns: Some(3),
-                                retry_config: None,
-                            },
-                            Some(reply_cancel.clone()),
-                        )
-                        .await
-                        .map_err(|e| anyhow::anyhow!("nudge reply init failed: {e}"))?;
-
-                    while let Some(evt) = stream.next().await {
-                        let evt = evt.map_err(|e| anyhow::anyhow!("nudge stream error: {e}"))?;
-                        if let goose::agents::AgentEvent::Message(msg) = &evt
-                            && msg.role == assistant_role
-                        {
-                            for content in &msg.content {
-                                match content {
-                                    MessageContent::Text(text) => {
-                                        output.ingest_text(&text.text);
-                                    }
-                                    _ => {
-                                        output.ingest_text(&content.to_string());
-                                    }
-                                }
-                            }
-                        }
-                        extension::handle_event(&app_state, &agent, &evt, &worktree_path).await;
-                    }
-                }
-
-            if let Some(last_assistant_text) =
-                AgentSupervisor::last_assistant_text_from_goose_sqlite(&session_id).await
-            {
-                output.ingest_text(&last_assistant_text);
-                tracing::info!(
-                    task_id = %task_id,
-                    agent_type = %agent_type.as_str(),
-                    marker_present_after_persisted_check = !AgentSupervisor::missing_required_marker(agent_type, &output),
-                    "Supervisor: parsed persisted last assistant message before marker decision"
-                );
-            }
-
-            if AgentSupervisor::missing_required_marker(agent_type, &output) {
-                tracing::warn!(
-                    task_id = %task_id,
-                    agent_type = %agent_type.as_str(),
-                    saw_any_event,
-                    saw_any_tool_use,
-                    assistant_message_count,
-                    worker_signal = ?output.worker_signal,
-                    reviewer_verdict = ?output.reviewer_verdict,
-                    epic_verdict = ?output.epic_verdict,
-                    runtime_error = ?output.runtime_error,
-                    reviewer_feedback = ?output.reviewer_feedback,
-                    assistant_fragments = ?assistant_fragments,
-                    "Supervisor: required marker missing at session end"
-                );
-                let reason = if !saw_any_tool_use {
-                    match agent_type {
-                        AgentType::Worker | AgentType::ConflictResolver => "worker ended without any tool use (provider error?)",
-                        AgentType::TaskReviewer => "task reviewer ended without any tool use (provider error?)",
-                        AgentType::EpicReviewer => "epic reviewer ended without any tool use (provider error?)",
-                    }
-                } else {
-                    match agent_type {
-                        AgentType::Worker | AgentType::ConflictResolver => "worker ended without WORKER_RESULT marker",
-                        AgentType::TaskReviewer => "task reviewer ended without REVIEW_RESULT marker",
-                        AgentType::EpicReviewer => "epic reviewer ended without EPIC_REVIEW_RESULT marker",
-                    }
-                };
-                return Err(anyhow::anyhow!(reason));
-            }
-
-            Ok(())
-        }
-        .await;
-
-        let msg = match &run_result {
-            Ok(()) => SupervisorMessage::SessionCompleted {
-                task_id: task_id.clone(),
-                result: Ok(()),
-                output,
-            },
-            Err(e) => SupervisorMessage::SessionCompleted {
-                task_id: task_id.clone(),
-                result: Err(e.to_string()),
-                output,
-            },
-        };
-        let _ = sender.send(msg).await;
-
-        run_result
-    })
+pub(super) struct LifecycleHandle {
+    pub(super) join: tokio::task::JoinHandle<anyhow::Result<()>>,
+    pub(super) kill: CancellationToken,
+    pub(super) pause: CancellationToken,
+    pub(super) model_id: String,
+    pub(super) project_id: String,
+    pub(super) started_at: Instant,
 }
 
 pub(super) struct AgentSupervisor {
     pub(super) receiver: mpsc::Receiver<SupervisorMessage>,
+    pub(super) slot_event_rx: mpsc::Receiver<SlotEvent>,
+    pub(super) slot_event_tx: mpsc::Sender<SlotEvent>,
+    pub(super) lifecycle_handles: HashMap<String, LifecycleHandle>,
     pub(super) sessions: HashMap<String, GooseSessionHandle>,
     pub(super) capacity: HashMap<String, ModelCapacity>,
     pub(super) session_models: HashMap<String, String>,
@@ -647,8 +157,6 @@ pub(super) struct AgentSupervisor {
     pub(super) session_projects: HashMap<String, String>,
     pub(super) task_session_records: HashMap<String, String>,
     pub(super) interrupted_sessions: HashSet<String>,
-    /// Tasks currently undergoing compaction (no active session, but not stuck).
-    pub(super) compacting_tasks: HashSet<String>,
     /// Tasks fully owned by the supervisor: from dispatch start through post-session
     /// completion (verification, commit, transition, cleanup). Prevents stuck detection
     /// from false-positiving during the sessionless post-session window.
@@ -658,18 +166,17 @@ pub(super) struct AgentSupervisor {
     pub(super) session_manager: Arc<SessionManager>,
     pub(super) app_state: AppState,
     pub(super) cancel: CancellationToken,
-    pub(super) sender: mpsc::Sender<SupervisorMessage>,
 }
 
 impl AgentSupervisor {
     pub(super) fn new(
         receiver: mpsc::Receiver<SupervisorMessage>,
-        sender: mpsc::Sender<SupervisorMessage>,
         app_state: AppState,
         session_manager: Arc<SessionManager>,
         cancel: CancellationToken,
     ) -> Self {
         register_goose_builtin_extensions();
+        let (slot_event_tx, slot_event_rx) = mpsc::channel(64);
         // Disable Goose's built-in auto-compaction so Djinn owns the compaction lifecycle entirely.
         // check_if_compaction_needed() returns false when threshold <= 0.0 || threshold >= 1.0.
         if let Err(e) = GooseConfig::global().set_param("GOOSE_AUTO_COMPACT_THRESHOLD", 0.0f64) {
@@ -677,6 +184,9 @@ impl AgentSupervisor {
         }
         Self {
             receiver,
+            slot_event_rx,
+            slot_event_tx,
+            lifecycle_handles: HashMap::new(),
             sessions: HashMap::new(),
             capacity: HashMap::new(),
             session_models: HashMap::new(),
@@ -684,14 +194,12 @@ impl AgentSupervisor {
             session_projects: HashMap::new(),
             task_session_records: HashMap::new(),
             interrupted_sessions: HashSet::new(),
-            compacting_tasks: HashSet::new(),
             in_flight: HashSet::new(),
             default_max_sessions: 1,
             configured_model_limits: HashMap::new(),
             session_manager,
             app_state,
             cancel,
-            sender,
         }
     }
 
@@ -702,7 +210,11 @@ impl AgentSupervisor {
             .unwrap_or(self.default_max_sessions)
     }
 
-    pub(super) fn apply_session_limits(&mut self, max_sessions: HashMap<String, u32>, default_max: u32) {
+    pub(super) fn apply_session_limits(
+        &mut self,
+        max_sessions: HashMap<String, u32>,
+        default_max: u32,
+    ) {
         self.default_max_sessions = default_max.max(1);
         self.configured_model_limits = max_sessions
             .into_iter()
@@ -727,38 +239,16 @@ impl AgentSupervisor {
         }
     }
 
-    pub(super) fn parse_model_id(model_id: &str) -> Result<(String, String), SupervisorError> {
-        let Some((provider_id, model_name)) = model_id.split_once('/') else {
-            return Err(SupervisorError::InvalidModelId {
-                model_id: model_id.to_owned(),
-            });
-        };
-        Ok((provider_id.to_owned(), model_name.to_owned()))
-    }
-
-    pub(super) fn extensions_for(&self, agent_type: AgentType) -> Vec<goose::config::ExtensionConfig> {
-        vec![extension::config(agent_type)]
-    }
-
     pub(super) fn spawn_mock_session(&mut self, task_id: String, model_id: String) {
         let session_cancel = CancellationToken::new();
         let session_cancel_for_join = session_cancel.clone();
         let global_cancel = self.cancel.clone();
-        let task_id_for_join = task_id.clone();
-        let sender = self.sender.clone();
 
         let join = tokio::spawn(async move {
             tokio::select! {
                 _ = session_cancel_for_join.cancelled() => {}
                 _ = global_cancel.cancelled() => {}
             }
-            let _ = sender
-                .send(SupervisorMessage::SessionCompleted {
-                    task_id: task_id_for_join,
-                    result: Ok(()),
-                    output: ParsedAgentOutput::default(),
-                })
-                .await;
             Ok(())
         });
 
@@ -800,10 +290,7 @@ impl AgentSupervisorHandle {
         cancel: CancellationToken,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(32);
-        tokio::spawn(
-            AgentSupervisor::new(receiver, sender.clone(), app_state, session_manager, cancel)
-                .run(),
-        );
+        tokio::spawn(AgentSupervisor::new(receiver, app_state, session_manager, cancel).run());
         Self { sender }
     }
 

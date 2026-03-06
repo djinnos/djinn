@@ -207,10 +207,8 @@ impl AgentSupervisor {
     }
 
     pub(super) async fn default_target_branch(&self, project_id: &str) -> String {
-        let repo = ProjectRepository::new(
-            self.app_state.db().clone(),
-            self.app_state.events().clone(),
-        );
+        let repo =
+            ProjectRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
         if let Ok(Some(config)) = repo.get_config(project_id).await {
             return config.target_branch;
         }

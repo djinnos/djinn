@@ -115,40 +115,41 @@ pub(super) async fn board_reconcile_impl(
                         .collect();
 
                     if !batch_dirs.is_empty()
-                        && let Ok(git) = server.state.git_actor(&project_path).await {
-                            for batch_dir in batch_dirs {
-                                let batch_str = batch_dir.display().to_string();
-                                if active_worktree_paths.contains(&batch_str) {
-                                    continue;
-                                }
-                                tracing::info!(
+                        && let Ok(git) = server.state.git_actor(&project_path).await
+                    {
+                        for batch_dir in batch_dirs {
+                            let batch_str = batch_dir.display().to_string();
+                            if active_worktree_paths.contains(&batch_str) {
+                                continue;
+                            }
+                            tracing::info!(
+                                project_id = %project_id,
+                                worktree = %batch_dir.display(),
+                                "board_reconcile: removing stale batch-* worktree"
+                            );
+                            if let Err(e) = git.remove_worktree(&batch_dir).await {
+                                tracing::warn!(
                                     project_id = %project_id,
                                     worktree = %batch_dir.display(),
-                                    "board_reconcile: removing stale batch-* worktree"
+                                    error = %e,
+                                    "board_reconcile: failed to remove stale batch worktree"
                                 );
-                                if let Err(e) = git.remove_worktree(&batch_dir).await {
-                                    tracing::warn!(
-                                        project_id = %project_id,
-                                        worktree = %batch_dir.display(),
-                                        error = %e,
-                                        "board_reconcile: failed to remove stale batch worktree"
-                                    );
-                                } else {
-                                    stale_batch_worktrees.push(
-                                        batch_dir
-                                            .file_name()
-                                            .unwrap_or_default()
-                                            .to_string_lossy()
-                                            .into_owned(),
-                                    );
-                                }
-                            }
-                            if !stale_batch_worktrees.is_empty() {
-                                let _ = git
-                                    .run_command(vec!["worktree".into(), "prune".into()])
-                                    .await;
+                            } else {
+                                stale_batch_worktrees.push(
+                                    batch_dir
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .into_owned(),
+                                );
                             }
                         }
+                        if !stale_batch_worktrees.is_empty() {
+                            let _ = git
+                                .run_command(vec!["worktree".into(), "prune".into()])
+                                .await;
+                        }
+                    }
                 }
             }
 

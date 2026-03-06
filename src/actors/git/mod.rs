@@ -414,10 +414,7 @@ impl GitActor {
     ///
     /// Uses `-D` because squash merges don't produce a merge commit, so git
     /// considers task branches "unmerged" even after a successful squash.
-    pub(super) async fn delete_branch_impl(
-        path: PathBuf,
-        branch: String,
-    ) -> Result<(), GitError> {
+    pub(super) async fn delete_branch_impl(path: PathBuf, branch: String) -> Result<(), GitError> {
         // Force-delete local branch.
         Self::run_git_command(
             path.clone(),

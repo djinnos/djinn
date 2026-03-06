@@ -15,8 +15,8 @@ mod types;
 pub use types::*;
 
 mod reads;
-mod writes;
 mod search;
+mod writes;
 
 // ── Router composition ────────────────────────────────────────────────────────
 
@@ -72,9 +72,10 @@ async fn resolve_note_by_identifier(
     }
     // Fallback: search by title
     if let Ok(results) = repo.search(project_id, identifier, None, None, 1).await
-        && let Some(r) = results.into_iter().next() {
-            return repo.get(&r.id).await.ok().flatten();
-        }
+        && let Some(r) = results.into_iter().next()
+    {
+        return repo.get(&r.id).await.ok().flatten();
+    }
     None
 }
 

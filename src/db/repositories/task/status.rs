@@ -55,7 +55,9 @@ impl TaskRepository {
             }
         }
 
-        let to_status = apply.to_status.expect("all transitions must have a target status");
+        let to_status = apply
+            .to_status
+            .expect("all transitions must have a target status");
         let to_str = to_status.as_str();
         let from_str = from.as_str();
 

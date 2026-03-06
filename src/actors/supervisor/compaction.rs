@@ -367,7 +367,10 @@ impl AgentSupervisor {
         // For reviewers: compaction won't help (the prompt itself exceeds the
         // context window). Release gracefully and block the task so it doesn't
         // loop endlessly with the same model.
-        if matches!(agent_type, AgentType::TaskReviewer | AgentType::EpicReviewer) {
+        if matches!(
+            agent_type,
+            AgentType::TaskReviewer | AgentType::EpicReviewer
+        ) {
             tracing::warn!(
                 task_id = %task_id,
                 agent_type = %agent_type.as_str(),
@@ -401,10 +404,8 @@ impl AgentSupervisor {
                 self.app_state.health_tracker().record_failure(model_id);
                 self.app_state.persist_model_health_state().await;
             }
-            let repo = TaskRepository::new(
-                self.app_state.db().clone(),
-                self.app_state.events().clone(),
-            );
+            let repo =
+                TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
             let reason = "context_length_exceeded: review prompt too large for current model";
             let _ = repo
                 .transition(

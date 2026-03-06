@@ -18,10 +18,8 @@ mod graph;
 mod indexing;
 mod search;
 
-pub use file_helpers::{
-    file_path_for, folder_for_type, is_singleton, permalink_for, slugify,
-};
 use file_helpers::{build_catalog, write_note_file};
+pub use file_helpers::{file_path_for, folder_for_type, is_singleton, permalink_for, slugify};
 use indexing::{index_links_for_note, resolve_links_for_note};
 
 // ── SQL constant ─────────────────────────────────────────────────────────────

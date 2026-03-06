@@ -130,9 +130,10 @@ impl SyncManager {
         for ch in REGISTERED_CHANNELS {
             let key = format!("sync.{}.project", ch.name);
             if let Ok(Some(s)) = repo.get(&key).await
-                && let Some(st) = states.get_mut(ch.name) {
-                    st.project_path = Some(PathBuf::from(s.value));
-                }
+                && let Some(st) = states.get_mut(ch.name)
+            {
+                st.project_path = Some(PathBuf::from(s.value));
+            }
         }
     }
 
@@ -489,11 +490,12 @@ fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 
     let mut y = 1970u32;
     loop {
-        let days_in_year: u64 = if y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400)) {
-            366
-        } else {
-            365
-        };
+        let days_in_year: u64 =
+            if y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400)) {
+                366
+            } else {
+                365
+            };
         if days < days_in_year {
             break;
         }

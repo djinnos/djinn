@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
+use crate::agent::output_parser::ParsedAgentOutput;
 use crate::agent::{AgentType, SessionManager};
 use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
@@ -13,7 +14,6 @@ use crate::db::repositories::task::TaskRepository;
 use crate::models::session::{SessionRecord, SessionStatus};
 use crate::models::task::{Task, TransitionAction};
 use crate::server::AppState;
-use crate::agent::output_parser::ParsedAgentOutput;
 use goose::providers;
 
 use super::*;
@@ -149,8 +149,7 @@ pub(crate) async fn last_assistant_text_from_goose_sqlite(
     goose_session_id: &str,
 ) -> Option<String> {
     for db_path in goose_session_db_candidates() {
-        let Some(text) =
-            last_assistant_text_from_goose_sqlite_at(&db_path, goose_session_id).await
+        let Some(text) = last_assistant_text_from_goose_sqlite_at(&db_path, goose_session_id).await
         else {
             continue;
         };
@@ -298,10 +297,7 @@ pub(crate) async fn update_session_record_paused(
 
 // ─── Task / project helpers ───────────────────────────────────────────────────
 
-pub(crate) async fn load_task(
-    task_id: &str,
-    app_state: &AppState,
-) -> anyhow::Result<Task> {
+pub(crate) async fn load_task(task_id: &str, app_state: &AppState) -> anyhow::Result<Task> {
     let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     let task = repo
         .get(task_id)
@@ -340,8 +336,7 @@ pub(crate) async fn active_epic_batch_for_task(
     task_id: &str,
     app_state: &AppState,
 ) -> Option<String> {
-    let repo =
-        EpicReviewBatchRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = EpicReviewBatchRepository::new(app_state.db().clone(), app_state.events().clone());
     repo.active_batch_for_task(task_id)
         .await
         .ok()
@@ -426,14 +421,15 @@ pub(crate) async fn resume_context_for_task(task_id: &str, app_state: &AppState)
     let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
 
     for entry in activity.iter().rev() {
-        if entry.event_type == "comment" && entry.actor_role == "task_reviewer"
+        if entry.event_type == "comment"
+            && entry.actor_role == "task_reviewer"
             && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
-                && let Some(body) = payload.get("body").and_then(|v| v.as_str())
-            {
-                return format!(
-                    "Your previous work was reviewed and returned with this feedback:\n\n{body}\n\nAddress this feedback, make the necessary changes, then emit:\nWORKER_RESULT: DONE"
-                );
-            }
+            && let Some(body) = payload.get("body").and_then(|v| v.as_str())
+        {
+            return format!(
+                "Your previous work was reviewed and returned with this feedback:\n\n{body}\n\nAddress this feedback, make the necessary changes, then emit:\nWORKER_RESULT: DONE"
+            );
+        }
     }
 
     if let Some(context) = merge_validation_context_for_dispatch(task_id, app_state).await {
@@ -442,18 +438,19 @@ pub(crate) async fn resume_context_for_task(task_id: &str, app_state: &AppState)
 
     for entry in activity.iter().rev() {
         if entry.event_type == "merge_conflict"
-            && let Ok(meta) = serde_json::from_str::<MergeConflictMetadata>(&entry.payload) {
-                let files = meta
-                    .conflicting_files
-                    .iter()
-                    .map(|f| format!("- {f}"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return format!(
-                    "A merge conflict was detected when merging your branch into `{}`. Resolve the conflicts in these files:\n\n{files}\n\nAfter resolving, commit and emit:\nWORKER_RESULT: DONE",
-                    meta.merge_target
-                );
-            }
+            && let Ok(meta) = serde_json::from_str::<MergeConflictMetadata>(&entry.payload)
+        {
+            let files = meta
+                .conflicting_files
+                .iter()
+                .map(|f| format!("- {f}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return format!(
+                "A merge conflict was detected when merging your branch into `{}`. Resolve the conflicts in these files:\n\n{files}\n\nAfter resolving, commit and emit:\nWORKER_RESULT: DONE",
+                meta.merge_target
+            );
+        }
     }
 
     "Your previous submission needs revision. Review your work, address any issues, then emit:\nWORKER_RESULT: DONE".to_string()
@@ -470,9 +467,7 @@ pub(crate) async fn transition_start(
         (AgentType::Worker, "open") | (AgentType::ConflictResolver, "open") => {
             Some(TransitionAction::Start)
         }
-        (AgentType::TaskReviewer, "needs_task_review") => {
-            Some(TransitionAction::TaskReviewStart)
-        }
+        (AgentType::TaskReviewer, "needs_task_review") => Some(TransitionAction::TaskReviewStart),
         _ => None,
     };
 
@@ -539,10 +534,7 @@ pub(crate) async fn resolve_goose_provider_id(provider_id: &str) -> String {
         .unwrap_or_else(|| provider_id.to_string())
 }
 
-pub(crate) async fn provider_supports_oauth(
-    _provider_id: &str,
-    goose_provider_id: &str,
-) -> bool {
+pub(crate) async fn provider_supports_oauth(_provider_id: &str, goose_provider_id: &str) -> bool {
     let entries = providers::providers().await;
     entries
         .iter()
@@ -579,7 +571,9 @@ pub(crate) async fn load_provider_api_key(
 
 pub(crate) fn parse_model_id(model_id: &str) -> anyhow::Result<(String, String)> {
     let Some((provider_id, model_name)) = model_id.split_once('/') else {
-        return Err(anyhow::anyhow!("invalid model id '{model_id}', expected provider/model"));
+        return Err(anyhow::anyhow!(
+            "invalid model id '{model_id}', expected provider/model"
+        ));
     };
     Ok((provider_id.to_owned(), model_name.to_owned()))
 }
@@ -616,11 +610,7 @@ pub(crate) fn extensions_for(agent_type: AgentType) -> Vec<goose::config::Extens
                 description: "Write and edit files, list directory trees".to_string(),
                 display_name: None,
                 bundled: None,
-                available_tools: vec![
-                    "write".to_string(),
-                    "edit".to_string(),
-                    "tree".to_string(),
-                ],
+                available_tools: vec!["write".to_string(), "edit".to_string(), "tree".to_string()],
             });
             exts.push(ExtensionConfig::Platform {
                 name: "summon".to_string(),
@@ -672,9 +662,9 @@ pub(crate) fn missing_marker_nudge(
     }
 
     match agent_type {
-        AgentType::Worker | AgentType::ConflictResolver => Some(
-            "Emit exactly one final marker now: WORKER_RESULT: DONE.",
-        ),
+        AgentType::Worker | AgentType::ConflictResolver => {
+            Some("Emit exactly one final marker now: WORKER_RESULT: DONE.")
+        }
         AgentType::TaskReviewer => Some(
             "Emit exactly one final marker now: REVIEW_RESULT: VERIFIED | REOPEN | CANCEL. If REOPEN or CANCEL, also emit FEEDBACK: <what is missing>.",
         ),

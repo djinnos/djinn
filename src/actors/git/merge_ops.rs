@@ -121,11 +121,8 @@ impl GitActor {
                 ],
             )
             .await;
-            let _ = Self::run_git_command(
-                path.clone(),
-                vec!["worktree".into(), "prune".into()],
-            )
-            .await;
+            let _ =
+                Self::run_git_command(path.clone(), vec!["worktree".into(), "prune".into()]).await;
 
             match merge_result {
                 Ok(result) => return Ok(result),

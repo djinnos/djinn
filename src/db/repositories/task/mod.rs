@@ -237,7 +237,11 @@ pub(super) fn is_constraint_violation(db_err: &dyn sqlx::error::DatabaseError) -
         || db_err.message().contains("constraint failed")
 }
 
-pub(super) async fn short_id_exists(pool: &SqlitePool, table: &str, short_id: &str) -> Result<bool> {
+pub(super) async fn short_id_exists(
+    pool: &SqlitePool,
+    table: &str,
+    short_id: &str,
+) -> Result<bool> {
     let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE short_id = ?1)");
     Ok(sqlx::query_scalar::<_, i64>(&sql)
         .bind(short_id)

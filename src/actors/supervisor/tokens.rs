@@ -62,19 +62,6 @@ impl AgentSupervisor {
         None
     }
 
-    pub(super) async fn last_assistant_text_from_goose_sqlite(goose_session_id: &str) -> Option<String> {
-        for db_path in Self::goose_session_db_candidates() {
-            let Some(text) =
-                Self::last_assistant_text_from_goose_sqlite_at(&db_path, goose_session_id).await
-            else {
-                continue;
-            };
-            return Some(text);
-        }
-
-        None
-    }
-
     fn goose_session_db_candidates() -> Vec<PathBuf> {
         let mut candidates = Vec::new();
 
@@ -125,57 +112,5 @@ impl AgentSupervisor {
         .ok()??;
 
         Some(row)
-    }
-
-    pub(super) async fn last_assistant_text_from_goose_sqlite_at(
-        db_path: &Path,
-        goose_session_id: &str,
-    ) -> Option<String> {
-        if !db_path.exists() {
-            return None;
-        }
-
-        let options = SqliteConnectOptions::new()
-            .filename(db_path)
-            .read_only(true)
-            .create_if_missing(false)
-            .busy_timeout(Duration::from_secs(1));
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .ok()?;
-
-        let content_json = sqlx::query_scalar::<_, String>(
-            "SELECT content_json FROM messages WHERE session_id = ?1 AND role = 'assistant' ORDER BY id DESC LIMIT 1",
-        )
-        .bind(goose_session_id)
-        .fetch_optional(&pool)
-        .await
-        .ok()??;
-
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content_json)
-            && let Some(items) = value.as_array()
-        {
-            let mut text_parts = Vec::new();
-            for item in items {
-                let is_text = item
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|t| t == "text");
-                if !is_text {
-                    continue;
-                }
-                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                    text_parts.push(text);
-                }
-            }
-            if !text_parts.is_empty() {
-                return Some(text_parts.join("\n"));
-            }
-        }
-
-        Some(content_json)
     }
 }

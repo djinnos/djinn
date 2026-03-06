@@ -9,6 +9,10 @@ impl AgentSupervisor {
                     self.shutdown().await;
                     break;
                 }
+                evt = self.slot_event_rx.recv() => {
+                    let Some(evt) = evt else { break; };
+                    self.handle_slot_event(evt).await;
+                }
                 msg = self.receiver.recv() => {
                     let Some(msg) = msg else { break; };
                     self.handle(msg).await;
@@ -37,7 +41,7 @@ impl AgentSupervisor {
                 respond_to,
             } => {
                 let active = self.sessions.contains_key(&task_id)
-                    || self.compacting_tasks.contains(&task_id)
+                    || self.lifecycle_handles.contains_key(&task_id)
                     || self.in_flight.contains(&task_id);
                 let _ = respond_to.send(Ok(active));
             }
@@ -55,7 +59,7 @@ impl AgentSupervisor {
             }
             SupervisorMessage::GetStatus { respond_to } => {
                 let _ = respond_to.send(Ok(SupervisorStatus {
-                    active_sessions: self.sessions.len(),
+                    active_sessions: self.sessions.len() + self.lifecycle_handles.len(),
                     capacity: self.capacity.clone(),
                     running_sessions: self.running_sessions_snapshot(),
                 }));
@@ -68,6 +72,17 @@ impl AgentSupervisor {
                     .sessions
                     .get(&task_id)
                     .map(|handle| self.session_snapshot(&task_id, handle));
+                let session = session.or_else(|| {
+                    self.lifecycle_handles
+                        .get(&task_id)
+                        .map(|h| RunningSessionInfo {
+                            task_id: task_id.clone(),
+                            model_id: h.model_id.clone(),
+                            session_id: "lifecycle".to_string(),
+                            duration_seconds: h.started_at.elapsed().as_secs(),
+                            worktree_path: None,
+                        })
+                });
                 let _ = respond_to.send(Ok(session));
             }
             SupervisorMessage::InterruptAll { reason, respond_to } => {
@@ -90,111 +105,22 @@ impl AgentSupervisor {
                 self.apply_session_limits(max_sessions, default_max);
                 let _ = respond_to.send(Ok(()));
             }
-            SupervisorMessage::SessionCompleted {
-                task_id,
-                result,
-                output,
+        }
+    }
+
+    pub(super) async fn handle_slot_event(&mut self, evt: SlotEvent) {
+        match evt {
+            SlotEvent::Free {
+                model_id, task_id, ..
+            }
+            | SlotEvent::Killed {
+                model_id, task_id, ..
             } => {
-                if self.interrupted_sessions.remove(&task_id) {
-                    tracing::info!(task_id = %task_id, "Supervisor: ignoring completion for interrupted session");
-                    self.in_flight.remove(&task_id);
-                    return;
+                let had_handle = self.lifecycle_handles.remove(&task_id).is_some();
+                if had_handle {
+                    self.decrement_capacity_for_model(Some(&model_id));
                 }
-                tracing::info!(
-                    task_id = %task_id,
-                    result = if result.is_ok() { "ok" } else { "error" },
-                    "Supervisor: session completion received"
-                );
-
-                // Detect context exhaustion and trigger a fresh continuation
-                // instead of failing/releasing the task.
-                if self.maybe_compact_on_context_exhaustion(&task_id, &result, &output).await {
-                    return;
-                }
-
-                let session = self.remove_session(&task_id);
-                self.handle_session_result(&task_id, session, result, output)
-                    .await;
-                // Remove in_flight AFTER all post-session work (verification, commit,
-                // transition, cleanup) is done. If handle_session_result queued a
-                // ResumeSession (verification failure path), this removal is safe:
-                // no HasSession query can be processed between this remove and the
-                // re-insert in dispatch_resume since the actor is still in its loop.
                 self.in_flight.remove(&task_id);
-            }
-            SupervisorMessage::ResumeSession {
-                task_id,
-                model_id,
-                goose_session_id,
-                worktree_path,
-                resume_prompt,
-                tokens_in,
-                old_record_id,
-            } => {
-                if let Err(e) = self
-                    .dispatch_resume(
-                        task_id.clone(),
-                        model_id,
-                        goose_session_id,
-                        worktree_path,
-                        resume_prompt,
-                        tokens_in,
-                        old_record_id,
-                    )
-                    .await
-                {
-                    tracing::warn!(error = %e, "Supervisor: failed to dispatch resume session after verification failure");
-                    self.in_flight.remove(&task_id);
-                }
-            }
-            SupervisorMessage::CompactionNeeded {
-                task_id,
-                old_goose_session_id,
-                tokens_in,
-                context_window,
-            } => {
-                self.handle_compaction_needed(
-                    task_id,
-                    old_goose_session_id,
-                    tokens_in,
-                    context_window,
-                )
-                .await;
-            }
-            SupervisorMessage::CompactionComplete {
-                task_id,
-                model_id,
-                agent_type,
-                project_id,
-                new_goose_session_id,
-                new_record_id,
-                agent,
-                worktree_path,
-                summary,
-                context_window,
-            } => {
-                self.handle_compaction_complete(
-                    task_id,
-                    model_id,
-                    agent_type,
-                    project_id,
-                    new_goose_session_id,
-                    new_record_id,
-                    agent,
-                    worktree_path,
-                    summary,
-                    context_window,
-                )
-                .await;
-            }
-            SupervisorMessage::CompactionAborted {
-                task_id,
-                model_id,
-                agent_type,
-                worktree_path,
-            } => {
-                self.handle_compaction_aborted(task_id, model_id, agent_type, worktree_path)
-                    .await;
             }
         }
     }

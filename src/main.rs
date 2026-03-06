@@ -126,9 +126,10 @@ impl ServerHandler for StdioBridge {
         request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        self.upstream.list_tools(request).await.map_err(|e| {
-            McpError::internal_error(format!("upstream list_tools failed: {e}"), None)
-        })
+        self.upstream
+            .list_tools(request)
+            .await
+            .map_err(|e| McpError::internal_error(format!("upstream list_tools failed: {e}"), None))
     }
 
     async fn call_tool(
@@ -136,9 +137,10 @@ impl ServerHandler for StdioBridge {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        self.upstream.call_tool(request).await.map_err(|e| {
-            McpError::internal_error(format!("upstream call_tool failed: {e}"), None)
-        })
+        self.upstream
+            .call_tool(request)
+            .await
+            .map_err(|e| McpError::internal_error(format!("upstream call_tool failed: {e}"), None))
     }
 }
 

@@ -25,8 +25,7 @@ pub(crate) async fn prepare_worktree(
         .join("worktrees")
         .join(&task.short_id);
 
-    let session_repo =
-        SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
     let has_paused_session = session_repo
         .paused_for_task(&task.id)
         .await
@@ -290,22 +289,18 @@ pub(crate) async fn commit_final_work_if_needed(
     Ok(())
 }
 
-pub(crate) async fn cleanup_worktree(
-    task_id: &str,
-    worktree_path: &Path,
-    app_state: &AppState,
-) {
-    let session_repo =
-        SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+pub(crate) async fn cleanup_worktree(task_id: &str, worktree_path: &Path, app_state: &AppState) {
+    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
     if let Ok(Some(paused)) = session_repo.paused_for_task(task_id).await
-        && paused.worktree_path.as_deref() == Some(worktree_path.to_str().unwrap_or("")) {
-            tracing::info!(
-                task_id = %task_id,
-                worktree = %worktree_path.display(),
-                "Lifecycle: skipping worktree cleanup — paused session still references it"
-            );
-            return;
-        }
+        && paused.worktree_path.as_deref() == Some(worktree_path.to_str().unwrap_or(""))
+    {
+        tracing::info!(
+            task_id = %task_id,
+            worktree = %worktree_path.display(),
+            "Lifecycle: skipping worktree cleanup — paused session still references it"
+        );
+        return;
+    }
 
     let task = match load_task(task_id, app_state).await {
         Ok(task) => task,

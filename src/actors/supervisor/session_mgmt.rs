@@ -1,35 +1,6 @@
 use super::*;
 
 impl AgentSupervisor {
-    pub(super) fn remove_session(&mut self, task_id: &str) -> SessionClosure {
-        let removed = self.sessions.remove(task_id);
-        let goose_session_id = removed
-            .as_ref()
-            .map(|h| h.session_id.clone())
-            .unwrap_or_else(|| format!("unknown-session-{task_id}"));
-        self.decrement_capacity(task_id);
-        self.session_projects.remove(task_id);
-        SessionClosure {
-            model_id: self.session_models.remove(task_id),
-            agent_type: self
-                .session_agent_types
-                .remove(task_id)
-                .unwrap_or(AgentType::Worker),
-            goose_session_id,
-            record_id: self.task_session_records.remove(task_id),
-            worktree_path: removed.and_then(|h| h.worktree_path),
-        }
-    }
-
-    pub(super) fn decrement_capacity(&mut self, task_id: &str) {
-        if let Some(model_id) = self.session_models.get(task_id)
-            && let Some(model_capacity) = self.capacity.get_mut(model_id)
-            && model_capacity.active > 0
-        {
-            model_capacity.active -= 1;
-        }
-    }
-
     pub(super) fn decrement_capacity_for_model(&mut self, model_id: Option<&str>) {
         if let Some(model_id) = model_id
             && let Some(model_capacity) = self.capacity.get_mut(model_id)
@@ -45,11 +16,24 @@ impl AgentSupervisor {
             .iter()
             .map(|(task_id, handle)| self.session_snapshot(task_id, handle))
             .collect();
+        sessions.extend(self.lifecycle_handles.iter().map(|(task_id, handle)| {
+            RunningSessionInfo {
+                task_id: task_id.clone(),
+                model_id: handle.model_id.clone(),
+                session_id: "lifecycle".to_string(),
+                duration_seconds: handle.started_at.elapsed().as_secs(),
+                worktree_path: None,
+            }
+        }));
         sessions.sort_by(|a, b| a.task_id.cmp(&b.task_id));
         sessions
     }
 
-    pub(super) fn session_snapshot(&self, task_id: &str, handle: &GooseSessionHandle) -> RunningSessionInfo {
+    pub(super) fn session_snapshot(
+        &self,
+        task_id: &str,
+        handle: &GooseSessionHandle,
+    ) -> RunningSessionInfo {
         let model_id = self
             .session_models
             .get(task_id)
@@ -88,7 +72,11 @@ impl AgentSupervisor {
         }
     }
 
-    pub(super) async fn drain_pending_sessions(&mut self, pending: &mut Vec<PendingInterrupt>, reason: &str) {
+    pub(super) async fn drain_pending_sessions(
+        &mut self,
+        pending: &mut Vec<PendingInterrupt>,
+        reason: &str,
+    ) {
         let deadline = Instant::now() + Duration::from_secs(30);
         for item in pending.iter_mut() {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -108,6 +96,7 @@ impl AgentSupervisor {
 
         for item in pending.drain(..) {
             self.decrement_capacity_for_model(item.model_id.as_deref());
+            self.in_flight.remove(&item.task_id);
             if let Some(worktree_path) = item.worktree_path.as_ref() {
                 self.commit_wip_if_needed(&item.task_id, worktree_path)
                     .await;
@@ -127,15 +116,34 @@ impl AgentSupervisor {
     }
 
     pub(super) async fn interrupt_all_sessions(&mut self, reason: &str) {
+        for handle in self.lifecycle_handles.values() {
+            handle.kill.cancel();
+        }
+
         let mut pending: Vec<PendingInterrupt> = Vec::new();
         for (task_id, handle) in std::mem::take(&mut self.sessions) {
             self.session_projects.remove(&task_id);
             pending.push(self.collect_pending_session(task_id, handle));
         }
         self.drain_pending_sessions(&mut pending, reason).await;
+
+        let mut lifecycle_pending = std::mem::take(&mut self.lifecycle_handles);
+        for (task_id, mut handle) in lifecycle_pending.drain() {
+            let _ = tokio::time::timeout(Duration::from_secs(30), &mut handle.join).await;
+            self.decrement_capacity_for_model(Some(&handle.model_id));
+            self.in_flight.remove(&task_id);
+        }
     }
 
     pub(super) async fn interrupt_project_sessions(&mut self, project_id: &str, reason: &str) {
+        for (_task_id, handle) in self
+            .lifecycle_handles
+            .iter()
+            .filter(|(_, h)| h.project_id == project_id)
+        {
+            handle.kill.cancel();
+        }
+
         let matching_task_ids: Vec<String> = self
             .session_projects
             .iter()
@@ -151,42 +159,19 @@ impl AgentSupervisor {
             }
         }
         self.drain_pending_sessions(&mut pending, reason).await;
-    }
 
-    pub(super) fn missing_required_marker(agent_type: AgentType, output: &ParsedAgentOutput) -> bool {
-        match agent_type {
-            AgentType::Worker | AgentType::ConflictResolver => output.worker_signal.is_none(),
-            AgentType::TaskReviewer => output.reviewer_verdict.is_none(),
-            AgentType::EpicReviewer => output.epic_verdict.is_none(),
-        }
-    }
-
-    pub(super) fn missing_marker_nudge(
-        agent_type: AgentType,
-        output: &ParsedAgentOutput,
-    ) -> Option<&'static str> {
-        if !Self::missing_required_marker(agent_type, output) {
-            return None;
-        }
-
-        match agent_type {
-            AgentType::Worker | AgentType::ConflictResolver => Some(
-                "Emit exactly one final marker now: WORKER_RESULT: DONE.",
-            ),
-            AgentType::TaskReviewer => Some(
-                "Emit exactly one final marker now: REVIEW_RESULT: VERIFIED | REOPEN. If REOPEN, also emit FEEDBACK: <what is missing>.",
-            ),
-            AgentType::EpicReviewer => Some(
-                "Emit exactly one final marker now: EPIC_REVIEW_RESULT: CLEAN | ISSUES_FOUND. If ISSUES_FOUND, include concise actionable findings and create follow-up tasks in this epic before finishing.",
-            ),
-        }
-    }
-
-    pub(super) fn agent_type_for_task(&self, task: &Task, has_conflict_context: bool) -> AgentType {
-        match task.status.as_str() {
-            "needs_task_review" | "in_task_review" => AgentType::TaskReviewer,
-            "open" if has_conflict_context => AgentType::ConflictResolver,
-            _ => AgentType::Worker,
+        let lifecycle_task_ids: Vec<String> = self
+            .lifecycle_handles
+            .iter()
+            .filter(|(_, h)| h.project_id == project_id)
+            .map(|(task_id, _)| task_id.clone())
+            .collect();
+        for task_id in lifecycle_task_ids {
+            if let Some(mut handle) = self.lifecycle_handles.remove(&task_id) {
+                let _ = tokio::time::timeout(Duration::from_secs(30), &mut handle.join).await;
+                self.decrement_capacity_for_model(Some(&handle.model_id));
+                self.in_flight.remove(&task_id);
+            }
         }
     }
 }

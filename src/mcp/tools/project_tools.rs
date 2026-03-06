@@ -52,7 +52,6 @@ pub struct ProjectConfigResponse {
     pub sync_remote: Option<String>,
 }
 
-
 #[derive(Serialize, JsonSchema)]
 pub struct ProjectAddResponse {
     pub status: String,
@@ -287,7 +286,6 @@ impl DjinnMcpServer {
         }
     }
 
-
     #[tool(description = "Get project config fields for a project path.")]
     pub async fn project_config_get(
         &self,
@@ -330,11 +328,32 @@ impl DjinnMcpServer {
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
         let project = match repo.get_by_path(&input.project).await {
             Ok(Some(project)) => project,
-            Ok(None) => return Json(ProjectConfigResponse { status: format!("error: project not found: {}", input.project), project: input.project, target_branch: "main".into(), auto_merge: true, sync_enabled: false, sync_remote: None }),
-            Err(e) => return Json(ProjectConfigResponse { status: format!("error: {e}"), project: input.project, target_branch: "main".into(), auto_merge: true, sync_enabled: false, sync_remote: None }),
+            Ok(None) => {
+                return Json(ProjectConfigResponse {
+                    status: format!("error: project not found: {}", input.project),
+                    project: input.project,
+                    target_branch: "main".into(),
+                    auto_merge: true,
+                    sync_enabled: false,
+                    sync_remote: None,
+                });
+            }
+            Err(e) => {
+                return Json(ProjectConfigResponse {
+                    status: format!("error: {e}"),
+                    project: input.project,
+                    target_branch: "main".into(),
+                    auto_merge: true,
+                    sync_enabled: false,
+                    sync_remote: None,
+                });
+            }
         };
 
-        match repo.update_config_field(&project.id, &input.key, &input.value).await {
+        match repo
+            .update_config_field(&project.id, &input.key, &input.value)
+            .await
+        {
             Ok(Some(config)) => Json(ProjectConfigResponse {
                 status: "ok".into(),
                 project: project.path,

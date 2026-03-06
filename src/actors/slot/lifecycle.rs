@@ -13,9 +13,11 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::agent::extension;
 use crate::agent::output_parser::ParsedAgentOutput;
-use crate::agent::{AgentType, SessionManager, SessionType};
+use crate::agent::output_parser::WorkerSignal;
 use crate::agent::prompts::{TaskContext, render_prompt};
+use crate::agent::{AgentType, SessionManager, SessionType};
 use crate::commands::{CommandSpec, run_commands};
 use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
 use crate::db::repositories::project::ProjectRepository;
@@ -24,8 +26,6 @@ use crate::db::repositories::task::TaskRepository;
 use crate::events::DjinnEvent;
 use crate::models::session::SessionStatus;
 use crate::models::task::TransitionAction;
-use crate::agent::output_parser::WorkerSignal;
-use crate::agent::extension;
 use crate::server::AppState;
 
 use super::*;
@@ -59,7 +59,11 @@ async fn run_reply_loop(
     app_state: &AppState,
     context_window: i64,
     session_manager: &Arc<SessionManager>,
-) -> (anyhow::Result<()>, ParsedAgentOutput, Option<CompactionSignal>) {
+) -> (
+    anyhow::Result<()>,
+    ParsedAgentOutput,
+    Option<CompactionSignal>,
+) {
     let mut output = ParsedAgentOutput::new(agent_type);
     let mut compaction_signal: Option<CompactionSignal> = None;
 
@@ -366,28 +370,35 @@ async fn compact_inline(
     resume_context: Option<&str>,
 ) -> Result<CompactResult, String> {
     // 1. Read conversation history, final token counts, and extension data from old session.
-    let (final_tokens_in, final_tokens_out, messages, old_extension_data) =
-        match session_manager.get_session(old_session_id, true).await {
-            Ok(s) => {
-                let tin = s.accumulated_input_tokens.or(s.input_tokens).unwrap_or(0) as i64;
-                let tout = s.accumulated_output_tokens.or(s.output_tokens).unwrap_or(0) as i64;
-                let msgs = s
-                    .conversation
-                    .map(|c| c.messages().clone())
-                    .unwrap_or_default();
-                (tin.max(tokens_in), tout, msgs, Some(s.extension_data))
-            }
-            Err(e) => {
-                tracing::warn!(task_id = %task_id, error = %e, "compaction: failed to read Goose session");
-                (tokens_in, 0, vec![], None)
-            }
-        };
+    let (final_tokens_in, final_tokens_out, messages, old_extension_data) = match session_manager
+        .get_session(old_session_id, true)
+        .await
+    {
+        Ok(s) => {
+            let tin = s.accumulated_input_tokens.or(s.input_tokens).unwrap_or(0) as i64;
+            let tout = s.accumulated_output_tokens.or(s.output_tokens).unwrap_or(0) as i64;
+            let msgs = s
+                .conversation
+                .map(|c| c.messages().clone())
+                .unwrap_or_default();
+            (tin.max(tokens_in), tout, msgs, Some(s.extension_data))
+        }
+        Err(e) => {
+            tracing::warn!(task_id = %task_id, error = %e, "compaction: failed to read Goose session");
+            (tokens_in, 0, vec![], None)
+        }
+    };
 
     // 2. Finalize old Djinn session record.
     if let Some(record_id) = old_record_id {
         let repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
         if let Err(e) = repo
-            .update(record_id, SessionStatus::Compacted, final_tokens_in, final_tokens_out)
+            .update(
+                record_id,
+                SessionStatus::Compacted,
+                final_tokens_in,
+                final_tokens_out,
+            )
             .await
         {
             tracing::warn!(record_id = %record_id, error = %e, "compaction: failed to finalize old session record");
@@ -404,13 +415,12 @@ async fn compact_inline(
         "Context window was compacted. Please review the current state of the worktree and continue the task.".to_string()
     } else {
         let compaction_system = crate::agent::prompts::render_compaction_prompt();
-        let summary_provider =
-            providers::create(goose_provider_id, goose_model.clone(), vec![])
-                .await
-                .map_err(|e| {
-                    app_state.health_tracker().record_failure(model_id);
-                    format!("compaction: summary provider creation failed: {e}")
-                })?;
+        let summary_provider = providers::create(goose_provider_id, goose_model.clone(), vec![])
+            .await
+            .map_err(|e| {
+                app_state.health_tracker().record_failure(model_id);
+                format!("compaction: summary provider creation failed: {e}")
+            })?;
         let model_config = summary_provider.get_model_config();
         summary_provider
             .complete(
@@ -425,9 +435,7 @@ async fn compact_inline(
                 tracing::info!(task_id = %task_id, "compaction: summary generated successfully");
                 msg.as_concat_text()
             })
-            .map_err(|e| {
-                format!("compaction: summary generation failed: {e}")
-            })?
+            .map_err(|e| format!("compaction: summary generation failed: {e}"))?
     };
 
     // 4. Create new Goose session.
@@ -444,15 +452,14 @@ async fn compact_inline(
         .map_err(|e| format!("compaction: failed to create new Goose session: {e}"))?;
 
     // 4b. Carry over extension_data (todo state, etc.) from old session.
-    if let Some(ext_data) = old_extension_data {
-        if let Err(e) = session_manager
+    if let Some(ext_data) = old_extension_data
+        && let Err(e) = session_manager
             .update(&new_goose_session.id)
             .extension_data(ext_data)
             .apply()
             .await
-        {
-            tracing::warn!(task_id = %task_id, error = %e, "compaction: failed to carry over extension_data");
-        }
+    {
+        tracing::warn!(task_id = %task_id, error = %e, "compaction: failed to carry over extension_data");
     }
 
     // 5. Create new Djinn session record.
@@ -551,6 +558,7 @@ async fn compact_inline(
 ///
 /// Sends `SlotEvent::Free` on normal completion and `SlotEvent::Killed` when
 /// cancelled via `cancel`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_task_lifecycle(
     task_id: String,
     project_path: String,
@@ -558,6 +566,7 @@ pub async fn run_task_lifecycle(
     app_state: AppState,
     session_manager: Arc<SessionManager>,
     cancel: CancellationToken,
+    pause: CancellationToken,
     event_tx: mpsc::Sender<SlotEvent>,
 ) -> anyhow::Result<()> {
     // Helper macros for emitting slot events on exit.
@@ -588,6 +597,9 @@ pub async fn run_task_lifecycle(
 
     if cancel.is_cancelled() {
         return_killed!();
+    }
+    if pause.is_cancelled() {
+        return_free!();
     }
 
     // ── Load task ──────────────────────────────────────────────────────────────
@@ -655,10 +667,101 @@ pub async fn run_task_lifecycle(
         }
     }
 
-    // ── Prepare worktree ───────────────────────────────────────────────────────
+    // ── Prepare worktree / paused-session resume context ──────────────────────
     let session_name = format!("{} {}", task.short_id, task.title);
     let project_dir = PathBuf::from(&project_path);
-    let worktree_path = if agent_type == AgentType::EpicReviewer {
+    let mut resumed_session_id: Option<String> = None;
+    let mut resumed_record_id: Option<String> = None;
+    let mut resumed_kickoff: Option<GooseMessage> = None;
+
+    let paused = if agent_type == AgentType::EpicReviewer {
+        None
+    } else {
+        find_paused_session_record(&task_id, &app_state).await
+    };
+
+    let worktree_path = if let Some(paused) = paused {
+        if let (Some(paused_session_id), Some(paused_worktree_path)) = (
+            paused.goose_session_id.clone(),
+            paused.worktree_path.as_deref().map(PathBuf::from),
+        ) {
+            if paused.model_id != model_id {
+                tracing::info!(
+                    task_id = %task_id,
+                    paused_model_id = %paused.model_id,
+                    requested_model_id = %model_id,
+                    "Lifecycle: paused session model mismatch; starting fresh session"
+                );
+                match prepare_worktree(&project_dir, &task, &app_state).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed");
+                        transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state)
+                            .await;
+                        return_free!();
+                    }
+                }
+            } else if paused.agent_type != agent_type.as_str() {
+                tracing::info!(
+                    task_id = %task_id,
+                    paused_agent_type = %paused.agent_type,
+                    needed_agent_type = %agent_type.as_str(),
+                    "Lifecycle: paused session agent type mismatch; starting fresh session"
+                );
+                match prepare_worktree(&project_dir, &task, &app_state).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed");
+                        transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state)
+                            .await;
+                        return_free!();
+                    }
+                }
+            } else if !paused_worktree_path.exists() || !paused_worktree_path.is_dir() {
+                let session_repo =
+                    SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+                let _ = session_repo
+                    .update(
+                        &paused.id,
+                        SessionStatus::Interrupted,
+                        paused.tokens_in,
+                        paused.tokens_out,
+                    )
+                    .await;
+                tracing::warn!(
+                    task_id = %task_id,
+                    session_record_id = %paused.id,
+                    worktree = %paused_worktree_path.display(),
+                    "Lifecycle: paused session worktree missing; finalized as interrupted"
+                );
+                match prepare_worktree(&project_dir, &task, &app_state).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed");
+                        transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state)
+                            .await;
+                        return_free!();
+                    }
+                }
+            } else {
+                let context_message = resume_context_for_task(&task_id, &app_state).await;
+                resumed_session_id = Some(paused_session_id);
+                resumed_record_id = Some(paused.id.clone());
+                resumed_kickoff = Some(GooseMessage::user().with_text(&context_message));
+                paused_worktree_path
+            }
+        } else {
+            tracing::warn!(task_id = %task_id, session_record_id = %paused.id, "Lifecycle: paused session missing resume metadata; starting fresh session");
+            match prepare_worktree(&project_dir, &task, &app_state).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed");
+                    transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+                    return_free!();
+                }
+            }
+        }
+    } else if agent_type == AgentType::EpicReviewer {
         let batch_id = active_batch.as_deref().unwrap_or_default();
         match prepare_epic_reviewer_worktree(&project_dir, batch_id, &app_state).await {
             Ok(p) => p,
@@ -681,32 +784,37 @@ pub async fn run_task_lifecycle(
 
     // ── Conflict resolver: start merge for conflict markers ───────────────────
     if agent_type == AgentType::ConflictResolver
-        && let Some(ref ctx) = conflict_ctx {
-            let target_ref = format!("origin/{}", ctx.merge_target);
-            if let Ok(wt_git) = app_state.git_actor(&worktree_path).await {
+        && let Some(ref ctx) = conflict_ctx
+    {
+        let target_ref = format!("origin/{}", ctx.merge_target);
+        if let Ok(wt_git) = app_state.git_actor(&worktree_path).await {
+            let _ = wt_git
+                .run_command(vec![
+                    "fetch".into(),
+                    "origin".into(),
+                    ctx.merge_target.clone(),
+                ])
+                .await;
+            let merge_result = wt_git
+                .run_command(vec![
+                    "merge".into(),
+                    target_ref.clone(),
+                    "--no-commit".into(),
+                ])
+                .await;
+            if merge_result.is_ok() {
                 let _ = wt_git
-                    .run_command(vec![
-                        "fetch".into(),
-                        "origin".into(),
-                        ctx.merge_target.clone(),
-                    ])
+                    .run_command(vec!["merge".into(), "--abort".into()])
                     .await;
-                let merge_result = wt_git
-                    .run_command(vec!["merge".into(), target_ref.clone(), "--no-commit".into()])
-                    .await;
-                if merge_result.is_ok() {
-                    let _ = wt_git
-                        .run_command(vec!["merge".into(), "--abort".into()])
-                        .await;
-                } else {
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        target_ref = %target_ref,
-                        "Lifecycle: started merge in worktree for conflict resolver"
-                    );
-                }
+            } else {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    target_ref = %target_ref,
+                    "Lifecycle: started merge in worktree for conflict resolver"
+                );
             }
         }
+    }
 
     // ── Goose logs dir ────────────────────────────────────────────────────────
     let goose_logs_dir = goose::config::paths::Paths::in_state_dir("logs");
@@ -716,7 +824,13 @@ pub async fn run_task_lifecycle(
     if !worktree_path.exists() || !worktree_path.is_dir() {
         let diag = runtime_fs_diagnostics(&project_path, &worktree_path);
         tracing::warn!(task_id = %task_id, diag = %diag, "Lifecycle: worktree preflight failed");
-        transition_interrupted(&task_id, agent_type, "worktree preflight failed", &app_state).await;
+        transition_interrupted(
+            &task_id,
+            agent_type,
+            "worktree preflight failed",
+            &app_state,
+        )
+        .await;
         return_free!();
     }
 
@@ -733,7 +847,9 @@ pub async fn run_task_lifecycle(
     };
 
     // ── Run setup commands before session ─────────────────────────────────────
-    if let Ok(Some(project)) = project_repo.get(&task.project_id).await {
+    if resumed_session_id.is_none()
+        && let Ok(Some(project)) = project_repo.get(&task.project_id).await
+    {
         let setup_specs: Vec<CommandSpec> =
             serde_json::from_str(&project.setup_commands).unwrap_or_default();
         if !setup_specs.is_empty() {
@@ -803,53 +919,80 @@ pub async fn run_task_lifecycle(
         }
     }
 
-    // ── Create Goose session ───────────────────────────────────────────────────
-    let session = match session_manager
-        .create_session(worktree_path.clone(), session_name, SessionType::SubAgent)
-        .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create Goose session");
-            transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
-            cleanup_worktree(&task_id, &worktree_path, &app_state).await;
-            return_free!();
-        }
-    };
-
-    // ── Create Djinn session record ───────────────────────────────────────────
+    // ── Create or resume Goose session ─────────────────────────────────────────
     let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
-    let session_record = match session_repo
-        .create(
-            &task.project_id,
-            &task.id,
-            &model_id,
-            agent_type.as_str(),
-            worktree_path.to_str(),
-            Some(session.id.as_str()),
-            None,
-        )
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
-            transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
-            cleanup_worktree(&task_id, &worktree_path, &app_state).await;
-            return_free!();
+    let (mut current_session_id, mut current_record_id, mut kickoff) = if let (
+        Some(session_id),
+        Some(record_id),
+        Some(kickoff),
+    ) = (
+        resumed_session_id.clone(),
+        resumed_record_id.clone(),
+        resumed_kickoff,
+    ) {
+        if let Err(e) = session_repo.set_running(&record_id).await {
+            tracing::warn!(record_id = %record_id, error = %e, "Lifecycle: failed to mark resumed session running");
         }
-    };
+        tracing::info!(
+            task_id = %task.short_id,
+            task_uuid = %task.id,
+            session_id = %session_id,
+            "Lifecycle: resuming paused session"
+        );
+        (session_id, Some(record_id), kickoff)
+    } else {
+        let session = match session_manager
+            .create_session(worktree_path.clone(), session_name, SessionType::SubAgent)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create Goose session");
+                transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+                cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+                return_free!();
+            }
+        };
 
-    // Mark epic review batch as in_review.
-    if agent_type == AgentType::EpicReviewer
-        && let Some(batch_id) = active_batch.as_deref()
-    {
-        let batch_repo =
-            EpicReviewBatchRepository::new(app_state.db().clone(), app_state.events().clone());
-        if let Err(e) = batch_repo.mark_in_review(batch_id, &session.id).await {
-            tracing::warn!(task_id = %task.short_id, batch_id = %batch_id, error = %e, "failed to mark epic review batch in_review");
+        let session_record = match session_repo
+            .create(
+                &task.project_id,
+                &task.id,
+                &model_id,
+                agent_type.as_str(),
+                worktree_path.to_str(),
+                Some(session.id.as_str()),
+                None,
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
+                transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+                cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+                return_free!();
+            }
+        };
+
+        if agent_type == AgentType::EpicReviewer
+            && let Some(batch_id) = active_batch.as_deref()
+        {
+            let batch_repo =
+                EpicReviewBatchRepository::new(app_state.db().clone(), app_state.events().clone());
+            if let Err(e) = batch_repo.mark_in_review(batch_id, &session.id).await {
+                tracing::warn!(task_id = %task.short_id, batch_id = %batch_id, error = %e, "failed to mark epic review batch in_review");
+            }
         }
-    }
+
+        (
+            session.id,
+            Some(session_record.id),
+            GooseMessage::user().with_text(
+                "Start by understanding the task context and execute it fully before stopping.",
+            ),
+        )
+    };
 
     // ── Create agent ───────────────────────────────────────────────────────────
     let goose_model = match ModelConfig::new(&model_name) {
@@ -885,7 +1028,7 @@ pub async fn run_task_lifecycle(
         GoosePlatform::GooseCli,
     )));
 
-    if let Err(e) = agent.update_provider(provider, &session.id).await {
+    if let Err(e) = agent.update_provider(provider, &current_session_id).await {
         app_state.health_tracker().record_failure(&model_id);
         tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to set provider");
         transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
@@ -894,7 +1037,7 @@ pub async fn run_task_lifecycle(
     }
 
     for ext in exts {
-        if let Err(e) = agent.add_extension(ext, &session.id).await {
+        if let Err(e) = agent.add_extension(ext, &current_session_id).await {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to add extension");
         }
     }
@@ -938,12 +1081,7 @@ pub async fn run_task_lifecycle(
         .unwrap_or(0);
 
     // ── Main lifecycle loop (compaction + verification retry) ─────────────────
-    let mut current_session_id = session.id.clone();
-    let mut current_record_id = Some(session_record.id.clone());
     let mut current_agent = agent;
-    let mut kickoff = GooseMessage::user().with_text(
-        "Start by understanding the task context and execute it fully before stopping.",
-    );
 
     let (final_result, final_output) = loop {
         let (reply_result, output, compaction_signal) = run_reply_loop(
@@ -955,14 +1093,21 @@ pub async fn run_task_lifecycle(
             agent_type,
             kickoff.clone(),
             &cancel,
-            &cancel, // global_cancel reuses task cancel (supervisor shuts down via same token)
+            &pause,
             &app_state,
             context_window,
             &session_manager,
         )
         .await;
 
-        // ── Handle cancellation ─────────────────────────────────────────────
+        // ── Handle pause/kill cancellation ─────────────────────────────────
+        if pause.is_cancelled() {
+            tracing::info!(task_id = %task_id, "Lifecycle: paused; committing WIP and preserving worktree");
+            let (ti, to) = tokens_for_session(&current_session_id, &session_manager).await;
+            update_session_record_paused(current_record_id.as_deref(), ti, to, &app_state).await;
+            commit_wip_if_needed(&task_id, &worktree_path, &app_state).await;
+            return_free!();
+        }
         if cancel.is_cancelled() {
             tracing::info!(task_id = %task_id, "Lifecycle: cancelled; committing WIP and cleaning up");
             let (ti, to) = tokens_for_session(&current_session_id, &session_manager).await;
@@ -1014,12 +1159,20 @@ pub async fn run_task_lifecycle(
                         &TaskContext {
                             project_path: project_path.clone(),
                             workspace_path: worktree_path.display().to_string(),
-                            diff: None, commits: None, start_commit: None,
-                            end_commit: None, batch_num: None, task_count: None,
-                            tasks_summary: None, common_labels: None,
-                            conflict_files: None, merge_base_branch: None,
-                            merge_target_branch: None, merge_failure_context: None,
-                            setup_commands: None, verification_commands: None,
+                            diff: None,
+                            commits: None,
+                            start_commit: None,
+                            end_commit: None,
+                            batch_num: None,
+                            task_count: None,
+                            tasks_summary: None,
+                            common_labels: None,
+                            conflict_files: None,
+                            merge_base_branch: None,
+                            merge_target_branch: None,
+                            merge_failure_context: None,
+                            setup_commands: None,
+                            verification_commands: None,
                         },
                     );
                     compact.agent.override_system_prompt(new_prompt).await;
@@ -1064,7 +1217,10 @@ pub async fn run_task_lifecycle(
 
         if is_context_error {
             // Reviewers: compaction won't help (prompt too large). Block the task.
-            if matches!(agent_type, AgentType::TaskReviewer | AgentType::EpicReviewer) {
+            if matches!(
+                agent_type,
+                AgentType::TaskReviewer | AgentType::EpicReviewer
+            ) {
                 tracing::warn!(
                     task_id = %task_id,
                     agent_type = %agent_type.as_str(),
@@ -1082,8 +1238,7 @@ pub async fn run_task_lifecycle(
                 cleanup_worktree(&task_id, &worktree_path, &app_state).await;
                 app_state.health_tracker().record_failure(&model_id);
                 app_state.persist_model_health_state().await;
-                let repo =
-                    TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+                let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
                 let reason = "context_length_exceeded: review prompt too large for current model";
                 let _ = repo
                     .transition(
@@ -1104,7 +1259,11 @@ pub async fn run_task_lifecycle(
                 "Lifecycle: context exhaustion at session end; triggering fresh continuation"
             );
             let (_ti, _) = tokens_for_session(&current_session_id, &session_manager).await;
-            let cw = if context_window > 0 { context_window } else { 200_000 };
+            let cw = if context_window > 0 {
+                context_window
+            } else {
+                200_000
+            };
             match compact_inline(
                 &task_id,
                 agent_type,
@@ -1130,12 +1289,20 @@ pub async fn run_task_lifecycle(
                         &TaskContext {
                             project_path: project_path.clone(),
                             workspace_path: worktree_path.display().to_string(),
-                            diff: None, commits: None, start_commit: None,
-                            end_commit: None, batch_num: None, task_count: None,
-                            tasks_summary: None, common_labels: None,
-                            conflict_files: None, merge_base_branch: None,
-                            merge_target_branch: None, merge_failure_context: None,
-                            setup_commands: None, verification_commands: None,
+                            diff: None,
+                            commits: None,
+                            start_commit: None,
+                            end_commit: None,
+                            batch_num: None,
+                            task_count: None,
+                            tasks_summary: None,
+                            common_labels: None,
+                            conflict_files: None,
+                            merge_base_branch: None,
+                            merge_target_branch: None,
+                            merge_failure_context: None,
+                            setup_commands: None,
+                            verification_commands: None,
                         },
                     );
                     compact.agent.override_system_prompt(new_prompt).await;
@@ -1166,7 +1333,13 @@ pub async fn run_task_lifecycle(
                 let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
                 let payload = serde_json::json!({ "body": feedback }).to_string();
                 let _ = repo
-                    .log_activity(Some(&task_id), "agent-supervisor", "verification", "comment", &payload)
+                    .log_activity(
+                        Some(&task_id),
+                        "agent-supervisor",
+                        "verification",
+                        "comment",
+                        &payload,
+                    )
                     .await;
                 kickoff = GooseMessage::user().with_text(&feedback);
                 continue;
@@ -1178,7 +1351,13 @@ pub async fn run_task_lifecycle(
                 let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
                 let payload = serde_json::json!({ "body": feedback }).to_string();
                 let _ = repo
-                    .log_activity(Some(&task_id), "agent-supervisor", "verification", "comment", &payload)
+                    .log_activity(
+                        Some(&task_id),
+                        "agent-supervisor",
+                        "verification",
+                        "comment",
+                        &payload,
+                    )
                     .await;
                 kickoff = GooseMessage::user().with_text(&feedback);
                 continue;
@@ -1205,10 +1384,27 @@ pub async fn run_task_lifecycle(
 
     // Update session record.
     if is_worker_done {
-        update_session_record_paused(current_record_id.as_deref(), tokens_in, tokens_out, &app_state).await;
+        update_session_record_paused(
+            current_record_id.as_deref(),
+            tokens_in,
+            tokens_out,
+            &app_state,
+        )
+        .await;
     } else {
-        let status = if final_result.is_ok() { SessionStatus::Completed } else { SessionStatus::Failed };
-        update_session_record(current_record_id.as_deref(), status, tokens_in, tokens_out, &app_state).await;
+        let status = if final_result.is_ok() {
+            SessionStatus::Completed
+        } else {
+            SessionStatus::Failed
+        };
+        update_session_record(
+            current_record_id.as_deref(),
+            status,
+            tokens_in,
+            tokens_out,
+            &app_state,
+        )
+        .await;
     }
 
     // Worktree: commit and keep for worker done; cleanup otherwise.
@@ -1235,7 +1431,13 @@ pub async fn run_task_lifecycle(
     if let Some(feedback) = final_output.reviewer_feedback.as_deref() {
         let payload = serde_json::json!({ "body": feedback }).to_string();
         if let Err(e) = task_repo
-            .log_activity(Some(&task_id), "agent-supervisor", "task_reviewer", "comment", &payload)
+            .log_activity(
+                Some(&task_id),
+                "agent-supervisor",
+                "task_reviewer",
+                "comment",
+                &payload,
+            )
             .await
         {
             tracing::warn!(task_id = %task_id, error = %e, "failed to store reviewer feedback comment");
@@ -1250,7 +1452,13 @@ pub async fn run_task_lifecycle(
         })
         .to_string();
         let _ = task_repo
-            .log_activity(Some(&task_id), "agent-supervisor", "system", "session_error", &payload)
+            .log_activity(
+                Some(&task_id),
+                "agent-supervisor",
+                "system",
+                "session_error",
+                &payload,
+            )
             .await;
     }
     if final_result.is_ok()
@@ -1262,23 +1470,28 @@ pub async fn run_task_lifecycle(
         })
         .to_string();
         let _ = task_repo
-            .log_activity(Some(&task_id), "agent-supervisor", "system", "session_error", &payload)
+            .log_activity(
+                Some(&task_id),
+                "agent-supervisor",
+                "system",
+                "session_error",
+                &payload,
+            )
             .await;
     }
 
     // Determine transition.
     let epic_error = final_result.as_ref().err().map(|e| e.to_string());
     let transition = match final_result {
-        Ok(()) => {
-            success_transition(&task_id, agent_type, &final_output, &app_state).await
-        }
+        Ok(()) => success_transition(&task_id, agent_type, &final_output, &app_state).await,
         Err(reason) => match agent_type {
             AgentType::Worker | AgentType::ConflictResolver => {
                 Some((TransitionAction::Release, Some(reason.to_string())))
             }
-            AgentType::TaskReviewer => {
-                Some((TransitionAction::ReleaseTaskReview, Some(reason.to_string())))
-            }
+            AgentType::TaskReviewer => Some((
+                TransitionAction::ReleaseTaskReview,
+                Some(reason.to_string()),
+            )),
             AgentType::EpicReviewer => None,
         },
     };

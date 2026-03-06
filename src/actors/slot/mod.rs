@@ -130,14 +130,14 @@ impl MergeValidationFailureMetadata {
 
 // ─── Submodules ───────────────────────────────────────────────────────────────
 
-mod helpers;
-mod worktree;
 mod commands;
 mod epic_review;
+mod helpers;
 mod lifecycle;
+mod worktree;
 
-pub(crate) use helpers::*;
-pub(crate) use worktree::*;
 pub(crate) use commands::*;
 pub(crate) use epic_review::*;
+pub(crate) use helpers::*;
 pub use lifecycle::run_task_lifecycle;
+pub(crate) use worktree::*;

@@ -18,9 +18,10 @@ fn system_hostname() -> String {
         if rc == 0 {
             let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
             if let Ok(name) = std::str::from_utf8(&buf[..len])
-                && !name.is_empty() {
-                    return name.to_string();
-                }
+                && !name.is_empty()
+            {
+                return name.to_string();
+            }
         }
     }
     std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string())

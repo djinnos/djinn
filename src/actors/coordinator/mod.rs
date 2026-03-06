@@ -266,10 +266,9 @@ impl CoordinatorActor {
                     "CoordinatorActor: paused all projects"
                 );
                 self.publish_status();
-                if interrupt_active
-                    && let Err(e) = self.supervisor.interrupt_all(&reason).await {
-                        tracing::warn!(error = %e, "CoordinatorActor: failed to interrupt sessions on pause");
-                    }
+                if interrupt_active && let Err(e) = self.supervisor.interrupt_all(&reason).await {
+                    tracing::warn!(error = %e, "CoordinatorActor: failed to interrupt sessions on pause");
+                }
             }
             CoordinatorMessage::PauseProject {
                 project_id,
@@ -283,13 +282,13 @@ impl CoordinatorActor {
                         .supervisor
                         .interrupt_project(&project_id, &reason)
                         .await
-                    {
-                        tracing::warn!(
-                            project_id = %project_id,
-                            error = %e,
-                            "CoordinatorActor: failed to interrupt project sessions on pause"
-                        );
-                    }
+                {
+                    tracing::warn!(
+                        project_id = %project_id,
+                        error = %e,
+                        "CoordinatorActor: failed to interrupt project sessions on pause"
+                    );
+                }
             }
             CoordinatorMessage::Resume => {
                 // Global resume = unpause every project and dispatch.

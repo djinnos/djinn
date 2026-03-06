@@ -81,7 +81,6 @@ struct CatalogData {
     fetched_at: Option<Instant>,
 }
 
-
 /// Fetches, caches, and serves LLM provider and model data from models.dev.
 ///
 /// Resilience tiers (in order):

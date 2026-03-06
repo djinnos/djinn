@@ -318,11 +318,12 @@ mod tests {
             match value {
                 Value::Object(map) => {
                     if let Some(Value::String(format)) = map.get("format")
-                        && (format == "uint" || format.starts_with("uint")) {
-                            bad.push(format!(
-                                "{tool_name} {schema_kind} {path}/format = {format}"
-                            ));
-                        }
+                        && (format == "uint" || format.starts_with("uint"))
+                    {
+                        bad.push(format!(
+                            "{tool_name} {schema_kind} {path}/format = {format}"
+                        ));
+                    }
 
                     if matches!(map.get("nullable"), Some(Value::Bool(true)))
                         && !matches!(map.get("type"), Some(Value::String(_)))

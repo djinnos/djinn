@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use crate::actors::git::GitError;
-use crate::agent::output_parser::{EpicReviewVerdict, ParsedAgentOutput, ReviewerVerdict};
 use crate::agent::AgentType;
+use crate::agent::output_parser::{EpicReviewVerdict, ParsedAgentOutput, ReviewerVerdict};
 use crate::db::repositories::epic::EpicRepository;
 use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
 use crate::db::repositories::session::SessionRepository;
@@ -298,19 +298,20 @@ pub(crate) async fn success_transition(
 ) -> Option<(TransitionAction, Option<String>)> {
     match agent_type {
         AgentType::Worker | AgentType::ConflictResolver => match output.worker_signal {
-            Some(crate::agent::output_parser::WorkerSignal::Done) => Some((TransitionAction::SubmitTaskReview, None)),
+            Some(crate::agent::output_parser::WorkerSignal::Done) => {
+                Some((TransitionAction::SubmitTaskReview, None))
+            }
             None => {
-                let reason = output.runtime_error.clone().unwrap_or_else(|| {
-                    "worker session completed without DONE marker".to_string()
-                });
+                let reason = output
+                    .runtime_error
+                    .clone()
+                    .unwrap_or_else(|| "worker session completed without DONE marker".to_string());
                 tracing::warn!(reason = %reason, "worker session completed without structured result marker");
                 Some((TransitionAction::Release, Some(reason)))
             }
         },
         AgentType::TaskReviewer => match output.reviewer_verdict {
-            Some(ReviewerVerdict::Verified) => {
-                merge_after_task_review(task_id, app_state).await
-            }
+            Some(ReviewerVerdict::Verified) => merge_after_task_review(task_id, app_state).await,
             Some(ReviewerVerdict::Reopen) => Some((
                 TransitionAction::TaskReviewReject,
                 Some(
@@ -332,9 +333,7 @@ pub(crate) async fn success_transition(
             Some(EpicReviewVerdict::Clean) => None,
             Some(EpicReviewVerdict::IssuesFound) => None,
             None => {
-                tracing::warn!(
-                    "epic reviewer session completed without EPIC_REVIEW_RESULT marker"
-                );
+                tracing::warn!("epic reviewer session completed without EPIC_REVIEW_RESULT marker");
                 None
             }
         },

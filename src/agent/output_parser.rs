@@ -90,9 +90,10 @@ impl ParsedAgentOutput {
             }
 
             if self.runtime_error.is_none()
-                && let Some(error) = extract_runtime_error(&line) {
-                    self.runtime_error = Some(error.to_string());
-                }
+                && let Some(error) = extract_runtime_error(&line)
+            {
+                self.runtime_error = Some(error.to_string());
+            }
 
             if !self.context_exhausted {
                 let lower = line.to_lowercase();
@@ -178,11 +179,7 @@ fn extract_runtime_error(line: &str) -> Option<&str> {
     let marker = "Execution error:";
     let idx = line.find(marker)?;
     let value = line[idx + marker.len()..].trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 #[cfg(test)]

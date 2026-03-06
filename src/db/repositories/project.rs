@@ -5,7 +5,6 @@ use crate::error::Result;
 use crate::events::DjinnEvent;
 use crate::models::project::Project;
 
-
 #[derive(Clone, Debug, serde::Serialize, sqlx::FromRow)]
 pub struct ProjectConfig {
     pub target_branch: String,
@@ -134,7 +133,12 @@ impl ProjectRepository {
         .await?)
     }
 
-    pub async fn update_config_field(&self, id: &str, key: &str, value: &str) -> Result<Option<ProjectConfig>> {
+    pub async fn update_config_field(
+        &self,
+        id: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<Option<ProjectConfig>> {
         self.db.ensure_initialized().await?;
         match key {
             "target_branch" => {

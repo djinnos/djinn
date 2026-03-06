@@ -33,17 +33,18 @@ impl DjinnMcpServer {
                 .get_by_permalink(&project_id, &p.note_type)
                 .await
                 .ok()
-                .flatten() {
-                match repo
-                    .update(&existing.id, &p.title, &p.content, &tags_json)
-                    .await
-                {
-                    Ok(note) => return Json(MemoryNoteResponse::from_note(&note)),
-                    Err(e) => {
-                        return Json(MemoryNoteResponse::error(e.to_string()));
-                    }
+                .flatten()
+        {
+            match repo
+                .update(&existing.id, &p.title, &p.content, &tags_json)
+                .await
+            {
+                Ok(note) => return Json(MemoryNoteResponse::from_note(&note)),
+                Err(e) => {
+                    return Json(MemoryNoteResponse::error(e.to_string()));
                 }
             }
+        }
 
         match repo
             .create(

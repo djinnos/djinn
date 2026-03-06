@@ -102,9 +102,10 @@ impl DjinnSettings {
         let mut out = HashMap::new();
         for (model_id, max) in map {
             if let Some(max) = max.as_u64()
-                && max > 0 {
-                    out.insert(model_id.clone(), max as u32);
-                }
+                && max > 0
+            {
+                out.insert(model_id.clone(), max as u32);
+            }
         }
         if out.is_empty() { None } else { Some(out) }
     }

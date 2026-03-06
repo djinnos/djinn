@@ -16,8 +16,7 @@ pub(crate) async fn run_setup_commands_checked(
     let task = load_task(task_id, app_state).await.ok()?;
     let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
     let project = project_repo.get(&task.project_id).await.ok()??;
-    let specs: Vec<CommandSpec> =
-        serde_json::from_str(&project.setup_commands).unwrap_or_default();
+    let specs: Vec<CommandSpec> = serde_json::from_str(&project.setup_commands).unwrap_or_default();
     if specs.is_empty() {
         return None;
     }
