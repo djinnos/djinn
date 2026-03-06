@@ -1,21 +1,15 @@
 /**
  * SSE Event Handlers - Wire SSE events to task/epic stores
- * 
+ *
  * Sets up subscriptions to SSE events and updates stores directly
- * from full-entity event payloads. No follow-up reads needed.
+ * from full-entity event payloads. No mapping needed — types match MCP wire format.
  */
 
 import { sseStore, type SSEEvent } from "./sseStore";
 import { taskStore } from "./taskStore";
 import { epicStore } from "./epicStore";
 import { queryClient } from "@/lib/queryClient";
-import { mapTaskFromMcp, mapEpicFromMcp } from "@/api/server";
-import type {
-  Task,
-  Epic,
-  TaskDeletedPayload,
-  EpicDeletedPayload
-} from "../types";
+import type { Task, Epic } from "@/api/types";
 
 /**
  * Unwrap SSE event payload.
@@ -32,7 +26,7 @@ function unwrapPayload(raw: unknown): Record<string, unknown> {
 
 /**
  * SSE sends some array fields as JSON strings (e.g. labels, acceptance_criteria).
- * Parse them back to arrays before passing to the mapper.
+ * Parse them back to arrays before storing.
  */
 function normalizeSSEPayload(payload: Record<string, unknown>): Record<string, unknown> {
   const result = { ...payload };
@@ -65,8 +59,7 @@ export function initSSEEventHandlers(): () => void {
 
   // Task events — SSE sends snake_case MCP payloads wrapped in {type,action,data}
   taskCreatedUnsub = subscribe("task_created", (event: SSEEvent) => {
-    const raw = normalizeSSEPayload(unwrapPayload(event.data));
-    const task: Task = mapTaskFromMcp(raw as any);
+    const task = normalizeSSEPayload(unwrapPayload(event.data)) as unknown as Task;
     taskStore.getState().addTask(task);
     queryClient.setQueryData(["tasks"], (current: Task[] | undefined) =>
       current ? [...current, task] : [task]
@@ -74,8 +67,7 @@ export function initSSEEventHandlers(): () => void {
   });
 
   taskUpdatedUnsub = subscribe("task_updated", (event: SSEEvent) => {
-    const raw = normalizeSSEPayload(unwrapPayload(event.data));
-    const task: Task = mapTaskFromMcp(raw as any);
+    const task = normalizeSSEPayload(unwrapPayload(event.data)) as unknown as Task;
     taskStore.getState().updateTask(task);
     queryClient.setQueryData(["tasks"], (current: Task[] | undefined) =>
       current?.map((t) => (t.id === task.id ? task : t))
@@ -83,7 +75,7 @@ export function initSSEEventHandlers(): () => void {
   });
 
   taskDeletedUnsub = subscribe("task_deleted", (event: SSEEvent) => {
-    const payload = unwrapPayload(event.data) as unknown as TaskDeletedPayload;
+    const payload = unwrapPayload(event.data) as { id: string };
     taskStore.getState().removeTask(payload.id);
     queryClient.setQueryData(["tasks"], (current: { id: string }[] | undefined) =>
       current?.filter((task) => task.id !== payload.id)
@@ -92,8 +84,7 @@ export function initSSEEventHandlers(): () => void {
 
   // Epic events — SSE sends snake_case MCP payloads wrapped in {type,action,data}
   epicCreatedUnsub = subscribe("epic_created", (event: SSEEvent) => {
-    const raw = unwrapPayload(event.data);
-    const epic: Epic = mapEpicFromMcp(raw as any);
+    const epic = unwrapPayload(event.data) as unknown as Epic;
     epicStore.getState().addEpic(epic);
     queryClient.setQueryData(["epics"], (current: Epic[] | undefined) =>
       current ? [...current, epic] : [epic]
@@ -101,8 +92,7 @@ export function initSSEEventHandlers(): () => void {
   });
 
   epicUpdatedUnsub = subscribe("epic_updated", (event: SSEEvent) => {
-    const raw = unwrapPayload(event.data);
-    const epic: Epic = mapEpicFromMcp(raw as any);
+    const epic = unwrapPayload(event.data) as unknown as Epic;
     epicStore.getState().updateEpic(epic);
     queryClient.setQueryData(["epics"], (current: Epic[] | undefined) =>
       current?.map((e) => (e.id === epic.id ? epic : e))
@@ -110,7 +100,7 @@ export function initSSEEventHandlers(): () => void {
   });
 
   epicDeletedUnsub = subscribe("epic_deleted", (event: SSEEvent) => {
-    const payload = unwrapPayload(event.data) as unknown as EpicDeletedPayload;
+    const payload = unwrapPayload(event.data) as { id: string };
     epicStore.getState().removeEpic(payload.id);
     queryClient.setQueryData(["epics"], (current: { id: string }[] | undefined) =>
       current?.filter((epic) => epic.id !== payload.id)
@@ -148,7 +138,7 @@ export function cleanupSSEEventHandlers(): void {
   epicCreatedUnsub?.();
   epicUpdatedUnsub?.();
   epicDeletedUnsub?.();
-  
+
   taskCreatedUnsub = null;
   taskUpdatedUnsub = null;
   taskDeletedUnsub = null;

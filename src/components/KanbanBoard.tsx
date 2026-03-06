@@ -4,7 +4,7 @@ import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
 import { useProjects, useSelectedProjectId, useProjectStore } from "@/stores/useProjectStore";
 import { taskStore } from "@/stores/taskStore";
-import type { Epic, Task, TaskPriority, TaskStatus } from "@/types";
+import type { Epic, Task } from "@/api/types";
 import { TaskCard } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 import {
@@ -38,7 +38,7 @@ import {
 } from "@/components/ui/input-group";
 import { Search01Icon } from "@hugeicons/core-free-icons";
 
-type ColumnKey = TaskStatus | "in_review";
+type ColumnKey = "open" | "in_progress" | "in_review" | "closed";
 
 const STATUS_COLUMNS: Array<{
   key: ColumnKey;
@@ -47,26 +47,33 @@ const STATUS_COLUMNS: Array<{
   glowClass: string;
   icon: typeof UnavailableIcon;
 }> = [
-  { key: "pending", label: "Open", colorClass: "bg-violet-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-violet-500/40", icon: CircleIcon },
+  { key: "open", label: "Open", colorClass: "bg-violet-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-violet-500/40", icon: CircleIcon },
   { key: "in_progress", label: "In Progress", colorClass: "bg-blue-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-blue-500/40", icon: Progress02Icon },
   { key: "in_review", label: "In Review", colorClass: "bg-amber-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-amber-500/40", icon: Progress04Icon },
-  { key: "completed", label: "Closed", colorClass: "bg-emerald-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-emerald-500/40", icon: CheckmarkCircle03Icon },
+  { key: "closed", label: "Closed", colorClass: "bg-emerald-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-emerald-500/40", icon: CheckmarkCircle03Icon },
 ];
 
-const PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3"];
+const PRIORITIES = [0, 1, 2, 3] as const;
 
-const PRIORITY_ICONS: Record<TaskPriority, { icon: typeof FullSignalIcon; color: string; activeColor: string }> = {
-  P0: { icon: FullSignalIcon, color: "text-muted-foreground/50", activeColor: "text-red-500" },
-  P1: { icon: MediumSignalIcon, color: "text-muted-foreground/50", activeColor: "text-yellow-500" },
-  P2: { icon: LowSignalIcon, color: "text-muted-foreground/50", activeColor: "text-green-500" },
-  P3: { icon: NoSignalIcon, color: "text-muted-foreground/50", activeColor: "text-muted-foreground" },
+const PRIORITY_ICONS: Record<number, { icon: typeof FullSignalIcon; color: string; activeColor: string }> = {
+  0: { icon: FullSignalIcon, color: "text-muted-foreground/50", activeColor: "text-red-500" },
+  1: { icon: MediumSignalIcon, color: "text-muted-foreground/50", activeColor: "text-yellow-500" },
+  2: { icon: LowSignalIcon, color: "text-muted-foreground/50", activeColor: "text-green-500" },
+  3: { icon: NoSignalIcon, color: "text-muted-foreground/50", activeColor: "text-muted-foreground" },
 };
+
+function taskToColumnKey(task: Task): ColumnKey {
+  if (task.status === "needs_task_review" || task.status === "in_task_review") return "in_review";
+  if (task.status === "closed") return "closed";
+  if (task.status === "in_progress") return "in_progress";
+  return "open";
+}
 
 function getEpicEmoji(epic: Epic | undefined): string {
   return epic?.emoji ?? "📌";
 }
 
-function getEpicTitle(epic: Epic | undefined, epicId: string | null): string {
+function getEpicTitle(epic: Epic | undefined, epicId: string | undefined): string {
   if (!epicId) return "No Epic";
   return epic?.title ?? "Unknown Epic";
 }
@@ -98,7 +105,7 @@ export function KanbanBoard({
     return next;
   });
   const [movingTaskIds, setMovingTaskIds] = useState<Record<string, boolean>>({});
-  const previousTaskStatusesRef = useRef<Map<string, TaskStatus>>(new Map());
+  const previousTaskStatusesRef = useRef<Map<string, string>>(new Map());
 
   useEffect(() => {
     if (tasksProp) return;
@@ -107,7 +114,7 @@ export function KanbanBoard({
       (state) => state.tasks,
       (nextTasks) => {
         const previousStatuses = previousTaskStatusesRef.current;
-        const nextStatuses = new Map<string, TaskStatus>();
+        const nextStatuses = new Map<string, string>();
         const changedTaskIds: string[] = [];
 
         nextTasks.forEach((task, id) => {
@@ -148,11 +155,15 @@ export function KanbanBoard({
   const [ownerFilters, setOwnerFilters] = useState<string[]>(
     (searchParams.get("owner") ?? "").split(",").filter(Boolean)
   );
-  const [priorityFilters, setPriorityFilters] = useState<TaskPriority[]>(
+  const [priorityFilters, setPriorityFilters] = useState<number[]>(
     (searchParams.get("priority") ?? "")
       .split(",")
       .filter(Boolean)
-      .filter((p): p is TaskPriority => PRIORITIES.includes(p as TaskPriority))
+      .map((p) => {
+        const match = p.match(/^P?(\d)$/i);
+        return match ? Number(match[1]) : -1;
+      })
+      .filter((p) => p >= 0 && p <= 3)
   );
   const [searchInput, setSearchInput] = useState<string>(searchParams.get("q") ?? "");
   const [textFilter, setTextFilter] = useState<string>(searchParams.get("q") ?? "");
@@ -180,7 +191,7 @@ export function KanbanBoard({
     if (ownerFilters.length > 0) next.set("owner", ownerFilters.join(","));
     else next.delete("owner");
 
-    if (priorityFilters.length > 0) next.set("priority", priorityFilters.join(","));
+    if (priorityFilters.length > 0) next.set("priority", priorityFilters.map((p) => `P${p}`).join(","));
     else next.delete("priority");
 
     if (textFilter.trim()) next.set("q", textFilter.trim());
@@ -206,7 +217,7 @@ export function KanbanBoard({
     const q = textFilter.trim().toLowerCase();
 
     return tasks.filter((task) => {
-      if (epicFilters.length > 0 && !epicFilters.includes(task.epicId ?? "")) return false;
+      if (epicFilters.length > 0 && !epicFilters.includes(task.epic_id ?? "")) return false;
       if (ownerFilters.length > 0 && !ownerFilters.includes(task.owner ?? "")) return false;
       if (priorityFilters.length > 0 && !priorityFilters.includes(task.priority)) return false;
       if (q && !task.title.toLowerCase().includes(q)) return false;
@@ -222,8 +233,8 @@ export function KanbanBoard({
     }
 
     for (const task of filteredTasks) {
-      const epicKey = task.epicId ?? "no-epic";
-      const columnKey: ColumnKey = task.reviewPhase ? "in_review" : task.status;
+      const epicKey = task.epic_id ?? "no-epic";
+      const columnKey = taskToColumnKey(task);
       const columnMap = byColumn.get(columnKey);
       if (!columnMap) continue;
 
@@ -294,7 +305,7 @@ export function KanbanBoard({
               <button
                 key={priority}
                 type="button"
-                title={priority}
+                title={`P${priority}`}
                 onClick={() =>
                   setPriorityFilters((prev) =>
                     prev.includes(priority)
@@ -385,7 +396,7 @@ export function KanbanBoard({
               <CardContent className="flex-1 overflow-y-auto px-3 pt-4">
                 <div className="flex flex-col gap-3.5">
                   {epicGroups.map(([epicKey, epicTasks]) => {
-                    const firstTaskEpicId = epicTasks[0]?.epicId ?? null;
+                    const firstTaskEpicId = epicTasks[0]?.epic_id;
                     const epic = firstTaskEpicId ? epics.get(firstTaskEpicId) : undefined;
                     const collapseKey = `${column.key}:${epicKey}`;
                     const isCollapsed = !!collapsedEpics[collapseKey];
@@ -414,7 +425,7 @@ export function KanbanBoard({
                                 <li key={task.id}>
                                   <TaskCard
                                     task={task}
-                                    epic={task.epicId ? epics.get(task.epicId) : undefined}
+                                    epic={task.epic_id ? epics.get(task.epic_id) : undefined}
                                     moving={!!movingTaskIds[task.id]}
                                     onClick={() => setSelectedTask(task)}
                                   />
@@ -436,7 +447,7 @@ export function KanbanBoard({
       <TaskDetailPanel
         open={!!selectedTask}
         task={selectedTask}
-        epic={selectedTask?.epicId ? epics.get(selectedTask.epicId) : undefined}
+        epic={selectedTask?.epic_id ? epics.get(selectedTask.epic_id) : undefined}
         onClose={() => setSelectedTask(null)}
       />
     </div>

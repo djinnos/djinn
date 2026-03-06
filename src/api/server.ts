@@ -1,7 +1,7 @@
 import { callMcpTool } from "@/api/mcpClient";
 import type { McpToolOutput } from "@/api/generated/mcp-tools.gen";
 import { getServerPort } from "@/tauri/commands";
-import type { Epic, EpicStatus, Task, TaskPriority, TaskStatus } from "@/types";
+import type { Epic, Task } from "@/api/types";
 
 async function getBaseUrl(): Promise<string> {
   const port = await getServerPort();
@@ -62,8 +62,6 @@ export interface ProviderCredential {
 
 type ProviderCatalogResponse = McpToolOutput<"provider_catalog">;
 type ProviderCatalogItem = ProviderCatalogResponse["providers"][number];
-export type TaskListMcpResponse = McpToolOutput<"task_list">;
-export type EpicListMcpResponse = McpToolOutput<"epic_list">;
 
 export async function fetchProviderCatalog(): Promise<Provider[]> {
   const providers = await listProviderCatalogRaw();
@@ -271,78 +269,6 @@ export async function addCustomProvider(payload: CustomProviderRequest): Promise
   return response.json();
 }
 
-export function mapPriority(priority: number): TaskPriority {
-  if (priority <= 0) return "P0";
-  if (priority === 1) return "P1";
-  if (priority === 2) return "P2";
-  return "P3";
-}
-
-export function mapTaskStatus(status: string): TaskStatus {
-  if (status === "in_progress") return "in_progress";
-  if (status === "closed") return "completed";
-  return "pending";
-}
-
-export function mapEpicStatus(status: string): EpicStatus {
-  if (status === "closed") return "completed";
-  if (status === "archived") return "archived";
-  return "active";
-}
-
-export function mapTaskFromMcp(task: TaskListMcpResponse["tasks"][number]): Task {
-  return {
-    id: task.id,
-    shortId: task.short_id,
-    title: task.title,
-    description: task.description,
-    design: task.design ?? "",
-    acceptanceCriteria: (task.acceptance_criteria ?? []).map((raw) => {
-      let item: any = raw;
-      if (typeof item === "string") {
-        try { item = JSON.parse(item); } catch { /* keep as plain string */ }
-      }
-      if (typeof item === "string") {
-        return { criterion: item, met: false };
-      }
-      return {
-        criterion: item.criterion ?? item.description ?? item.text ?? "",
-        met: Boolean(item.met),
-      };
-    }),
-    activity: [],
-    status: mapTaskStatus(task.status),
-    reviewPhase: task.status === "needs_task_review" || task.status === "in_task_review" ? task.status : undefined,
-    priority: mapPriority(task.priority),
-    epicId: task.epic_id ?? null,
-    labels: task.labels,
-    owner: task.owner || null,
-    createdAt: task.created_at,
-    updatedAt: task.updated_at,
-    sessionModelId: task.active_session?.model_id ?? undefined,
-    sessionCount: typeof task.session_count === "number" ? task.session_count : undefined,
-    trackedSeconds: typeof task.duration_seconds === "number" ? task.duration_seconds : undefined,
-    activeSessionStartedAt: task.active_session?.started_at ?? null,
-    reopenCount: typeof task.reopen_count === "number" ? task.reopen_count : undefined,
-    unresolvedBlockerCount: typeof task.unresolved_blocker_count === "number" ? task.unresolved_blocker_count : undefined,
-  };
-}
-
-export function mapEpicFromMcp(epic: NonNullable<EpicListMcpResponse["epics"]>[number]): Epic {
-  return {
-    id: epic.id,
-    title: epic.title,
-    description: epic.description,
-    emoji: epic.emoji,
-    status: mapEpicStatus(epic.status),
-    priority: "P2",
-    labels: [],
-    owner: epic.owner || null,
-    createdAt: epic.created_at,
-    updatedAt: epic.updated_at,
-  };
-}
-
 export interface KanbanSnapshot {
   projectPath: string | null;
   tasks: Task[];
@@ -372,8 +298,7 @@ export async function fetchKanbanSnapshot(projectPath?: string | null): Promise<
 
   return {
     projectPath: resolvedProjectPath,
-    tasks: taskList.tasks.map(mapTaskFromMcp),
-    epics: (epicList.epics ?? []).map(mapEpicFromMcp),
+    tasks: taskList.tasks as unknown as Task[],
+    epics: (epicList.epics ?? []) as unknown as Epic[],
   };
 }
-

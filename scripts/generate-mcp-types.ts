@@ -120,7 +120,9 @@ function normalizeSchema(raw: JsonSchema | undefined): JsonSchema {
           continue;
         }
 
-        if (key === "title") {
+        // Strip schema-level "title" (metadata) but keep "title" when it's
+        // a property inside "properties" (i.e. an actual data field).
+        if (key === "title" && typeof current === "string" && record["type"] !== undefined) {
           continue;
         }
 

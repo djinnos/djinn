@@ -8,7 +8,7 @@
 import { useCallback } from "react";
 import { useStoreWithSelector } from "./useStoreWithSelector";
 import { epicStore, type EpicState } from "./epicStore";
-import type { Epic } from "../types";
+import type { Epic } from "@/api/types";
 
 // Re-export the store for direct access
 export { epicStore } from "./epicStore";
@@ -27,7 +27,7 @@ export function useEpic(id: string): Epic | undefined {
   );
 }
 
-export function useEpicsByStatus(status: Epic['status']): Epic[] {
+export function useEpicsByStatus(status: string): Epic[] {
   return useEpicStore(
     useCallback((state) => state.getEpicsByStatus(status), [status])
   );

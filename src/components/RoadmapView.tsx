@@ -6,15 +6,12 @@ import { useMemo, useState } from "react";
 import { EpicCard } from "./EpicCard";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { useAllEpics } from "@/stores/useEpicStore";
-import type { Epic, Task } from "@/types";
+import type { Epic, Task } from "@/api/types";
 import { Button } from "@/components/ui/button";
 
 function sortEpics(epics: Epic[]): Epic[] {
-  const priorityOrder: Record<Epic["priority"], number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
   return [...epics].sort((a, b) => {
-    const priorityDiff = priorityOrder[a.priority] - priorityOrder[b.priority];
-    if (priorityDiff !== 0) return priorityDiff;
-    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
   });
 }
 
@@ -55,7 +52,7 @@ export function RoadmapView({ mockEpics, mockTasks }: RoadmapViewProps = {}) {
             expandAllSignal={expandAllSignal}
             collapseAllSignal={collapseAllSignal}
             onTaskClick={setSelectedTask}
-            mockTasks={mockTasks?.filter((task) => task.epicId === epic.id)}
+            mockTasks={mockTasks?.filter((task) => task.epic_id === epic.id)}
           />
         ))}
       </div>

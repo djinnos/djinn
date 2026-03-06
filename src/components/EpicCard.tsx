@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useTasksByEpic } from "@/stores/useTaskStore";
-import type { Epic, Task, TaskStatus } from "@/types";
+import type { Epic, Task } from "@/api/types";
 import { ChevronDown } from "lucide-react";
 
 interface EpicCardProps {
@@ -20,38 +20,23 @@ interface EpicCardProps {
   onTaskClick?: (task: Task) => void;
 }
 
-function getPriorityBorderColor(priority: Epic["priority"]): string {
-  switch (priority) {
-    case "P0":
-      return "border-l-4 border-l-red-500";
-    case "P1":
-      return "border-l-4 border-l-orange-500";
-    case "P2":
-      return "border-l-4 border-l-blue-500";
-    case "P3":
-      return "border-l-4 border-l-gray-500";
-    default:
-      return "border-l-4 border-l-gray-500";
-  }
-}
-
 function calculateProgress(tasks: Task[]): { percentage: number; closed: number; total: number } {
   const total = tasks.length;
   if (total === 0) return { percentage: 0, closed: 0, total: 0 };
-  const closed = tasks.filter((task) => task.status === "completed").length;
+  const closed = tasks.filter((task) => task.status === "closed").length;
   const percentage = Math.round((closed / total) * 100);
   return { percentage, closed, total };
 }
 
-function getStatusBadge(status: TaskStatus): { dot: string; label: string } {
+function getStatusBadge(status: string): { dot: string; label: string } {
   switch (status) {
-    case "completed":
+    case "closed":
       return { dot: "bg-green-500", label: "Completed" };
     case "in_progress":
       return { dot: "bg-blue-500", label: "In Progress" };
-    case "blocked":
-      return { dot: "bg-red-500", label: "Blocked" };
-    case "pending":
+    case "needs_task_review":
+    case "in_task_review":
+      return { dot: "bg-amber-500", label: "In Review" };
     default:
       return { dot: "bg-amber-500", label: "Pending" };
   }
@@ -80,7 +65,7 @@ export function EpicCard({
   }, [collapseAllSignal]);
 
   return (
-    <Card className={`overflow-hidden ${getPriorityBorderColor(epic.priority)}`}>
+    <Card className="overflow-hidden border-l-4 border-l-blue-500">
       <button
         type="button"
         className="w-full text-left"

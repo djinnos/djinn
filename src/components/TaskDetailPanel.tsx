@@ -1,4 +1,4 @@
-import type { Epic, Task } from "@/types";
+import type { Epic, Task, AcceptanceCriterion } from "@/api/types";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -9,11 +9,19 @@ type TaskDetailPanelProps = {
   onClose: () => void;
 };
 
-const STATUS_LABELS: Record<Task["status"], string> = {
-  pending: "Open",
+const STATUS_LABELS: Record<string, string> = {
+  open: "Open",
   in_progress: "In Progress",
-  blocked: "In Review",
-  completed: "Closed",
+  needs_task_review: "Needs Review",
+  in_task_review: "In Review",
+  closed: "Closed",
+};
+
+const PRIORITY_LABELS: Record<number, string> = {
+  0: "P0",
+  1: "P1",
+  2: "P2",
+  3: "P3",
 };
 
 function formatRelative(dateString: string): string {
@@ -30,6 +38,13 @@ function formatRelative(dateString: string): string {
   return rtf.format(days, "day");
 }
 
+function parseCriterion(raw: string | AcceptanceCriterion): { criterion: string; met: boolean } {
+  if (typeof raw === "string") {
+    return { criterion: raw, met: false };
+  }
+  return { criterion: raw.criterion, met: Boolean(raw.met) };
+}
+
 function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="space-y-2">
@@ -42,6 +57,8 @@ function SectionCard({ title, children }: { title: string; children: React.React
 export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelProps) {
   if (!open || !task) return null;
 
+  const criteria = (task.acceptance_criteria ?? []).map(parseCriterion);
+
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/40" role="dialog" aria-modal="true">
       <button type="button" className="h-full flex-1 cursor-default" onClick={onClose} aria-label="Close task details" />
@@ -50,14 +67,14 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <h2 className="text-xl font-semibold">{task.title}</h2>
-              {task.shortId ? <span className="rounded bg-muted px-2 py-0.5 text-xs font-semibold uppercase">{task.shortId}</span> : null}
-              {task.reopenCount && task.reopenCount > 0 ? (
-                <span className="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">Reopened {task.reopenCount}x</span>
+              {task.short_id ? <span className="rounded bg-muted px-2 py-0.5 text-xs font-semibold uppercase">{task.short_id}</span> : null}
+              {task.reopen_count > 0 ? (
+                <span className="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">Reopened {task.reopen_count}x</span>
               ) : null}
             </div>
             {!!task.labels?.length && (
               <div className="flex flex-wrap gap-1">
-                {task.labels.map((label) => (
+                {task.labels.map((label: string) => (
                   <span key={label} className="rounded-full border px-2 py-0.5 text-xs text-muted-foreground">
                     {label}
                   </span>
@@ -73,12 +90,12 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
         <div className="space-y-5">
           <SectionCard title="Metadata">
             <div className="grid grid-cols-2 gap-2 text-sm">
-              <div><span className="font-medium">Status:</span> {STATUS_LABELS[task.status]}</div>
-              <div><span className="font-medium">Priority:</span> {task.priority}</div>
+              <div><span className="font-medium">Status:</span> {STATUS_LABELS[task.status] ?? task.status}</div>
+              <div><span className="font-medium">Priority:</span> {PRIORITY_LABELS[task.priority] ?? `P${task.priority}`}</div>
               <div><span className="font-medium">Epic:</span> {epic?.title ?? "No Epic"}</div>
               <div><span className="font-medium">Owner:</span> {task.owner ?? "Unassigned"}</div>
-              <div><span className="font-medium">Created:</span> {formatRelative(task.createdAt)}</div>
-              <div><span className="font-medium">Updated:</span> {formatRelative(task.updatedAt)}</div>
+              <div><span className="font-medium">Created:</span> {formatRelative(task.created_at)}</div>
+              <div><span className="font-medium">Updated:</span> {formatRelative(task.updated_at)}</div>
             </div>
           </SectionCard>
 
@@ -90,7 +107,7 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
 
           <SectionCard title="Acceptance Criteria">
             <ul className="space-y-2">
-              {(task.acceptanceCriteria?.length ? task.acceptanceCriteria : [{ criterion: "No acceptance criteria", met: false }]).map((item, idx) => (
+              {(criteria.length ? criteria : [{ criterion: "No acceptance criteria", met: false }]).map((item: { criterion: string; met: boolean }, idx: number) => (
                 <li key={`${item.criterion}-${idx}`} className="flex items-start gap-2">
                   <input type="checkbox" checked={item.met} readOnly className="mt-0.5" />
                   <span>{item.criterion}</span>
@@ -103,14 +120,6 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
             <div className="prose prose-sm max-w-none dark:prose-invert">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{task.design || "No design notes"}</ReactMarkdown>
             </div>
-          </SectionCard>
-
-          <SectionCard title="Activity Log">
-            <ul className="space-y-2">
-              {(task.activity?.length ? task.activity : ["No recent activity"]).map((event, idx) => (
-                <li key={`${event}-${idx}`} className="text-muted-foreground">• {event}</li>
-              ))}
-            </ul>
           </SectionCard>
         </div>
       </aside>

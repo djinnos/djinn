@@ -1,6 +1,6 @@
 import { MemoryRouter } from "react-router-dom";
 import { KanbanBoard } from "@/components/KanbanBoard";
-import type { Epic, Task } from "@/types";
+import type { Epic, Task } from "@/api/types";
 
 type BoardFixture = {
   epics: Epic[];
@@ -14,109 +14,59 @@ const emptyFixture: BoardFixture = {
   tasks: [],
 };
 
+const makeEpic = (id: string, title: string, emoji: string, owner: string): Epic => ({
+  id,
+  short_id: id.slice(0, 4),
+  title,
+  description: "",
+  emoji,
+  color: "#3B82F6",
+  status: "active",
+  owner,
+  created_at: "2026-03-01T10:00:00.000Z",
+  updated_at: "2026-03-01T10:00:00.000Z",
+});
+
 const epicsFixture: Epic[] = [
-  {
-    id: "epic-foundation",
-    title: "Platform Foundation",
-    description: "Core infra and shared systems",
-    emoji: "🚀",
-    status: "active",
-    priority: "P1",
-    labels: ["platform"],
-    owner: "Alex",
-    createdAt: "2026-03-01T10:00:00.000Z",
-    updatedAt: "2026-03-01T10:00:00.000Z",
-  },
-  {
-    id: "epic-ux",
-    title: "UX Polish",
-    description: "Usability and visual improvements",
-    emoji: "🎨",
-    status: "active",
-    priority: "P2",
-    labels: ["ux"],
-    owner: "Mina",
-    createdAt: "2026-03-01T10:00:00.000Z",
-    updatedAt: "2026-03-01T10:00:00.000Z",
-  },
+  makeEpic("epic-foundation", "Platform Foundation", "🚀", "Alex"),
+  makeEpic("epic-ux", "UX Polish", "🎨", "Mina"),
 ];
 
+const makeTask = (
+  id: string,
+  title: string,
+  status: string,
+  priority: number,
+  owner: string,
+  epicId: string | undefined,
+  labels: string[],
+  ts: string,
+): Task => ({
+  id,
+  short_id: id.slice(0, 4),
+  title,
+  description: "",
+  design: "",
+  acceptance_criteria: [],
+  issue_type: "task",
+  status,
+  priority,
+  owner,
+  epic_id: epicId,
+  labels,
+  memory_refs: [],
+  created_at: ts,
+  updated_at: ts,
+  reopen_count: 0,
+  continuation_count: 0,
+});
+
 const tasksFixture: Task[] = [
-  {
-    id: "t-1",
-    title: "Scaffold auth hooks",
-    description: "",
-    design: "",
-    acceptanceCriteria: [],
-    activity: [],
-    status: "pending",
-    priority: "P1",
-    owner: "Alex",
-    epicId: "epic-foundation",
-    labels: ["auth"],
-    createdAt: "2026-03-01T11:00:00.000Z",
-    updatedAt: "2026-03-01T11:00:00.000Z",
-  },
-  {
-    id: "t-2",
-    title: "Set up observability alerts",
-    description: "",
-    design: "",
-    acceptanceCriteria: [],
-    activity: [],
-    status: "in_progress",
-    priority: "P0",
-    owner: "Priya",
-    epicId: "epic-foundation",
-    labels: ["infra"],
-    createdAt: "2026-03-01T11:10:00.000Z",
-    updatedAt: "2026-03-01T11:10:00.000Z",
-  },
-  {
-    id: "t-3",
-    title: "Refine empty states",
-    description: "",
-    design: "",
-    acceptanceCriteria: [],
-    activity: [],
-    status: "blocked",
-    priority: "P2",
-    owner: "Mina",
-    epicId: "epic-ux",
-    labels: ["ui"],
-    createdAt: "2026-03-01T11:20:00.000Z",
-    updatedAt: "2026-03-01T11:20:00.000Z",
-  },
-  {
-    id: "t-4",
-    title: "Keyboard navigation pass",
-    description: "",
-    design: "",
-    acceptanceCriteria: [],
-    activity: [],
-    status: "completed",
-    priority: "P1",
-    owner: "Alex",
-    epicId: "epic-ux",
-    labels: ["accessibility"],
-    createdAt: "2026-03-01T11:30:00.000Z",
-    updatedAt: "2026-03-01T11:30:00.000Z",
-  },
-  {
-    id: "t-5",
-    title: "Backfill migration docs",
-    description: "",
-    design: "",
-    acceptanceCriteria: [],
-    activity: [],
-    status: "pending",
-    priority: "P3",
-    owner: "Jordan",
-    epicId: null,
-    labels: ["docs"],
-    createdAt: "2026-03-01T11:40:00.000Z",
-    updatedAt: "2026-03-01T11:40:00.000Z",
-  },
+  makeTask("t-1", "Scaffold auth hooks", "open", 1, "Alex", "epic-foundation", ["auth"], "2026-03-01T11:00:00.000Z"),
+  makeTask("t-2", "Set up observability alerts", "in_progress", 0, "Priya", "epic-foundation", ["infra"], "2026-03-01T11:10:00.000Z"),
+  makeTask("t-3", "Refine empty states", "needs_task_review", 2, "Mina", "epic-ux", ["ui"], "2026-03-01T11:20:00.000Z"),
+  makeTask("t-4", "Keyboard navigation pass", "closed", 1, "Alex", "epic-ux", ["accessibility"], "2026-03-01T11:30:00.000Z"),
+  makeTask("t-5", "Backfill migration docs", "open", 3, "Jordan", undefined, ["docs"], "2026-03-01T11:40:00.000Z"),
 ];
 
 const meta = {
@@ -176,7 +126,7 @@ export const CollapsedEpicGroups = {
     fixture: {
       epics: epicsFixture,
       tasks: tasksFixture,
-      initialCollapsedEpics: ["pending:epic-foundation", "completed:epic-ux"],
+      initialCollapsedEpics: ["open:epic-foundation", "closed:epic-ux"],
     },
   },
 };

@@ -1,6 +1,6 @@
 /**
  * useTaskStore - React hook for task state with selector support
- * 
+ *
  * Uses subscribeWithSelector for granular, performant subscriptions.
  * Components re-render only when their selected slice changes.
  */
@@ -8,7 +8,7 @@
 import { useCallback } from "react";
 import { useStoreWithSelector } from "./useStoreWithSelector";
 import { taskStore, type TaskState } from "./taskStore";
-import type { Task } from "../types";
+import type { Task } from "@/api/types";
 
 // Re-export the store for direct access
 export { taskStore } from "./taskStore";
@@ -33,7 +33,7 @@ export function useTasksByEpic(epicId: string): Task[] {
   );
 }
 
-export function useTasksByStatus(status: Task['status']): Task[] {
+export function useTasksByStatus(status: string): Task[] {
   return useTaskStore(
     useCallback((state) => state.getTasksByStatus(status), [status])
   );

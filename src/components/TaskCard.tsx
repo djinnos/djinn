@@ -1,4 +1,4 @@
-import type { Epic, Task } from "@/types";
+import type { Epic, Task } from "@/api/types";
 import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -23,21 +23,21 @@ type TaskCardProps = {
   onClick?: () => void;
 };
 
-const PRIORITY_CONFIG: Record<Task["priority"], { icon: typeof NoSignalIcon; color: string }> = {
-  P0: { icon: FullSignalIcon, color: "text-red-500" },
-  P1: { icon: MediumSignalIcon, color: "text-yellow-500" },
-  P2: { icon: LowSignalIcon, color: "text-green-500" },
-  P3: { icon: NoSignalIcon, color: "text-muted-foreground" },
+const PRIORITY_CONFIG: Record<number, { icon: typeof NoSignalIcon; color: string }> = {
+  0: { icon: FullSignalIcon, color: "text-red-500" },
+  1: { icon: MediumSignalIcon, color: "text-yellow-500" },
+  2: { icon: LowSignalIcon, color: "text-green-500" },
+  3: { icon: NoSignalIcon, color: "text-muted-foreground" },
 };
 
-function PriorityBadge({ priority }: { priority: Task["priority"] }) {
-  const config = PRIORITY_CONFIG[priority];
+function PriorityBadge({ priority }: { priority: number }) {
+  const config = PRIORITY_CONFIG[Math.min(Math.max(priority, 0), 3)];
   return (
     <HugeiconsIcon
       icon={config.icon}
       size={16}
       className={`shrink-0 ${config.color}`}
-      aria-label={`Priority ${priority}`}
+      aria-label={`Priority P${priority}`}
     />
   );
 }
@@ -70,13 +70,13 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const [now, setNow] = useState(() => Date.now());
 
   const runningSessionStartMs = useMemo(() => {
-    if (!task.activeSessionStartedAt || task.status !== "in_progress") {
+    if (!task.active_session?.started_at || task.status !== "in_progress") {
       return null;
     }
 
-    const parsed = Date.parse(task.activeSessionStartedAt);
+    const parsed = Date.parse(task.active_session.started_at);
     return Number.isNaN(parsed) ? null : parsed;
-  }, [task.activeSessionStartedAt, task.status]);
+  }, [task.active_session?.started_at, task.status]);
 
   useEffect(() => {
     if (!runningSessionStartMs) {
@@ -93,7 +93,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   }, [runningSessionStartMs]);
 
   const totalTrackedSeconds = useMemo(() => {
-    const persisted = task.trackedSeconds ?? 0;
+    const persisted = task.duration_seconds ?? 0;
 
     if (!runningSessionStartMs) {
       return persisted;
@@ -101,9 +101,9 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
 
     const extraSeconds = Math.max(0, Math.floor((now - runningSessionStartMs) / 1000));
     return persisted + extraSeconds;
-  }, [now, runningSessionStartMs, task.trackedSeconds]);
+  }, [now, runningSessionStartMs, task.duration_seconds]);
 
-  const shouldShowDuration = totalTrackedSeconds > 0 || (task.sessionCount ?? 0) > 0;
+  const shouldShowDuration = totalTrackedSeconds > 0 || (task.session_count ?? 0) > 0;
 
   return (
     <Card
@@ -116,7 +116,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
     >
       <CardContent className="flex flex-col gap-1.5">
         <div className="flex items-center justify-between gap-2">
-          <TaskIdLabel taskId={task.id} shortId={task.shortId} />
+          <TaskIdLabel taskId={task.id} shortId={task.short_id} />
           <div
             className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold uppercase text-muted-foreground"
             title={task.owner ?? "Unassigned"}
@@ -128,28 +128,28 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
 
         <div className="flex items-start gap-2">
           <div className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
-            {(task.unresolvedBlockerCount ?? 0) > 0 ? (
+            {(task.unresolved_blocker_count ?? 0) > 0 ? (
               <HugeiconsIcon
                 icon={UnavailableIcon}
                 size={16}
                 className="shrink-0 text-red-500"
                 aria-label="Blocked"
               />
-            ) : isRunning || task.reviewPhase === "in_task_review" ? (
+            ) : isRunning || task.status === "in_task_review" ? (
               <HugeiconsIcon
                 icon={Loading03Icon}
                 size={16}
-                className={`shrink-0 animate-spin ${task.reviewPhase === "in_task_review" ? "text-yellow-400" : "text-blue-500"}`}
-                aria-label={task.reviewPhase === "in_task_review" ? "In review" : "Task running"}
+                className={`shrink-0 animate-spin ${task.status === "in_task_review" ? "text-yellow-400" : "text-blue-500"}`}
+                aria-label={task.status === "in_task_review" ? "In review" : "Task running"}
               />
-            ) : task.reviewPhase === "needs_task_review" ? (
+            ) : task.status === "needs_task_review" ? (
               <HugeiconsIcon
                 icon={Progress01Icon}
                 size={16}
                 className="shrink-0 text-yellow-400"
                 aria-label="Needs review"
               />
-            ) : task.status === "completed" ? (
+            ) : task.status === "closed" ? (
               <HugeiconsIcon
                 icon={CheckmarkCircle03Icon}
                 size={16}
@@ -175,10 +175,10 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
             <PriorityBadge priority={task.priority} />
             <HugeiconsIcon icon={Task01Icon} size={16} className="shrink-0" aria-label="Task" />
           </div>
-          {task.sessionModelId || shouldShowDuration ? (
+          {task.active_session?.model_id || shouldShowDuration ? (
             <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-              {task.sessionModelId ? (
-                <span className="max-w-[100px] truncate" title={task.sessionModelId}>{task.sessionModelId}</span>
+              {task.active_session?.model_id ? (
+                <span className="max-w-[100px] truncate" title={task.active_session.model_id}>{task.active_session.model_id}</span>
               ) : null}
               {shouldShowDuration ? (
                 <span>{formatCompactDuration(totalTrackedSeconds)}</span>

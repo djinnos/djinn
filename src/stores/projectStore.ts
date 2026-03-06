@@ -1,6 +1,6 @@
 import { createStore } from "zustand/vanilla";
 import { subscribeWithSelector } from "zustand/middleware";
-import type { Project } from "@/types";
+import type { Project } from "@/api/types";
 
 const STORAGE_KEY = "djinnos-selected-project-id";
 

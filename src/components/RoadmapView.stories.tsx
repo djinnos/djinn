@@ -1,47 +1,51 @@
 import { RoadmapView } from "./RoadmapView";
-import type { Epic, Task } from "@/types";
+import type { Epic, Task } from "@/api/types";
 
-const makeEpic = (id: string, title: string, priority: Epic["priority"], createdAt: string): Epic => ({
+const makeEpic = (id: string, title: string, createdAt: string): Epic => ({
   id,
+  short_id: id.slice(0, 4),
   title,
   description: "Epic description",
   emoji: "🚀",
-  priority,
+  color: "#3B82F6",
   status: "active",
-  labels: [],
   owner: null,
-  createdAt,
-  updatedAt: createdAt,
+  created_at: createdAt,
+  updated_at: createdAt,
 });
 
-const makeTask = (id: string, epicId: string, title: string, status: Task["status"]): Task => ({
+const makeTask = (id: string, epicId: string, title: string, status: string): Task => ({
   id,
-  epicId,
+  short_id: id.slice(0, 4),
+  epic_id: epicId,
   title,
   description: "Story description",
   design: "",
-  acceptanceCriteria: [],
-  activity: [],
+  acceptance_criteria: [],
+  issue_type: "task",
   status,
-  priority: "P2",
+  priority: 2,
   labels: [],
+  memory_refs: [],
   owner: null,
-  createdAt: new Date("2026-01-01").toISOString(),
-  updatedAt: new Date("2026-01-01").toISOString(),
+  created_at: new Date("2026-01-01").toISOString(),
+  updated_at: new Date("2026-01-01").toISOString(),
+  reopen_count: 0,
+  continuation_count: 0,
 });
 
 const epics: Epic[] = [
-  makeEpic("epic-a", "Foundation", "P0", "2026-01-03T00:00:00.000Z"),
-  makeEpic("epic-b", "UX Polish", "P1", "2026-01-02T00:00:00.000Z"),
-  makeEpic("epic-c", "Integrations", "P2", "2026-01-01T00:00:00.000Z"),
+  makeEpic("epic-a", "Foundation", "2026-01-03T00:00:00.000Z"),
+  makeEpic("epic-b", "UX Polish", "2026-01-02T00:00:00.000Z"),
+  makeEpic("epic-c", "Integrations", "2026-01-01T00:00:00.000Z"),
 ];
 
 const tasks: Task[] = [
-  makeTask("a1", "epic-a", "Set up core API", "completed"),
-  makeTask("a2", "epic-a", "Define schema", "completed"),
+  makeTask("a1", "epic-a", "Set up core API", "closed"),
+  makeTask("a2", "epic-a", "Define schema", "closed"),
   makeTask("b1", "epic-b", "Refine spacing", "in_progress"),
-  makeTask("b2", "epic-b", "Tune colors", "pending"),
-  makeTask("c1", "epic-c", "Connect webhooks", "blocked"),
+  makeTask("b2", "epic-b", "Tune colors", "open"),
+  makeTask("c1", "epic-c", "Connect webhooks", "open"),
 ];
 
 const meta = {
