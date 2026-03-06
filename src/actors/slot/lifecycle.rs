@@ -32,6 +32,17 @@ use super::*;
 
 // ─── Reply loop sub-function ──────────────────────────────────────────────────
 
+
+fn serialize_goose_message(msg: &GooseMessage) -> serde_json::Value {
+    serde_json::to_value(msg).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "failed to serialize Goose message for SessionMessage event");
+        serde_json::json!({
+            "role": msg.role,
+            "content": msg.content.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        })
+    })
+}
+
 /// Compaction signal returned by the reply loop when the 80% threshold is hit.
 struct CompactionSignal {
     session_id: String,
@@ -144,10 +155,9 @@ async fn run_reply_loop(
                         })?;
                         saw_any_event = true;
                         saw_round_event = true;
-                        if let goose::agents::AgentEvent::Message(msg) = &evt
-                            && msg.role == assistant_role
-                        {
-                            assistant_message_count += 1;
+                        if let goose::agents::AgentEvent::Message(msg) = &evt {
+                            if msg.role == assistant_role {
+                                assistant_message_count += 1;
                             for content in &msg.content {
                                 match content {
                                     MessageContent::Text(text) => {
@@ -218,6 +228,15 @@ async fn run_reply_loop(
                                     break 'outer;
                                 }
                             }
+
+                            if msg.role != goose::message::MessageRole::System {
+                                let _ = app_state.events().send(DjinnEvent::SessionMessage {
+                                    session_id: session_id.to_owned(),
+                                    task_id: task_id.to_owned(),
+                                    agent_type: agent_type.to_string(),
+                                    message: serialize_goose_message(msg),
+                                });
+                            }
                         }
                         extension::handle_event(app_state, agent, &evt, worktree_path).await;
                     }
@@ -273,10 +292,9 @@ async fn run_reply_loop(
                 let assistant_role = GooseMessage::assistant().role;
                 while let Some(evt) = stream.next().await {
                     let evt = evt.map_err(|e| anyhow::anyhow!("nudge stream error: {e}"))?;
-                    if let goose::agents::AgentEvent::Message(msg) = &evt
-                        && msg.role == assistant_role
-                    {
-                        for content in &msg.content {
+                    if let goose::agents::AgentEvent::Message(msg) = &evt {
+                        if msg.role == assistant_role {
+                            for content in &msg.content {
                             match content {
                                 MessageContent::Text(text) => {
                                     output.ingest_text(&text.text);
@@ -285,6 +303,15 @@ async fn run_reply_loop(
                                     output.ingest_text(&content.to_string());
                                 }
                             }
+                        }
+
+                        if msg.role != goose::message::MessageRole::System {
+                            let _ = app_state.events().send(DjinnEvent::SessionMessage {
+                                session_id: session_id.to_owned(),
+                                task_id: task_id.to_owned(),
+                                agent_type: agent_type.to_string(),
+                                message: serialize_goose_message(msg),
+                            });
                         }
                     }
                     extension::handle_event(app_state, agent, &evt, worktree_path).await;
