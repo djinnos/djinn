@@ -101,6 +101,21 @@ impl SessionRepository {
         Ok(session)
     }
 
+    /// Mark all `running` sessions as `interrupted`.
+    /// Called once at server startup — no runtime sessions can exist yet.
+    pub async fn interrupt_all_running(&self) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query(
+            "UPDATE sessions
+             SET status = 'interrupted',
+                 ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE status = 'running'",
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn get(&self, id: &str) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(

@@ -210,6 +210,26 @@ impl CoordinatorActor {
 
     async fn run(mut self) {
         tracing::info!("CoordinatorActor started");
+
+        // Always start with execution paused for all projects.
+        #[cfg(not(test))]
+        {
+            let repo = crate::db::repositories::project::ProjectRepository::new(
+                self.db.clone(),
+                self.events_tx.clone(),
+            );
+            if let Ok(projects) = repo.list().await {
+                for p in projects {
+                    self.paused_projects.insert(p.id);
+                }
+            }
+            tracing::info!(
+                count = self.paused_projects.len(),
+                "CoordinatorActor: all projects start paused"
+            );
+            self.publish_status();
+        }
+
         loop {
             tokio::select! {
                 biased;
@@ -404,6 +424,15 @@ impl CoordinatorActor {
             // is_project_dispatch_enabled() handles global-pause + per-project
             // resume, so we don't bail early here — a project-resumed project
             // must still react to events even when globally paused.
+            // New projects start paused — must be explicitly resumed.
+            DjinnEvent::ProjectCreated(p) => {
+                self.paused_projects.insert(p.id.clone());
+                tracing::info!(
+                    project_id = %p.id,
+                    "CoordinatorActor: new project starts paused"
+                );
+                self.publish_status();
+            }
             DjinnEvent::TaskCreated(t) | DjinnEvent::TaskUpdated(t)
                 if matches!(t.status.as_str(), "open" | "needs_task_review" | "closed") =>
             {

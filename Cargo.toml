@@ -5,9 +5,9 @@ edition = "2024"
 
 [dependencies]
 # Goose: in-process agent harness (ADR-008). default-features=false excludes V8/Deno.
-# Pinned to latest stable release tag for reproducible runtime behavior.
-goose = { git = "https://github.com/block/goose.git", tag = "v1.26.1", default-features = false }
-goose-mcp = { git = "https://github.com/block/goose.git", tag = "v1.26.1" }
+# Pinned to main HEAD (670293631) for analyze + developer platform extensions.
+goose = { git = "https://github.com/block/goose.git", rev = "670293631", default-features = false }
+goose-mcp = { git = "https://github.com/block/goose.git", rev = "670293631" }
 anyhow = "1"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }

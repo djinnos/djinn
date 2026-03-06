@@ -158,87 +158,82 @@ async fn run_reply_loop(
                         if let goose::agents::AgentEvent::Message(msg) = &evt {
                             if msg.role == assistant_role {
                                 assistant_message_count += 1;
-                            for content in &msg.content {
-                                match content {
-                                    MessageContent::Text(text) => {
-                                        output.ingest_text(&text.text);
-                                        push_fragment(&mut assistant_fragments, format!("text:{}", text.text));
-                                    }
-                                    MessageContent::ToolRequest(req) => {
-                                        push_fragment(&mut assistant_fragments, format!("tool_request:{}", req.id));
-                                        saw_any_tool_use = true;
-                                        output.ingest_text(&content.to_string());
-                                    }
-                                    MessageContent::FrontendToolRequest(req) => {
-                                        push_fragment(&mut assistant_fragments, format!("frontend_tool_request:{}", req.id));
-                                        saw_any_tool_use = true;
-                                        output.ingest_text(&content.to_string());
-                                    }
-                                    _ => {
-                                        push_fragment(&mut assistant_fragments, format!("{}", content));
-                                        output.ingest_text(&content.to_string());
+                                for content in &msg.content {
+                                    match content {
+                                        MessageContent::Text(text) => {
+                                            push_fragment(&mut assistant_fragments, format!("text:{}", text.text));
+                                        }
+                                        MessageContent::ToolRequest(req) => {
+                                            push_fragment(&mut assistant_fragments, format!("tool_request:{}", req.id));
+                                            saw_any_tool_use = true;
+                                        }
+                                        MessageContent::FrontendToolRequest(req) => {
+                                            push_fragment(&mut assistant_fragments, format!("frontend_tool_request:{}", req.id));
+                                            saw_any_tool_use = true;
+                                        }
+                                        _ => {
+                                            push_fragment(&mut assistant_fragments, format!("{}", content));
+                                        }
                                     }
                                 }
-                            }
 
-                            // Token tracking + compaction threshold check.
-                            {
-                                let goose_session = session_manager.get_session(session_id, false).await;
-                                let (tokens_in, tokens_out) = if let Ok(s) = goose_session {
-                                    let ti = s.accumulated_input_tokens
-                                        .or(s.input_tokens)
-                                        .unwrap_or(0) as i64;
-                                    let to = s.accumulated_output_tokens
-                                        .or(s.output_tokens)
-                                        .unwrap_or(0) as i64;
-                                    (ti, to)
-                                } else {
-                                    tokens_from_goose_sqlite(session_id).await.unwrap_or((0, 0))
-                                };
-                                let usage_pct = if context_window > 0 {
-                                    tokens_in as f64 / context_window as f64
-                                } else {
-                                    0.0
-                                };
-                                let _ = app_state.events().send(DjinnEvent::SessionTokenUpdate {
-                                    session_id: session_id.to_owned(),
-                                    task_id: task_id.to_owned(),
-                                    tokens_in,
-                                    tokens_out,
-                                    context_window,
-                                    usage_pct,
-                                });
-                                #[allow(unused_assignments)]
-                                if !compaction_signaled && context_window > 0 && usage_pct >= 0.8 {
-                                    compaction_signaled = true;
-                                    tracing::info!(
-                                        task_id = %task_id,
-                                        session_id = %session_id,
-                                        tokens_in,
-                                        context_window,
-                                        threshold_pct = 80,
-                                        "Lifecycle: compaction threshold reached; breaking reply loop"
-                                    );
-                                    compaction_signal = Some(CompactionSignal {
+                                // Token tracking + compaction threshold check.
+                                {
+                                    let goose_session = session_manager.get_session(session_id, false).await;
+                                    let (tokens_in, tokens_out) = if let Ok(s) = goose_session {
+                                        let ti = s.accumulated_input_tokens
+                                            .or(s.input_tokens)
+                                            .unwrap_or(0) as i64;
+                                        let to = s.accumulated_output_tokens
+                                            .or(s.output_tokens)
+                                            .unwrap_or(0) as i64;
+                                        (ti, to)
+                                    } else {
+                                        tokens_from_goose_sqlite(session_id).await.unwrap_or((0, 0))
+                                    };
+                                    let usage_pct = if context_window > 0 {
+                                        tokens_in as f64 / context_window as f64
+                                    } else {
+                                        0.0
+                                    };
+                                    let _ = app_state.events().send(DjinnEvent::SessionTokenUpdate {
                                         session_id: session_id.to_owned(),
+                                        task_id: task_id.to_owned(),
                                         tokens_in,
+                                        tokens_out,
                                         context_window,
+                                        usage_pct,
                                     });
-                                    // Break out of both loops — compaction will restart with a fresh session.
-                                    break 'outer;
+                                    #[allow(unused_assignments)]
+                                    if !compaction_signaled && context_window > 0 && usage_pct >= 0.8 {
+                                        compaction_signaled = true;
+                                        tracing::info!(
+                                            task_id = %task_id,
+                                            session_id = %session_id,
+                                            tokens_in,
+                                            context_window,
+                                            threshold_pct = 80,
+                                            "Lifecycle: compaction threshold reached; breaking reply loop"
+                                        );
+                                        compaction_signal = Some(CompactionSignal {
+                                            session_id: session_id.to_owned(),
+                                            tokens_in,
+                                            context_window,
+                                        });
+                                        // Break out of both loops — compaction will restart with a fresh session.
+                                        break 'outer;
+                                    }
                                 }
-                            }
 
-                            if msg.role != goose::message::MessageRole::System {
                                 let _ = app_state.events().send(DjinnEvent::SessionMessage {
                                     session_id: session_id.to_owned(),
                                     task_id: task_id.to_owned(),
-                                    agent_type: agent_type.to_string(),
+                                    agent_type: agent_type.as_str().to_owned(),
                                     message: serialize_goose_message(msg),
                                 });
                             }
+                            extension::handle_event(app_state, agent, &evt, worktree_path).await;
                         }
-                        extension::handle_event(app_state, agent, &evt, worktree_path).await;
                     }
                 }
             }
@@ -264,6 +259,11 @@ async fn run_reply_loop(
         if !saw_any_event {
             let diag = runtime_fs_diagnostics(project_path, worktree_path);
             return Err(anyhow::anyhow!("agent session produced no events; {}", diag));
+        }
+
+        // Parse markers from the persisted final assistant message (not from streaming chunks).
+        if let Some(last_text) = last_assistant_text_from_goose_sqlite(session_id).await {
+            output.ingest_text(&last_text);
         }
 
         // Send a nudge if the required marker is missing.
@@ -294,22 +294,10 @@ async fn run_reply_loop(
                     let evt = evt.map_err(|e| anyhow::anyhow!("nudge stream error: {e}"))?;
                     if let goose::agents::AgentEvent::Message(msg) = &evt {
                         if msg.role == assistant_role {
-                            for content in &msg.content {
-                            match content {
-                                MessageContent::Text(text) => {
-                                    output.ingest_text(&text.text);
-                                }
-                                _ => {
-                                    output.ingest_text(&content.to_string());
-                                }
-                            }
-                        }
-
-                        if msg.role != goose::message::MessageRole::System {
                             let _ = app_state.events().send(DjinnEvent::SessionMessage {
                                 session_id: session_id.to_owned(),
                                 task_id: task_id.to_owned(),
-                                agent_type: agent_type.to_string(),
+                                agent_type: agent_type.as_str().to_owned(),
                                 message: serialize_goose_message(msg),
                             });
                         }

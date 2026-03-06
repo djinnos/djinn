@@ -216,7 +216,20 @@ impl AppState {
 
         self.restore_model_health_state().await;
 
+        // Finalize any sessions left in `running` from a previous process.
+        self.interrupt_stale_sessions_on_startup().await;
+
         self.reindex_all_projects_on_startup().await;
+    }
+
+    async fn interrupt_stale_sessions_on_startup(&self) {
+        use crate::db::repositories::session::SessionRepository;
+        let repo = SessionRepository::new(self.db().clone(), self.events().clone());
+        match repo.interrupt_all_running().await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(count = n, "interrupted stale sessions from previous run"),
+            Err(e) => tracing::warn!(error = %e, "failed to interrupt stale sessions"),
+        }
     }
 
     async fn reindex_all_projects_on_startup(&self) {
