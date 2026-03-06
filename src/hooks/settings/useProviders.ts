@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useSettingsStore } from '@/stores/settingsStore';
 import {
   addCustomProvider,
+  deleteProviderCredentials,
   fetchCredentialList,
   fetchProviderCatalog,
+  invalidateProviderCatalogCache,
   saveProviderCredentials,
   validateProviderApiKey,
   type Provider,
@@ -22,17 +25,27 @@ export function useProviders() {
   const loadData = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
-    try {
-      const [catalog, credentialList] = await Promise.all([fetchProviderCatalog(), fetchCredentialList()]);
-      setProviders(catalog);
-      setCredentials(credentialList);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to load providers';
+    invalidateProviderCatalogCache();
+    const [catalogResult, credentialResult] = await Promise.allSettled([fetchProviderCatalog(), fetchCredentialList()]);
+
+    if (catalogResult.status === 'fulfilled') {
+      setProviders(catalogResult.value);
+    } else {
+      const message = catalogResult.reason instanceof Error ? catalogResult.reason.message : 'Failed to load provider catalog';
       setLoadError(message);
       showToast.error('Failed to load providers', { description: message });
-    } finally {
-      setLoading(false);
     }
+
+    if (credentialResult.status === 'fulfilled') {
+      setCredentials(credentialResult.value);
+    } else if (catalogResult.status === 'fulfilled') {
+      // Catalog loaded but credentials failed — show a non-blocking warning
+      showToast.error('Could not load credential status', {
+        description: credentialResult.reason instanceof Error ? credentialResult.reason.message : 'Unknown error',
+      });
+    }
+
+    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -92,6 +105,20 @@ export function useProviders() {
     }
   }, [loadData]);
 
+  const { removeModelsByProvider, saveSettings: saveAgentSettings } = useSettingsStore();
+
+  const removeProvider = useCallback(async (providerId: string) => {
+    try {
+      await deleteProviderCredentials(providerId);
+      removeModelsByProvider(providerId);
+      await saveAgentSettings();
+      await loadData();
+      showToast.success('Provider removed');
+    } catch (error) {
+      showToast.error('Could not remove provider', { description: error instanceof Error ? error.message : 'Unknown error' });
+    }
+  }, [loadData, removeModelsByProvider, saveAgentSettings]);
+
   return {
     providers,
     configuredProviders,
@@ -106,5 +133,6 @@ export function useProviders() {
     validateInline,
     saveProvider,
     addCustom,
+    removeProvider,
   };
 }

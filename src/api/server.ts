@@ -21,9 +21,17 @@ function fallbackKeyName(providerId: string): string {
   return `${normalized}_API_KEY`;
 }
 
+let catalogCache: ProviderCatalogItem[] | null = null;
+
 async function listProviderCatalogRaw(): Promise<ProviderCatalogItem[]> {
+  if (catalogCache) return catalogCache;
   const response = await callMcpTool("provider_catalog");
-  return response.providers;
+  catalogCache = response.providers;
+  return catalogCache;
+}
+
+export function invalidateProviderCatalogCache(): void {
+  catalogCache = null;
 }
 
 async function resolveKeyName(providerId: string): Promise<string> {
@@ -266,6 +274,7 @@ export async function addCustomProvider(payload: CustomProviderRequest): Promise
     throw new Error(`Failed to add custom provider: ${error || response.status}`);
   }
 
+  invalidateProviderCatalogCache();
   return response.json();
 }
 

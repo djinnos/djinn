@@ -36,6 +36,7 @@ function ProvidersSettings() {
     validateInline,
     saveProvider,
     addCustom,
+    removeProvider,
   } = useProviders();
 
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -164,9 +165,18 @@ function ProvidersSettings() {
 
       <div className="space-y-2 shrink-0">
         {configuredProviders.map((provider) => (
-          <div key={provider.id} className="rounded-lg border border-border bg-card p-4">
-            <p className="font-medium">{provider.name}</p>
-            <p className="text-xs text-muted-foreground">Configured</p>
+          <div key={provider.id} className="flex items-center justify-between rounded-lg border border-border bg-card p-4">
+            <div>
+              <p className="font-medium">{provider.name}</p>
+              <p className="text-xs text-muted-foreground">Configured</p>
+            </div>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={async () => { if (await confirm(`Remove provider "${provider.name}" and its credentials?`)) await removeProvider(provider.id); }}
+            >
+              Remove
+            </Button>
           </div>
         ))}
         {configuredProviders.length === 0 && <p className="text-sm text-muted-foreground">No providers configured yet.</p>}

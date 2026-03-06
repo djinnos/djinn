@@ -13,6 +13,7 @@ type ToolCallResult = {
 let activeClient: Client | null = null;
 let activeTransport: StreamableHTTPClientTransport | null = null;
 let activeUrl: string | null = null;
+let connectPromise: Promise<Client> | null = null;
 
 function buildErrorMessage(result: ToolCallResult): string {
   if (!result.content) return "MCP tool call failed";
@@ -61,18 +62,40 @@ async function connectClient(forceReconnect = false): Promise<Client> {
     return activeClient;
   }
 
-  if (activeTransport) {
-    await activeTransport.close().catch(() => undefined);
+  // Serialize concurrent connection attempts — if one is already in-flight, wait for it
+  if (!forceReconnect && connectPromise) {
+    return connectPromise;
   }
 
-  const client = new Client({ name: "djinn-desktop", version: "0.1.0" });
-  const transport = new StreamableHTTPClientTransport(new URL(url));
-  await client.connect(transport);
+  const doConnect = async (): Promise<Client> => {
+    if (activeTransport) {
+      await activeTransport.close().catch(() => undefined);
+    }
 
-  activeClient = client;
-  activeTransport = transport;
-  activeUrl = url;
-  return client;
+    const client = new Client({ name: "djinn-desktop", version: "0.1.0" });
+    const transport = new StreamableHTTPClientTransport(new URL(url));
+    await client.connect(transport);
+
+    activeClient = client;
+    activeTransport = transport;
+    activeUrl = url;
+    return client;
+  };
+
+  connectPromise = doConnect().finally(() => {
+    connectPromise = null;
+  });
+
+  return connectPromise;
+}
+
+const MAX_RETRIES = 3;
+const INITIAL_BACKOFF_MS = 500;
+const REQUEST_TIMEOUT_MS = 30_000;
+
+function isTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.message.includes("timed out") || error.message.includes("-32001");
 }
 
 export async function callMcpTool<TName extends McpToolName>(
@@ -84,19 +107,22 @@ export async function callMcpTool<TName extends McpToolName>(
     const result = (await client.callTool({
       name,
       arguments: (args ?? {}) as Record<string, unknown>,
-    })) as ToolCallResult;
+    }, undefined, { timeout: REQUEST_TIMEOUT_MS })) as ToolCallResult;
     if (result.isError) {
       throw new Error(buildErrorMessage(result));
     }
     return extractToolPayload<McpToolOutput<TName>>(result);
   };
 
-  try {
-    return await invoke(false);
-  } catch (error) {
-    if (!(error instanceof Error)) {
-      throw error;
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await invoke(attempt > 0);
+    } catch (error) {
+      lastError = error;
+      if (!isTimeoutError(error) || attempt === MAX_RETRIES) break;
+      await new Promise((r) => setTimeout(r, INITIAL_BACKOFF_MS * 2 ** attempt));
     }
-    return invoke(true);
   }
+  throw lastError;
 }
