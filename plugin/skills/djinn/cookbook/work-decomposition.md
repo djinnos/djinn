@@ -1,28 +1,28 @@
 # Work Decomposition Cookbook
 
-How to structure work into epics, features, and tasks in djinn — workflow agnostic.
+How to structure work into epics and tasks in djinn -- workflow agnostic.
 
-## The Core Hierarchy
+## The Hierarchy
 
 Epics and tasks use **separate MCP tools** (per ADR-003):
 
 ```
-epic_create(project=PROJECT, ...)  → Epic: "User Authentication System"   (weeks, strategic container)
-task_create(project=PROJECT, ...)  → Feature: "Login UI"                   (2-4h, one deliverable)
-task_create(project=PROJECT, ...)  → Task: "Create JWT middleware"          (1 outcome, implementable)
-task_create(project=PROJECT, ...)  → Bug: "Password field clears on error" (defect fix)
+epic_create(project=PROJECT, ...)  -> Epic: "User Authentication System"   (weeks, strategic container)
+task_create(project=PROJECT, ...)  -> Feature: "Login UI"                   (2-4h, user-facing deliverable)
+task_create(project=PROJECT, ...)  -> Task: "Create JWT middleware"          (1 outcome, internal implementation)
+task_create(project=PROJECT, ...)  -> Bug: "Password field clears on error" (defect fix)
 ```
 
 Features, tasks, and bugs are **all flat siblings under an epic**. There is no nesting of tasks under features. The `issue_type` field distinguishes them but they share the same parent level.
 
 **Rule of thumb:**
-- If a dev (or agent) can't implement it in one focused session → it's too big, split further
-- If it doesn't produce a testable outcome → it's too vague, add acceptance criteria
-- If it depends on unreleased work → add a blocker
+- If an agent can't implement it in one focused session -> it's too big, split into independent peers
+- If it doesn't produce a testable outcome -> it's too vague, add acceptance criteria
+- If it depends on unreleased work -> add a blocker
 
 ## Epics
 
-Epics are **strategic containers** managed by their own tool namespace. They don't get implemented directly — their child features/tasks do.
+Epics are **strategic containers** managed by their own tool namespace. They don't get implemented directly -- their child tasks do.
 
 ```
 epic_create(
@@ -35,274 +35,190 @@ epic_create(
 ```
 
 **Good epic characteristics:**
-- Describes a user-facing capability, not a technical component
-- Has acceptance criteria that a non-technical stakeholder can verify
-- Contains 2-8 features (if more, consider splitting the epic)
-- Use `epic_tasks(project=PROJECT, epic_id=...)` to list all children
-- Use `epic_show(id=...)` to see epic details and child counts
+- Describes a domain concept, not a timeline phase
+- Contains 2-8 tasks/features (if more, consider splitting)
+- Use `epic_tasks(project=PROJECT, epic_id=...)` to list children
 
-## Features / Stories
+## Tasks
 
-Features are the primary unit of delivery. Each feature should be completable in one focused agent session (2-4 hours). Features are direct children of epics (same level as tasks and bugs).
+Tasks are the primary unit of work. Each should be completable in one focused agent session.
+
+```
+# Step 1: Create the task
+task_create(
+  project=PROJECT,
+  title="Create login API endpoint",
+  issue_type="task",
+  epic_id="k7m2",
+  description="POST /api/auth/login endpoint that validates email/password and returns JWT tokens.",
+  design="Validate request body. Look up user by email. Compare password hash with bcrypt. Generate tokens via JWT module. Set refresh token as httpOnly cookie.",
+  acceptance_criteria=[
+    {"criterion": "POST /api/auth/login accepts email and password", "met": false},
+    {"criterion": "Returns 200 with access token on valid credentials", "met": false},
+    {"criterion": "Returns 401 on invalid email or password", "met": false}
+  ],
+  priority=1,
+  memory_refs=["requirements/v1-requirements"]
+)
+# Returns: { id: "e5f6" }
+
+# Add more refs later if needed
+task_update(
+  project=PROJECT,
+  id="e5f6",
+  memory_refs_add=["decisions/adr-005-jwt-session"]
+)
+```
+
+Use `issue_type="feature"` for user-facing deliverables:
 
 ```
 task_create(
   project=PROJECT,
   title="Login UI",
   issue_type="feature",
-  epic_id="epic-id",
-  description="""
-  As a user, I want to log in with email/password so I can access my account.
-  This is the entry point to the auth system — must handle all edge cases gracefully.
-  """,
-  design="""
-  LoginForm component using existing Form primitives.
-  useAuth hook for API calls. On success: redirect to /dashboard.
-  On failure: inline error, no page reload. See ADR-005 for session handling.
-  """,
+  epic_id="k7m2",
+  description="Login page with email/password form. Entry point to the auth system.",
+  design="LoginForm component using Form primitives. useAuth hook for API calls. Redirect to /dashboard on success. Inline error on failure.",
   acceptance_criteria=[
-    "Given valid credentials → redirect to dashboard",
-    "Given invalid credentials → inline error, no page reload",
-    "Given expired session on protected route → redirect to login with return URL",
+    "Given valid credentials, redirect to dashboard",
+    "Given invalid credentials, inline error without page reload",
     "Form is accessible (WCAG 2.1 AA)"
   ],
-  priority=1,
+  priority=1
 )
 ```
 
-**Good feature characteristics:**
-- User-story framing ("As a user, I want...")
-- Design field contains the APPROACH (not acceptance criteria — those go in AC)
-- AC written as "Given/When/Then" or observable outcomes
-- Priority set relative to other features in the epic
-
-## Tasks
-
-Tasks are implementation steps. One task = one atomic commit.
-
-```
-task_create(
-  project=PROJECT,
-  title="Implement JWT validation middleware",
-  issue_type="task",
-  epic_id="epic-id",
-  description="""
-  JWT validation middleware for protected Express routes.
-  Validates RS256 signed tokens, rejects expired tokens with clear error.
-  """,
-  design="""
-  Use jsonwebtoken library (already installed). Public key from env JWT_PUBLIC_KEY.
-  Follow middleware pattern from ADR-005. Set req.user on success.
-  Reference: server/middleware/auth-existing.js for pattern.
-  """,
-  acceptance_criteria=[
-    "Valid JWT → sets req.user with decoded payload",
-    "Expired JWT → 401 with {error: 'token_expired'}",
-    "Invalid signature → 401 with {error: 'invalid_token'}",
-    "Missing token → 401 with {error: 'auth_required'}",
-    "Unit tests cover all four cases"
-  ],
-  priority=0,
-  labels=["area:auth", "sprint:3"],
-)
-```
-
-**Good task characteristics:**
-- `design` tells EXACTLY how to implement (references ADRs, patterns, existing code)
-- AC is specific enough that an agent can write tests for it
-- Single responsibility — one thing, one commit
-- Labels for grouping (sprint, area, feature-flag)
+**Features and tasks are peers.** Both sit flat under an epic. The distinction is semantic (user-facing vs internal), not hierarchical.
 
 ## Bugs
-
-Bugs are defects found during or after implementation.
 
 ```
 task_create(
   project=PROJECT,
   title="Login fails with special chars in password",
   issue_type="bug",
-  epic_id="epic-id",
-  description="""
-  Passwords with '&' or '+' fail auth. Found during edge case testing of login flow.
-  Reproducible: test@example.com / pass&word123 → 401 despite valid credentials.
-  """,
-  design="""
-  Root cause: URL encoding issue in API call. The password isn't encoded before
-  being sent in the request body. Fix: use JSON body (not form-encoded) or
-  encodeURIComponent before sending.
-  """,
+  epic_id="k7m2",
+  description="Passwords with '&' or '+' fail auth. Root cause: URL encoding issue.",
   acceptance_criteria=[
     "Password 'test&123' authenticates successfully",
-    "Password 'test+456' authenticates successfully",
     "Standard passwords still work (no regression)"
   ],
-  priority=1,
+  priority=1
 )
 ```
 
-## Sizing Features
+## Sizing
 
-Feature sizing guide — each feature should produce a working, testable deliverable:
+| Size | Effort | Action |
+|------|--------|--------|
+| XS | < 1h | Fine as-is |
+| S | 1-2h | Fine as-is |
+| M | 2-4h | Target size |
+| L | 4-8h | Split into 2-3 independent tasks |
+| XL | > 8h | Split into multiple tasks, possibly a new epic |
 
-| Size | Effort | Examples |
-|------|--------|---------|
-| XS | < 1h | Add a field to a form, update a constant, fix a typo |
-| S | 1-2h | Single API endpoint, simple UI component, a hook |
-| M | 2-4h | ✓ Target size — login form, email verification flow, data table |
-| L | 4-8h | Too large — split into 2-3 features |
-| XL | > 8h | Way too large — split into multiple features, possibly a new epic |
-
-When a feature is L or XL, split it:
+When splitting, create independent peer tasks -- NOT parent-child:
 ```
 # Too large: "User authentication"
-→ Split into:
-  "Login UI"           (S)
-  "Registration flow"  (M)
-  "Email verification" (M)
-  "Password reset"     (M)
-  "Session management" (S)
+# Split into independent peer tasks:
+  "Login UI"             (feature, M)
+  "Registration flow"    (feature, M)
+  "Email verification"   (feature, M)
+  "JWT middleware"        (task, S)
+  "Session management"   (task, S)
 ```
 
-## Dependency Mapping
+## Dependency Ordering
 
-**Blockers are THE implementation sequence mechanism.** The Djinn coordinator dispatches any open task with no unresolved blockers. If you don't set blockers, tasks run in parallel — even when one logically depends on another. Blockers are not metadata; they are the execution order.
-
-Use blockers to express sequencing requirements:
+**Blockers are THE execution sequence mechanism.** The Djinn coordinator dispatches any open task with no unresolved blockers. If you don't set blockers, tasks run in parallel.
 
 ```
 # Registration must exist before email verification can be built
 task_blockers_add(
   project=PROJECT,
-  id="email-verification-feature-id",
-  blocking_id="registration-feature-id",
+  id="email-verification-id",
+  blocking_id="registration-id",
 )
 ```
 
 **When to add blockers:**
-- Technical dependency: A must ship before B can be built (schema before CRUD, CRUD before tools that use it)
-- Logical dependency: B assumes A's UI/API exists
+- Technical dependency: A must ship before B can be built
 - Data dependency: B needs data that A creates
-- Build dependency: B imports or links against code that A produces
+- Build dependency: B imports code that A produces
 
 **When NOT to add blockers:**
-- "Nice to have" sequencing — let the coordinator parallelize
-- Features in completely different areas (auth vs. billing)
+- "Nice to have" sequencing
+- Tasks in completely different areas
 - Personal preference about order
-
-**Critical:** Get blockers right. Missing a blocker means the coordinator may dispatch a task before its dependency ships — the agent will fail or produce broken code. Adding a false blocker means unnecessary serialization that slows execution.
 
 ## Labels for Grouping
 
-Labels enable cross-cutting queries without modifying the hierarchy:
+Labels enable cross-cutting queries:
 
 ```
-# Sprint tracking
-labels=["sprint:3"]
-
-# Domain/area grouping
-labels=["area:auth", "area:payments"]
-
-# Feature flags
-labels=["flag:new-checkout"]
-
-# Layer
-labels=["layer:api", "layer:ui", "layer:db"]
-
-# Special
-labels=["hotfix", "tech-debt", "a11y"]
+labels=["area:auth", "sprint:3", "layer:api"]
 ```
 
 Query examples:
 ```
-# All auth work in sprint 3
 task_list(project=PROJECT, label="sprint:3", text="auth")
-
-# All API tasks
 task_list(project=PROJECT, label="layer:api", issue_type="task")
-
-# Count by area
 task_count(project=PROJECT, group_by="epic")
+```
+
+## Memory-Task Linking
+
+Set `memory_refs` at creation, or add/remove later with `task_update`:
+
+```
+# At creation
+task_create(project=PROJECT, ..., memory_refs=["requirements/v1-requirements"])
+
+# Or add/remove later
+task_update(project=PROJECT, id="e5f6", memory_refs_add=["decisions/adr-005"])
+
+# Add backlink to memory note
+memory_edit(
+  identifier="requirements/v1-requirements",
+  operation="append",
+  section="Relations",
+  content="\n- Task e5f6: Create login API endpoint -- implements AUTH-01"
+)
 ```
 
 ## Acceptance Criteria Patterns
 
-Well-written AC enables agent verification and review:
-
 ```python
 # Given/When/Then (behavioral)
 "Given valid credentials, when user submits, then they are redirected to /dashboard"
-"Given invalid credentials, when user submits, then error message appears inline"
 
 # Observable outcome
 "Form submits without page reload"
-"Error clears when user starts typing again"
-"Password field value is never logged or stored in plaintext"
 
 # Testable assertion
 "Unit test: middleware rejects expired tokens with 401"
-"E2E test: login → dashboard redirect works"
-"Performance: form renders in < 100ms"
 ```
 
 **Bad AC (avoid):**
 ```
 "Works correctly"           # How do we know?
-"Is tested"                 # What tests? What coverage?
+"Is tested"                 # What tests?
 "Follows best practices"    # Which ones?
-"Is fast"                   # How fast?
 ```
 
-## Roadmap-Level Planning
+## Common Mistakes
 
-For strategic planning, create epics first, then flesh out features:
+1. **Decomposing features into child tasks.** Features, tasks, and bugs are flat siblings. Split large items into independent peers instead.
 
-```
-# Phase 1: Create epics via epic_create (separate tool namespace)
-auth_epic = epic_create(project=PROJECT, title="User Auth", emoji="🔐", color="#8B5CF6")
-payments_epic = epic_create(project=PROJECT, title="Payments", emoji="💳", color="#22C55E")
-onboarding_epic = epic_create(project=PROJECT, title="Onboarding", emoji="🚀", color="#F97316")
+2. **Naming epics after milestones.** Name epics after domain concepts: "User Authentication System", not "Phase 2".
 
-# Phase 2: Create features and tasks under epics (all flat siblings)
-task_create(project=PROJECT, title="Login UI", issue_type="feature", epic_id=auth_epic, ...)
-task_create(project=PROJECT, title="Registration", issue_type="feature", epic_id=auth_epic, ...)
-task_create(project=PROJECT, title="JWT middleware", issue_type="task", epic_id=auth_epic, ...)
+4. **Putting acceptance criteria in description.** Use the `acceptance_criteria` array field.
 
-# Use epic_tasks to list all children of an epic
-epic_tasks(project=PROJECT, epic_id=auth_epic)
-```
+5. **Adding unnecessary blockers.** Only block on real dependencies. Let the coordinator parallelize the rest.
 
-## Linking Memory to Work
+6. **Using string values for priority.** Priority is an integer (0-3).
 
-Always connect work items to relevant architectural knowledge:
+7. **Omitting `project` on task/epic tools.** Always pass `project=PROJECT`.
 
-```
-# After writing an ADR
-task_update(
-  project=PROJECT,
-  id="feature-id",
-  memory_refs_add=["decisions/adr-005-jwt-session.md"]
-)
-
-# In task design field, reference memory notes
-design="""
-Follow ADR-005 (stored in djinn memory: decisions/adr-005-jwt-session.md).
-Use pattern from memory: patterns/express-middleware.md.
-"""
-```
-
-This creates bidirectional links: tasks reference memory, memory can look up tasks.
-
-## Decomposition Checklist
-
-Before submitting a feature for execution:
-
-- [ ] Title is imperative and specific ("Add login form", not "Login work")
-- [ ] `description` has context and user value, NOT implementation details
-- [ ] `design` has exact implementation approach, file references, ADR refs
-- [ ] `acceptance_criteria` has observable, testable outcomes
-- [ ] Sized to complete in one session (2-4h for features, < 1h for tasks)
-- [ ] Blockers set if it depends on unreleased work
-- [ ] Labels added for sprint, area, and any cross-cutting concerns
-- [ ] Memory refs linked if ADRs or patterns apply
-- [ ] Priority set (0=must-ship-now, 1=important, 2=nice-to-have)
+8. **Trying to pass `blocked_by` to `task_create`.** Use `task_blockers_add()` after creation.

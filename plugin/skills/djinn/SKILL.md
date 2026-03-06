@@ -7,35 +7,37 @@ description: Use when djinn MCP tools are available and user needs to manage tas
 
 Djinn gives you three systems: **tasks** (kanban board), **memory** (persistent knowledge base), **execution** (parallel agent orchestration). This skill is workflow-agnostic -- use it your way.
 
-For project planning workflows, use the dedicated skills: `new-project`, `discuss-milestone`, `plan-milestone`, `progress`.
+For project planning workflows, use the dedicated skills: `init-project`, `plan`, `breakdown`.
 
 ## Session Start
 
 Always orient first:
 
-1. `memory_catalog(project=PROJECT)` — see what knowledge exists
-2. `task_list(project=PROJECT, status="in_progress")` — check active work
-3. `task_ready(project=PROJECT)` — see what's next
+1. `memory_catalog(project=PROJECT)` -- see what knowledge exists
+2. `task_list(project=PROJECT, status="in_progress")` -- check active work
+3. `task_ready(project=PROJECT)` -- see what's next
 
 ## Hierarchy
 
 Epics and tasks are managed by **separate MCP tools** (per ADR-003):
 
 ```
-epic_create(project=PROJECT, ...)  → Epic (strategic container, weeks+)
-task_create(project=PROJECT, ...)  → feature / task / bug (epic-linked or standalone)
+epic_create(project=PROJECT, ...)  -> Epic (strategic container, weeks+)
+task_create(project=PROJECT, ...)  -> feature / task / bug (epic-linked or standalone)
 ```
 
 Epics use: `epic_create`, `epic_list`, `epic_show`, `epic_tasks`, `epic_update`, `epic_close`, `epic_reopen`, `epic_delete`, `epic_count`.
 
-Tasks use: `task_create(project=PROJECT, issue_type="task"|"feature"|"bug", epic_id=...)` — `epic_id` is optional, so tasks may be standalone or epic-linked. There is no nesting of tasks under features.
+Tasks use: `task_create(project=PROJECT, issue_type="task"|"feature"|"bug", epic_id=...)` -- `epic_id` is optional, so tasks may be standalone or epic-linked. **All task types are flat siblings under an epic -- there is no nesting.**
 
 Always set `project` and `issue_type`. Use `acceptance_criteria` (array), not description, for what "done" looks like. Use `design` for how to implement.
+
+Use `memory_refs` on `task_create` to link tasks to memory notes at creation. Use `task_update(memory_refs_add=..., memory_refs_remove=...)` to modify refs later.
 
 ## Status Transitions
 
 ```
-open → in_progress → needs_task_review → needs_epic_review → closed
+open -> in_progress -> needs_task_review -> needs_epic_review -> closed
 ```
 
 Key actions: `start`, `submit_task_review`, `task_review_approve`, `epic_review_approve`, `close` (skip review), `reopen`, `block`/`unblock`.
@@ -59,8 +61,10 @@ Add comments at milestones so any agent can resume:
 | `research` | research/ | Analysis, findings |
 | `requirement` | requirements/ | Specs, PRDs |
 | `design` | design/ | System designs |
-| `brief` | (root) | Project brief (singleton) |
-| `roadmap` | (root) | Roadmap (singleton) |
+| `brief` | (root) | Project brief (singleton, mutable) |
+| `roadmap` | (root) | Roadmap (singleton, mutable) |
+
+Both `brief` and `roadmap` are **living documents** that evolve as the project progresses.
 
 Connect notes with `[[wikilinks]]`. Add `## Relations` section. Search before creating to avoid duplicates.
 
@@ -73,18 +77,19 @@ Load when you need detailed patterns:
 | Task CRUD, lifecycle, blockers, queries | `cookbook/task-management.md` |
 | Memory write, search, wikilinks, maintenance | `cookbook/memory-management.md` |
 | Execution control, monitoring, session operations | `cookbook/execution-planning.md` |
-| Structuring epics → features → tasks | `cookbook/work-decomposition.md` |
+| Structuring epics and tasks | `cookbook/work-decomposition.md` |
 
 ## Common Mistakes
 
 | Mistake | Fix |
 |---------|-----|
-| Putting acceptance criteria in `description` | Use the `acceptance_criteria` array field — description is for context/background only |
-| Creating memory without searching first | Always run `memory_catalog()` or `memory_search()` before writing — avoid duplicates |
-| Skipping `memory_catalog()` at session start | Run it first — it tells you what knowledge exists before you create or search |
-| Setting blockers on features that could run in parallel | Only block on real technical or logical dependencies — let the coordinator parallelize the rest |
-| Using `close` on a task that needs review | Use `submit_task_review` → let the review pipeline run. `close` skips review entirely. |
-| Omitting `project` on task/epic tools | `project` is required on task/epic reads and writes (for example `task_create`, `task_list`, `epic_create`, `epic_list`). |
-| Assuming `epic_id` is required | `epic_id` is optional. Standalone tasks are valid when epic grouping is not needed. |
-| Using `task_create` for epics | Use `epic_create()` — epics have their own tool namespace (ADR-003). |
-| Nesting tasks under features | Features, tasks, and bugs are flat siblings under an epic. There is no parent-child between them. |
+| Forgetting `memory_refs` on `task_create` | Always set `memory_refs` at creation to link tasks to requirements and ADRs |
+| Putting acceptance criteria in `description` | Use the `acceptance_criteria` array field |
+| Decomposing features into child tasks | Features, tasks, and bugs are flat siblings under an epic. There is no nesting. Split large items into independent peers instead |
+| Creating memory without searching first | Run `memory_catalog()` or `memory_search()` before writing |
+| Skipping `memory_catalog()` at session start | Run it first to see what exists |
+| Setting blockers on tasks that could run in parallel | Only block on real technical or logical dependencies |
+| Using `close` on a task that needs review | Use `submit_task_review` to enter the review pipeline |
+| Omitting `project` on task/epic tools | `project` is required on task/epic reads and writes |
+| Assuming `epic_id` is required | `epic_id` is optional. Standalone tasks are valid |
+| Using `task_create` for epics | Use `epic_create()` -- epics have their own tool namespace (ADR-003) |
