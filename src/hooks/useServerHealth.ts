@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { getServerStatus, retryServerDiscovery } from "@/tauri/commands";
+import { listen } from "@tauri-apps/api/event";
 
 export type ConnectionStatus = "loading" | "connected" | "error";
 
@@ -72,8 +73,22 @@ export function useServerHealth(): ServerHealthState {
       }
     }, POLL_INTERVAL_MS);
 
+    // Listen for backend health monitor events
+    const unlistenReconnected = listen<number>("server:reconnected", (event) => {
+      setPort(event.payload);
+      setStatus("connected");
+      setError(null);
+    });
+
+    const unlistenDisconnected = listen("server:disconnected", () => {
+      setStatus("error");
+      setError("Server connection lost. Attempting to reconnect...");
+    });
+
     return () => {
       clearInterval(intervalId);
+      unlistenReconnected.then((fn) => fn());
+      unlistenDisconnected.then((fn) => fn());
     };
   }, [checkStatus, status]);
 

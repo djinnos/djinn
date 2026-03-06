@@ -60,6 +60,9 @@ pub fn run() {
                             }
                         }
 
+                        // Start background health monitor for server reconnection
+                        server::start_health_monitor(&app_handle);
+
                         // Show the main window now that server is ready
                         if let Some(window) = app_handle.get_webview_window("main") {
                             let _ = window.show();

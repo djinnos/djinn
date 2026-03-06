@@ -89,6 +89,20 @@ async function connectClient(forceReconnect = false): Promise<Client> {
   return connectPromise;
 }
 
+/**
+ * Reset the cached MCP client so the next call reconnects.
+ * Called when the server restarts on a new port.
+ */
+export async function resetMcpClient(): Promise<void> {
+  if (activeTransport) {
+    await activeTransport.close().catch(() => undefined);
+  }
+  activeClient = null;
+  activeTransport = null;
+  activeUrl = null;
+  connectPromise = null;
+}
+
 const MAX_RETRIES = 3;
 const INITIAL_BACKOFF_MS = 500;
 const REQUEST_TIMEOUT_MS = 30_000;

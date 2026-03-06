@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
 
@@ -371,6 +371,87 @@ pub async fn retry_server_discovery<R: Runtime>(app: &AppHandle<R>) -> Result<u1
             Err(e)
         }
     }
+}
+
+/// Start a background health monitor that periodically checks server health.
+///
+/// When the server becomes unreachable (e.g. after a restart), this monitor
+/// re-reads `daemon.json` to discover the new port/PID and updates `ServerState`.
+/// Emits Tauri events so the frontend can reconnect SSE and MCP clients.
+pub fn start_health_monitor<R: Runtime>(app: &AppHandle<R>) {
+    let app_handle = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        // Wait for initial startup to complete before monitoring
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let mut was_healthy = true;
+
+        loop {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+
+            let current_port = {
+                let state = app_handle.state::<Mutex<ServerState>>();
+                state.lock().ok().and_then(|s| s.port)
+            };
+
+            // If we don't have a port yet, skip (startup hasn't finished)
+            let Some(port) = current_port else {
+                continue;
+            };
+
+            if health_check(port).await {
+                if !was_healthy {
+                    log::info!("Health monitor: server recovered on port {}", port);
+                    if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
+                        if let Ok(mut state) = state.lock() {
+                            state.mark_healthy();
+                        }
+                    }
+                    let _ = app_handle.emit("server:reconnected", port);
+                    was_healthy = true;
+                }
+                continue;
+            }
+
+            // Health check failed — try to rediscover from daemon.json
+            log::warn!(
+                "Health monitor: server on port {} is unreachable, attempting rediscovery",
+                port
+            );
+
+            if let Some(new_port) = discover_server_for_app(&app_handle) {
+                if health_check(new_port).await {
+                    log::info!(
+                        "Health monitor: rediscovered healthy server on port {} (was {})",
+                        new_port,
+                        port
+                    );
+                    if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
+                        if let Ok(mut state) = state.lock() {
+                            state.port = Some(new_port);
+                            state.mark_healthy();
+                        }
+                    }
+                    let _ = app_handle.emit("server:reconnected", new_port);
+                    was_healthy = true;
+                    continue;
+                }
+            }
+
+            // Server is truly down
+            if was_healthy {
+                log::warn!("Health monitor: server is down");
+                if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
+                    if let Ok(mut state) = state.lock() {
+                        state.is_healthy = false;
+                    }
+                }
+                let _ = app_handle.emit("server:disconnected", ());
+                was_healthy = false;
+            }
+        }
+    });
 }
 
 // Note: We intentionally do NOT implement a shutdown_server function
