@@ -31,7 +31,7 @@ pub use types::*;
 impl DjinnMcpServer {
     /// Create a new work item (task, feature, or bug) under an epic.
     #[tool(
-        description = "Create a new work item (task, feature, or bug) under an epic. Accepts epic_id as UUID or short_id."
+        description = "Create a new work item (task, feature, or bug) under an epic. Accepts epic_id as UUID or short_id. Use blocked_by to set blocker dependencies atomically at creation."
     )]
     pub async fn task_create(
         &self,
@@ -165,12 +165,28 @@ impl DjinnMcpServer {
             }
         }
 
+        // Apply blocked_by relationships atomically at creation.
+        if let Some(ref blockers) = p.blocked_by {
+            for blocker_ref in blockers {
+                let blocking_id = match self
+                    .resolve_task_not_epic(&project_id, blocker_ref)
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(e) => return Json(ErrorOr::Error(e)),
+                };
+                if let Err(e) = repo.add_blocker(&task.id, &blocking_id).await {
+                    return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
+                }
+            }
+        }
+
         Json(ErrorOr::Ok(task_to_response(&task)))
     }
 
     /// Update allowed fields of a work item.
     #[tool(
-        description = "Update allowed fields of a work item (title, description, acceptance_criteria, design, priority, owner, labels, epic_id). Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
+        description = "Update allowed fields of a work item (title, description, acceptance_criteria, design, priority, owner, labels, epic_id, blocked_by_add, blocked_by_remove). Accepts task ID (full UUID or short_id, e.g., 'k7m2')."
     )]
     pub async fn task_update(
         &self,
@@ -306,7 +322,7 @@ impl DjinnMcpServer {
         };
 
         // Apply memory_refs changes if requested.
-        if p.memory_refs_add.is_some() || p.memory_refs_remove.is_some() {
+        let updated = if p.memory_refs_add.is_some() || p.memory_refs_remove.is_some() {
             let mut refs: Vec<String> =
                 serde_json::from_str(&updated.memory_refs).unwrap_or_default();
             if let Some(add) = &p.memory_refs_add {
@@ -321,8 +337,40 @@ impl DjinnMcpServer {
             }
             let refs_json = serde_json::to_string(&refs).unwrap_or_else(|_| "[]".into());
             match repo.update_memory_refs(&updated.id, &refs_json).await {
-                Ok(t) => return Json(ErrorOr::Ok(task_to_response(&t))),
+                Ok(t) => t,
                 Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
+            }
+        } else {
+            updated
+        };
+
+        // Apply blocker changes if requested.
+        if let Some(ref add) = p.blocked_by_add {
+            for blocker_ref in add {
+                let blocking_id = match self
+                    .resolve_task_not_epic(&project_id, blocker_ref)
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(e) => return Json(ErrorOr::Error(e)),
+                };
+                if let Err(e) = repo.add_blocker(&updated.id, &blocking_id).await {
+                    return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
+                }
+            }
+        }
+        if let Some(ref remove) = p.blocked_by_remove {
+            for blocker_ref in remove {
+                let blocking_id = match self
+                    .resolve_task_not_epic(&project_id, blocker_ref)
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(e) => return Json(ErrorOr::Error(e)),
+                };
+                if let Err(e) = repo.remove_blocker(&updated.id, &blocking_id).await {
+                    return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
+                }
             }
         }
 
@@ -522,71 +570,6 @@ impl DjinnMcpServer {
                 Ok(parsed) => Json(ErrorOr::Ok(parsed)),
                 Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
             },
-            Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
-        }
-    }
-
-    /// Add a blocker relationship between two tasks. Rejects epics and circular dependencies.
-    #[tool(
-        description = "Add a blocker relationship: task 'id' is blocked by task 'blocking_id'. Both accept task ID (full UUID or short_id, e.g., 'k7m2'). Epics cannot participate in blocker relationships — both tasks must be non-epic (task, feature, or bug)."
-    )]
-    pub async fn task_blockers_add(
-        &self,
-        Parameters(p): Parameters<TaskBlockersAddParams>,
-    ) -> Json<ErrorOr<OkResponse>> {
-        let project_id = match self.require_project_id(&p.project).await {
-            Ok(id) => id,
-            Err(e) => return Json(ErrorOr::Error(e)),
-        };
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
-        let task_id = match self.resolve_task_not_epic(&project_id, &p.id).await {
-            Ok(id) => id,
-            Err(e) => return Json(ErrorOr::Error(e)),
-        };
-        let blocking_id = match self
-            .resolve_task_not_epic(&project_id, &p.blocking_id)
-            .await
-        {
-            Ok(id) => id,
-            Err(e) => return Json(ErrorOr::Error(e)),
-        };
-        match repo.add_blocker(&task_id, &blocking_id).await {
-            Ok(()) => Json(ErrorOr::Ok(OkResponse { ok: true })),
-            Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
-        }
-    }
-
-    /// Remove a blocker relationship between two tasks.
-    #[tool(
-        description = "Remove a blocker relationship. Both task IDs accept (full UUID or short_id, e.g., 'k7m2')."
-    )]
-    pub async fn task_blockers_remove(
-        &self,
-        Parameters(p): Parameters<TaskBlockersRemoveParams>,
-    ) -> Json<ErrorOr<OkResponse>> {
-        let project_id = match self.require_project_id(&p.project).await {
-            Ok(id) => id,
-            Err(e) => return Json(ErrorOr::Error(e)),
-        };
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
-        let Some(task) = repo
-            .resolve_in_project(&project_id, &p.id)
-            .await
-            .ok()
-            .flatten()
-        else {
-            return Json(ErrorOr::Error(not_found(&p.id)));
-        };
-        let Some(blocker) = repo
-            .resolve_in_project(&project_id, &p.blocking_id)
-            .await
-            .ok()
-            .flatten()
-        else {
-            return Json(ErrorOr::Error(not_found(&p.blocking_id)));
-        };
-        match repo.remove_blocker(&task.id, &blocker.id).await {
-            Ok(()) => Json(ErrorOr::Ok(OkResponse { ok: true })),
             Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
         }
     }

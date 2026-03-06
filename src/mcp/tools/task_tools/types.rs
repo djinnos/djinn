@@ -19,6 +19,8 @@ pub struct TaskCreateParams {
     pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
     /// Memory note permalinks to attach to this task at creation.
     pub memory_refs: Option<Vec<String>>,
+    /// Task IDs (UUID or short_id) that block this task. Blockers are set atomically at creation.
+    pub blocked_by: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -44,6 +46,10 @@ pub struct TaskUpdateParams {
     pub memory_refs_add: Option<Vec<String>>,
     /// Memory note permalinks to remove from this task.
     pub memory_refs_remove: Option<Vec<String>>,
+    /// Task IDs (UUID or short_id) to add as blockers of this task.
+    pub blocked_by_add: Option<Vec<String>>,
+    /// Task IDs (UUID or short_id) to remove as blockers of this task.
+    pub blocked_by_remove: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
@@ -110,26 +116,6 @@ pub struct TaskCommentAddParams {
     pub body: String,
     pub actor_id: Option<String>,
     pub actor_role: Option<String>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct TaskBlockersAddParams {
-    /// Absolute project path.
-    pub project: String,
-    /// Task UUID or short_id (the task being blocked).
-    pub id: String,
-    /// Task UUID or short_id of the task that blocks it.
-    pub blocking_id: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct TaskBlockersRemoveParams {
-    /// Absolute project path.
-    pub project: String,
-    /// Task UUID or short_id (the blocked task).
-    pub id: String,
-    /// Task UUID or short_id of the blocker to remove.
-    pub blocking_id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]

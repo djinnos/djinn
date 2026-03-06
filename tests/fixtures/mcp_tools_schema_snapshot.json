@@ -4692,39 +4692,6 @@
       }
     },
     {
-      "name": "task_blockers_add",
-      "input_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "blocking_id": {
-            "description": "Task UUID or short_id of the task that blocks it.",
-            "type": "string"
-          },
-          "id": {
-            "description": "Task UUID or short_id (the task being blocked).",
-            "type": "string"
-          },
-          "project": {
-            "description": "Absolute project path.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "project",
-          "id",
-          "blocking_id"
-        ],
-        "title": "TaskBlockersAddParams",
-        "type": "object"
-      },
-      "output_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "additionalProperties": true,
-        "title": "ErrorOrOkResponse",
-        "type": "object"
-      }
-    },
-    {
       "name": "task_blockers_list",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4749,39 +4716,6 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrTaskBlockersListResponse",
-        "type": "object"
-      }
-    },
-    {
-      "name": "task_blockers_remove",
-      "input_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "blocking_id": {
-            "description": "Task UUID or short_id of the blocker to remove.",
-            "type": "string"
-          },
-          "id": {
-            "description": "Task UUID or short_id (the blocked task).",
-            "type": "string"
-          },
-          "project": {
-            "description": "Absolute project path.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "project",
-          "id",
-          "blocking_id"
-        ],
-        "title": "TaskBlockersRemoveParams",
-        "type": "object"
-      },
-      "output_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "additionalProperties": true,
-        "title": "ErrorOrOkResponse",
         "type": "object"
       }
     },
@@ -4958,6 +4892,14 @@
             "nullable": true,
             "type": "array"
           },
+          "blocked_by": {
+            "description": "Task IDs (UUID or short_id) that block this task. Blockers are set atomically at creation.",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
           "description": {
             "nullable": true,
             "type": "string"
@@ -4977,6 +4919,14 @@
             "type": "string"
           },
           "labels": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "memory_refs": {
+            "description": "Memory note permalinks to attach to this task at creation.",
             "items": {
               "type": "string"
             },
@@ -5700,6 +5650,22 @@
             "description": "Full replacement for acceptance_criteria.",
             "items": {
               "$ref": "#/$defs/AcceptanceCriterionItem"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "blocked_by_add": {
+            "description": "Task IDs (UUID or short_id) to add as blockers of this task.",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "blocked_by_remove": {
+            "description": "Task IDs (UUID or short_id) to remove as blockers of this task.",
+            "items": {
+              "type": "string"
             },
             "nullable": true,
             "type": "array"
