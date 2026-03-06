@@ -434,7 +434,33 @@ async fn compact_inline(
         .with_canonical_limits(goose_provider_id);
 
     // 3. Generate summary.
-    let summary = if messages.is_empty() {
+    //
+    // Trim messages to fit within the model's context window.  We target 80%
+    // of the window (leaving room for the compaction system prompt + output).
+    // If the session used more tokens than that, we keep only the leading
+    // fraction of messages and drop the tail.
+    let trimmed_messages = if !messages.is_empty() && context_window > 0 && final_tokens_in > 0 {
+        let target = (context_window as f64 * 0.80) as i64;
+        if final_tokens_in > target {
+            let keep_ratio = target as f64 / final_tokens_in as f64;
+            let keep_count = ((messages.len() as f64 * keep_ratio).ceil() as usize).max(1);
+            tracing::info!(
+                task_id = %task_id,
+                total_messages = messages.len(),
+                keep_count,
+                final_tokens_in,
+                target,
+                "compaction: trimming conversation to fit context window"
+            );
+            messages[..keep_count].to_vec()
+        } else {
+            messages
+        }
+    } else {
+        messages
+    };
+
+    let summary = if trimmed_messages.is_empty() {
         tracing::warn!(task_id = %task_id, "compaction: empty conversation history; using fallback summary");
         "Context window was compacted. Please review the current state of the worktree and continue the task.".to_string()
     } else {
@@ -451,7 +477,7 @@ async fn compact_inline(
                 &model_config,
                 old_session_id,
                 compaction_system,
-                &messages,
+                &trimmed_messages,
                 &[],
             )
             .await
