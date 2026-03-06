@@ -1,7 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Cancel01Icon,
-  Minus01Icon,
+  MinusSignIcon,
   Square01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -42,7 +42,7 @@ export function Titlebar() {
       className="flex h-9 select-none items-center justify-end border-b border-border/50 bg-background"
     >
       <TitlebarButton onClick={() => appWindow.minimize()} label="Minimize">
-        <HugeiconsIcon icon={Minus01Icon} size={14} className="pointer-events-none" />
+        <HugeiconsIcon icon={MinusSignIcon} size={14} className="pointer-events-none" />
       </TitlebarButton>
       <TitlebarButton onClick={() => appWindow.toggleMaximize()} label="Maximize">
         <HugeiconsIcon icon={Square01Icon} size={12} className="pointer-events-none" />
