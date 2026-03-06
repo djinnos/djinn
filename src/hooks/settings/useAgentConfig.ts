@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { useWizardStore } from '@/stores/wizardStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 
@@ -20,6 +21,11 @@ export function useAgentConfig() {
     saveSettings,
     resetError,
   } = useSettingsStore();
+
+  useEffect(() => {
+    void loadSettings();
+    void loadProviderModels();
+  }, [loadSettings, loadProviderModels]);
 
   const handleResetWizard = () => {
     if (confirm('Are you sure you want to reset the wizard? This will show the setup wizard on next launch.')) {
