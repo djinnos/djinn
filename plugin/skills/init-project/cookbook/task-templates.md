@@ -146,7 +146,7 @@ task_b = task_create(
 **Stage 2 -- Core logic (blocked by Stage 1):**
 
 ```
-task_c = task_create(
+task_create(
   project=PROJECT,
   title="Create login API endpoint",
   issue_type="task",
@@ -155,18 +155,16 @@ task_c = task_create(
     {"criterion": "Returns JWT pair on valid credentials", "met": false},
     {"criterion": "Returns 401 on invalid credentials", "met": false}
   ],
-  priority=1
+  priority=1,
+  blocked_by=["a1b2", "c3d4"]
 )
-# Returns: { id: "e5f6" }
-
-task_blockers_add(project=PROJECT, id="e5f6", blocking_id="a1b2")  # needs schema
-task_blockers_add(project=PROJECT, id="e5f6", blocking_id="c3d4")  # needs JWT config
+# Returns: { id: "e5f6" } -- created already blocked
 ```
 
 **Stage 3 -- Integration (blocked by Stage 2):**
 
 ```
-task_d = task_create(
+task_create(
   project=PROJECT,
   title="Add auth middleware to protected routes",
   issue_type="task",
@@ -175,18 +173,17 @@ task_d = task_create(
     {"criterion": "Protected routes return 401 without valid token", "met": false},
     {"criterion": "Valid tokens pass through to route handler", "met": false}
   ],
-  priority=2
+  priority=2,
+  blocked_by=["e5f6"]
 )
 # Returns: { id: "g7h8" }
-
-task_blockers_add(project=PROJECT, id="g7h8", blocking_id="e5f6")
 ```
 
 ### Ordering Rules
 
 1. Foundation tasks have no blockers
-2. Use `task_blockers_add()` after creation for each dependency
-3. `task_create` does NOT accept `blocked_by` -- always use `task_blockers_add()` separately
+2. Use `blocked_by` on `task_create` to set blockers atomically at creation
+3. Use `task_update(blocked_by_add=..., blocked_by_remove=...)` to adjust after creation
 4. Only block on real dependencies -- if two tasks CAN run in parallel, let them
 
 ---
@@ -250,4 +247,4 @@ memory_edit(
 
 7. **Omitting `project` on task/epic tools.** Always pass `project=PROJECT`.
 
-8. **Trying to pass `blocked_by` to `task_create`.** Use `task_blockers_add()` after creation.
+8. **Not using `blocked_by` on `task_create`.** Always pass `blocked_by` at creation time to set blockers atomically.
