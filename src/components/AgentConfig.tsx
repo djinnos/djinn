@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
-import { useSettingsStore } from "@/stores/settingsStore";
-import { AgentRole, ModelPriorityItem, ProviderModel } from "@/api/settings";
+import { useState } from "react";
+import { AgentRole, ModelPriorityItem, ProviderModel, ModelSessionLimit } from "@/api/settings";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -259,40 +258,35 @@ function SessionLimitItem({
   );
 }
 
-export function AgentConfig() {
-  const {
-    modelPriorities,
-    sessionLimits,
-    availableModels,
-    isLoading,
-    isSaving,
-    error,
-    hasUnsavedChanges,
-    loadSettings,
-    loadProviderModels,
-    addModelToRole,
-    removeModelFromRole,
-    reorderModelsInRole,
-    updateSessionLimit,
-    saveSettings,
-    resetError,
-  } = useSettingsStore();
+interface AgentConfigProps {
+  modelPriorities: Record<AgentRole, ModelPriorityItem[]>;
+  sessionLimits: ModelSessionLimit[];
+  availableModels: ProviderModel[];
+  isLoading: boolean;
+  isSaving: boolean;
+  error: string | null;
+  hasUnsavedChanges: boolean;
+  onAddModel: (role: AgentRole, model: ModelPriorityItem) => void;
+  onRemoveModel: (role: AgentRole, index: number) => void;
+  onReorderModels: (role: AgentRole, fromIndex: number, toIndex: number) => void;
+  onUpdateSessionLimit: (model: string, provider: string, maxConcurrent: number) => void;
+  onDismissError: () => void;
+}
 
-  useEffect(() => {
-    loadSettings();
-    loadProviderModels();
-  }, [loadSettings, loadProviderModels]);
-
-  // Auto-save when changes are made
-  useEffect(() => {
-    if (hasUnsavedChanges && !isSaving) {
-      const timeoutId = setTimeout(() => {
-        saveSettings();
-      }, 1000);
-      
-      return () => clearTimeout(timeoutId);
-    }
-  }, [hasUnsavedChanges, isSaving, saveSettings]);
+export function AgentConfig({
+  modelPriorities,
+  sessionLimits,
+  availableModels,
+  isLoading,
+  isSaving,
+  error,
+  hasUnsavedChanges,
+  onAddModel,
+  onRemoveModel,
+  onReorderModels,
+  onUpdateSessionLimit,
+  onDismissError,
+}: AgentConfigProps) {
 
   const roles: AgentRole[] = ["worker", "task_reviewer", "epic_reviewer"];
 
@@ -324,7 +318,7 @@ export function AgentConfig() {
         <div className="rounded-md bg-destructive/10 p-4 text-sm text-destructive">
           <div className="flex items-center justify-between">
             <span>{error}</span>
-            <Button variant="ghost" size="sm" onClick={resetError}>
+            <Button variant="ghost" size="sm" onClick={onDismissError}>
               Dismiss
             </Button>
           </div>
@@ -361,9 +355,9 @@ export function AgentConfig() {
                   role={role}
                   models={modelPriorities[role]}
                   availableModels={availableModels}
-                  onAddModel={addModelToRole}
-                  onRemoveModel={removeModelFromRole}
-                  onReorder={reorderModelsInRole}
+                  onAddModel={onAddModel}
+                  onRemoveModel={onRemoveModel}
+                  onReorder={onReorderModels}
                 />
               ))}
             </div>
@@ -394,7 +388,7 @@ export function AgentConfig() {
                     maxConcurrent={item.max_concurrent}
                     currentActive={item.current_active}
                     onChange={(max) =>
-                      updateSessionLimit(item.model, item.provider, max)
+                      onUpdateSessionLimit(item.model, item.provider, max)
                     }
                   />
                 ))}
