@@ -4,6 +4,7 @@ type: requirement
 tags: []
 ---
 
+
 # V1 Requirements — Djinn Server Rust Rewrite
 
 Requirements derived from [[Project Brief]], [[Research Summary]], and the four research dimension notes. Each requirement traces to its source.
@@ -227,3 +228,31 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 | 951w | Graceful shutdown and WIP commits for agent sessions | AGENT-09, AGENT-10 |
 | 1u1b | CoordinatorActor (closed) | AGENT-01, AGENT-07, AGENT-08, AGENT-11 |
 | n8e4 | Model health (closed) | AGENT-04, AGENT-05, CFG-04 |
+
+
+
+
+## Category: CMEM (Cognitive Memory — Phase 11)
+
+| ID | Requirement | Classification | Source |
+|---|---|---|---|
+| CMEM-01 | Multi-signal search via Reciprocal Rank Fusion (RRF): fuse FTS/BM25, temporal priority, graph proximity, and task affinity into a single ranked result set | v1.1 | ADR-023, MuninnDB research |
+| CMEM-02 | ACT-R temporal priority scoring: `B(M) = ln(access_count+1) - 0.5 × ln(age_days/(access_count+1))`, computed at query time from stored access counts and timestamps | v1.1 | ADR-023, MuninnDB ACT-R |
+| CMEM-03 | Access frequency tracking: `access_count` column on notes, incremented on every `memory_read`/`touch_accessed` | v1.1 | ADR-023 |
+| CMEM-04 | Graph proximity scoring: BFS from top-K FTS hits through wikilink + association graph, 0.7× hop decay per hop, max 2 hops | v1.1 | ADR-023, MuninnDB |
+| CMEM-05 | Task affinity scoring: notes referenced by the querying task's epic, blockers, or related tasks rank higher in search | v1.1 | ADR-023, Djinn unique |
+| CMEM-06 | Implicit association learning (Hebbian): `note_associations` table tracks co-access pairs with weight updates. Canonical pair keys, session-scoped batch updates | v1.1 | ADR-023, MuninnDB Hebbian |
+| CMEM-07 | Bayesian confidence scoring on notes: `confidence` column (REAL, [0.025, 0.975]), updated from task outcomes, co-access, contradictions, and user confirmation | v1.1 | ADR-023, MuninnDB Bayesian |
+| CMEM-08 | Concept-cluster contradiction detection: on `memory_write`, FTS overlap check against existing notes flags potential contradictions, lowers confidence, creates `contradicts` association | v1.1 | ADR-023, MuninnDB |
+| CMEM-09 | Context compression in `build_context`: scored retrieval returning top-K related notes as summaries (progressive disclosure), not full content dump | v1.1 | ADR-023, Letta/MemGPT, Augment research |
+| CMEM-10 | Note summaries: `summary` column auto-generated on write (truncation), used in build_context, search results, and catalog | v1.1 | ADR-023, Letta progressive disclosure |
+| CMEM-11 | Session reflection: post-task background job extracts co-access data from session tool log, batch-updates Hebbian associations and confidence scores | v1.1 | ADR-023, Letta sleep-time reflection |
+| CMEM-12 | Association pruning: periodic cleanup of low-weight (< 0.05) entries with no co-access in 90 days | v1.1 | ADR-023 |
+| CMEM-13 | FTS5 field weighting: title=3×, tags=2×, content=1× for more relevant BM25 scoring | v1.1 | ADR-023, MuninnDB |
+| CMEM-14 | Memory domain scoping: retrieval can be scoped by note type/folder to isolate knowledge domains per agent type (e.g., reviewer sees only ADRs + patterns, worker sees everything) | v1.1 | Cognee domain isolation |
+| CMEM-15 | Vector/semantic search via sqlite-vec: embedding-based similarity as additional RRF signal for paraphrase-robust retrieval | v2 | ADR-023 future signal, DB-08 |
+
+## Relations (CMEM)
+- [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
+- [[Cognitive Memory Systems Research]]
+- [[Cognitive Memory Scope]]

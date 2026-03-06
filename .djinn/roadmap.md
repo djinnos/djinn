@@ -5,39 +5,44 @@ tags: []
 ---
 
 
+
 # Roadmap — Djinn Server Rust Rewrite
 
 Phased delivery plan for v1 requirements. Each phase builds on the previous and has testable success criteria. Phases are sequenced by real dependencies — later phases require earlier foundations.
 
 ## Progress Overview
 
-_Updated: 2026-03-04_
+_Updated: 2026-03-06_
 
 | Phase | Status | Remaining |
 |-------|--------|-----------|
-| Phase 1: Foundation | ✅ Complete | — |
-| Phase 2: Task Board | ✅ Complete | — |
-| Phase 3: Knowledge Base | ✅ Complete | — |
-| Phase 4: Git Integration | ✅ Complete | — |
-| Phase 5: Coordinator | ✅ Complete | — |
-| Phase 6: Review | ✅ Complete | — |
-| Phase 7: Desktop & Sync | ✅ Complete | — |
-| Phase 8: Session Visibility | ✅ Complete | — |
-| Phase 9: V1 Completion | ✅ Complete | `ewbt` (KB file watcher only — settings watcher done) |
+| Phase 1: Foundation | Complete | -- |
+| Phase 2: Task Board | Complete | -- |
+| Phase 3: Knowledge Base | Complete | -- |
+| Phase 4: Git Integration | Complete | -- |
+| Phase 5: Coordinator | Complete | -- |
+| Phase 6: Review | Complete | -- |
+| Phase 7: Desktop & Sync | Complete | -- |
+| Phase 8: Session Visibility | Complete | -- |
+| Phase 9: V1 Completion | Complete | `ewbt` (KB file watcher only) |
+| Phase 10: Operational Reliability | Not started | ADR-022: outcome-based validation |
+| Phase 11: Cognitive Memory | Not started | ADR-023: multi-signal retrieval, associations, confidence |
 
-**All server phases complete. 55/55 items closed (100%).**
-**Only remaining gap: KB file watcher (P2) — external `.djinn/` note edits require manual `memory_reindex`.**
+**All V1 server phases complete (55/55 items, 100%).**
+**Phase 10 addresses operational reliability: outcome-based worker validation, AC-driven reviewer verdicts, circuit breakers. See [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]].**
+**Phase 11 upgrades the KB to a cognitive memory system for multi-agent scale: RRF search, Hebbian associations, Bayesian confidence, contradiction detection, context compression. See [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]].**
 
-**ADR-008:** Goose library replaces summon. MCP-connect bridge (`1tst`) and scaffold system (`1nby`) dropped. See [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]].
+**ADR-008:** Goose library replaces summon. MCP-connect bridge (`1tst`) and scaffold system (`1nby`) dropped. See [[ADR-008: Agent Harness -- Goose Library over Summon Subprocess Spawning]].
 
-**ADR-009:** Phases eliminated. No dispatch grouping — tasks dispatch when open + unblocked. Simplified execution tools (6 instead of 26). See [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]].
+**ADR-009:** Phases eliminated. No dispatch grouping -- tasks dispatch when open + unblocked. Simplified execution tools (6 instead of 26). See [[ADR-009: Simplified Execution -- No Phases, Direct Task Dispatch]].
 
-**ADR-010:** Session cost tracking. Per-task session history with token metrics for desktop visibility. See [[ADR-010: Session Cost Tracking — Per-Task Token Metrics]].
+**ADR-010:** Session cost tracking. Per-task session history with token metrics for desktop visibility. See [[ADR-010: Session Cost Tracking -- Per-Task Token Metrics]].
 
 **ADR-012:** Epic review batches. Tasks close immediately after merge; epic review runs as persisted batch orchestration. Structured output nudging with retry budget. See [[ADR-012 Epic Review Batches and Structured Output Nudging]].
 
-**ADR-013:** OS-level shell sandboxing. Landlock (Linux) + Seatbelt (macOS) for kernel-enforced filesystem isolation. Supersedes ADR-011. See [[ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]].
+**ADR-013:** OS-level shell sandboxing. Landlock (Linux) + Seatbelt (macOS) for kernel-enforced filesystem isolation. Supersedes ADR-011. See [[ADR-013: OS-Level Shell Sandboxing -- Landlock + Seatbelt]].
 
+**ADR-022:** Outcome-based session validation. Git diff replaces worker DONE marker; AC met state replaces reviewer text markers; circuit breakers prevent infinite loops. See [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]].
 
 ## Phase 1: Foundation — Database, Schema, and Core Server ✅
 
@@ -303,22 +308,133 @@ _Updated: 2026-03-04_
 
 ## Phase Dependency Graph
 
+## Phase 10: Operational Reliability — Outcome-Based Validation & Agent Roles
+
+**Goal**: Replace unreliable text-marker-based session routing with outcome-based validation. Workers validated by git diff, reviewers validated by AC state, circuit breakers prevent infinite loops. **See [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]].**
+
+**Progress**: Not started.
+
+**Requirements addressed**:
+- REVIEW-01 extension (AC-driven reviewer verdicts replace text markers)
+- REVIEW-03 extension (circuit breaker on reopen limit)
+- AGENT-08 extension (outcome-based stuck detection replaces marker-based)
+- NEW AGENT-20: Git diff as worker completion signal
+- NEW AGENT-21: Evidence-based nudging with retry budget
+- NEW AGENT-22: Task-level circuit breaker (no-changes, reopen limit, session errors)
+- NEW REVIEW-04: AC-only reviewer verdicts (workers cannot update AC met status)
+
+**Features/Tasks** (to be broken down):
+- Outcome-based worker validation — git diff check after reply loop, NO_CHANGES_NEEDED signal
+- AC-driven reviewer verdicts — derive VERIFIED/REOPEN from AC met state, not text markers
+- Evidence-based nudging — git diff evidence in nudge, max 2 attempts
+- Task-level circuit breaker — fail after no-changes/reopen-limit/session-error thresholds
+- Worker AC restriction — prevent workers from updating AC met status
+- Write-tool tracking — distinguish "explored but didn't implement" from "genuinely done"
+
+**Success criteria**:
+1. Worker that produces file changes proceeds to review without needing a text marker
+2. Worker that produces no changes gets evidence-based nudge showing empty git diff
+3. Worker that produces no changes after 2 nudges has task marked failed
+4. Task reopened 3+ times by reviewer is marked failed for human triage
+5. Reviewer verdict derived from AC met/unmet state, not from REVIEW_RESULT text
+6. Workers cannot call task_update to set acceptance_criteria met status
+7. NO_CHANGES_NEEDED signal passes to reviewer who independently verifies the claim
+
+**Depends on**: Phase 9 (V1 complete), Phase 6 (review system)
+
+**ADR-024:** Agent role redesign. EpicReviewer killed, replaced by PM (backlog grooming, circuit breaker escalation, KB hygiene) and Architect (codebase analysis, ADR enforcement, proposals). ADR status gains system semantics (Proposed/Accepted/Superseded/Rejected). Workers lose `task_update`. See [[ADR-024: Agent Role Redesign — PM, Architect, and Approval Pipeline]].
+
+**ADR-025:** Backlog grooming and dispatch triggers. `Draft` renamed to `Backlog` as default status. PM triggered by debounced backlog watch. Architect triggered by merge count threshold. PM has dispatch priority over workers. See [[ADR-025: Backlog Grooming and Autonomous Dispatch Triggers]].
+
+
+## Phase 11: Cognitive Memory Infrastructure
+
+**Goal**: Upgrade the knowledge base from a static note store with FTS search to a cognitive memory system with multi-signal retrieval, implicit association learning, confidence scoring, and context compression. Designed for multi-agent scale (hundreds of concurrent agents, thousands of tasks). **See [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]].**
+
+**Progress**: Not started.
+
+**Requirements addressed**:
+- CMEM-01 (multi-signal RRF search)
+- CMEM-02 (ACT-R temporal priority)
+- CMEM-03 (access frequency tracking)
+- CMEM-04 (graph proximity scoring)
+- CMEM-05 (task affinity scoring)
+- CMEM-06 (Hebbian association learning)
+- CMEM-07 (Bayesian confidence scoring)
+- CMEM-08 (contradiction detection)
+- CMEM-09 (context compression / progressive disclosure)
+- CMEM-10 (note summaries)
+- CMEM-11 (session reflection)
+- CMEM-12 (association pruning)
+- CMEM-13 (FTS5 field weighting)
+- CMEM-14 (memory domain scoping)
+
+**Sub-phases**:
+
+### 11a: Retrieval Pipeline
+- Schema migration: `access_count`, `confidence`, `summary` columns on notes
+- FTS5 field weighting (title=3×, tags=2×, content=1×)
+- ACT-R temporal priority function (query-time computation)
+- Graph proximity scoring (BFS + 0.7× hop decay)
+- Task affinity scoring (memory_refs on related tasks)
+- RRF fusion of 4 signals with configurable k-constants
+- `build_context` upgrade with progressive disclosure
+
+### 11b: Association Learning
+- `note_associations` table schema + migration
+- Co-access tracking (session-scoped batches)
+- Hebbian weight updates on session completion
+- Association pruning (periodic, low-weight cleanup)
+- Implicit associations as graph proximity signal
+- `memory_associations` MCP tool
+
+### 11c: Confidence & Contradiction
+- Bayesian confidence update function
+- Task outcome → confidence signal (success/failure)
+- Concept-cluster contradiction detection on write
+- Contradiction event emission
+- Confidence in search results and note reads
+
+### 11d: Session Reflection
+- Post-task reflection job in supervisor
+- Co-access extraction from session tool log
+- Batch Hebbian + confidence updates
+- Access count bulk update
+
+**Success criteria**:
+1. `memory_search` returns results ranked by RRF-fused score (BM25 + temporal + graph + task affinity)
+2. Notes accessed frequently and recently rank measurably higher than equivalent stale notes
+3. Notes co-accessed by 10+ agent sessions show implicit associations without manual wikilinks
+4. Task completion updates confidence scores on referenced notes
+5. Writing a note with high FTS overlap against an existing note flags a potential contradiction
+6. `build_context` returns top-K related notes as summaries, not full content
+7. Post-session reflection updates association weights and confidence for notes accessed during the session
+
+**Depends on**: Phase 9 (V1 complete — existing KB infrastructure), Phase 10 (operational reliability — session outcome tracking provides confidence signals)
+
+**Research**: [[Cognitive Memory Systems Research]] — comparative analysis of MuninnDB, Augment Code, Letta/MemGPT, GitHub Copilot, Cognee, and git-based context patterns.
+
+## Phase Dependency Graph
+
 ```
-Phase 1-4: Foundation, Task Board, KB, Git ✅
-    ↓
-Phase 5: Coordinator ✅
-    ↓
-Phase 6: Review ✅
-    ↓
-Phase 7: Desktop & Sync ✅
-    ↓
-Phase 8: Session Visibility ✅
-    ↓
-Phase 9: V1 Completion ✅ (KB file watcher pending)
+Phase 1-4: Foundation, Task Board, KB, Git
+    |
+Phase 5: Coordinator
+    |
+Phase 6: Review
+    |
+Phase 7: Desktop & Sync
+    |
+Phase 8: Session Visibility
+    |
+Phase 9: V1 Completion (KB file watcher pending)
+    |
+Phase 10: Operational Reliability (ADR-022)
+    |
+Phase 11: Cognitive Memory Infrastructure (ADR-023)
 ```
 
-All server phases complete. Only remaining gap: KB file watcher (`ewbt` partial).
-
+All V1 server phases complete. Phase 10 addresses operational reliability. Phase 11 upgrades the memory system for multi-agent scale.
 
 ## Coverage Check
 
@@ -335,7 +451,10 @@ Updated 2026-03-04. All phases complete. ADR-012 adds epic review batches. ADR-0
 - Phase 9: GIT-09, OBS-02, CFG-02 MCP tools, REVIEW-01..03 completion (5 reqs) ✅
 - Cross-cutting: TEST-01..03 (3 reqs)
 
-Total: 94 (88 prior + AGENT-19 + 5 gap-identified coverage gaps) ✓
+- Phase 10: AGENT-20..22, REVIEW-04 (4 reqs)
+- Phase 11: CMEM-01..14 (14 reqs)
+
+Total: 112 (94 prior + 4 Phase 10 + 14 Phase 11) ✓
 
 
 ## Relations

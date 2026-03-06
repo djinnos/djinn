@@ -4,6 +4,7 @@ type: brief
 tags: []
 ---
 
+
 # Djinn Server — Rust Rewrite
 
 ## Vision
@@ -73,6 +74,14 @@ The current Go server has accumulated significant complexity:
 - Wikilink graph (bidirectional links between notes)
 - Memory↔task references (bidirectional lookup)
 - Catalog auto-generation
+- **Cognitive memory layer (v1.1 — [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]):**
+  - Multi-signal search via Reciprocal Rank Fusion (FTS + temporal priority + graph proximity + task affinity)
+  - ACT-R temporal priority scoring from access frequency and recency
+  - Hebbian implicit association learning from agent co-access patterns
+  - Bayesian confidence scoring driven by task outcomes and contradiction detection
+  - Context compression with progressive disclosure (summaries, not full content dumps)
+  - Session reflection: post-task extraction of co-access data and confidence signals
+  - Memory domain scoping per agent type
 
 **Agent Orchestration (Coordinator):**
 - Three agent types: worker (developer), task reviewer, epic reviewer
