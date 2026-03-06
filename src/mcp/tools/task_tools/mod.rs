@@ -158,14 +158,13 @@ impl DjinnMcpServer {
         }
 
         // Apply memory_refs if provided.
-        if let Some(ref refs) = p.memory_refs {
-            if !refs.is_empty() {
+        if let Some(ref refs) = p.memory_refs
+            && !refs.is_empty() {
                 let refs_json = serde_json::to_string(refs).unwrap_or_else(|_| "[]".into());
                 if let Ok(t) = repo.update_memory_refs(&task.id, &refs_json).await {
                     task = t;
                 }
             }
-        }
 
         // Apply blocked_by relationships atomically at creation.
         if let Some(ref blockers) = p.blocked_by {

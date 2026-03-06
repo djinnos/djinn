@@ -55,10 +55,8 @@ impl CoordinatorActor {
                     .await;
                 match origin_check {
                     Ok(status) if !status.success() => {
-                        let err = format!(
-                            "No git remote 'origin' configured. Execution requires a remote to merge completed work. \
-                             Add one with: git remote add origin <url> && git push -u origin main"
-                        );
+                        let err = "No git remote 'origin' configured. Execution requires a remote to merge completed work. \
+                             Add one with: git remote add origin <url> && git push -u origin main".to_string();
                         tracing::warn!(
                             project_id = %row.id,
                             "CoordinatorActor: project missing git remote 'origin' — blocking dispatch"

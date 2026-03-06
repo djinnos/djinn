@@ -292,8 +292,8 @@ async fn run_reply_loop(
                 let assistant_role = GooseMessage::assistant().role;
                 while let Some(evt) = stream.next().await {
                     let evt = evt.map_err(|e| anyhow::anyhow!("nudge stream error: {e}"))?;
-                    if let goose::agents::AgentEvent::Message(msg) = &evt {
-                        if msg.role == assistant_role {
+                    if let goose::agents::AgentEvent::Message(msg) = &evt
+                        && msg.role == assistant_role {
                             let _ = app_state.events().send(DjinnEvent::SessionMessage {
                                 session_id: session_id.to_owned(),
                                 task_id: task_id.to_owned(),
@@ -301,7 +301,6 @@ async fn run_reply_loop(
                                 message: serialize_goose_message(msg),
                             });
                         }
-                    }
                     extension::handle_event(app_state, agent, &evt, worktree_path).await;
                 }
             }

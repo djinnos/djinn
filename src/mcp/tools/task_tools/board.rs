@@ -13,13 +13,11 @@ pub(super) async fn board_health_impl(
         Ok(report) => match serde_json::from_value::<BoardHealthResponse>(report) {
             Ok(mut parsed) => {
                 // Surface any project health issues from the coordinator.
-                if let Some(coordinator) = server.state.coordinator().await {
-                    if let Ok(status) = coordinator.get_status() {
-                        if !status.unhealthy_projects.is_empty() {
-                            parsed.project_issues = Some(status.unhealthy_projects);
-                        }
+                if let Some(coordinator) = server.state.coordinator().await
+                    && let Ok(status) = coordinator.get_status()
+                    && !status.unhealthy_projects.is_empty() {
+                        parsed.project_issues = Some(status.unhealthy_projects);
                     }
-                }
                 Json(ErrorOr::Ok(parsed))
             }
             Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
