@@ -44,6 +44,7 @@ function ProvidersSettings() {
   const [customName, setCustomName] = useState('');
   const [customBaseUrl, setCustomBaseUrl] = useState('');
   const [catalogFilter, setCatalogFilter] = useState('');
+  const catalogFilterRef = useRef<HTMLInputElement>(null);
 
   const selectedProvider = providers.find((p) => p.id === selectedProviderId);
 
@@ -53,6 +54,7 @@ function ProvidersSettings() {
     setValidationStatus(null);
     setCustomName('');
     setCustomBaseUrl('');
+    setCatalogFilter('');
   };
 
   const handleSave = async () => {
@@ -93,13 +95,15 @@ function ProvidersSettings() {
     <div className="flex flex-col gap-4 flex-1 min-h-0">
       <div className="flex items-center justify-between shrink-0">
         <h2 className="text-lg font-semibold">Configured Providers</h2>
-        <Button onClick={() => setIsAddOpen((v) => !v)}>{isAddOpen ? 'Close' : 'Add Provider'}</Button>
+        <Button onClick={() => { setIsAddOpen((v) => !v); if (isAddOpen) resetAddFlow(); }}>{isAddOpen ? 'Close' : 'Add Provider'}</Button>
       </div>
 
       {isAddOpen && (
         <div className="rounded-lg border border-border bg-card p-4 flex flex-col gap-4 flex-1 min-h-0">
           <h3 className="font-medium">Provider catalog</h3>
           <Input
+            ref={catalogFilterRef}
+            autoFocus
             placeholder="Filter providers..."
             value={catalogFilter}
             onChange={(e) => setCatalogFilter(e.target.value)}
@@ -137,8 +141,12 @@ function ProvidersSettings() {
                 onBlur={() => void validateInline(selectedProviderId, apiKey)}
               />
               {validationStatus && <p className={cn('text-xs', validationStatus.type === 'success' ? 'text-green-500' : 'text-red-500')}>{validationStatus.message}</p>}
-              <Button onClick={() => void handleSave()} disabled={saving || validating || !apiKey.trim()}>
-                {saving ? 'Saving...' : validating ? 'Validating...' : 'Save Provider'}
+              <Button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => void handleSave()}
+                disabled={saving || !apiKey.trim()}
+              >
+                {saving ? 'Saving...' : 'Save Provider'}
               </Button>
             </div>
           )}
