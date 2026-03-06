@@ -761,27 +761,41 @@ fn tool_shell() -> RmcpTool {
 }
 
 /// Truncate shell output to prevent blowing the context window.
-/// Hard cap at MAX_BYTES to ensure the result never exceeds a safe size,
-/// regardless of how long individual lines are.
+/// Hard cap at 50 KB — both line count and byte size are enforced.
 fn truncate_shell_output(raw: &str) -> String {
+    const MAX_LINES: usize = 2000;
     const MAX_BYTES: usize = 50_000;
 
-    if raw.len() <= MAX_BYTES {
+    if raw.len() <= MAX_BYTES && raw.split('\n').count() <= MAX_LINES {
         return raw.to_string();
     }
 
-    // Take the last MAX_BYTES worth of content so the model sees the tail.
-    let start = raw.len() - MAX_BYTES;
-    // Align to a char boundary.
-    let start = raw.ceil_char_boundary(start);
-    // Skip to the next newline to avoid a partial first line.
-    let start = raw[start..].find('\n').map(|i| start + i + 1).unwrap_or(start);
-    let preview = &raw[start..];
+    let total_lines = raw.split('\n').count();
+    let total_bytes = raw.len();
+
+    // Take last lines that fit within MAX_BYTES
+    let mut preview_bytes = 0;
+    let mut preview_lines: Vec<&str> = Vec::new();
+    for line in raw.rsplit('\n') {
+        let line_bytes = line.len() + 1; // +1 for newline
+        if preview_bytes + line_bytes > MAX_BYTES && !preview_lines.is_empty() {
+            break;
+        }
+        preview_bytes += line_bytes;
+        preview_lines.push(line);
+    }
+    preview_lines.reverse();
+    let preview = preview_lines.join("\n");
+
+    let reason = format!(
+        "Output truncated to {} KB ({} lines / {} bytes total).",
+        MAX_BYTES / 1000,
+        total_lines,
+        total_bytes
+    );
 
     format!(
-        "{preview}\n\n[Output truncated: {total} bytes total, showing last {shown} bytes. Use shell commands like `head`, `tail`, or `sed -n '100,200p'` to read sections.]",
-        total = raw.len(),
-        shown = preview.len(),
+        "{preview}\n\n[{reason} Use shell commands like `head`, `tail`, or `sed -n '100,200p'` to read sections.]"
     )
 }
 
