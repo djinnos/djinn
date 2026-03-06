@@ -7,24 +7,17 @@
 
 import { createStore } from "zustand/vanilla";
 import { subscribeWithSelector } from "zustand/middleware";
-import type { Epic, EpicCreatedPayload, EpicUpdatedPayload } from "../types";
+import type { Epic } from "@/api/types";
 
 export interface EpicState {
-  // Epics map for O(1) lookups
   epics: Map<string, Epic>;
-  
-  // CRUD operations
-  addEpic: (payload: EpicCreatedPayload) => void;
-  updateEpic: (payload: EpicUpdatedPayload) => void;
+  addEpic: (epic: Epic) => void;
+  updateEpic: (epic: Epic) => void;
   removeEpic: (id: string) => void;
-  
-  // Utility operations
   getEpic: (id: string) => Epic | undefined;
-  getEpicsByStatus: (status: Epic['status']) => Epic[];
+  getEpicsByStatus: (status: string) => Epic[];
   getAllEpics: () => Epic[];
   clearEpics: () => void;
-  
-  // Batch operations
   setEpics: (epics: Epic[]) => void;
 }
 
