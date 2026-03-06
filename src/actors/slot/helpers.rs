@@ -663,7 +663,7 @@ pub(crate) fn missing_marker_nudge(
 
     match agent_type {
         AgentType::Worker | AgentType::ConflictResolver => {
-            Some("Emit exactly one final marker now: WORKER_RESULT: DONE.")
+            Some("You stopped without finishing. Continue implementing — write and save all required code changes, then emit WORKER_RESULT: DONE when every acceptance criterion is met.")
         }
         AgentType::TaskReviewer => Some(
             "Emit exactly one final marker now: REVIEW_RESULT: VERIFIED | REOPEN | CANCEL. If REOPEN or CANCEL, also emit FEEDBACK: <what is missing>.",

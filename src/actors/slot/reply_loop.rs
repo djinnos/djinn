@@ -297,7 +297,7 @@ pub(super) async fn run_reply_loop(
                         GooseSessionConfig {
                             id: session_id.to_owned(),
                             schedule_id: None,
-                            max_turns: Some(3),
+                            max_turns: Some(300),
                             retry_config: None,
                         },
                         Some(cancel.clone()),
