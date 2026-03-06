@@ -25,6 +25,9 @@ type LifecycleRunner = Arc<
         + Sync,
 >;
 
+#[cfg(test)]
+pub(crate) type TestLifecycleRunner = LifecycleRunner;
+
 struct ActiveLifecycle {
     task_id: String,
     join: tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -225,6 +228,27 @@ impl SlotHandle {
             model_id,
             sender,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_with_test_runner(
+        id: usize,
+        model_id: String,
+        event_tx: mpsc::Sender<SlotEvent>,
+        app_state: AppState,
+        session_manager: Arc<SessionManager>,
+        cancel: CancellationToken,
+        runner: TestLifecycleRunner,
+    ) -> Self {
+        Self::spawn_with_runner(
+            id,
+            model_id,
+            event_tx,
+            app_state,
+            session_manager,
+            cancel,
+            runner,
+        )
     }
 
     pub fn id(&self) -> usize {
