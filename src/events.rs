@@ -90,6 +90,14 @@ pub enum DjinnEvent {
         continuation_of: Option<String>,
     },
 
+    /// Emitted for each agent conversation turn in a live session.
+    SessionMessage {
+        session_id: String,
+        task_id: String,
+        agent_type: String,
+        message: serde_json::Value,
+    },
+
     // Project health (setup/verification commands result)
     ProjectHealthChanged {
         project_id: String,

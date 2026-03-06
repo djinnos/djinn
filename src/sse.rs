@@ -220,6 +220,23 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             id: None,
             project_id: None,
         },
+        DjinnEvent::SessionMessage {
+            session_id,
+            task_id,
+            agent_type,
+            message,
+        } => Envelope {
+            entity_type: "session",
+            action: "message",
+            data: Some(serde_json::json!({
+                "session_id": session_id,
+                "task_id": task_id,
+                "agent_type": agent_type,
+                "message": message,
+            })),
+            id: None,
+            project_id: None,
+        },
         DjinnEvent::ProjectHealthChanged {
             project_id,
             healthy,
