@@ -33,11 +33,10 @@ export function useEventSource(projectId?: string | null) {
   const snapshotLoadRef = useRef<Promise<void> | null>(null);
 
   const hydrateSnapshot = async () => {
-    if (snapshotLoadRef.current) {
-      return snapshotLoadRef.current;
-    }
+    // Cancel any in-flight snapshot so we always fetch fresh data
+    snapshotLoadRef.current = null;
 
-    snapshotLoadRef.current = (async () => {
+    const promise = (async () => {
       try {
         const snapshot = await fetchKanbanSnapshot(selectedProjectPath);
         taskStore.getState().setTasks(snapshot.tasks);
@@ -47,10 +46,14 @@ export function useEventSource(projectId?: string | null) {
       }
     })();
 
+    snapshotLoadRef.current = promise;
+
     try {
-      await snapshotLoadRef.current;
+      await promise;
     } finally {
-      snapshotLoadRef.current = null;
+      if (snapshotLoadRef.current === promise) {
+        snapshotLoadRef.current = null;
+      }
     }
   };
 

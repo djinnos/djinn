@@ -161,6 +161,16 @@ export function KanbanBoard({
   const [textFilter, setTextFilter] = useState<string>(searchParams.get("q") ?? "");
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
+  // Reset filters when project changes
+  useEffect(() => {
+    setEpicFilters([]);
+    setOwnerFilters([]);
+    setPriorityFilters([]);
+    setSearchInput("");
+    setTextFilter("");
+    setSelectedTask(null);
+  }, [selectedProjectId]);
+
   useEffect(() => {
     const timeout = setTimeout(() => setTextFilter(searchInput), 250);
     return () => clearTimeout(timeout);
