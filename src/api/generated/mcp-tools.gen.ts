@@ -2078,32 +2078,6 @@ export namespace TaskBlockedListOutputSchema {
 
 }
 export type TaskBlockedListOutput = TaskBlockedListOutputSchema.TaskBlockedListOutput;
-export namespace TaskBlockersAddInputSchema {
-  export interface TaskBlockersAddInput {
-  /**
-   * Task UUID or short_id of the task that blocks it.
-   */
-  blocking_id: string
-  /**
-   * Task UUID or short_id (the task being blocked).
-   */
-  id: string
-  /**
-   * Absolute project path.
-   */
-  project: string
-  [k: string]: any
-  }
-
-}
-export type TaskBlockersAddInput = TaskBlockersAddInputSchema.TaskBlockersAddInput;
-export namespace TaskBlockersAddOutputSchema {
-  export interface TaskBlockersAddOutput {
-  [k: string]: any
-  }
-
-}
-export type TaskBlockersAddOutput = TaskBlockersAddOutputSchema.TaskBlockersAddOutput;
 export namespace TaskBlockersListInputSchema {
   export interface TaskBlockersListInput {
   /**
@@ -2126,32 +2100,6 @@ export namespace TaskBlockersListOutputSchema {
 
 }
 export type TaskBlockersListOutput = TaskBlockersListOutputSchema.TaskBlockersListOutput;
-export namespace TaskBlockersRemoveInputSchema {
-  export interface TaskBlockersRemoveInput {
-  /**
-   * Task UUID or short_id of the blocker to remove.
-   */
-  blocking_id: string
-  /**
-   * Task UUID or short_id (the blocked task).
-   */
-  id: string
-  /**
-   * Absolute project path.
-   */
-  project: string
-  [k: string]: any
-  }
-
-}
-export type TaskBlockersRemoveInput = TaskBlockersRemoveInputSchema.TaskBlockersRemoveInput;
-export namespace TaskBlockersRemoveOutputSchema {
-  export interface TaskBlockersRemoveOutput {
-  [k: string]: any
-  }
-
-}
-export type TaskBlockersRemoveOutput = TaskBlockersRemoveOutputSchema.TaskBlockersRemoveOutput;
 export namespace TaskClaimInputSchema {
   export interface TaskClaimInput {
   /**
@@ -2246,6 +2194,10 @@ export namespace TaskCreateInputSchema {
 
   export interface TaskCreateInput {
   acceptance_criteria?: AcceptanceCriterionItem[]
+  /**
+   * Task IDs (UUID or short_id) that block this task. Blockers are set atomically at creation.
+   */
+  blocked_by?: string[]
   description?: string
   design?: string
   /**
@@ -2257,6 +2209,10 @@ export namespace TaskCreateInputSchema {
    */
   issue_type?: string
   labels?: string[]
+  /**
+   * Memory note permalinks to attach to this task at creation.
+   */
+  memory_refs?: string[]
   owner?: string
   priority?: number
   /**
@@ -2611,6 +2567,14 @@ export namespace TaskUpdateInputSchema {
    * Full replacement for acceptance_criteria.
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
+  /**
+   * Task IDs (UUID or short_id) to add as blockers of this task.
+   */
+  blocked_by_add?: string[]
+  /**
+   * Task IDs (UUID or short_id) to remove as blockers of this task.
+   */
+  blocked_by_remove?: string[]
   description?: string
   design?: string
   /**
@@ -2662,7 +2626,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_commands_get" | "project_commands_set" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_add" | "task_blockers_list" | "task_blockers_remove" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_transition" | "task_update";
+export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_commands_get" | "project_commands_set" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "board_health": { input: BoardHealthInput; output: BoardHealthOutput };
@@ -2729,9 +2693,7 @@ export interface McpToolMap {
   "system_ping": { input: SystemPingInput; output: SystemPingOutput };
   "task_activity_list": { input: TaskActivityListInput; output: TaskActivityListOutput };
   "task_blocked_list": { input: TaskBlockedListInput; output: TaskBlockedListOutput };
-  "task_blockers_add": { input: TaskBlockersAddInput; output: TaskBlockersAddOutput };
   "task_blockers_list": { input: TaskBlockersListInput; output: TaskBlockersListOutput };
-  "task_blockers_remove": { input: TaskBlockersRemoveInput; output: TaskBlockersRemoveOutput };
   "task_claim": { input: TaskClaimInput; output: TaskClaimOutput };
   "task_comment_add": { input: TaskCommentAddInput; output: TaskCommentAddOutput };
   "task_count": { input: TaskCountInput; output: TaskCountOutput };
