@@ -280,9 +280,19 @@ export function mapTaskFromMcp(task: TaskListMcpResponse["tasks"][number]): Task
     title: task.title,
     description: task.description,
     design: task.design ?? "",
-    acceptanceCriteria: (task.acceptance_criteria ?? []).map((criterion) =>
-      typeof criterion === "string" ? { criterion, met: false } : { criterion: criterion.criterion, met: Boolean(criterion.met) }
-    ),
+    acceptanceCriteria: (task.acceptance_criteria ?? []).map((raw) => {
+      let item: any = raw;
+      if (typeof item === "string") {
+        try { item = JSON.parse(item); } catch { /* keep as plain string */ }
+      }
+      if (typeof item === "string") {
+        return { criterion: item, met: false };
+      }
+      return {
+        criterion: item.criterion ?? item.description ?? item.text ?? "",
+        met: Boolean(item.met),
+      };
+    }),
     activity: [],
     status: mapTaskStatus(task.status),
     reviewPhase: task.status === "needs_task_review" || task.status === "in_task_review" ? task.status : undefined,

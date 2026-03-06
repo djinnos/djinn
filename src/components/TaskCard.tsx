@@ -1,5 +1,6 @@
 import type { Epic, Task } from "@/types";
 import { TaskIdLabel } from "@/components/TaskIdLabel";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   CheckmarkCircle03Icon,
   FullSignalIcon,
@@ -12,6 +13,7 @@ import {
   UnavailableIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useState } from "react";
 
 type TaskCardProps = {
@@ -36,7 +38,6 @@ function PriorityBadge({ priority }: { priority: Task["priority"] }) {
       size={16}
       className={`shrink-0 ${config.color}`}
       aria-label={`Priority ${priority}`}
-      title={`Priority ${priority}`}
     />
   );
 }
@@ -54,11 +55,6 @@ function formatCompactDuration(totalSeconds: number): string {
   return `${minutes}m`;
 }
 
-
-
-
-
-
 function ownerInitials(owner: string | null): string {
   if (!owner) return "??";
   const parts = owner
@@ -68,7 +64,6 @@ function ownerInitials(owner: string | null): string {
   if (parts.length === 0) return owner.slice(0, 2).toUpperCase();
   return parts.map((p) => p[0]?.toUpperCase() ?? "").join("");
 }
-
 
 export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const isRunning = task.status === "in_progress";
@@ -111,86 +106,87 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const shouldShowDuration = totalTrackedSeconds > 0 || (task.sessionCount ?? 0) > 0;
 
   return (
-    <article
-      className={`cursor-pointer rounded border bg-card p-2 text-sm transition-all duration-200 ease-in-out hover:bg-muted/30 ${moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"}`}
+    <Card
+      size="sm"
+      className={cn(
+        "cursor-pointer bg-secondary transition-all duration-200 ease-in-out hover:bg-secondary/80",
+        moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"
+      )}
       onClick={onClick}
     >
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <TaskIdLabel taskId={task.id} shortId={task.shortId} />
-        <div
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border bg-background text-[10px] font-semibold uppercase"
-          title={task.owner ?? "Unassigned"}
-          aria-label={`Owner: ${task.owner ?? "Unassigned"}`}
-        >
-          {ownerInitials(task.owner)}
-        </div>
-      </div>
-
-      <div className="mb-2 flex items-start gap-2">
-        <div className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
-          {(task.unresolvedBlockerCount ?? 0) > 0 ? (
-            <HugeiconsIcon
-              icon={UnavailableIcon}
-              size={16}
-              className="shrink-0 text-red-500"
-              title={`Blocked by ${task.unresolvedBlockerCount} task${task.unresolvedBlockerCount === 1 ? "" : "s"}`}
-              aria-label="Blocked"
-            />
-          ) : isRunning || task.reviewPhase === "in_task_review" ? (
-            <HugeiconsIcon
-              icon={Loading03Icon}
-              size={16}
-              className={`shrink-0 animate-spin ${task.reviewPhase === "in_task_review" ? "text-yellow-400" : "text-purple-500"}`}
-              title={task.reviewPhase === "in_task_review" ? "In review" : "Task running"}
-              aria-label={task.reviewPhase === "in_task_review" ? "In review" : "Task running"}
-            />
-          ) : task.reviewPhase === "needs_task_review" ? (
-            <HugeiconsIcon
-              icon={Progress01Icon}
-              size={16}
-              className="shrink-0 text-yellow-400"
-              title="Needs review"
-              aria-label="Needs review"
-            />
-          ) : task.status === "completed" ? (
-            <HugeiconsIcon
-              icon={CheckmarkCircle03Icon}
-              size={16}
-              className="shrink-0 text-emerald-500"
-              title="Completed"
-              aria-label="Completed"
-            />
-          ) : (
-            <HugeiconsIcon
-              icon={Progress01Icon}
-              size={16}
-              className="shrink-0 text-muted-foreground/40"
-              aria-label="Not started"
-              title="Not started"
-            />
-          )}
-        </div>
-        <h4 className="font-medium leading-snug" title={task.title}>
-          {task.title}
-        </h4>
-      </div>
-
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <PriorityBadge priority={task.priority} />
-          <HugeiconsIcon icon={Task01Icon} size={16} className="shrink-0" aria-label="Task" title="Task" />
-        </div>
-        {task.sessionModelId || shouldShowDuration ? (
-          <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-            {task.sessionModelId ? (
-              <span className="max-w-[100px] truncate" title={task.sessionModelId}>{task.sessionModelId}</span>
-            ) : null}
-            {shouldShowDuration ? (
-              <span>{formatCompactDuration(totalTrackedSeconds)}</span>
-            ) : null}
+      <CardContent className="flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-2">
+          <TaskIdLabel taskId={task.id} shortId={task.shortId} />
+          <div
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold uppercase text-muted-foreground"
+            title={task.owner ?? "Unassigned"}
+            aria-label={`Owner: ${task.owner ?? "Unassigned"}`}
+          >
+            {ownerInitials(task.owner)}
           </div>
-        ) : null}
-      </div>
-    </article>
+        </div>
+
+        <div className="flex items-start gap-2">
+          <div className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
+            {(task.unresolvedBlockerCount ?? 0) > 0 ? (
+              <HugeiconsIcon
+                icon={UnavailableIcon}
+                size={16}
+                className="shrink-0 text-red-500"
+                aria-label="Blocked"
+              />
+            ) : isRunning || task.reviewPhase === "in_task_review" ? (
+              <HugeiconsIcon
+                icon={Loading03Icon}
+                size={16}
+                className={`shrink-0 animate-spin ${task.reviewPhase === "in_task_review" ? "text-yellow-400" : "text-blue-500"}`}
+                aria-label={task.reviewPhase === "in_task_review" ? "In review" : "Task running"}
+              />
+            ) : task.reviewPhase === "needs_task_review" ? (
+              <HugeiconsIcon
+                icon={Progress01Icon}
+                size={16}
+                className="shrink-0 text-yellow-400"
+                aria-label="Needs review"
+              />
+            ) : task.status === "completed" ? (
+              <HugeiconsIcon
+                icon={CheckmarkCircle03Icon}
+                size={16}
+                className="shrink-0 text-emerald-500"
+                aria-label="Completed"
+              />
+            ) : (
+              <HugeiconsIcon
+                icon={Progress01Icon}
+                size={16}
+                className="shrink-0 text-muted-foreground/40"
+                aria-label="Not started"
+              />
+            )}
+          </div>
+          <h4 className="font-medium leading-snug" title={task.title}>
+            {task.title}
+          </h4>
+        </div>
+
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <PriorityBadge priority={task.priority} />
+            <HugeiconsIcon icon={Task01Icon} size={16} className="shrink-0" aria-label="Task" />
+          </div>
+          {task.sessionModelId || shouldShowDuration ? (
+            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+              {task.sessionModelId ? (
+                <span className="max-w-[100px] truncate" title={task.sessionModelId}>{task.sessionModelId}</span>
+              ) : null}
+              {shouldShowDuration ? (
+                <span>{formatCompactDuration(totalTrackedSeconds)}</span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </CardContent>
+    </Card>
   );
 }

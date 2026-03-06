@@ -118,7 +118,7 @@ const tasksFixture: Task[] = [
 ];
 
 const meta = {
-  title: "Planning/KanbanBoard",
+  title: "Kanban/KanbanBoard",
   component: KanbanBoard,
   parameters: {
     layout: "fullscreen",

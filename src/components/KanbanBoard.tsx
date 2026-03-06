@@ -6,14 +6,46 @@ import { taskStore } from "@/stores/taskStore";
 import type { Epic, Task, TaskPriority, TaskStatus } from "@/types";
 import { TaskCard } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
+import {
+  ArrowDown01Icon,
+  ArrowRight01Icon,
+  CheckmarkCircle03Icon,
+  CircleIcon,
+  Progress02Icon,
+  Progress04Icon,
+  type UnavailableIcon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { cn } from "@/lib/utils";
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+  ComboboxEmpty,
+} from "@/components/ui/combobox";
+import { Card, CardContent } from "@/components/ui/card";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+} from "@/components/ui/input-group";
+import { Search01Icon } from "@hugeicons/core-free-icons";
 
 type ColumnKey = TaskStatus | "in_review";
 
-const STATUS_COLUMNS: Array<{ key: ColumnKey; label: string; accentClass: string }> = [
-  { key: "pending", label: "Open", accentClass: "border-violet-500" },
-  { key: "in_progress", label: "In Progress", accentClass: "border-purple-500" },
-  { key: "in_review", label: "In Review", accentClass: "border-amber-500" },
-  { key: "completed", label: "Closed", accentClass: "border-emerald-500" },
+const STATUS_COLUMNS: Array<{
+  key: ColumnKey;
+  label: string;
+  colorClass: string;
+  glowClass: string;
+  icon: typeof UnavailableIcon;
+}> = [
+  { key: "pending", label: "Open", colorClass: "bg-violet-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-violet-500/40", icon: CircleIcon },
+  { key: "in_progress", label: "In Progress", colorClass: "bg-blue-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-blue-500/40", icon: Progress02Icon },
+  { key: "in_review", label: "In Review", colorClass: "bg-amber-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-amber-500/40", icon: Progress04Icon },
+  { key: "completed", label: "Closed", colorClass: "bg-emerald-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-emerald-500/40", icon: CheckmarkCircle03Icon },
 ];
 
 const PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3"];
@@ -188,61 +220,77 @@ export function KanbanBoard({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-card p-3">
-        <select
+      <div className="flex flex-wrap items-center gap-2">
+        <Combobox
           value={epicFilter}
-          onChange={(e) => setEpicFilter(e.target.value)}
-          className="rounded border bg-background px-2 py-1 text-sm"
+          onValueChange={(v) => setEpicFilter(v ?? "")}
         >
-          <option value="">All epics</option>
-          {epicOptions.map((epic) => (
-            <option key={epic.id} value={epic.id}>
-              {getEpicEmoji(epic)} {epic.title}
-            </option>
-          ))}
-        </select>
+          <ComboboxInput placeholder="All epics" className="w-40" />
+          <ComboboxContent>
+            <ComboboxList>
+              <ComboboxEmpty>No epics found</ComboboxEmpty>
+              <ComboboxItem value="">All epics</ComboboxItem>
+              {epicOptions.map((epic) => (
+                <ComboboxItem key={epic.id} value={epic.id}>
+                  {getEpicEmoji(epic)} {epic.title}
+                </ComboboxItem>
+              ))}
+            </ComboboxList>
+          </ComboboxContent>
+        </Combobox>
 
-        <div className="flex items-center gap-1">
-          {PRIORITIES.map((priority) => {
-            const active = priorityFilters.includes(priority);
-            return (
-              <button
-                key={priority}
-                type="button"
-                onClick={() =>
-                  setPriorityFilters((prev) =>
-                    prev.includes(priority)
-                      ? prev.filter((p) => p !== priority)
-                      : [...prev, priority]
-                  )
-                }
-                className={`rounded-full border px-2 py-1 text-xs ${active ? "bg-primary text-primary-foreground" : "bg-background"}`}
-              >
-                {priority}
-              </button>
+        <Combobox
+          value={priorityFilters.join(",")}
+          onValueChange={(v) => {
+            const val = v ?? "";
+            setPriorityFilters(
+              val ? val.split(",").filter((p): p is TaskPriority => PRIORITIES.includes(p as TaskPriority)) : []
             );
-          })}
-        </div>
-
-        <select
-          value={ownerFilter}
-          onChange={(e) => setOwnerFilter(e.target.value)}
-          className="rounded border bg-background px-2 py-1 text-sm"
+          }}
         >
-          <option value="">All owners</option>
-          {ownerOptions.map((owner) => (
-            <option key={owner} value={owner}>
-              {owner}
-            </option>
-          ))}
-        </select>
+          <ComboboxInput
+            placeholder={priorityFilters.length > 0 ? `Priority (${priorityFilters.length})` : "Priority"}
+            className="w-32"
+          />
+          <ComboboxContent>
+            <ComboboxList>
+              {PRIORITIES.map((priority) => (
+                <ComboboxItem key={priority} value={priority}>
+                  {priority}
+                </ComboboxItem>
+              ))}
+            </ComboboxList>
+          </ComboboxContent>
+        </Combobox>
 
-        <input
-          value={searchInput}
-          onChange={(e) => setSearchInput(e.target.value)}
-          placeholder="Search tasks..."
-          className="min-w-[220px] rounded border bg-background px-2 py-1 text-sm"
-        />
+        <Combobox
+          value={ownerFilter}
+          onValueChange={(v) => setOwnerFilter(v ?? "")}
+        >
+          <ComboboxInput placeholder="All owners" className="w-36" />
+          <ComboboxContent>
+            <ComboboxList>
+              <ComboboxEmpty>No owners found</ComboboxEmpty>
+              <ComboboxItem value="">All owners</ComboboxItem>
+              {ownerOptions.map((owner) => (
+                <ComboboxItem key={owner} value={owner}>
+                  {owner}
+                </ComboboxItem>
+              ))}
+            </ComboboxList>
+          </ComboboxContent>
+        </Combobox>
+
+        <InputGroup className="ml-auto w-56">
+          <InputGroupAddon>
+            <HugeiconsIcon icon={Search01Icon} className="size-3.5" />
+          </InputGroupAddon>
+          <InputGroupInput
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search tasks..."
+          />
+        </InputGroup>
       </div>
 
       <div className="flex min-h-0 flex-1 gap-4 overflow-x-auto pb-1">
@@ -252,15 +300,27 @@ export function KanbanBoard({
           const taskCount = epicGroups.reduce((total, [, epicTasks]) => total + epicTasks.length, 0);
 
           return (
-            <section
+            <Card
               key={column.key}
-              className="flex min-w-[260px] flex-1 flex-col rounded-lg border bg-card transition-all duration-300 ease-in-out"
+              className="min-w-[260px] flex-1 gap-0 py-0 transition-all duration-300 ease-in-out"
             >
-              <header className={`border-b-2 px-3 py-2 text-sm font-semibold ${column.accentClass}`}>
-                {column.label} {taskCount}
-              </header>
+              <div className="flex flex-col">
+                <div className="px-3 py-2 text-sm font-semibold">
+                  <div className="flex items-center gap-2">
+                    <HugeiconsIcon
+                      icon={column.icon}
+                      className="size-4 shrink-0 text-muted-foreground"
+                    />
+                    <span className="leading-none">{column.label}</span>
+                    <span className="text-xs leading-none text-muted-foreground">{taskCount}</span>
+                  </div>
+                </div>
+                <div className="px-2">
+                  <div className={cn("h-0.5 w-full rounded-full", column.colorClass, column.glowClass)} />
+                </div>
+              </div>
 
-              <div className="flex-1 overflow-y-auto p-3">
+              <CardContent className="flex-1 overflow-y-auto pt-3">
                 <div className="flex flex-col gap-3">
                   {epicGroups.map(([epicKey, epicTasks]) => {
                     const firstTaskEpicId = epicTasks[0]?.epicId ?? null;
@@ -269,38 +329,43 @@ export function KanbanBoard({
                     const isCollapsed = !!collapsedEpics[collapseKey];
 
                     return (
-                      <div key={epicKey} className="rounded-md border bg-background transition-all duration-300 ease-in-out">
-                        <button
-                          type="button"
-                          onClick={() => toggleEpic(column.key, epicKey)}
-                          className="flex w-full items-center justify-between gap-2 border-b px-2 py-1 text-left text-sm font-medium"
-                        >
-                          <span className="truncate">
-                            {getEpicEmoji(epic)} {getEpicTitle(epic, firstTaskEpicId)}
-                          </span>
-                          <span>{isCollapsed ? "▸" : "▾"}</span>
-                        </button>
+                      <Card key={epicKey} size="sm" className="gap-0 bg-zinc-800/50 py-2">
+                        <CardContent>
+                          <button
+                            type="button"
+                            onClick={() => toggleEpic(column.key, epicKey)}
+                            className="flex w-full items-center justify-between gap-2 rounded-md px-1 py-1 text-left text-sm font-medium transition-colors hover:bg-muted/40"
+                          >
+                            <span className="truncate">
+                              {getEpicEmoji(epic)} {getEpicTitle(epic, firstTaskEpicId)}
+                            </span>
+                            <HugeiconsIcon
+                              icon={isCollapsed ? ArrowRight01Icon : ArrowDown01Icon}
+                              className="size-4 shrink-0 text-muted-foreground"
+                            />
+                          </button>
 
-                        {!isCollapsed && (
-                          <ul className="flex flex-col gap-2 p-2 transition-all duration-300 ease-in-out">
-                            {epicTasks.map((task) => (
-                              <li key={task.id}>
-                                <TaskCard
-                                  task={task}
-                                  epic={task.epicId ? epics.get(task.epicId) : undefined}
-                                  moving={!!movingTaskIds[task.id]}
-                                  onClick={() => setSelectedTask(task)}
-                                />
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
+                          {!isCollapsed && (
+                            <ul className="flex flex-col gap-2 pt-2">
+                              {epicTasks.map((task) => (
+                                <li key={task.id}>
+                                  <TaskCard
+                                    task={task}
+                                    epic={task.epicId ? epics.get(task.epicId) : undefined}
+                                    moving={!!movingTaskIds[task.id]}
+                                    onClick={() => setSelectedTask(task)}
+                                  />
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </CardContent>
+                      </Card>
                     );
                   })}
                 </div>
-              </div>
-            </section>
+              </CardContent>
+            </Card>
           );
         })}
       </div>
