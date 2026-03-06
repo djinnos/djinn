@@ -5,7 +5,7 @@ description: Initialize a new project with Djinn. Discovers existing state, guid
 
 # Init Project Workflow
 
-The heavy-lift discovery engine for new projects. Detects greenfield vs brownfield, runs deep adaptive questioning, spawns research subagents, and produces the foundational artifacts: brief, research notes, requirements, roadmap, and domain-structured epics. This only runs once per project. After init, use `/plan` for ongoing steering and `/breakdown` to create tasks.
+The heavy-lift discovery engine for new projects. Detects greenfield vs brownfield, runs deep adaptive questioning, spawns research subagents, and produces the foundational artifacts: brief, research notes, requirements, roadmap, and domain-structured epics. This only runs once per project. After init, use `/planning` for ongoing steering and `/breakdown` to create tasks.
 
 ## Tools
 
@@ -114,7 +114,7 @@ Synthesize the questioning session (or document analysis in auto mode) into a st
    - `[[V1 Requirements]]`, `[[Roadmap]]`, research dimension notes
 4. Present the brief to the user for confirmation before proceeding
 
-The brief is a singleton -- only one per project. Writing it again overwrites the previous version. This is intentional: the brief is a living document that evolves through `/plan` sessions.
+The brief is a singleton -- only one per project. Writing it again overwrites the previous version. This is intentional: the brief is a living document that evolves through `/planning` sessions.
 
 ### Step 4: Research
 
@@ -177,7 +177,7 @@ Create a narrative roadmap with phased delivery.
 2. For each phase: Goal, Depends on, Requirements (REQ-IDs), Success criteria
 3. Write: `memory_write(title="Roadmap", type="roadmap", tags=["planning", "roadmap"], content=...)`
 
-The roadmap is a singleton that evolves -- `/plan` can add phases, update goals, and adjust requirements. Present to the user for confirmation.
+The roadmap is a singleton that evolves -- `/planning` can add phases, update goals, and adjust requirements. Present to the user for confirmation.
 
 ### Step 8: Epic Creation
 
@@ -220,7 +220,7 @@ Tell the user what was created and what to do next:
 
 **Next steps:**
 - Run `/clear` to free context
-- Use `/plan` to discuss and refine any phase before breaking it down
+- Use `/planning` to discuss and refine any phase before breaking it down
 - Use `/breakdown` to create tasks for a phase"
 
 ## Output Summary

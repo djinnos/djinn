@@ -1,11 +1,11 @@
 ---
-name: plan
+name: planning
 description: Plan project work through adaptive conversation. Creates new phases, updates the brief and roadmap, captures design decisions as ADRs, and defines scope boundaries. Use before /breakdown.
 ---
 
 # Plan Workflow
 
-The thinking space for ongoing project steering. Use `/plan` to discuss what needs to happen next -- whether that's a new phase, a new feature area, or refining an existing plan. This workflow reads from the knowledge base, has an adaptive conversation with the user, and writes ADRs, scope notes, and updates to the brief and roadmap. It does NOT create tasks -- that's `/breakdown`'s job.
+The thinking space for ongoing project steering. Use `/planning` to discuss what needs to happen next -- whether that's a new phase, a new feature area, or refining an existing plan. This workflow reads from the knowledge base, has an adaptive conversation with the user, and writes ADRs, scope notes, and updates to the brief and roadmap. It does NOT create tasks -- that's `/breakdown`'s job.
 
 ## Tools
 

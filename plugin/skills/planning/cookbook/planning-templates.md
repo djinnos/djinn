@@ -13,7 +13,7 @@ Memory output patterns for all planning artifact types. Use these as copy-paste 
 | ADR | `type="adr"` | No | Context, Decision, Consequences, Relations |
 | Reference | `type="reference"` | No | Varies by purpose |
 
-**Singletons:** `brief` and `roadmap` types allow only one note per project. Writing again overwrites the previous version. Both are **living documents** that evolve as the project progresses -- `/plan` can update them at any time.
+**Singletons:** `brief` and `roadmap` types allow only one note per project. Writing again overwrites the previous version. Both are **living documents** that evolve as the project progresses -- `/planning` can update them at any time.
 
 ---
 
@@ -58,7 +58,7 @@ Current project management tools require constant manual curation. Teams spend m
 
 **Key points:**
 - Title parameter is ignored for brief (singleton) but include it for clarity
-- Brief is a living document -- `/plan` can rewrite it as the project evolves
+- Brief is a living document -- `/planning` can rewrite it as the project evolves
 - The `## Relations` section creates wikilinks in the knowledge graph
 
 ---
@@ -211,7 +211,7 @@ memory_write(
 ```
 
 **Key points:**
-- Roadmap is a living document -- `/plan` can add phases, update goals, adjust requirements
+- Roadmap is a living document -- `/planning` can add phases, update goals, adjust requirements
 - Each phase has: Goal, Depends on, Requirements (REQ-IDs), Success Criteria
 - Success criteria are testable statements, not vague descriptions
 
