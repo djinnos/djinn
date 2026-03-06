@@ -54,9 +54,10 @@ You have access to Djinn tools via the `djinn` extension. Use them during implem
 4. **Check memory** — look up any ADRs or patterns referenced in the design field
 5. **Implement** — write the code following the design approach exactly as specified
 6. **Add progress note** — comment on the task with what you implemented
-7. **Emit completion marker** — end with exactly one of:
+7. **Emit completion marker** — only when the task is fully complete:
    - `WORKER_RESULT: DONE`
-   - `WORKER_RESULT: PROGRESS: <what's done so far. what's next>`
+   - ALL acceptance criteria must be met. ALL code changes written and saved. ALL TODOs from your plan addressed.
+   - Do NOT emit DONE if you have only planned, read files, or partially implemented. Finish the work first.
 
 ## Rules
 
