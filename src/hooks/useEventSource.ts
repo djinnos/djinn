@@ -30,33 +30,6 @@ export function useEventSource(projectId?: string | null) {
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cleanupHandlersRef = useRef<(() => void) | null>(null);
-  const snapshotLoadRef = useRef<Promise<void> | null>(null);
-
-  const hydrateSnapshot = async () => {
-    // Cancel any in-flight snapshot so we always fetch fresh data
-    snapshotLoadRef.current = null;
-
-    const promise = (async () => {
-      try {
-        const snapshot = await fetchKanbanSnapshot(selectedProjectPath);
-        taskStore.getState().setTasks(snapshot.tasks);
-        epicStore.getState().setEpics(snapshot.epics);
-      } catch (error) {
-        console.error("Failed to hydrate Kanban snapshot:", error);
-      }
-    })();
-
-    snapshotLoadRef.current = promise;
-
-    try {
-      await promise;
-    } finally {
-      if (snapshotLoadRef.current === promise) {
-        snapshotLoadRef.current = null;
-      }
-    }
-  };
-
   const normalizeEventType = (rawType: string): SSEEventType | null => {
     const normalized = rawType.replace(".", "_");
     if (normalized === "task_created") return "task_created";
@@ -80,6 +53,21 @@ export function useEventSource(projectId?: string | null) {
 
   useEffect(() => {
     let isActive = true;
+
+    // Clear stores immediately so stale data from previous project isn't shown
+    taskStore.getState().clearTasks();
+    epicStore.getState().clearEpics();
+
+    const hydrateSnapshot = async () => {
+      try {
+        const snapshot = await fetchKanbanSnapshot(selectedProjectPath);
+        if (!isActive) return;
+        taskStore.getState().setTasks(snapshot.tasks);
+        epicStore.getState().setEpics(snapshot.epics);
+      } catch (error) {
+        console.error("Failed to hydrate Kanban snapshot:", error);
+      }
+    };
 
     // Initialize SSE event handlers (wire stores to SSE events)
     cleanupHandlersRef.current = initSSEEventHandlers();
