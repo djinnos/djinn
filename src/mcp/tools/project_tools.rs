@@ -12,6 +12,81 @@ use crate::mcp::server::DjinnMcpServer;
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
 
+/// Ensure the project directory is a git repo with at least one commit.
+///
+/// Handles:
+/// 1. Not a git repo → `git init`.
+/// 2. No commits on HEAD → stage `.djinn/.gitignore` and create initial commit.
+/// 3. Already has commits → no-op.
+async fn ensure_git_repo_ready(path: &str) -> Result<(), String> {
+    let project_path = std::path::PathBuf::from(path);
+    let git_dir = project_path.join(".git");
+
+    // 1. Initialize git repo if needed.
+    if !git_dir.exists() {
+        tracing::info!(path, "project_add: initializing git repo");
+        let output = tokio::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&project_path)
+            .output()
+            .await
+            .map_err(|e| format!("git init failed: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git init failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+
+    // 2. Check if HEAD points to a valid commit.
+    let rev_parse = tokio::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(&project_path)
+        .output()
+        .await
+        .map_err(|e| format!("git rev-parse failed: {e}"))?;
+
+    if rev_parse.status.success() {
+        return Ok(()); // Already has commits.
+    }
+
+    // 3. Stage .djinn/.gitignore and create initial commit.
+    tracing::info!(path, "project_add: creating initial commit");
+    let add = tokio::process::Command::new("git")
+        .args(["add", ".djinn/.gitignore"])
+        .current_dir(&project_path)
+        .output()
+        .await
+        .map_err(|e| format!("git add failed: {e}"))?;
+    if !add.status.success() {
+        return Err(format!(
+            "git add .djinn/.gitignore failed: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        ));
+    }
+
+    let commit = tokio::process::Command::new("git")
+        .args([
+            "commit",
+            "--no-verify",
+            "-m",
+            "chore: initialize repository",
+        ])
+        .current_dir(&project_path)
+        .output()
+        .await
+        .map_err(|e| format!("git commit failed: {e}"))?;
+    if !commit.status.success() {
+        return Err(format!(
+            "initial commit failed: {}",
+            String::from_utf8_lossy(&commit.stderr).trim()
+        ));
+    }
+
+    Ok(())
+}
+
 // ── Param structs ────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema)]
@@ -166,6 +241,11 @@ impl DjinnMcpServer {
         let gitignore_path = djinn_dir.join(".gitignore");
         if !gitignore_path.exists() {
             let _ = fs::write(&gitignore_path, DJINN_GITIGNORE).await;
+        }
+
+        // Ensure the project is a git repo with at least one commit.
+        if let Err(e) = ensure_git_repo_ready(path).await {
+            tracing::warn!(path, error = %e, "project_add: git bootstrap failed");
         }
 
         // Idempotent: if same name+path already exists, return it

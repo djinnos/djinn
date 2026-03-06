@@ -29,16 +29,20 @@ impl DjinnMcpServer {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 impl DjinnMcpServer {
-    /// Resolve an absolute project path to its DB project_id.
-    pub(crate) async fn project_id_for_path(&self, project_path: &str) -> Option<String> {
+    /// Resolve a project path **or name** to its DB project_id.
+    pub(crate) async fn project_id_for_path(&self, project_ref: &str) -> Option<String> {
         let db = self.state.db();
         db.ensure_initialized().await.ok()?;
-        sqlx::query_scalar::<_, String>("SELECT id FROM projects WHERE path = ?1")
-            .bind(project_path)
-            .fetch_optional(db.pool())
-            .await
-            .ok()
-            .flatten()
+        let normalized = project_ref.trim_end_matches('/');
+        // Try by path first, then by name.
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM projects WHERE path = ?1 OR name = ?1 LIMIT 1",
+        )
+        .bind(normalized)
+        .fetch_optional(db.pool())
+        .await
+        .ok()
+        .flatten()
     }
 
     /// Resolve a project path to ID, creating a project entry when missing.

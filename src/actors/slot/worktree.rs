@@ -8,6 +8,108 @@ use super::*;
 
 // ─── Git / worktree helpers ───────────────────────────────────────────────────
 
+/// Ensure the target branch exists and has at least one commit.
+///
+/// Handles two cases:
+/// 1. Repo has commits but target branch doesn't exist → create it from HEAD.
+/// 2. Repo has no commits at all → stage `.djinn/.gitignore`, create initial
+///    commit on the target branch.
+///
+/// This is a safety net for `prepare_worktree`; the primary bootstrap happens
+/// in `project_add` via `ensure_git_repo_ready`.
+async fn ensure_target_branch_ready(
+    git: &crate::actors::git::GitActorHandle,
+    target_branch: &str,
+) -> anyhow::Result<()> {
+    // Fast path: target branch already resolves to a valid commit.
+    if git
+        .run_command(vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            format!("refs/heads/{target_branch}"),
+        ])
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    // Check if the repo has *any* commits (HEAD resolves?).
+    let head_exists = git
+        .run_command(vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            "HEAD".into(),
+        ])
+        .await
+        .is_ok();
+
+    if head_exists {
+        // Repo has commits, but the target branch doesn't exist.
+        // Create it from HEAD (user may have switched target_branch in settings).
+        tracing::info!(
+            target_branch,
+            "Lifecycle: creating target branch '{target_branch}' from HEAD"
+        );
+        git.run_command(vec![
+            "branch".into(),
+            target_branch.to_string(),
+            "HEAD".into(),
+        ])
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("failed to create target branch '{target_branch}' from HEAD: {e}")
+        })?;
+        return Ok(());
+    }
+
+    // No commits at all — bootstrap the repo.
+    let current = git
+        .run_command(vec![
+            "symbolic-ref".into(),
+            "--short".into(),
+            "HEAD".into(),
+        ])
+        .await
+        .map(|o| o.stdout.trim().to_string())
+        .unwrap_or_default();
+
+    if current != target_branch {
+        let _ = git
+            .run_command(vec![
+                "checkout".into(),
+                "-B".into(),
+                target_branch.to_string(),
+            ])
+            .await;
+    }
+
+    tracing::info!(
+        target_branch,
+        "Lifecycle: bootstrapping repo with initial commit on '{target_branch}'"
+    );
+
+    // Stage .djinn/.gitignore and create initial commit.
+    git.run_command(vec!["add".into(), ".djinn/.gitignore".into()])
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("failed to stage .djinn/.gitignore for initial commit: {e}")
+        })?;
+
+    git.run_command(vec![
+        "commit".into(),
+        "--no-verify".into(),
+        "-m".into(),
+        format!("chore: initialize {target_branch} branch"),
+    ])
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to bootstrap repo with initial commit: {e}"))?;
+
+    Ok(())
+}
+
 pub(crate) async fn prepare_worktree(
     project_dir: &Path,
     task: &crate::models::task::Task,
@@ -48,6 +150,12 @@ pub(crate) async fn prepare_worktree(
     if stale_worktree_path.exists() {
         let _ = std::fs::remove_dir_all(&stale_worktree_path);
     }
+
+    // Ensure the target branch has at least one commit — a bare `git init`
+    // creates a branch ref with no commits, which makes `git branch task/x main`
+    // fail with "not a valid object name".  Bootstrap with an empty initial
+    // commit so the repo is usable.
+    ensure_target_branch_ready(&git, &target_branch).await?;
 
     let branch_exists = match git
         .run_command(vec![

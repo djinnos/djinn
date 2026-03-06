@@ -577,7 +577,10 @@ impl SlotPool {
     async fn trigger_redispatch(&self) {
         let coordinator: Option<CoordinatorHandle> = self.app_state.coordinator().await;
         if let Some(coord) = coordinator {
-            let _ = coord.trigger_dispatch().await;
+            // Use try_trigger_dispatch (non-blocking) to avoid deadlock:
+            // the pool actor must not block on the coordinator channel because
+            // the coordinator may be waiting on a pool response (e.g. has_session).
+            coord.try_trigger_dispatch();
         }
     }
 

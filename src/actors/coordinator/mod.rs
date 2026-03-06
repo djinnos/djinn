@@ -564,6 +564,15 @@ impl CoordinatorHandle {
         self.send(CoordinatorMessage::TriggerDispatch).await
     }
 
+    /// Best-effort dispatch trigger that never blocks.
+    ///
+    /// Used by the pool actor's slot-completion handler to avoid a deadlock:
+    /// the pool must not `.await` on the coordinator channel while the
+    /// coordinator may be `.await`-ing on the pool (e.g. `has_session`).
+    pub fn try_trigger_dispatch(&self) {
+        let _ = self.sender.try_send(CoordinatorMessage::TriggerDispatch);
+    }
+
     pub async fn trigger_dispatch_for_project(
         &self,
         project_id: &str,
