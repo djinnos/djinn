@@ -389,6 +389,70 @@ pub async fn logout() -> Result<(), String> {
     token_refresh::logout().await
 }
 
+/// Check if a git repository has an 'origin' remote configured
+#[tauri::command]
+pub fn check_git_remote(project_path: String) -> Result<Option<String>, String> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if output.status.success() {
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if url.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(url))
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+/// Set up a git remote and push the current branch
+#[tauri::command]
+pub fn setup_git_remote(project_path: String, remote_url: String) -> Result<String, String> {
+    // Add the origin remote
+    let add_output = std::process::Command::new("git")
+        .args(["remote", "add", "origin", &remote_url])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("Failed to run git remote add: {}", e))?;
+
+    if !add_output.status.success() {
+        let stderr = String::from_utf8_lossy(&add_output.stderr).trim().to_string();
+        return Err(format!("git remote add failed: {}", stderr));
+    }
+
+    // Get the current branch name
+    let branch_output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("Failed to get current branch: {}", e))?;
+
+    let branch = if branch_output.status.success() {
+        String::from_utf8_lossy(&branch_output.stdout).trim().to_string()
+    } else {
+        "main".to_string()
+    };
+
+    // Push and set upstream
+    let push_output = std::process::Command::new("git")
+        .args(["push", "-u", "origin", &branch])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("Failed to run git push: {}", e))?;
+
+    if !push_output.status.success() {
+        let stderr = String::from_utf8_lossy(&push_output.stderr).trim().to_string();
+        return Err(format!("git push failed: {}", stderr));
+    }
+
+    Ok(format!("Remote configured and pushed to origin/{}", branch))
+}
+
 /// Open a native directory picker dialog
 #[tauri::command]
 pub async fn select_directory(

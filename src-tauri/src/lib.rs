@@ -194,6 +194,8 @@ pub fn run() {
             commands::is_token_expired,
             commands::logout,
             commands::select_directory,
+            commands::check_git_remote,
+            commands::setup_git_remote,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

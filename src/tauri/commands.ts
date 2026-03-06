@@ -62,6 +62,25 @@ export async function selectDirectory(title?: string): Promise<string | null> {
 
 
 /**
+ * Check if a git repository has an 'origin' remote configured.
+ * @param projectPath Absolute path to the project directory
+ * @returns The remote URL if configured, null otherwise
+ */
+export async function checkGitRemote(projectPath: string): Promise<string | null> {
+  return invoke<string | null>("check_git_remote", { projectPath });
+}
+
+/**
+ * Set up a git remote and push the current branch.
+ * @param projectPath Absolute path to the project directory
+ * @param remoteUrl The git remote URL (HTTPS or SSH)
+ * @returns Success message
+ */
+export async function setupGitRemote(projectPath: string, remoteUrl: string): Promise<string> {
+  return invoke<string>("setup_git_remote", { projectPath, remoteUrl });
+}
+
+/**
  * Get current authentication state.
  */
 export async function authGetState(): Promise<AuthState> {

@@ -16,6 +16,7 @@ import { getServerPort } from "../tauri";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
 import { fetchKanbanSnapshot } from "@/api/server";
 import { useSelectedProject } from "@/stores/useProjectStore";
+import { projectStore } from "@/stores/projectStore";
 import { taskStore } from "@/stores/taskStore";
 import { epicStore } from "@/stores/epicStore";
 import { resetMcpClient } from "@/api/mcpClient";
@@ -60,9 +61,9 @@ export function useEventSource(projectId?: string | null) {
     taskStore.getState().clearTasks();
     epicStore.getState().clearEpics();
 
-    const hydrateSnapshot = async () => {
+    const hydrateSnapshot = async (projectPath: string | null) => {
       try {
-        const snapshot = await fetchKanbanSnapshot(selectedProjectPath);
+        const snapshot = await fetchKanbanSnapshot(projectPath);
         if (!isActive) return;
         taskStore.getState().setTasks(snapshot.tasks);
         epicStore.getState().setEpics(snapshot.epics);
@@ -74,9 +75,26 @@ export function useEventSource(projectId?: string | null) {
     // Initialize SSE event handlers (wire stores to SSE events)
     cleanupHandlersRef.current = initSSEEventHandlers();
 
+    // When the project path isn't available yet (projects still loading),
+    // subscribe directly to the project store so we hydrate as soon as
+    // the path resolves — without relying on a React re-render to re-run
+    // this effect.
+    let unsubProjectPath: (() => void) | undefined;
+    if (!selectedProjectPath && projectId) {
+      unsubProjectPath = projectStore.subscribe((state) => {
+        if (!isActive) return;
+        const project = state.getSelectedProject();
+        if (project?.path) {
+          unsubProjectPath?.();
+          unsubProjectPath = undefined;
+          void hydrateSnapshot(project.path);
+        }
+      });
+    }
+
     const connect = async () => {
       try {
-        await hydrateSnapshot();
+        await hydrateSnapshot(selectedProjectPath);
 
         const port = await getServerPort();
         
@@ -98,7 +116,8 @@ export function useEventSource(projectId?: string | null) {
         es.onopen = () => {
           if (!isActive) return;
           if (sseStore.getState().reconnectAttempt > 0) {
-            void hydrateSnapshot();
+            const currentPath = projectStore.getState().getSelectedProject()?.path ?? selectedProjectPath;
+            void hydrateSnapshot(currentPath);
           }
           sseStore.getState().resetReconnectAttempt();
           sseStore.getState().setConnected(true);
@@ -133,7 +152,8 @@ export function useEventSource(projectId?: string | null) {
             if (!isActive) return;
             try {
               if (eventType === "lagged") {
-                void hydrateSnapshot();
+                const currentPath = projectStore.getState().getSelectedProject()?.path ?? selectedProjectPath;
+                void hydrateSnapshot(currentPath);
                 return;
               }
 
@@ -235,6 +255,7 @@ export function useEventSource(projectId?: string | null) {
 
     return () => {
       isActive = false;
+      unsubProjectPath?.();
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
       }
