@@ -45,28 +45,6 @@ pub struct SlotActor {
 }
 
 impl SlotActor {
-    fn new(
-        id: usize,
-        model_id: String,
-        receiver: mpsc::Receiver<SlotCommand>,
-        event_tx: mpsc::Sender<SlotEvent>,
-        app_state: AppState,
-        session_manager: Arc<SessionManager>,
-        cancel: CancellationToken,
-        runner: LifecycleRunner,
-    ) -> Self {
-        Self {
-            id,
-            model_id,
-            receiver,
-            event_tx,
-            app_state,
-            session_manager,
-            cancel,
-            runner,
-        }
-    }
-
     pub async fn run(mut self) {
         let mut active: Option<ActiveLifecycle> = None;
         let mut drain_requested = false;
@@ -231,16 +209,16 @@ impl SlotHandle {
         runner: LifecycleRunner,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(16);
-        let actor = SlotActor::new(
+        let actor = SlotActor {
             id,
-            model_id.clone(),
+            model_id: model_id.clone(),
             receiver,
             event_tx,
             app_state,
             session_manager,
             cancel,
             runner,
-        );
+        };
         tokio::spawn(actor.run());
         Self {
             id,

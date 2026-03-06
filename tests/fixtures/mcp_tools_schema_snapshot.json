@@ -5171,6 +5171,10 @@
               "title": {
                 "type": "string"
               },
+              "unresolved_blocker_count": {
+                "format": "int64",
+                "type": "integer"
+              },
               "updated_at": {
                 "type": "string"
               }
@@ -5191,7 +5195,8 @@
               "reopen_count",
               "continuation_count",
               "created_at",
-              "updated_at"
+              "updated_at",
+              "unresolved_blocker_count"
             ],
             "type": "object"
           }
