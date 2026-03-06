@@ -130,12 +130,14 @@ impl MergeValidationFailureMetadata {
 
 // ─── Submodules ───────────────────────────────────────────────────────────────
 
+mod actor;
 mod commands;
 mod epic_review;
 mod helpers;
 mod lifecycle;
 mod worktree;
 
+pub use actor::*;
 pub(crate) use commands::*;
 pub(crate) use epic_review::*;
 pub(crate) use helpers::*;
