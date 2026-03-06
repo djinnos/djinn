@@ -164,11 +164,8 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|_window, event| {
-            match event {
-                tauri::WindowEvent::CloseRequested { .. } => {
-                    // Window close requested - do nothing to server
-                }
-                _ => {}
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                // Window close requested - do nothing to server
             }
         })
         .invoke_handler(tauri::generate_handler![

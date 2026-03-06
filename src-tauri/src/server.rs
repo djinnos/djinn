@@ -23,6 +23,12 @@ pub struct ServerState {
     pub error_message: Option<String>,
 }
 
+impl Default for ServerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ServerState {
     pub fn new() -> Self {
         Self {

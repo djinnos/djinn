@@ -52,7 +52,7 @@ fn generate_code_challenge(code_verifier: &str) -> String {
     hasher.update(code_verifier.as_bytes());
     let hash = hasher.finalize();
 
-    URL_SAFE_NO_PAD.encode(&hash)
+    URL_SAFE_NO_PAD.encode(hash)
 }
 
 fn generate_state() -> String {

@@ -467,5 +467,5 @@ pub async fn select_directory(
         .set_title(title.as_deref().unwrap_or("Select Directory"))
         .blocking_pick_folder();
 
-    Ok(folder_path.map(|p| p.into_path().map_err(|e| e.to_string())).transpose()?)
+    folder_path.map(|p| p.into_path().map_err(|e| e.to_string())).transpose()
 }

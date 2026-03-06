@@ -29,7 +29,7 @@ function ProvidersSettings() {
     loading,
     loadError,
     validationStatus,
-    validating,
+    validating: _validating,
     saving,
     setValidationStatus,
     loadData,
