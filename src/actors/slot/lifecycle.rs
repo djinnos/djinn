@@ -148,9 +148,12 @@ pub async fn run_task_lifecycle(
     // ── Prepare worktree / paused-session resume context ──────────────────────
     let session_name = format!("{} {}", task.short_id, task.title);
     let project_dir = PathBuf::from(&project_path);
-    let mut resumed_session_id: Option<String> = None;
-    let mut resumed_record_id: Option<String> = None;
-    let mut resumed_kickoff: Option<GooseMessage> = None;
+    // Session resume is intentionally disabled — fresh sessions force the
+    // agent to re-read the worktree and reviewer feedback.  These are kept
+    // as None sentinels so the downstream session-creation branch still works.
+    let resumed_session_id: Option<String> = None;
+    let resumed_record_id: Option<String> = None;
+    let resumed_kickoff: Option<GooseMessage> = None;
 
     let paused = if agent_type == AgentType::EpicReviewer {
         None
@@ -222,10 +225,25 @@ pub async fn run_task_lifecycle(
                     }
                 }
             } else {
-                let context_message = resume_context_for_task(&task_id, &app_state).await;
-                resumed_session_id = Some(paused_session_id);
-                resumed_record_id = Some(paused.id.clone());
-                resumed_kickoff = Some(GooseMessage::user().with_text(&context_message));
+                // Never resume paused Goose sessions — a fresh session forces
+                // the agent to re-read the worktree and reviewer feedback instead
+                // of just repeating "DONE".  Reuse the existing worktree (the
+                // branch has all committed work).
+                tracing::info!(
+                    task_id = %task_id,
+                    paused_session = %paused_session_id,
+                    "Lifecycle: starting fresh session (no resume); reusing worktree"
+                );
+                let session_repo =
+                    SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+                let _ = session_repo
+                    .update(
+                        &paused.id,
+                        SessionStatus::Interrupted,
+                        paused.tokens_in,
+                        paused.tokens_out,
+                    )
+                    .await;
                 paused_worktree_path
             }
         } else {
