@@ -310,10 +310,11 @@ pub struct ProviderModelLookupResponse {
 #[derive(Deserialize, JsonSchema)]
 pub struct ProviderValidateInput {
     /// Provider API base URL (e.g. https://api.openai.com/v1). The probe appends /models.
-    pub base_url: String,
+    /// When omitted, the server resolves it from the catalog using provider_id.
+    pub base_url: Option<String>,
     /// API key to validate.
     pub api_key: String,
-    /// Optional provider identifier for logging/diagnostics.
+    /// Provider identifier. Used for logging and to resolve base_url from the catalog when not supplied.
     pub provider_id: Option<String>,
 }
 
@@ -759,8 +760,32 @@ impl DjinnMcpServer {
         &self,
         Parameters(input): Parameters<ProviderValidateInput>,
     ) -> Json<ProviderValidateResponse> {
+        // Resolve base_url: use explicit value, fall back to catalog lookup, then known defaults.
+        let base_url = match input.base_url.as_deref() {
+            Some(url) if !url.is_empty() => url.to_string(),
+            _ => {
+                let from_catalog = input.provider_id.as_deref().and_then(|pid| {
+                    self.state
+                        .catalog()
+                        .list_providers()
+                        .into_iter()
+                        .find(|p| p.id == pid)
+                        .map(|p| p.base_url)
+                        .filter(|u| !u.is_empty())
+                });
+                from_catalog.unwrap_or_else(|| {
+                    // Well-known defaults for providers whose native API isn't OpenAI-compatible
+                    // but still expose a /models-style list endpoint.
+                    match input.provider_id.as_deref() {
+                        Some("anthropic") => "https://api.anthropic.com/v1".to_string(),
+                        _ => String::new(),
+                    }
+                })
+            }
+        };
+
         let result = validate::validate(ValidationRequest {
-            base_url: input.base_url,
+            base_url,
             api_key: input.api_key,
             provider_id: input.provider_id,
         })

@@ -7,6 +7,7 @@
 -- SQLite does not support ALTER TABLE ... MODIFY CONSTRAINT, so we recreate
 -- the table to update the CHECK constraint.
 
+DROP TABLE IF EXISTS sessions_new;
 CREATE TABLE sessions_new (
     id               TEXT NOT NULL PRIMARY KEY,
     project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

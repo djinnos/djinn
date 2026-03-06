@@ -17,6 +17,7 @@ SET
 WHERE status IN ('needs_epic_review', 'in_epic_review', 'approved')
    OR blocked_from_status IN ('needs_epic_review', 'in_epic_review', 'approved');
 
+DROP TABLE IF EXISTS tasks_new;
 CREATE TABLE tasks_new (
     id                  TEXT NOT NULL PRIMARY KEY,
     project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

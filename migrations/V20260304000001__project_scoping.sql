@@ -7,6 +7,7 @@ PRAGMA foreign_keys = OFF;
 -- - If projects already exist, attach legacy rows to the first project.
 -- - If no project exists and there is pre-scoped data, create one migration
 --   project so project_id FKs can be satisfied.
+DROP TABLE IF EXISTS _migration_project;
 CREATE TEMP TABLE _migration_project (
     id TEXT NOT NULL
 );
@@ -24,6 +25,7 @@ INSERT INTO _migration_project(id)
 SELECT id FROM projects ORDER BY created_at LIMIT 1;
 
 -- EPICS -----------------------------------------------------------------------
+DROP TABLE IF EXISTS epics_new;
 CREATE TABLE epics_new (
     id          TEXT NOT NULL PRIMARY KEY,
     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -66,6 +68,7 @@ ALTER TABLE epics_new RENAME TO epics;
 CREATE INDEX epics_project_id ON epics(project_id);
 
 -- TASKS -----------------------------------------------------------------------
+DROP TABLE IF EXISTS tasks_new;
 CREATE TABLE tasks_new (
     id                  TEXT NOT NULL PRIMARY KEY,
     project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -139,6 +142,7 @@ CREATE INDEX tasks_status ON tasks(status);
 CREATE INDEX tasks_priority ON tasks(priority, created_at);
 
 -- SESSIONS --------------------------------------------------------------------
+DROP TABLE IF EXISTS sessions_new;
 CREATE TABLE sessions_new (
     id            TEXT NOT NULL PRIMARY KEY,
     project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

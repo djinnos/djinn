@@ -3,31 +3,33 @@ TARGET_DEBUG := $(CURDIR)/target/debug/$(BINARY)
 TARGET_RELEASE := $(CURDIR)/target/release/$(BINARY)
 INSTALL_DIR := $(HOME)/.local/bin
 INSTALL_PATH := $(INSTALL_DIR)/$(BINARY)
+DESKTOP_DIR := $(CURDIR)/../desktop
+DAEMON_FILE := $(HOME)/.djinn/daemon.json
 
-.PHONY: build release run dev test check clippy fmt clean install restart
+.PHONY: build release run dev test check clippy fmt clean install restart run-all reset stop halt help
 
-build:
+build: ## Build debug binary
 	cargo build
 
-release:
+release: ## Build release binary
 	cargo build --release
 
-run:
+run: ## Run server (foreground)
 	cargo run
 
-dev:
+dev: ## Run server with cargo watch
 	cargo watch -x run
 
-test:
+test: ## Run tests
 	cargo test
 
-check:
+check: ## Check compilation
 	cargo check
 
-clippy:
+clippy: ## Run clippy lints
 	cargo clippy -- -D warnings
 
-fmt:
+fmt: ## Format code
 	cargo fmt
 
 install: build
@@ -60,6 +62,46 @@ restart: build
 		fi; \
 	fi
 	$(TARGET_DEBUG) --ensure-daemon
+
+run-all: ## Start desktop app (server runs as sidecar)
+	-@pkill -f "djinn-server" 2>/dev/null || true
+	@sleep 0.5
+	cd $(DESKTOP_DIR) && $(MAKE) run-all
+
+stop: ## Stop the server daemon
+	@if [ -f "$(DAEMON_FILE)" ]; then \
+		PID=$$(jq -r '.pid' "$(DAEMON_FILE)" 2>/dev/null); \
+		if [ -n "$$PID" ] && [ "$$PID" != "null" ] && kill -0 "$$PID" 2>/dev/null; then \
+			echo "Stopping djinn-server (pid=$$PID)"; \
+			kill "$$PID"; \
+			while kill -0 "$$PID" 2>/dev/null; do sleep 0.1; done; \
+			echo "Stopped."; \
+		else \
+			echo "Server not running."; \
+		fi \
+	else \
+		echo "No daemon file found."; \
+	fi
+
+halt: stop ## Stop everything (server + desktop)
+	-@pkill -f "djinn-server" 2>/dev/null || true
+	-@pkill -f "djinnos-desktop" 2>/dev/null || true
+	-@pkill -f "tauri dev" 2>/dev/null || true
+	-@pkill -f "vite.*desktop" 2>/dev/null || true
+	@echo "All processes halted."
+
+reset: ## Kill everything and restart fresh
+	@echo "Killing all djinn processes..."
+	-@pkill -f "djinn-server" 2>/dev/null || true
+	-@pkill -f "tauri dev" 2>/dev/null || true
+	-@pkill -f "djinnos-desktop" 2>/dev/null || true
+	-@pkill -f "vite.*desktop" 2>/dev/null || true
+	@sleep 1
+	@echo "Restarting..."
+	$(MAKE) run-all
+
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
 clean:
 	cargo clean

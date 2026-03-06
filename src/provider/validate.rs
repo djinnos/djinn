@@ -97,12 +97,23 @@ pub async fn validate(req: ValidationRequest) -> ValidationResult {
         }
     };
 
-    let resp = match client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", req.api_key))
-        .header("Accept", "application/json")
-        .send()
-        .await
+    let is_anthropic = req
+        .provider_id
+        .as_deref()
+        .map(|id| id == "anthropic")
+        .unwrap_or(false)
+        || req.base_url.contains("anthropic.com");
+
+    let mut request = client.get(&url).header("Accept", "application/json");
+    if is_anthropic {
+        request = request
+            .header("x-api-key", &req.api_key)
+            .header("anthropic-version", "2023-06-01");
+    } else {
+        request = request.header("Authorization", format!("Bearer {}", req.api_key));
+    }
+
+    let resp = match request.send().await
     {
         Ok(r) => r,
         Err(e) if e.is_timeout() => {

@@ -2,6 +2,7 @@
 
 PRAGMA foreign_keys = OFF;
 
+DROP TABLE IF EXISTS epics_new;
 CREATE TABLE epics_new (
     id          TEXT NOT NULL PRIMARY KEY,
     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

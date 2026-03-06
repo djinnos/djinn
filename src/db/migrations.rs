@@ -20,7 +20,10 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    for migration in embedded::migrations::runner().get_migrations() {
+    let mut migrations = embedded::migrations::runner().get_migrations().clone();
+    migrations.sort_by_key(|m| m.version());
+
+    for migration in &migrations {
         let exists: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM refinery_schema_history WHERE version = ?1")
                 .bind(migration.version())
@@ -31,21 +34,94 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
         }
 
         if let Some(sql) = migration.sql() {
-            sqlx::raw_sql(sql).execute(pool).await?;
-        }
+            // Strip PRAGMA statements — they must be outside transactions.
+            // The runner handles foreign_keys explicitly.
+            let clean_sql = strip_pragmas(sql);
 
-        sqlx::query(
-            "INSERT INTO refinery_schema_history (version, name, applied_on, checksum)
-             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?3)",
-        )
-        .bind(migration.version())
-        .bind(migration.name())
-        .bind(migration.checksum().to_string())
-        .execute(pool)
-        .await?;
+            // Run the migration SQL inside PRAGMA foreign_keys=OFF + manual
+            // transaction on a dedicated connection. Spawned as a separate
+            // tokio task so that &mut SqliteConnection (Executor<'_>) usage
+            // doesn't infect the caller's async state machine and trigger
+            // crate-wide sqlx lifetime inference failures.
+            run_migration_sql_blocking(pool, &clean_sql)?;
+
+            sqlx::query(
+                "INSERT INTO refinery_schema_history (version, name, applied_on, checksum)
+                 VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?3)",
+            )
+            .bind(migration.version())
+            .bind(migration.name())
+            .bind(migration.checksum().to_string())
+            .execute(pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "INSERT INTO refinery_schema_history (version, name, applied_on, checksum)
+                 VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?3)",
+            )
+            .bind(migration.version())
+            .bind(migration.name())
+            .bind(migration.checksum().to_string())
+            .execute(pool)
+            .await?;
+        }
     }
 
     Ok(())
+}
+
+/// Execute migration SQL inside a PRAGMA foreign_keys=OFF + BEGIN EXCLUSIVE
+/// transaction on a dedicated pool connection.
+///
+/// Uses `block_in_place` + `block_on` so that `&mut SqliteConnection` never
+/// appears in an async state machine. This avoids a known sqlx lifetime
+/// inference bug where `Executor<'_>` for `&mut SqliteConnection` poisons
+/// Send bounds crate-wide.
+fn run_migration_sql_blocking(pool: &SqlitePool, sql: &str) -> Result<()> {
+    tokio::task::block_in_place(|| {
+        let handle = tokio::runtime::Handle::current();
+        handle.block_on(async {
+            let mut conn = pool.acquire().await?;
+            sqlx::raw_sql("PRAGMA foreign_keys = OFF")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::raw_sql("BEGIN EXCLUSIVE")
+                .execute(&mut *conn)
+                .await?;
+
+            match sqlx::raw_sql(sql).execute(&mut *conn).await {
+                Ok(_) => {
+                    sqlx::raw_sql("COMMIT").execute(&mut *conn).await?;
+                    sqlx::raw_sql("PRAGMA foreign_keys = ON")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
+                    let _ = sqlx::raw_sql("PRAGMA foreign_keys = ON")
+                        .execute(&mut *conn)
+                        .await;
+                    Err(e.into())
+                }
+            }
+        })
+    })
+}
+
+/// Strip `PRAGMA` lines from migration SQL. The runner manages
+/// `PRAGMA foreign_keys` outside the transaction so that SQLite
+/// honours it (PRAGMAs are no-ops inside transactions).
+fn strip_pragmas(sql: &str) -> String {
+    sql.lines()
+        .filter(|line| {
+            !line
+                .trim()
+                .to_uppercase()
+                .starts_with("PRAGMA ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -56,7 +132,7 @@ mod tests {
 
     use super::run;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn tables_exist_after_migration() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:").unwrap();
         let pool = SqlitePoolOptions::new()
