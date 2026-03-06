@@ -161,13 +161,9 @@ export function KanbanBoard({
   const [textFilter, setTextFilter] = useState<string>(searchParams.get("q") ?? "");
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
-  // Reset filters when project changes
+  // Reset epic filters when project changes (epic IDs are project-specific)
   useEffect(() => {
     setEpicFilters([]);
-    setOwnerFilters([]);
-    setPriorityFilters([]);
-    setSearchInput("");
-    setTextFilter("");
     setSelectedTask(null);
   }, [selectedProjectId]);
 
