@@ -162,6 +162,16 @@ async fn run_reply_loop(
                                     match content {
                                         MessageContent::Text(text) => {
                                             push_fragment(&mut assistant_fragments, format!("text:{}", text.text));
+                                            // Detect context exhaustion from streaming text
+                                            // (Goose may not persist the error message to SQLite).
+                                            if !output.context_exhausted {
+                                                let lower = text.text.to_lowercase();
+                                                if lower.contains("context_length_exceeded")
+                                                    || lower.contains("context length exceeded")
+                                                {
+                                                    output.context_exhausted = true;
+                                                }
+                                            }
                                         }
                                         MessageContent::ToolRequest(req) => {
                                             push_fragment(&mut assistant_fragments, format!("tool_request:{}", req.id));
