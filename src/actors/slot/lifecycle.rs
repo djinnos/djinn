@@ -340,6 +340,14 @@ pub async fn run_task_lifecycle(
             let setup_result = run_commands(&setup_specs, &worktree_path).await;
             match setup_result {
                 Ok(results) => {
+                    crate::actors::slot::commands::log_commands_run_event(
+                        &task.id,
+                        "setup",
+                        &setup_specs,
+                        &results,
+                        &app_state,
+                    )
+                    .await;
                     let failed = results.last().filter(|r| r.exit_code != 0);
                     if let Some(failure) = failed {
                         let reason = format!(
