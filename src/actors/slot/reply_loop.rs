@@ -14,6 +14,8 @@ use crate::server::AppState;
 
 use super::*;
 
+const MAX_TURNS: u32 = 1000;
+
 fn serialize_goose_message(msg: &GooseMessage) -> serde_json::Value {
     serde_json::to_value(msg).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "failed to serialize Goose message for SessionMessage event");
@@ -97,7 +99,7 @@ pub(super) async fn run_reply_loop(
                     GooseSessionConfig {
                         id: session_id.to_owned(),
                         schedule_id: None,
-                        max_turns: Some(1000),
+                        max_turns: Some(MAX_TURNS),
                         retry_config: None,
                     },
                     Some(cancel.clone()),
@@ -297,7 +299,7 @@ pub(super) async fn run_reply_loop(
                         GooseSessionConfig {
                             id: session_id.to_owned(),
                             schedule_id: None,
-                            max_turns: Some(1000),
+                            max_turns: Some(MAX_TURNS),
                             retry_config: None,
                         },
                         Some(cancel.clone()),
