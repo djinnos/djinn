@@ -1,16 +1,18 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { AgentRole, ModelPriorityItem, ProviderModel, ModelSessionLimit } from "@/api/settings";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  Combobox,
+  ComboboxInput,
+  ComboboxContent,
+  ComboboxList,
+  ComboboxItem,
+  ComboboxEmpty,
+  ComboboxCollection,
+} from "@/components/ui/combobox";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 
@@ -100,21 +102,26 @@ function ModelPrioritySection({
   onRemoveModel,
   onReorder,
 }: ModelPrioritySectionProps) {
-  const [selectedModel, setSelectedModel] = useState<string>("");
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [draggedItem, setDraggedItem] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
+  const modelOptionKeys = useMemo(
+    () => availableModels.map((m) => `${m.provider}::${m.id}`),
+    [availableModels],
+  );
+
   const handleAddModel = () => {
     if (!selectedModel) return;
-    
+
     const [provider, modelId] = selectedModel.split("::");
     const model = availableModels.find(
       (m) => m.provider === provider && m.id === modelId
     );
-    
+
     if (model) {
       onAddModel(role, { model: model.name, provider: model.provider });
-      setSelectedModel("");
+      setSelectedModel(null);
     }
   };
 
@@ -150,24 +157,45 @@ function ModelPrioritySection({
       <CardContent className="space-y-4">
         {/* Add Model Section */}
         <div className="flex gap-2">
-          <Select
-            value={selectedModel || null}
-            onValueChange={(value) => setSelectedModel(value ?? "")}
+          <div className="flex-1">
+          <Combobox
+            value={selectedModel}
+            onValueChange={setSelectedModel}
+            items={modelOptionKeys}
+            itemToStringLabel={(value) => {
+              const [p, id] = (value ?? "").split("::");
+              const m = availableModels.find((m) => m.provider === p && m.id === id);
+              return m ? `${m.name} (${m.provider})` : value ?? "";
+            }}
+            filter={(value, query) => {
+              const [p, id] = (value ?? "").split("::");
+              const m = availableModels.find((m) => m.provider === p && m.id === id);
+              const label = m ? `${m.name} ${m.provider}` : value ?? "";
+              return label.toLowerCase().includes(query.toLowerCase());
+            }}
           >
-            <SelectTrigger className="flex-1">
-              <SelectValue placeholder="Select a model..." />
-            </SelectTrigger>
-            <SelectContent>
-              {availableModels.map((model) => (
-                <SelectItem
-                  key={`${model.provider}::${model.id}`}
-                  value={`${model.provider}::${model.id}`}
-                >
-                  {model.name} ({model.provider})
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            <ComboboxInput placeholder="Select a model..." showClear={!!selectedModel} />
+            <ComboboxContent>
+              <ComboboxList>
+                <ComboboxEmpty>No models found.</ComboboxEmpty>
+                <ComboboxCollection>
+                  {(value: string) => {
+                    const [p, id] = value.split("::");
+                    const m = availableModels.find((m) => m.provider === p && m.id === id);
+                    return (
+                      <ComboboxItem key={value} value={value}>
+                        <div>
+                          <span>{m?.name ?? value}</span>
+                          <span className="ml-1.5 text-xs text-muted-foreground">{p}</span>
+                        </div>
+                      </ComboboxItem>
+                    );
+                  }}
+                </ComboboxCollection>
+              </ComboboxList>
+            </ComboboxContent>
+          </Combobox>
+          </div>
           <Button onClick={handleAddModel} disabled={!selectedModel}>
             Add
           </Button>
@@ -271,6 +299,7 @@ interface AgentConfigProps {
   onReorderModels: (role: AgentRole, fromIndex: number, toIndex: number) => void;
   onUpdateSessionLimit: (model: string, provider: string, maxConcurrent: number) => void;
   onDismissError: () => void;
+  onSave: () => void;
 }
 
 export function AgentConfig({
@@ -286,6 +315,7 @@ export function AgentConfig({
   onReorderModels,
   onUpdateSessionLimit,
   onDismissError,
+  onSave,
 }: AgentConfigProps) {
 
   const roles: AgentRole[] = ["worker", "task_reviewer", "epic_reviewer"];
@@ -340,11 +370,10 @@ export function AgentConfig({
                   Configure which models to use for each agent role. Drag to reorder.
                 </p>
               </div>
-              {isSaving && (
-                <span className="text-sm text-muted-foreground">Saving...</span>
-              )}
-              {hasUnsavedChanges && !isSaving && (
-                <Badge variant="outline">Unsaved changes</Badge>
+              {hasUnsavedChanges && (
+                <Button onClick={onSave} disabled={isSaving} size="sm">
+                  {isSaving ? "Saving..." : "Save Changes"}
+                </Button>
               )}
             </div>
 

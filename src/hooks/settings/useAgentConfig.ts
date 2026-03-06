@@ -55,5 +55,6 @@ export function useAgentConfig() {
     onReorderModels: reorderModelsInRole,
     onUpdateSessionLimit: updateSessionLimit,
     onDismissError: resetError,
+    onSave: () => void saveSettings(),
   };
 }

@@ -35,9 +35,12 @@ export interface SettingsActions {
   // Session limit actions
   updateSessionLimit: (model: string, provider: string, maxConcurrent: number) => void;
   
+  // Provider cleanup
+  removeModelsByProvider: (provider: string) => void;
+
   // Save action
   saveSettings: () => Promise<void>;
-  
+
   // Reset
   resetError: () => void;
 }
@@ -161,6 +164,22 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
     
     set({
       sessionLimits: newSessionLimits,
+      hasUnsavedChanges: true,
+    });
+  },
+
+  removeModelsByProvider: (provider: string) => {
+    const { modelPriorities, sessionLimits } = get();
+    const roles: AgentRole[] = ['worker', 'task_reviewer', 'epic_reviewer'];
+    const newPriorities = { ...modelPriorities };
+    for (const role of roles) {
+      newPriorities[role] = modelPriorities[role].filter(
+        (item) => item.provider !== provider
+      );
+    }
+    set({
+      modelPriorities: newPriorities,
+      sessionLimits: sessionLimits.filter((sl) => sl.provider !== provider),
       hasUnsavedChanges: true,
     });
   },

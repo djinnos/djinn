@@ -32,15 +32,7 @@ function WelcomeStep() {
   );
 }
 
-function DoneState() {
-  const navigate = useNavigate();
-  const { resetWizard } = useWizardStore();
-
-  const handleNavigate = (path: "/" | "/settings") => {
-    localStorage.removeItem("djinnos-wizard-storage");
-    resetWizard();
-    navigate(path);
-  };
+function DoneState({ onDismiss }: { onDismiss: (path: "/" | "/settings") => void }) {
 
   return (
     <div className="flex min-h-screen flex-col bg-background">
@@ -51,8 +43,8 @@ function DoneState() {
             Setup is complete. What's next?
           </p>
           <div className="mt-6 flex flex-col gap-3">
-            <Button onClick={() => handleNavigate("/")}>View Kanban Board</Button>
-            <Button variant="outline" onClick={() => handleNavigate("/settings")}>
+            <Button onClick={() => onDismiss("/")}>View Kanban Board</Button>
+            <Button variant="outline" onClick={() => onDismiss("/settings")}>
               Explore Settings
             </Button>
           </div>
@@ -100,6 +92,7 @@ export default function App() {
   const { isFirstRun, isLoading: isFirstRunLoading } = useFirstRun();
   const { isCompleted, resetWizard } = useWizardStore();
   const selectedProjectId = useSelectedProjectId();
+  const navigate = useNavigate();
 
   useProjectsBootstrap();
   const [showWizard, setShowWizard] = useState(false);
@@ -174,7 +167,10 @@ export default function App() {
   }
 
   if (showDoneState) {
-    return <DoneState />;
+    return <DoneState onDismiss={(path) => {
+      setShowDoneState(false);
+      navigate(path);
+    }} />;
   }
 
   return <MainLayout />;
