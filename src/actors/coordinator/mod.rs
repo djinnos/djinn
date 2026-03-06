@@ -278,10 +278,7 @@ impl CoordinatorActor {
                 self.paused_projects.insert(project_id.clone());
                 self.publish_status();
                 if interrupt_active
-                    && let Err(e) = self
-                        .pool
-                        .interrupt_project(&project_id, &reason)
-                        .await
+                    && let Err(e) = self.pool.interrupt_project(&project_id, &reason).await
                 {
                     tracing::warn!(
                         project_id = %project_id,

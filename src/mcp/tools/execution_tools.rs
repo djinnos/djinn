@@ -505,7 +505,11 @@ impl DjinnMcpServer {
             SessionRepository::new(self.state.db().clone(), self.state.events().clone());
         let mut sessions = Vec::new();
         for running in pool_status.running_tasks {
-            let db_session = session_repo.active_for_task(&running.task_id).await.ok().flatten();
+            let db_session = session_repo
+                .active_for_task(&running.task_id)
+                .await
+                .ok()
+                .flatten();
             if let Some(project_id_filter) = project_id.as_deref()
                 && db_session
                     .as_ref()

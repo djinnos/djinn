@@ -104,11 +104,7 @@ impl CoordinatorActor {
                     continue;
                 }
 
-                match self
-                    .pool
-                    .dispatch(&task.id, &project_path, model_id)
-                    .await
-                {
+                match self.pool.dispatch(&task.id, &project_path, model_id).await {
                     Ok(()) => {
                         tracing::info!(
                             task_id = %task.short_id,
