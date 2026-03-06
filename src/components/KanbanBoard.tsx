@@ -238,7 +238,7 @@ export function KanbanBoard({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-5">
+    <div className="flex h-full min-h-0 flex-col gap-5 px-4 pt-5 pb-2">
       <div className="flex flex-wrap items-center gap-3 px-4">
         <Combobox
           value={selectedProjectId ?? ""}
@@ -361,7 +361,7 @@ export function KanbanBoard({
           return (
             <Card
               key={column.key}
-              className="min-w-[280px] flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
+              className="min-h-0 min-w-[280px] flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
             >
               <div className="flex flex-col">
                 <div className="px-4 pb-2.5 pt-3.5 text-sm font-semibold">
