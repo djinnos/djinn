@@ -238,7 +238,7 @@ export function KanbanBoard({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-5 px-4 pt-5 pb-2">
+    <div className="flex h-full min-h-0 flex-col gap-5 overflow-hidden px-4 pt-5 pb-2">
       <div className="flex flex-wrap items-center gap-3 px-4">
         <Combobox
           value={selectedProjectId ?? ""}
