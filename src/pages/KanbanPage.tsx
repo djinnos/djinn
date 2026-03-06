@@ -38,6 +38,5 @@ export function KanbanPage() {
     );
   }
 
-  return <KanbanBoard />
-  );
+  return <KanbanBoard />;
 }
