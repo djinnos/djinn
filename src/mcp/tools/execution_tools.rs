@@ -4,6 +4,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
 use crate::mcp::server::DjinnMcpServer;
 
@@ -431,7 +432,7 @@ impl DjinnMcpServer {
                 error: Some("coordinator actor not initialized".to_string()),
             });
         };
-        let Some(supervisor) = self.state.supervisor().await else {
+        let Some(pool) = self.state.pool().await else {
             return Json(ExecutionStatusResponse {
                 ok: false,
                 state: None,
@@ -442,7 +443,7 @@ impl DjinnMcpServer {
                 capacity: None,
                 sessions: None,
                 metrics: None,
-                error: Some("supervisor actor not initialized".to_string()),
+                error: Some("slot pool actor not initialized".to_string()),
             });
         };
 
@@ -467,7 +468,7 @@ impl DjinnMcpServer {
                 });
             }
         };
-        let supervisor_status = match supervisor.get_status().await {
+        let pool_status = match pool.get_status().await {
             Ok(status) => status,
             Err(e) => {
                 return Json(ExecutionStatusResponse {
@@ -485,32 +486,47 @@ impl DjinnMcpServer {
             }
         };
 
-        let capacity = supervisor_status
-            .capacity
+        let capacity = pool_status
+            .per_model
             .iter()
             .map(|(model, model_capacity)| {
                 (
                     model.clone(),
                     ExecutionStatusCapacity {
                         active: model_capacity.active,
-                        max: model_capacity.max,
+                        max: model_capacity.total,
                     },
                 )
             })
             .collect::<HashMap<_, _>>();
-        let max_sessions: u32 = supervisor_status.capacity.values().map(|c| c.max).sum();
+        let max_sessions: u32 = pool_status.per_model.values().map(|c| c.total).sum();
 
-        let sessions = supervisor_status
-            .running_sessions
-            .into_iter()
-            .map(|session| ExecutionStatusSession {
-                task_id: session.task_id,
-                model_id: session.model_id,
-                session_id: session.session_id,
-                duration_seconds: session.duration_seconds,
-                worktree_path: session.worktree_path,
-            })
-            .collect::<Vec<_>>();
+        let session_repo =
+            SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+        let mut sessions = Vec::new();
+        for running in pool_status.running_tasks {
+            let db_session = session_repo.active_for_task(&running.task_id).await.ok().flatten();
+            if let Some(project_id_filter) = project_id.as_deref()
+                && db_session
+                    .as_ref()
+                    .map(|s| s.project_id.as_str())
+                    .unwrap_or_default()
+                    != project_id_filter
+            {
+                continue;
+            }
+
+            sessions.push(ExecutionStatusSession {
+                task_id: running.task_id,
+                model_id: running.model_id,
+                session_id: db_session
+                    .as_ref()
+                    .map(|s| s.id.clone())
+                    .unwrap_or_else(|| format!("slot-{}", running.slot_id)),
+                duration_seconds: running.duration_seconds,
+                worktree_path: db_session.and_then(|s| s.worktree_path),
+            });
+        }
 
         Json(ExecutionStatusResponse {
             ok: true,
@@ -531,7 +547,7 @@ impl DjinnMcpServer {
                 .to_string(),
             ),
             project_id,
-            running_sessions: Some(supervisor_status.active_sessions),
+            running_sessions: Some(sessions.len()),
             max_sessions: Some(max_sessions),
             capacity: Some(capacity),
             sessions: Some(sessions),
@@ -560,15 +576,15 @@ impl DjinnMcpServer {
                 error: Some(format!("project not found: {path}")),
             });
         }
-        let Some(supervisor) = self.state.supervisor().await else {
+        let Some(pool) = self.state.pool().await else {
             return Json(ExecutionKillTaskResponse {
                 ok: false,
                 task_id: None,
-                error: Some("supervisor actor not initialized".to_string()),
+                error: Some("slot pool actor not initialized".to_string()),
             });
         };
 
-        if let Err(e) = supervisor.kill_session(&p.task_id).await {
+        if let Err(e) = pool.kill_session(&p.task_id).await {
             return Json(ExecutionKillTaskResponse {
                 ok: false,
                 task_id: Some(p.task_id),
@@ -623,7 +639,7 @@ impl DjinnMcpServer {
                 error: Some(format!("task not found: {}", missing_task_id)),
             });
         };
-        let Some(supervisor) = self.state.supervisor().await else {
+        let Some(pool) = self.state.pool().await else {
             return Json(SessionForTaskResponse {
                 ok: false,
                 task_id: task.id,
@@ -632,11 +648,11 @@ impl DjinnMcpServer {
                 duration_seconds: None,
                 worktree_path: None,
                 session: None,
-                error: Some("supervisor actor not initialized".to_string()),
+                error: Some("slot pool actor not initialized".to_string()),
             });
         };
 
-        let session = match supervisor.session_for_task(&task.id).await {
+        let running = match pool.session_for_task(&task.id).await {
             Ok(session) => session,
             Err(e) => {
                 return Json(SessionForTaskResponse {
@@ -652,14 +668,23 @@ impl DjinnMcpServer {
             }
         };
 
-        match session {
+        let session_repo =
+            SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+        let db_session = session_repo.active_for_task(&task.id).await.ok().flatten();
+
+        match running {
             Some(session) => Json(SessionForTaskResponse {
                 ok: true,
                 task_id: task.id,
                 model_id: Some(session.model_id),
-                session_id: Some(session.session_id),
+                session_id: Some(
+                    db_session
+                        .as_ref()
+                        .map(|s| s.id.clone())
+                        .unwrap_or_else(|| format!("slot-{}", session.slot_id)),
+                ),
                 duration_seconds: Some(session.duration_seconds),
-                worktree_path: session.worktree_path,
+                worktree_path: db_session.and_then(|s| s.worktree_path),
                 session: None,
                 error: None,
             }),

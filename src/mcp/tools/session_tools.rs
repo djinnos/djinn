@@ -170,12 +170,12 @@ impl DjinnMcpServer {
                 });
             }
         };
-        let Some(supervisor) = self.state.supervisor().await else {
+        let Some(pool) = self.state.pool().await else {
             return Json(SessionActiveResponse {
                 sessions: None,
                 stale_sessions: None,
                 recovery_triggered: None,
-                error: Some("supervisor actor not initialized".to_string()),
+                error: Some("slot pool actor not initialized".to_string()),
             });
         };
         let coordinator = self.state.coordinator().await;
@@ -186,7 +186,7 @@ impl DjinnMcpServer {
                 let mut stale_sessions = Vec::new();
 
                 for session in sessions {
-                    match supervisor.has_session(&session.task_id).await {
+                    match pool.has_session(&session.task_id).await {
                         Ok(true) => runtime_sessions.push(session),
                         Ok(false) => stale_sessions.push(session),
                         Err(e) => {

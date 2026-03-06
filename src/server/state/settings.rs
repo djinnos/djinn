@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig};
 use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::settings::SettingsRepository;
 use crate::models::settings::DjinnSettings;
@@ -7,6 +8,47 @@ use crate::models::settings::DjinnSettings;
 use super::{AppState, SETTINGS_RAW_KEY};
 
 impl AppState {
+    fn slot_pool_config_for_settings(settings: &DjinnSettings) -> SlotPoolConfig {
+        let role_priorities = settings.model_priority_or_default();
+        let max_sessions = settings.max_sessions_or_default();
+
+        let mut model_ids: HashSet<String> = max_sessions.keys().cloned().collect();
+        for models in role_priorities.values() {
+            for model_id in models {
+                if model_id.contains('/') {
+                    model_ids.insert(model_id.clone());
+                }
+            }
+        }
+
+        let mut roles_by_model: HashMap<String, HashSet<String>> = HashMap::new();
+        for (role, model_ids) in &role_priorities {
+            for model_id in model_ids {
+                if model_id.contains('/') {
+                    roles_by_model
+                        .entry(model_id.clone())
+                        .or_default()
+                        .insert(role.clone());
+                }
+            }
+        }
+
+        let mut models = model_ids
+            .into_iter()
+            .map(|model_id| ModelSlotConfig {
+                max_slots: max_sessions.get(&model_id).copied().unwrap_or(1),
+                roles: roles_by_model.remove(&model_id).unwrap_or_default(),
+                model_id,
+            })
+            .collect::<Vec<_>>();
+        models.sort_by(|a, b| a.model_id.cmp(&b.model_id));
+
+        SlotPoolConfig {
+            models,
+            role_priorities,
+        }
+    }
+
     pub async fn apply_settings(&self, settings: &DjinnSettings) -> Result<(), String> {
         self.validate_model_priority_providers_connected(settings)
             .await?;
@@ -90,9 +132,12 @@ impl AppState {
                 .update_model_priorities(std::collections::HashMap::new())
                 .await;
         }
-        if let Some(supervisor) = self.supervisor().await {
-            let _ = supervisor
-                .update_session_limits(std::collections::HashMap::new(), 1)
+        if let Some(pool) = self.pool().await {
+            let _ = pool
+                .reconfigure(SlotPoolConfig {
+                    models: Vec::new(),
+                    role_priorities: std::collections::HashMap::new(),
+                })
                 .await;
         }
     }
@@ -125,9 +170,9 @@ impl AppState {
             coordinator_handle = Some(coordinator);
         }
 
-        if let Some(supervisor) = self.supervisor().await {
-            let _ = supervisor
-                .update_session_limits(settings.max_sessions_or_default(), 1)
+        if let Some(pool) = self.pool().await {
+            let _ = pool
+                .reconfigure(Self::slot_pool_config_for_settings(settings))
                 .await;
         }
 

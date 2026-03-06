@@ -18,7 +18,7 @@ use tokio::time::{self, Interval};
 use tokio_util::sync::CancellationToken;
 
 use crate::actors::git::GitActorHandle;
-use crate::actors::supervisor::{AgentSupervisorHandle, SupervisorError};
+use crate::actors::slot::{PoolError, SlotPoolHandle};
 use crate::commands::{CommandSpec, run_commands};
 use crate::db::connection::Database;
 use crate::db::repositories::git_settings::GitSettingsRepository;
@@ -90,7 +90,7 @@ enum CoordinatorMessage {
     Pause {
         /// If true, interrupt all active sessions immediately.
         interrupt_active: bool,
-        /// Optional interruption reason passed to the supervisor.
+        /// Optional interruption reason passed to the slot pool.
         reason: String,
     },
     /// Resume dispatch and immediately run a dispatch pass.
@@ -132,7 +132,7 @@ struct CoordinatorActor {
     // Dependencies
     db: Database,
     events_tx: broadcast::Sender<DjinnEvent>,
-    supervisor: AgentSupervisorHandle,
+    pool: SlotPoolHandle,
     #[cfg_attr(test, allow(dead_code))]
     catalog: CatalogService,
     health: HealthTracker,
@@ -151,7 +151,7 @@ struct CoordinatorActor {
     recovered: u64,
 }
 
-// Field count: receiver, events, cancel, tick, db, events_tx, supervisor,
+// Field count: receiver, events, cancel, tick, db, events_tx, pool,
 //              catalog, health, paused, dispatched, recovered = 12 ✓ (≤20)
 
 impl CoordinatorActor {
@@ -162,7 +162,7 @@ impl CoordinatorActor {
         events_tx: broadcast::Sender<DjinnEvent>,
         cancel: CancellationToken,
         db: Database,
-        supervisor: AgentSupervisorHandle,
+        pool: SlotPoolHandle,
         catalog: CatalogService,
         health: HealthTracker,
         status_tx: watch::Sender<SharedCoordinatorState>,
@@ -177,7 +177,7 @@ impl CoordinatorActor {
             tick,
             db,
             events_tx,
-            supervisor,
+            pool,
             catalog,
             health,
             self_sender,
@@ -266,7 +266,7 @@ impl CoordinatorActor {
                     "CoordinatorActor: paused all projects"
                 );
                 self.publish_status();
-                if interrupt_active && let Err(e) = self.supervisor.interrupt_all(&reason).await {
+                if interrupt_active && let Err(e) = self.pool.interrupt_all(&reason).await {
                     tracing::warn!(error = %e, "CoordinatorActor: failed to interrupt sessions on pause");
                 }
             }
@@ -279,7 +279,7 @@ impl CoordinatorActor {
                 self.publish_status();
                 if interrupt_active
                     && let Err(e) = self
-                        .supervisor
+                        .pool
                         .interrupt_project(&project_id, &reason)
                         .await
                 {
@@ -528,7 +528,7 @@ impl CoordinatorHandle {
         events_tx: broadcast::Sender<DjinnEvent>,
         cancel: CancellationToken,
         db: Database,
-        supervisor: AgentSupervisorHandle,
+        pool: SlotPoolHandle,
         catalog: CatalogService,
         health: HealthTracker,
     ) -> Self {
@@ -546,7 +546,7 @@ impl CoordinatorHandle {
             events_tx,
             cancel,
             db,
-            supervisor,
+            pool,
             catalog,
             health,
             status_tx,
@@ -723,6 +723,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
     use crate::agent::init_session_manager;
     use crate::db::repositories::epic::EpicRepository;
     use crate::db::repositories::task::TaskRepository;
@@ -742,10 +743,25 @@ mod tests {
         ));
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let session_manager = init_session_manager(sessions_dir);
-        let supervisor = AgentSupervisorHandle::spawn(app_state, session_manager, cancel.clone());
+        let pool = SlotPoolHandle::spawn(
+            app_state,
+            session_manager,
+            cancel.clone(),
+            SlotPoolConfig {
+                models: vec![ModelSlotConfig {
+                    model_id: DEFAULT_MODEL_ID.to_owned(),
+                    max_slots: 2,
+                    roles: ["worker", "task_reviewer", "epic_reviewer"]
+                        .into_iter()
+                        .map(ToOwned::to_owned)
+                        .collect(),
+                }],
+                role_priorities: HashMap::new(),
+            },
+        );
         let catalog = CatalogService::new();
         let health = HealthTracker::new();
-        CoordinatorHandle::spawn(tx.clone(), cancel, db.clone(), supervisor, catalog, health)
+        CoordinatorHandle::spawn(tx.clone(), cancel, db.clone(), pool, catalog, health)
     }
 
     async fn make_epic(

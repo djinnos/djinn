@@ -70,11 +70,11 @@ impl CoordinatorActor {
                 continue;
             };
 
-            match self.supervisor.has_session(&task.id).await {
+            match self.pool.has_session(&task.id).await {
                 Ok(true) => continue, // session already active
                 Ok(false) => {}
-                Err(SupervisorError::ActorDead) => {
-                    tracing::error!("CoordinatorActor: supervisor actor dead, aborting dispatch");
+                Err(PoolError::ActorDead) => {
+                    tracing::error!("CoordinatorActor: slot pool actor dead, aborting dispatch");
                     return;
                 }
                 Err(e) => {
@@ -105,7 +105,7 @@ impl CoordinatorActor {
                 }
 
                 match self
-                    .supervisor
+                    .pool
                     .dispatch(&task.id, &project_path, model_id)
                     .await
                 {
@@ -125,7 +125,7 @@ impl CoordinatorActor {
                         dispatched = true;
                         break;
                     }
-                    Err(SupervisorError::ModelAtCapacity { .. }) => {
+                    Err(PoolError::AtCapacity { .. }) => {
                         role_at_capacity = true;
                         tracing::debug!(
                             task_id = %task.short_id,
@@ -133,9 +133,9 @@ impl CoordinatorActor {
                             "CoordinatorActor: model at capacity, trying next model"
                         );
                     }
-                    Err(SupervisorError::ActorDead) => {
+                    Err(PoolError::ActorDead) => {
                         tracing::error!(
-                            "CoordinatorActor: supervisor actor dead, aborting dispatch"
+                            "CoordinatorActor: slot pool actor dead, aborting dispatch"
                         );
                         return;
                     }
@@ -193,11 +193,11 @@ impl CoordinatorActor {
                 continue;
             }
 
-            match self.supervisor.has_session(&anchor.task_id).await {
+            match self.pool.has_session(&anchor.task_id).await {
                 Ok(true) => continue,
                 Ok(false) => {}
-                Err(SupervisorError::ActorDead) => {
-                    tracing::error!("CoordinatorActor: supervisor actor dead, aborting dispatch");
+                Err(PoolError::ActorDead) => {
+                    tracing::error!("CoordinatorActor: slot pool actor dead, aborting dispatch");
                     return;
                 }
                 Err(e) => {
@@ -216,7 +216,7 @@ impl CoordinatorActor {
                 }
 
                 match self
-                    .supervisor
+                    .pool
                     .dispatch(&anchor.task_id, &project_path, model_id)
                     .await
                 {
@@ -225,10 +225,10 @@ impl CoordinatorActor {
                         self.dispatched += 1;
                         break;
                     }
-                    Err(SupervisorError::ModelAtCapacity { .. }) => continue,
-                    Err(SupervisorError::ActorDead) => {
+                    Err(PoolError::AtCapacity { .. }) => continue,
+                    Err(PoolError::ActorDead) => {
                         tracing::error!(
-                            "CoordinatorActor: supervisor actor dead, aborting dispatch"
+                            "CoordinatorActor: slot pool actor dead, aborting dispatch"
                         );
                         return;
                     }
@@ -271,12 +271,12 @@ impl CoordinatorActor {
                     continue;
                 }
 
-                match self.supervisor.has_session(&task.id).await {
+                match self.pool.has_session(&task.id).await {
                     Ok(true) => continue, // healthy — session is active
                     Ok(false) => {}
-                    Err(SupervisorError::ActorDead) => {
+                    Err(PoolError::ActorDead) => {
                         tracing::error!(
-                            "CoordinatorActor: supervisor actor dead during stuck check"
+                            "CoordinatorActor: slot pool actor dead during stuck check"
                         );
                         return;
                     }
@@ -351,7 +351,7 @@ impl CoordinatorActor {
             if !self.is_project_dispatch_enabled(&batch.project_id) {
                 continue;
             }
-            match self.supervisor.has_session(&batch.task_id).await {
+            match self.pool.has_session(&batch.task_id).await {
                 Ok(true) => continue,
                 Ok(false) => {
                     if let Err(e) = batch_repo
@@ -366,9 +366,9 @@ impl CoordinatorActor {
                         any_recovered = true;
                     }
                 }
-                Err(SupervisorError::ActorDead) => {
+                Err(PoolError::ActorDead) => {
                     tracing::error!(
-                        "CoordinatorActor: supervisor actor dead during batch stuck check"
+                        "CoordinatorActor: slot pool actor dead during batch stuck check"
                     );
                     return;
                 }

@@ -28,9 +28,9 @@ pub(super) async fn board_reconcile_impl(
     };
     let stale_hours = p.stale_threshold_hours.unwrap_or(24).max(1);
     let repo = TaskRepository::new(server.state.db().clone(), server.state.events().clone());
-    let Some(supervisor) = server.state.supervisor().await else {
+    let Some(pool) = server.state.pool().await else {
         return Json(ErrorOr::Error(ErrorResponse::new(
-            "supervisor actor not initialized",
+            "slot pool actor not initialized",
         )));
     };
     let Some(coordinator) = server.state.coordinator().await else {
@@ -49,14 +49,18 @@ pub(super) async fn board_reconcile_impl(
             };
 
             let mut finalized_stale_session_ids = Vec::new();
-            for session in running_sessions {
-                let has_runtime_session = match supervisor.has_session(&session.task_id).await {
+            let mut active_worktree_paths = std::collections::HashSet::new();
+            for session in &running_sessions {
+                let has_runtime_session = match pool.has_session(&session.task_id).await {
                     Ok(v) => v,
                     Err(e) => {
                         return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
                     }
                 };
                 if has_runtime_session {
+                    if let Some(path) = &session.worktree_path {
+                        active_worktree_paths.insert(path.clone());
+                    }
                     continue;
                 }
                 if session_repo
@@ -69,7 +73,7 @@ pub(super) async fn board_reconcile_impl(
                     .await
                     .is_ok()
                 {
-                    finalized_stale_session_ids.push(session.id);
+                    finalized_stale_session_ids.push(session.id.clone());
                 }
             }
 
@@ -89,17 +93,6 @@ pub(super) async fn board_reconcile_impl(
             if let Ok(Some(project)) = project_repo.get(&project_id).await {
                 let project_path = std::path::PathBuf::from(&project.path);
                 let worktrees_dir = project_path.join(".djinn").join("worktrees");
-
-                // Collect active worktree paths from live supervisor sessions.
-                let active_worktree_paths: std::collections::HashSet<String> =
-                    match supervisor.get_status().await {
-                        Ok(status) => status
-                            .running_sessions
-                            .into_iter()
-                            .filter_map(|s| s.worktree_path)
-                            .collect(),
-                        Err(_) => std::collections::HashSet::new(),
-                    };
 
                 if let Ok(entries) = std::fs::read_dir(&worktrees_dir) {
                     let batch_dirs: Vec<std::path::PathBuf> = entries

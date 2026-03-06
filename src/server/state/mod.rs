@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::actors::coordinator::CoordinatorHandle;
 use crate::actors::git::{GitActorHandle, GitError};
-use crate::actors::supervisor::AgentSupervisorHandle;
+use crate::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use crate::agent::init_session_manager;
 use crate::db::connection::Database;
 use crate::db::repositories::note::NoteRepository;
@@ -42,8 +42,8 @@ struct Inner {
     pub sync: SyncManager,
     /// Long-running coordinator actor handle.
     pub coordinator: Mutex<Option<CoordinatorHandle>>,
-    /// Long-running agent supervisor actor handle.
-    pub supervisor: Mutex<Option<AgentSupervisorHandle>>,
+    /// Long-running slot pool actor handle.
+    pub pool: Mutex<Option<SlotPoolHandle>>,
 }
 
 impl AppState {
@@ -64,7 +64,7 @@ impl AppState {
                 health_tracker: HealthTracker::new(),
                 sync,
                 coordinator: Mutex::new(None),
-                supervisor: Mutex::new(None),
+                pool: Mutex::new(None),
             }),
         }
     }
@@ -107,13 +107,13 @@ impl AppState {
         self.inner.coordinator.lock().await.clone()
     }
 
-    pub async fn supervisor(&self) -> Option<AgentSupervisorHandle> {
-        self.inner.supervisor.lock().await.clone()
+    pub async fn pool(&self) -> Option<SlotPoolHandle> {
+        self.inner.pool.lock().await.clone()
     }
 
     /// Spawn long-running agent actors once and keep their handles in AppState.
     pub async fn initialize_agents(&self) {
-        if self.supervisor().await.is_some() {
+        if self.pool().await.is_some() {
             return;
         }
 
@@ -127,18 +127,25 @@ impl AppState {
         }
 
         let session_manager = init_session_manager(sessions_dir);
-        let supervisor =
-            AgentSupervisorHandle::spawn(self.clone(), session_manager, self.cancel().clone());
+        let pool = SlotPoolHandle::spawn(
+            self.clone(),
+            session_manager,
+            self.cancel().clone(),
+            SlotPoolConfig {
+                models: Vec::new(),
+                role_priorities: std::collections::HashMap::new(),
+            },
+        );
         let coordinator = CoordinatorHandle::spawn(
             self.events().clone(),
             self.cancel().clone(),
             self.db().clone(),
-            supervisor.clone(),
+            pool.clone(),
             self.catalog().clone(),
             self.health_tracker().clone(),
         );
 
-        *self.inner.supervisor.lock().await = Some(supervisor.clone());
+        *self.inner.pool.lock().await = Some(pool.clone());
         *self.inner.coordinator.lock().await = Some(coordinator.clone());
 
         self.apply_runtime_settings_from_db().await;
