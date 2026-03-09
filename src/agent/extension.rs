@@ -24,7 +24,6 @@ pub fn config(agent_type: AgentType) -> ExtensionConfig {
         serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
         serde_json::to_value(tool_memory_read()).expect("serialize tool_memory_read"),
         serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
-        serde_json::to_value(tool_shell()).expect("serialize tool_shell"),
     ];
 
     let mut available_tools = vec![
@@ -32,8 +31,10 @@ pub fn config(agent_type: AgentType) -> ExtensionConfig {
         "task_comment_add".to_string(),
         "memory_read".to_string(),
         "memory_search".to_string(),
-        "shell".to_string(),
     ];
+
+    tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
+    available_tools.push("shell".to_string());
 
     // Only TaskReviewer gets the AC-update tool (ADR-022).
     if matches!(agent_type, AgentType::TaskReviewer) {

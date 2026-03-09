@@ -47,7 +47,7 @@ Diagnose why the task is stuck and take corrective action. You have access to:
 
 ## Important
 
-- Do NOT use shell commands or code editing tools.
+- Shell is available for **read-only inspection** only: `git diff`, `git log`, `git show`, `cat`, `ls`. Do not write or modify files via shell.
 - Your changes should make the task clearly achievable for the next worker.
 - If you decompose a task, close the original with `force_close` and open the subtasks.
 - Always emit a comment summarizing your intervention before completing.
