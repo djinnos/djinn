@@ -88,6 +88,7 @@ pub trait LlmProvider: Send + Sync {
     /// Start a streaming completion request.
     ///
     /// Returns a future that resolves to a stream of `StreamEvent`s.
+    #[allow(clippy::type_complexity)]
     fn stream<'a>(
         &'a self,
         conversation: &'a Conversation,

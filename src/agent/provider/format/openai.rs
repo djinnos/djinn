@@ -108,13 +108,13 @@ impl OpenAIProvider {
 
     fn extra_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        if let Some(proxy) = &self.config.dev_proxy {
-            if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", proxy.auth_key)) {
-                headers.insert(
-                    HeaderName::from_static("helicone-auth"),
-                    val,
-                );
-            }
+        if let Some(proxy) = &self.config.dev_proxy
+            && let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", proxy.auth_key))
+        {
+            headers.insert(
+                HeaderName::from_static("helicone-auth"),
+                val,
+            );
         }
         headers
     }
@@ -193,10 +193,8 @@ pub fn parse_openai_line(
         };
 
         // Text content
-        if let Some(text) = delta.content {
-            if !text.is_empty() {
-                events.push(StreamEvent::Delta(ContentBlock::Text { text }));
-            }
+        if let Some(text) = delta.content && !text.is_empty() {
+            events.push(StreamEvent::Delta(ContentBlock::Text { text }));
         }
 
         // Tool calls — accumulate across chunks
@@ -228,11 +226,10 @@ pub fn parse_openai_line(
             .as_deref()
             .map(|r| r == "tool_calls")
             .unwrap_or(false)
+            && let Some((id, name, args)) = tool_acc.take()
         {
-            if let Some((id, name, args)) = tool_acc.take() {
-                let input = serde_json::from_str(&args).unwrap_or(Value::Null);
-                events.push(StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }));
-            }
+            let input = serde_json::from_str(&args).unwrap_or(Value::Null);
+            events.push(StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }));
         }
     }
 

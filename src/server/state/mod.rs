@@ -326,22 +326,21 @@ fn resolve_sync_user_id() -> String {
     if let Ok(output) = std::process::Command::new("git")
         .args(["config", "user.email"])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let email = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !email.is_empty() {
-                return sanitize_sync_id(&email);
-            }
+        let email = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !email.is_empty() {
+            return sanitize_sync_id(&email);
         }
     }
 
     // Fallback: machine hostname.
-    if let Ok(output) = std::process::Command::new("hostname").output() {
-        if output.status.success() {
-            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !name.is_empty() {
-                return sanitize_sync_id(&name);
-            }
+    if let Ok(output) = std::process::Command::new("hostname").output()
+        && output.status.success()
+    {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !name.is_empty() {
+            return sanitize_sync_id(&name);
         }
     }
 

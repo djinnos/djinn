@@ -101,10 +101,10 @@ impl GoogleProvider {
 
     fn extra_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        if let Some(proxy) = &self.config.dev_proxy {
-            if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", proxy.auth_key)) {
-                headers.insert(HeaderName::from_static("helicone-auth"), val);
-            }
+        if let Some(proxy) = &self.config.dev_proxy
+            && let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", proxy.auth_key))
+        {
+            headers.insert(HeaderName::from_static("helicone-auth"), val);
         }
         headers
     }
@@ -169,10 +169,10 @@ pub fn parse_google_line(line: &str) -> Vec<StreamEvent> {
             if let Some(reason) = candidate
                 .get("finishReason")
                 .and_then(|r| r.as_str())
+                && !reason.is_empty()
+                && reason != "FINISH_REASON_UNSPECIFIED"
             {
-                if !reason.is_empty() && reason != "FINISH_REASON_UNSPECIFIED" {
-                    // Will emit Done after the loop
-                }
+                // Will emit Done after the loop
             }
         }
 

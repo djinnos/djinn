@@ -70,7 +70,7 @@ impl ApiClient {
 
             // Convert the byte stream to an async reader we can read lines from
             let byte_stream = response.bytes_stream().map(|r| {
-                r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                r.map_err(std::io::Error::other)
             });
             let stream_reader = StreamReader::new(byte_stream);
             let mut lines = BufReader::new(stream_reader).lines();

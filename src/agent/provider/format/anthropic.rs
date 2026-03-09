@@ -109,10 +109,10 @@ impl AnthropicProvider {
         );
 
         // Dev proxy Helicone auth
-        if let Some(proxy) = &self.config.dev_proxy {
-            if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", proxy.auth_key)) {
-                headers.insert(HeaderName::from_static("helicone-auth"), val);
-            }
+        if let Some(proxy) = &self.config.dev_proxy
+            && let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", proxy.auth_key))
+        {
+            headers.insert(HeaderName::from_static("helicone-auth"), val);
         }
 
         headers
@@ -142,13 +142,12 @@ pub(crate) fn parse_anthropic_event(
     match event_type {
         "message_start" => {
             // {"type":"message_start","message":{"usage":{"input_tokens":N,...}}}
-            if let Ok(v) = serde_json::from_str::<Value>(data) {
-                if let Some(n) = v
+            if let Ok(v) = serde_json::from_str::<Value>(data)
+                && let Some(n) = v
                     .pointer("/message/usage/input_tokens")
                     .and_then(|x| x.as_u64())
-                {
-                    *input_tokens = n as u32;
-                }
+            {
+                *input_tokens = n as u32;
             }
         }
 
@@ -198,13 +197,12 @@ pub(crate) fn parse_anthropic_event(
                         }
                     }
                     "input_json_delta" => {
-                        if let Some(acc) = tool_acc.as_mut() {
-                            if let Some(frag) = v
+                        if let Some(acc) = tool_acc.as_mut()
+                            && let Some(frag) = v
                                 .pointer("/delta/partial_json")
                                 .and_then(|x| x.as_str())
-                            {
-                                acc.input_json.push_str(frag);
-                            }
+                        {
+                            acc.input_json.push_str(frag);
                         }
                     }
                     _ => {}
@@ -227,16 +225,15 @@ pub(crate) fn parse_anthropic_event(
 
         "message_delta" => {
             // {"type":"message_delta","usage":{"output_tokens":N}}
-            if let Ok(v) = serde_json::from_str::<Value>(data) {
-                if let Some(n) = v
+            if let Ok(v) = serde_json::from_str::<Value>(data)
+                && let Some(n) = v
                     .pointer("/usage/output_tokens")
                     .and_then(|x| x.as_u64())
-                {
-                    events.push(StreamEvent::Usage(TokenUsage {
-                        input: *input_tokens,
-                        output: n as u32,
-                    }));
-                }
+            {
+                events.push(StreamEvent::Usage(TokenUsage {
+                    input: *input_tokens,
+                    output: n as u32,
+                }));
             }
         }
 
