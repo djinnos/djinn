@@ -539,7 +539,7 @@ where
 
 async fn project_id_for_path(state: &AppState, project_path: &str) -> Result<String, String> {
     let repo = ProjectRepository::new(state.db().clone(), state.events().clone());
-    repo.resolve_id_by_path_fuzzy(project_path)
+    repo.resolve(project_path)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("project not found: {project_path}"))
@@ -560,32 +560,11 @@ async fn resolve_note_by_identifier(
     project_id: &str,
     identifier: &str,
 ) -> Option<crate::models::note::Note> {
-    if let Ok(Some(n)) = repo.get_by_permalink(project_id, identifier).await {
-        return Some(n);
-    }
-    if let Ok(results) = repo.search(project_id, identifier, None, None, 1).await
-        && let Some(r) = results.into_iter().next()
-    {
-        return repo.get(&r.id).await.ok().flatten();
-    }
-    None
+    repo.resolve(project_id, identifier).await.ok().flatten()
 }
 
 fn note_to_value(note: &crate::models::note::Note) -> serde_json::Value {
-    serde_json::json!({
-        "id": note.id,
-        "project_id": note.project_id,
-        "permalink": note.permalink,
-        "title": note.title,
-        "file_path": note.file_path,
-        "note_type": note.note_type,
-        "folder": note.folder,
-        "tags": crate::models::parse_json_array(&note.tags),
-        "content": note.content,
-        "created_at": note.created_at,
-        "updated_at": note.updated_at,
-        "last_accessed": note.last_accessed,
-    })
+    note.to_value()
 }
 
 fn task_to_value(t: &Task) -> serde_json::Value {

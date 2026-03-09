@@ -19,13 +19,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::actors::git::GitActorHandle;
 use crate::actors::slot::{PoolError, SlotPoolHandle};
+use crate::agent::AgentType;
 use crate::commands::{CommandSpec, run_commands};
 use crate::db::connection::Database;
 use crate::db::repositories::git_settings::GitSettingsRepository;
 use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::task::{ReadyQuery, TaskRepository};
 use crate::events::DjinnEvent;
-use crate::models::task::TransitionAction;
 use crate::provider::catalog::CatalogService;
 use crate::provider::health::HealthTracker;
 
@@ -546,11 +546,7 @@ impl CoordinatorActor {
     }
 
     fn role_for_task_status(status: &str) -> &'static str {
-        match status {
-            "needs_task_review" | "in_task_review" => "task_reviewer",
-            "needs_pm_intervention" | "in_pm_intervention" => "pm",
-            _ => "worker",
-        }
+        AgentType::for_task_status(status, false).dispatch_role()
     }
 
     fn task_repo(&self) -> TaskRepository {
@@ -787,6 +783,7 @@ mod tests {
     use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
     use crate::db::repositories::epic::EpicRepository;
     use crate::db::repositories::task::TaskRepository;
+    use crate::models::task::TransitionAction;
     use crate::provider::health::HealthTracker;
     use crate::server::AppState;
     use crate::test_helpers;

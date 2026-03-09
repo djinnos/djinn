@@ -21,6 +21,31 @@ pub struct Note {
     pub last_accessed: String,
 }
 
+impl Note {
+    /// Parse the JSON tags string into a `Vec<String>`.
+    pub fn parsed_tags(&self) -> Vec<String> {
+        serde_json::from_str(&self.tags).unwrap_or_default()
+    }
+
+    /// Convert to a `serde_json::Value` with parsed tags.
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "project_id": self.project_id,
+            "permalink": self.permalink,
+            "title": self.title,
+            "file_path": self.file_path,
+            "note_type": self.note_type,
+            "folder": self.folder,
+            "tags": self.parsed_tags(),
+            "content": self.content,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "last_accessed": self.last_accessed,
+        })
+    }
+}
+
 /// A compact search result from FTS5 with BM25 score and content snippet.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NoteSearchResult {

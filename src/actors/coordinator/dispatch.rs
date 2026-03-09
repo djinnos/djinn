@@ -207,11 +207,12 @@ impl CoordinatorActor {
         let repo = self.task_repo();
 
         let mut any_recovered = false;
-        for (status, action) in [
-            ("in_progress", TransitionAction::Release),
-            ("in_task_review", TransitionAction::ReleaseTaskReview),
-            ("in_pm_intervention", TransitionAction::PmInterventionRelease),
+        for (status, agent_type) in [
+            ("in_progress", AgentType::Worker),
+            ("in_task_review", AgentType::TaskReviewer),
+            ("in_pm_intervention", AgentType::PM),
         ] {
+            let action = agent_type.release_action();
             let tasks = match repo.list_by_status(status).await {
                 Ok(tasks) => tasks,
                 Err(e) => {

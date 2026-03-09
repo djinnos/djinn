@@ -6,7 +6,7 @@ use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
 use crate::models::session::{SessionRecord, SessionStatus};
-use crate::models::task::{Task, TransitionAction};
+use crate::models::task::Task;
 use crate::server::AppState;
 
 use super::*;
@@ -271,16 +271,7 @@ pub(crate) async fn transition_start(
     agent_type: AgentType,
     app_state: &AppState,
 ) -> anyhow::Result<()> {
-    let action = match (agent_type, task.status.as_str()) {
-        (AgentType::Worker, "open") | (AgentType::ConflictResolver, "open") => {
-            Some(TransitionAction::Start)
-        }
-        (AgentType::TaskReviewer, "needs_task_review") => Some(TransitionAction::TaskReviewStart),
-        (AgentType::PM, "needs_pm_intervention") => Some(TransitionAction::PmInterventionStart),
-        _ => None,
-    };
-
-    if let Some(action) = action {
+    if let Some(action) = agent_type.start_action(task.status.as_str()) {
         let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
         repo.transition(&task.id, action, "agent-supervisor", "system", None, None)
             .await
@@ -295,11 +286,7 @@ pub(crate) async fn transition_interrupted(
     reason: &str,
     app_state: &AppState,
 ) {
-    let action = match agent_type {
-        AgentType::Worker | AgentType::ConflictResolver => TransitionAction::Release,
-        AgentType::TaskReviewer => TransitionAction::ReleaseTaskReview,
-        AgentType::PM => TransitionAction::PmInterventionRelease,
-    };
+    let action = agent_type.release_action();
 
     let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     if let Err(e) = repo
@@ -467,11 +454,6 @@ pub(crate) fn parse_model_id(model_id: &str) -> anyhow::Result<(String, String)>
 }
 
 pub(crate) fn agent_type_for_task(task: &Task, has_conflict_context: bool) -> AgentType {
-    match task.status.as_str() {
-        "needs_task_review" | "in_task_review" => AgentType::TaskReviewer,
-        "needs_pm_intervention" | "in_pm_intervention" => AgentType::PM,
-        "open" if has_conflict_context => AgentType::ConflictResolver,
-        _ => AgentType::Worker,
-    }
+    AgentType::for_task_status(task.status.as_str(), has_conflict_context)
 }
 

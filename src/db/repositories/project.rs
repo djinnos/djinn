@@ -271,6 +271,53 @@ impl ProjectRepository {
         .await?)
     }
 
+    /// Resolve a project reference (path or name) to its ID.
+    ///
+    /// Tries, in order:
+    /// 1. Exact match on `path` or `name` column.
+    /// 2. Longest-prefix match (the project whose path is a parent of the given
+    ///    path), so `/home/user/myapp/src` resolves to a project at
+    ///    `/home/user/myapp`.
+    pub async fn resolve(&self, project_ref: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        let normalized = project_ref.trim_end_matches('/');
+
+        // 1. Exact match by path or name.
+        let exact = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM projects WHERE path = ?1 OR name = ?1 LIMIT 1",
+        )
+        .bind(normalized)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        if exact.is_some() {
+            return Ok(exact);
+        }
+
+        // 2. Longest-prefix match (subdirectory of a known project).
+        let all = sqlx::query_as::<_, (String, String)>("SELECT id, path FROM projects")
+            .fetch_all(self.db.pool())
+            .await?;
+
+        let mut best: Option<(String, usize)> = None;
+        for (id, path) in all {
+            let root = path.trim_end_matches('/');
+            let is_match = normalized == root
+                || normalized
+                    .strip_prefix(root)
+                    .map(|suffix| suffix.starts_with('/'))
+                    .unwrap_or(false);
+            if is_match {
+                let len = root.len();
+                if best.as_ref().map(|(_, bl)| len > *bl).unwrap_or(true) {
+                    best = Some((id, len));
+                }
+            }
+        }
+
+        Ok(best.map(|(id, _)| id))
+    }
+
     pub async fn delete(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query("DELETE FROM projects WHERE id = ?1")

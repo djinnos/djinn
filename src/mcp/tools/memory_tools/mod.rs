@@ -29,10 +29,10 @@ impl DjinnMcpServer {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 impl DjinnMcpServer {
-    /// Resolve a project path to its DB project_id.
-    pub(crate) async fn project_id_for_path(&self, project_path: &str) -> Option<String> {
+    /// Resolve a project path **or name** to its DB project_id.
+    pub(crate) async fn project_id_for_path(&self, project_ref: &str) -> Option<String> {
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
-        repo.resolve_id_by_path(project_path).await.ok().flatten()
+        repo.resolve(project_ref).await.ok().flatten()
     }
 
     /// Resolve a project path to ID, creating a project entry when missing.
@@ -50,37 +50,12 @@ async fn resolve_note_by_identifier(
     project_id: &str,
     identifier: &str,
 ) -> Option<Note> {
-    if let Ok(Some(n)) = repo.get_by_permalink(project_id, identifier).await {
-        return Some(n);
-    }
-    // Fallback: search by title
-    if let Ok(results) = repo.search(project_id, identifier, None, None, 1).await
-        && let Some(r) = results.into_iter().next()
-    {
-        return repo.get(&r.id).await.ok().flatten();
-    }
-    None
+    repo.resolve(project_id, identifier).await.ok().flatten()
 }
 
 fn note_to_view(note: &Note) -> MemoryNoteView {
-    MemoryNoteView {
-        id: note.id.clone(),
-        project_id: note.project_id.clone(),
-        permalink: note.permalink.clone(),
-        title: note.title.clone(),
-        file_path: note.file_path.clone(),
-        note_type: note.note_type.clone(),
-        folder: note.folder.clone(),
-        tags: parse_json_array(&note.tags),
-        content: note.content.clone(),
-        created_at: note.created_at.clone(),
-        updated_at: note.updated_at.clone(),
-        last_accessed: note.last_accessed.clone(),
-    }
+    MemoryNoteView::from(note)
 }
-
-// Re-export for `use super::*` in submodules.
-use crate::models::parse_json_array;
 
 fn parse_task_ref_item(raw: serde_json::Value) -> Option<MemoryTaskRefItem> {
     serde_json::from_value(raw).ok()

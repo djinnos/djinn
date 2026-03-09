@@ -230,20 +230,7 @@ impl SessionRepository {
         .execute(self.db.pool())
         .await?;
 
-        let session = sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
-             FROM sessions
-             WHERE id = ?1",
-        )
-        .bind(id)
-        .fetch_one(self.db.pool())
-        .await?;
-
-        let _ = self
-            .events
-            .send(DjinnEvent::SessionUpdated(session.clone()));
-        Ok(session)
+        self.fetch_and_emit_update(id).await
     }
 
     /// Set a paused session back to Running (for resume cycles).
@@ -255,33 +242,16 @@ impl SessionRepository {
             .execute(self.db.pool())
             .await?;
 
-        let session = sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
-             FROM sessions
-             WHERE id = ?1",
-        )
-        .bind(id)
-        .fetch_one(self.db.pool())
-        .await?;
-
-        let _ = self
-            .events
-            .send(DjinnEvent::SessionUpdated(session.clone()));
-        Ok(session)
+        self.fetch_and_emit_update(id).await
     }
 
     /// Find the most recent paused session for a task (if any).
     pub async fn paused_for_task(&self, task_id: &str) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
-             FROM sessions
-             WHERE task_id = ?1 AND status = 'paused'
-             ORDER BY started_at DESC
-             LIMIT 1",
-        )
+        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
+            "SELECT {SESSION_COLS} FROM sessions \
+             WHERE task_id = ?1 AND status = 'paused' ORDER BY started_at DESC LIMIT 1"
+        ))
         .bind(task_id)
         .fetch_optional(self.db.pool())
         .await?)

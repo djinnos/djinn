@@ -107,6 +107,23 @@ impl NoteRepository {
         .await?)
     }
 
+    /// Resolve a note by permalink (primary) or title search (fallback).
+    ///
+    /// This is the canonical way to look up a note when the caller has a
+    /// human-supplied identifier that could be either a permalink slug or a
+    /// (partial) title.
+    pub async fn resolve(&self, project_id: &str, identifier: &str) -> Result<Option<Note>> {
+        if let Some(n) = self.get_by_permalink(project_id, identifier).await? {
+            return Ok(Some(n));
+        }
+        // Fallback: title search, take best match.
+        let results = self.search(project_id, identifier, None, None, 1).await?;
+        if let Some(r) = results.into_iter().next() {
+            return self.get(&r.id).await;
+        }
+        Ok(None)
+    }
+
     /// List notes for a project, optionally filtered by folder.
     pub async fn list(&self, project_id: &str, folder: Option<&str>) -> Result<Vec<Note>> {
         self.db.ensure_initialized().await?;

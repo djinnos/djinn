@@ -297,6 +297,44 @@ pub struct MemoryNoteView {
     pub last_accessed: String,
 }
 
+impl From<crate::models::note::Note> for MemoryNoteView {
+    fn from(note: crate::models::note::Note) -> Self {
+        Self {
+            tags: note.parsed_tags(),
+            id: note.id,
+            project_id: note.project_id,
+            permalink: note.permalink,
+            title: note.title,
+            file_path: note.file_path,
+            note_type: note.note_type,
+            folder: note.folder,
+            content: note.content,
+            created_at: note.created_at,
+            updated_at: note.updated_at,
+            last_accessed: note.last_accessed,
+        }
+    }
+}
+
+impl From<&crate::models::note::Note> for MemoryNoteView {
+    fn from(note: &crate::models::note::Note) -> Self {
+        Self {
+            id: note.id.clone(),
+            project_id: note.project_id.clone(),
+            permalink: note.permalink.clone(),
+            title: note.title.clone(),
+            file_path: note.file_path.clone(),
+            note_type: note.note_type.clone(),
+            folder: note.folder.clone(),
+            tags: note.parsed_tags(),
+            content: note.content.clone(),
+            created_at: note.created_at.clone(),
+            updated_at: note.updated_at.clone(),
+            last_accessed: note.last_accessed.clone(),
+        }
+    }
+}
+
 impl MemoryNoteResponse {
     pub(super) fn from_note(note: &crate::models::note::Note) -> Self {
         Self {
@@ -307,7 +345,7 @@ impl MemoryNoteResponse {
             file_path: Some(note.file_path.clone()),
             note_type: Some(note.note_type.clone()),
             folder: Some(note.folder.clone()),
-            tags: Some(parse_json_array(&note.tags)),
+            tags: Some(note.parsed_tags()),
             content: Some(note.content.clone()),
             created_at: Some(note.created_at.clone()),
             updated_at: Some(note.updated_at.clone()),

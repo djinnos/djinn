@@ -340,7 +340,7 @@ pub async fn run_task_lifecycle(
                         let _ = task_repo
                             .transition(
                                 &task.id,
-                                TransitionAction::Release,
+                                agent_type.release_action(),
                                 "agent-supervisor",
                                 "system",
                                 Some(&reason),
@@ -364,7 +364,7 @@ pub async fn run_task_lifecycle(
                     let _ = task_repo
                         .transition(
                             &task.id,
-                            TransitionAction::Release,
+                            agent_type.release_action(),
                             "agent-supervisor",
                             "system",
                             Some(&reason),
@@ -701,19 +701,7 @@ pub async fn run_task_lifecycle(
     // Determine transition.
     let transition = match final_result {
         Ok(()) => success_transition(&task_id, agent_type, &final_output, &app_state).await,
-        Err(reason) => match agent_type {
-            AgentType::Worker | AgentType::ConflictResolver => {
-                Some((TransitionAction::Release, Some(reason.to_string())))
-            }
-            AgentType::TaskReviewer => Some((
-                TransitionAction::ReleaseTaskReview,
-                Some(reason.to_string()),
-            )),
-            AgentType::PM => Some((
-                TransitionAction::PmInterventionRelease,
-                Some(reason.to_string()),
-            )),
-        },
+        Err(reason) => Some((agent_type.release_action(), Some(reason.to_string()))),
     };
 
     if let Some((action, reason)) = transition {
