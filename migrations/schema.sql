@@ -1,6 +1,6 @@
 -- Canonical schema — ground truth. Matches result of running all migrations.
 -- Updated manually after each migration is added.
--- Last updated: V20260308000001__drop_session_continuation_of.sql
+-- Last updated: V20260308000002__add_verifying_status.sql
 
 CREATE TABLE settings (
     key        TEXT NOT NULL PRIMARY KEY,
@@ -40,32 +40,6 @@ CREATE TABLE epics (
 
 CREATE INDEX epics_project_id ON epics(project_id);
 
-CREATE TABLE epic_review_batches (
-    id             TEXT NOT NULL PRIMARY KEY,
-    project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    epic_id        TEXT NOT NULL REFERENCES epics(id) ON DELETE CASCADE,
-    status         TEXT NOT NULL DEFAULT 'queued'
-                       CHECK(status IN ('queued', 'in_review', 'clean', 'issues_found', 'cancelled')),
-    verdict_reason TEXT,
-    session_id     TEXT,
-    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    started_at     TEXT,
-    completed_at   TEXT
-);
-
-CREATE INDEX epic_review_batches_project_id ON epic_review_batches(project_id);
-CREATE INDEX epic_review_batches_epic_id ON epic_review_batches(epic_id);
-CREATE INDEX epic_review_batches_status ON epic_review_batches(status);
-
-CREATE TABLE epic_review_batch_tasks (
-    batch_id    TEXT NOT NULL REFERENCES epic_review_batches(id) ON DELETE CASCADE,
-    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    PRIMARY KEY (batch_id, task_id)
-);
-
-CREATE INDEX epic_review_batch_tasks_task_id ON epic_review_batch_tasks(task_id);
-
 CREATE TABLE tasks (
     id                  TEXT NOT NULL PRIMARY KEY,
     project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -78,9 +52,9 @@ CREATE TABLE tasks (
                              CHECK(issue_type IN ('feature', 'task', 'bug')),
     status              TEXT NOT NULL DEFAULT 'open'
                              CHECK(status IN (
-                                 'draft', 'open', 'in_progress',
+                                 'draft', 'open', 'in_progress', 'verifying',
                                  'needs_task_review', 'in_task_review',
-                                 'closed', 'blocked'
+                                 'closed'
                              )),
     priority            INTEGER NOT NULL DEFAULT 0,
     owner               TEXT NOT NULL DEFAULT '',
@@ -91,7 +65,6 @@ CREATE TABLE tasks (
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     closed_at           TEXT,
-    blocked_from_status TEXT,
     close_reason        TEXT,
     merge_commit_sha    TEXT,
     memory_refs         TEXT NOT NULL DEFAULT '[]',

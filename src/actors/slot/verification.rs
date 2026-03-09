@@ -1,0 +1,136 @@
+use std::path::PathBuf;
+
+use crate::db::repositories::task::TaskRepository;
+use crate::models::task::TransitionAction;
+use crate::server::AppState;
+
+use super::*;
+
+/// Spawn a background verification pipeline for a completed worker task.
+///
+/// The task should already be in `verifying` status.  This function:
+/// 1. Creates a fresh worktree from the task branch
+/// 2. Runs setup commands
+/// 3. Runs verification commands
+/// 4. On pass: transitions to `needs_task_review` (VerificationPass)
+/// 5. On fail: logs the failure as an activity comment, transitions to `open` (VerificationFail)
+/// 6. Cleans up the worktree
+/// 7. Triggers redispatch for the project
+pub fn spawn_verification(
+    task_id: String,
+    project_path: String,
+    app_state: AppState,
+) {
+    tokio::spawn(async move {
+        if let Err(e) = run_verification_pipeline(&task_id, &project_path, &app_state).await {
+            tracing::error!(
+                task_id = %task_id,
+                error = %e,
+                "Verification pipeline crashed; releasing task"
+            );
+            let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+            let _ = repo
+                .transition(
+                    &task_id,
+                    TransitionAction::ReleaseVerification,
+                    "agent-supervisor",
+                    "system",
+                    Some(&format!("verification pipeline error: {e}")),
+                    None,
+                )
+                .await;
+        }
+
+        // Trigger redispatch so newly-open tasks (on failure) or newly-ready
+        // review tasks (on pass) get picked up promptly.
+        if let Ok(task) = load_task(&task_id, &app_state).await
+            && let Some(coordinator) = app_state.coordinator().await
+        {
+            let _ = coordinator
+                .trigger_dispatch_for_project(&task.project_id)
+                .await;
+        }
+    });
+}
+
+async fn run_verification_pipeline(
+    task_id: &str,
+    project_path: &str,
+    app_state: &AppState,
+) -> anyhow::Result<()> {
+    let task = load_task(task_id, app_state).await?;
+    let project_dir = PathBuf::from(project_path);
+    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+
+    // Create a fresh worktree from the task branch.
+    let worktree_path = prepare_worktree(&project_dir, &task, app_state).await?;
+
+    // Run setup commands (e.g. npm install, cargo fetch).
+    if let Some(feedback) = run_setup_commands_checked(task_id, &worktree_path, app_state).await {
+        tracing::info!(task_id = %task_id, "Verification: setup commands failed");
+        let payload = serde_json::json!({ "body": feedback }).to_string();
+        let _ = task_repo
+            .log_activity(
+                Some(task_id),
+                "agent-supervisor",
+                "verification",
+                "comment",
+                &payload,
+            )
+            .await;
+        let _ = task_repo
+            .transition(
+                task_id,
+                TransitionAction::VerificationFail,
+                "agent-supervisor",
+                "system",
+                Some(&feedback),
+                None,
+            )
+            .await;
+        cleanup_worktree(task_id, &worktree_path, app_state).await;
+        return Ok(());
+    }
+
+    // Run verification commands (e.g. cargo check, cargo test).
+    if let Some(feedback) = run_verification_commands(task_id, &worktree_path, app_state).await {
+        tracing::info!(task_id = %task_id, "Verification: verification commands failed");
+        let payload = serde_json::json!({ "body": feedback }).to_string();
+        let _ = task_repo
+            .log_activity(
+                Some(task_id),
+                "agent-supervisor",
+                "verification",
+                "comment",
+                &payload,
+            )
+            .await;
+        let _ = task_repo
+            .transition(
+                task_id,
+                TransitionAction::VerificationFail,
+                "agent-supervisor",
+                "system",
+                Some(&feedback),
+                None,
+            )
+            .await;
+        cleanup_worktree(task_id, &worktree_path, app_state).await;
+        return Ok(());
+    }
+
+    // All passed — transition to needs_task_review.
+    tracing::info!(task_id = %task_id, "Verification: all commands passed");
+    let _ = task_repo
+        .transition(
+            task_id,
+            TransitionAction::VerificationPass,
+            "agent-supervisor",
+            "system",
+            None,
+            None,
+        )
+        .await;
+    cleanup_worktree(task_id, &worktree_path, app_state).await;
+    Ok(())
+}

@@ -132,16 +132,17 @@ impl MergeValidationFailureMetadata {
 
 mod actor;
 mod commands;
-mod epic_review;
+mod task_review;
 mod helpers;
 mod lifecycle;
 mod pool;
 mod reply_loop;
+mod verification;
 mod worktree;
 
 pub use actor::*;
 pub(crate) use commands::*;
-pub(crate) use epic_review::*;
+pub(crate) use task_review::*;
 pub(crate) use helpers::*;
 pub use lifecycle::run_task_lifecycle;
 pub use pool::*;

@@ -4,7 +4,6 @@ use sqlx::SqlitePool;
 
 use crate::db::connection::Database;
 use crate::db::repositories::epic::EpicRepository;
-use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
 use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
 use crate::models::task::{ActivityEntry, Task, TaskStatus, TransitionAction, compute_transition};
@@ -140,52 +139,6 @@ pub struct TaskRepository {
 impl TaskRepository {
     pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
         Self { db, events }
-    }
-
-    pub(super) async fn maybe_queue_epic_review_batch(&self, task: &Task) -> Result<()> {
-        let Some(epic_id) = task.epic_id.as_deref() else {
-            return Ok(());
-        };
-
-        let epic_repo = EpicRepository::new(self.db.clone(), self.events.clone());
-        let Some(epic) = epic_repo.get(epic_id).await? else {
-            return Ok(());
-        };
-
-        let tasks = self.list_by_epic(epic_id).await?;
-        if tasks.is_empty() {
-            return Ok(());
-        }
-        let all_closed = tasks.iter().all(|t| t.status == "closed");
-        if !all_closed {
-            return Ok(());
-        }
-
-        let batch_repo = EpicReviewBatchRepository::new(self.db.clone(), self.events.clone());
-        if batch_repo.has_active_batch(epic_id).await? {
-            if epic.status != "in_review" {
-                let _ = epic_repo.mark_in_review(epic_id).await?;
-            }
-            return Ok(());
-        }
-
-        let reviewable_task_ids = batch_repo.list_unreviewed_closed_task_ids(epic_id).await?;
-        if reviewable_task_ids.is_empty() {
-            if epic.status == "in_review" {
-                let _ = epic_repo.close(epic_id).await?;
-            }
-            return Ok(());
-        }
-
-        if epic.status != "in_review" {
-            let _ = epic_repo.mark_in_review(epic_id).await?;
-        }
-
-        let _batch = batch_repo
-            .create_batch(&task.project_id, epic_id, &reviewable_task_ids)
-            .await?;
-
-        Ok(())
     }
 
     pub(super) async fn generate_short_id(&self, seed_id: &str) -> Result<String> {

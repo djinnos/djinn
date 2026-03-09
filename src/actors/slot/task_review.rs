@@ -241,8 +241,8 @@ pub(crate) async fn success_transition(
 ) -> Option<(TransitionAction, Option<String>)> {
     match agent_type {
         AgentType::Worker | AgentType::ConflictResolver => {
-            // Worker completed — proceed to task review.
-            Some((TransitionAction::SubmitTaskReview, None))
+            // Worker completed — submit for background verification.
+            Some((TransitionAction::SubmitVerification, None))
         }
         AgentType::TaskReviewer => {
             // Derive verdict from acceptance criteria state on the task.

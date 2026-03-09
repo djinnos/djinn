@@ -57,6 +57,7 @@ pub enum TaskStatus {
     Draft,
     Open,
     InProgress,
+    Verifying,
     NeedsTaskReview,
     InTaskReview,
     Closed,
@@ -69,6 +70,7 @@ impl TaskStatus {
             Self::Draft => "draft",
             Self::Open => "open",
             Self::InProgress => "in_progress",
+            Self::Verifying => "verifying",
             Self::NeedsTaskReview => "needs_task_review",
             Self::InTaskReview => "in_task_review",
             Self::Closed => "closed",
@@ -81,6 +83,7 @@ impl TaskStatus {
             "draft" => Ok(Self::Draft),
             "open" => Ok(Self::Open),
             "in_progress" => Ok(Self::InProgress),
+            "verifying" => Ok(Self::Verifying),
             "needs_task_review" => Ok(Self::NeedsTaskReview),
             "in_task_review" => Ok(Self::InTaskReview),
             "closed" => Ok(Self::Closed),
@@ -101,6 +104,10 @@ impl std::fmt::Display for TaskStatus {
 pub enum TransitionAction {
     Accept,
     Start,
+    SubmitVerification,
+    VerificationPass,
+    VerificationFail,
+    ReleaseVerification,
     SubmitTaskReview,
     TaskReviewStart,
     TaskReviewReject,
@@ -119,7 +126,9 @@ impl TransitionAction {
     pub fn requires_reason(&self) -> bool {
         matches!(
             self,
-            Self::TaskReviewReject
+            Self::VerificationFail
+                | Self::ReleaseVerification
+                | Self::TaskReviewReject
                 | Self::TaskReviewRejectConflict
                 | Self::Reopen
                 | Self::Release
@@ -133,6 +142,10 @@ impl TransitionAction {
         match s {
             "accept" => Ok(Self::Accept),
             "start" => Ok(Self::Start),
+            "submit_verification" => Ok(Self::SubmitVerification),
+            "verification_pass" => Ok(Self::VerificationPass),
+            "verification_fail" => Ok(Self::VerificationFail),
+            "release_verification" => Ok(Self::ReleaseVerification),
             "submit_task_review" => Ok(Self::SubmitTaskReview),
             "task_review_start" => Ok(Self::TaskReviewStart),
             "task_review_reject" => Ok(Self::TaskReviewReject),
@@ -223,9 +236,37 @@ pub fn compute_transition(
             TransitionApply::simple(TaskStatus::InProgress)
         }
 
-        TransitionAction::SubmitTaskReview => {
+        TransitionAction::SubmitVerification => {
             if *from != TaskStatus::InProgress {
-                return bad("submit_task_review is only valid from in_progress");
+                return bad("submit_verification is only valid from in_progress");
+            }
+            TransitionApply::simple(TaskStatus::Verifying)
+        }
+
+        TransitionAction::VerificationPass => {
+            if *from != TaskStatus::Verifying {
+                return bad("verification_pass is only valid from verifying");
+            }
+            TransitionApply::simple(TaskStatus::NeedsTaskReview)
+        }
+
+        TransitionAction::VerificationFail => {
+            if *from != TaskStatus::Verifying {
+                return bad("verification_fail is only valid from verifying");
+            }
+            TransitionApply::simple(TaskStatus::Open)
+        }
+
+        TransitionAction::ReleaseVerification => {
+            if *from != TaskStatus::Verifying {
+                return bad("release_verification is only valid from verifying");
+            }
+            TransitionApply::simple(TaskStatus::Open)
+        }
+
+        TransitionAction::SubmitTaskReview => {
+            if !matches!(from, TaskStatus::InProgress | TaskStatus::Verifying) {
+                return bad("submit_task_review is only valid from in_progress or verifying");
             }
             TransitionApply::simple(TaskStatus::NeedsTaskReview)
         }

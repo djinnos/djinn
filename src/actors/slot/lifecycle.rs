@@ -26,7 +26,8 @@ use super::*;
 use super::reply_loop::run_reply_loop;
 
 /// Standalone async function that runs the full per-task lifecycle:
-/// load -> worktree -> session -> reply loop -> verification -> post-session work -> cleanup.
+/// load -> worktree -> session -> reply loop -> post-session work -> cleanup.
+/// Verification runs as a separate background task after the slot is freed.
 ///
 /// Compaction is handled as an inline loop (no supervisor messages). The reply
 /// loop returns its result directly instead of sending SessionCompleted back to
@@ -476,13 +477,8 @@ pub async fn run_task_lifecycle(
 
     let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
 
-    // ── Main lifecycle loop (fresh session + agent per iteration) ─────────────
-    //
-    // Each iteration creates a fresh Goose session and agent.  This avoids
-    // stale final_output_tool state when verification fails and we retry.
-    let mut kickoff_text: Option<String> = None;
-
-    let (final_result, final_output, current_session_id, _current_record_id) = loop {
+    // ── Create session and run agent ────────────────────────────────────────────
+    let (final_result, final_output, current_session_id, _current_record_id) = {
         // ── Create Goose session ─────────────────────────────────────────
         let session = match session_manager
             .create_session(worktree_path.clone(), session_name.clone(), SessionType::SubAgent)
@@ -567,13 +563,9 @@ pub async fn run_task_lifecycle(
             })
             .await;
 
-        let kickoff = if let Some(feedback) = kickoff_text.take() {
-            GooseMessage::user().with_text(&feedback)
-        } else {
-            GooseMessage::user().with_text(
-                "Start by understanding the task context and execute it fully before stopping.",
-            )
-        };
+        let kickoff = GooseMessage::user().with_text(
+            "Start by understanding the task context and execute it fully before stopping.",
+        );
 
         // ── Run reply loop ───────────────────────────────────────────────
         let (reply_result, output) = run_reply_loop(
@@ -634,51 +626,7 @@ pub async fn run_task_lifecycle(
         )
         .await;
 
-        // ── Verification pipeline for worker DONE ────────────────────────
-        let is_worker_done = reply_result.is_ok()
-            && matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver);
-
-        if is_worker_done {
-            if let Some(feedback) =
-                run_setup_commands_checked(&task_id, &worktree_path, &app_state).await
-            {
-                tracing::info!(task_id = %task_id, "Lifecycle: setup verification failed; spawning fresh session");
-                let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
-                let payload = serde_json::json!({ "body": feedback }).to_string();
-                let _ = repo
-                    .log_activity(
-                        Some(&task_id),
-                        "agent-supervisor",
-                        "verification",
-                        "comment",
-                        &payload,
-                    )
-                    .await;
-                kickoff_text = Some(feedback);
-                continue;
-            }
-            if let Some(feedback) =
-                run_verification_commands(&task_id, &worktree_path, &app_state).await
-            {
-                tracing::info!(task_id = %task_id, "Lifecycle: verification failed; spawning fresh session");
-                let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
-                let payload = serde_json::json!({ "body": feedback }).to_string();
-                let _ = repo
-                    .log_activity(
-                        Some(&task_id),
-                        "agent-supervisor",
-                        "verification",
-                        "comment",
-                        &payload,
-                    )
-                    .await;
-                kickoff_text = Some(feedback);
-                continue;
-            }
-        }
-
-        // ── Done ─────────────────────────────────────────────────────────
-        break (reply_result, output, current_session_id, current_record_id);
+        (reply_result, output, current_session_id, current_record_id)
     };
 
     // ── Post-loop: health + transitions + cleanup ─────────────────────────────
@@ -695,24 +643,18 @@ pub async fn run_task_lifecycle(
     let is_worker_done = final_result.is_ok()
         && matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver);
 
-    // Worktree: commit and keep for worker done; cleanup otherwise.
-    if let Some(worktree_ref) = Some(&worktree_path) {
-        if is_worker_done {
-            // Commit final work but keep worktree alive for review -> resume cycle.
-            if let Err(e) = commit_final_work_if_needed(&task_id, worktree_ref, &app_state).await {
-                tracing::warn!(
-                    task_id = %task_id,
-                    error = %e,
-                    "Lifecycle: failed to commit final work before pausing for review"
-                );
-            }
-        } else {
-            cleanup_worktree(&task_id, worktree_ref, &app_state).await;
+    // Worktree: commit final work then clean up.  Verification and review
+    // create their own fresh worktrees from the branch.
+    if is_worker_done {
+        if let Err(e) = commit_final_work_if_needed(&task_id, &worktree_path, &app_state).await {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "Lifecycle: failed to commit final work"
+            );
         }
-
-        // Post-DONE setup re-check is already handled in the main loop above.
-        // (run_setup_commands_checked / run_verification_commands are called in the loop)
     }
+    cleanup_worktree(&task_id, &worktree_path, &app_state).await;
 
     // Log reviewer feedback.
     let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
@@ -796,6 +738,7 @@ pub async fn run_task_lifecycle(
             action,
             TransitionAction::TaskReviewReject | TransitionAction::TaskReviewRejectConflict
         );
+        let is_submit_verification = action == TransitionAction::SubmitVerification;
         if let Err(e) = task_repo
             .transition(
                 &task_id,
@@ -811,6 +754,17 @@ pub async fn run_task_lifecycle(
         }
         if is_reviewer_rejection {
             interrupt_paused_worker_session(&task_id, &app_state).await;
+        }
+        // Spawn background verification — runs outside the slot so the slot is
+        // freed immediately.  The verification pipeline creates its own worktree,
+        // runs setup + verification commands, and transitions the task to
+        // needs_task_review (pass) or open (fail).
+        if is_submit_verification {
+            super::verification::spawn_verification(
+                task_id.clone(),
+                project_path.clone(),
+                app_state.clone(),
+            );
         }
     } else {
         tracing::info!(

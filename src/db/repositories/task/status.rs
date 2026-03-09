@@ -120,10 +120,6 @@ impl TaskRepository {
             .await?;
         tx.commit().await?;
 
-        if task.status == "closed" {
-            self.maybe_queue_epic_review_batch(&task).await?;
-        }
-
         let _ = self.events.send(DjinnEvent::TaskUpdated { task: task.clone(), from_sync: false });
 
         // Blocker resolution: when a task reaches post-merge/closed states, notify any tasks
