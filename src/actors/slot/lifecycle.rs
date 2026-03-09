@@ -142,11 +142,8 @@ pub async fn run_task_lifecycle(
     let session_name = format!("{} {}", task.short_id, task.title);
     let project_dir = PathBuf::from(&project_path);
     // Session resume is intentionally disabled — fresh sessions force the
-    // agent to re-read the worktree and reviewer feedback.  These are kept
-    // as None sentinels so the downstream session-creation branch still works.
+    // agent to re-read the worktree and reviewer feedback.
     let resumed_session_id: Option<String> = None;
-    let resumed_record_id: Option<String> = None;
-    let resumed_kickoff: Option<GooseMessage> = None;
 
     let paused = find_paused_session_record(&task_id, &app_state).await;
 
@@ -402,71 +399,7 @@ pub async fn run_task_lifecycle(
         }
     }
 
-    // ── Create or resume Goose session ─────────────────────────────────────────
-    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
-    let (current_session_id, current_record_id, mut kickoff) = if let (
-        Some(session_id),
-        Some(record_id),
-        Some(kickoff),
-    ) = (
-        resumed_session_id.clone(),
-        resumed_record_id.clone(),
-        resumed_kickoff,
-    ) {
-        if let Err(e) = session_repo.set_running(&record_id).await {
-            tracing::warn!(record_id = %record_id, error = %e, "Lifecycle: failed to mark resumed session running");
-        }
-        tracing::info!(
-            task_id = %task.short_id,
-            task_uuid = %task.id,
-            session_id = %session_id,
-            "Lifecycle: resuming paused session"
-        );
-        (session_id, Some(record_id), kickoff)
-    } else {
-        let session = match session_manager
-            .create_session(worktree_path.clone(), session_name, SessionType::SubAgent)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create Goose session");
-                transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
-                cleanup_worktree(&task_id, &worktree_path, &app_state).await;
-                return_free!();
-            }
-        };
-
-        let session_record = match session_repo
-            .create(
-                &task.project_id,
-                &task.id,
-                &model_id,
-                agent_type.as_str(),
-                worktree_path.to_str(),
-                Some(session.id.as_str()),
-            )
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
-                transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
-                cleanup_worktree(&task_id, &worktree_path, &app_state).await;
-                return_free!();
-            }
-        };
-
-        (
-            session.id,
-            Some(session_record.id),
-            GooseMessage::user().with_text(
-                "Start by understanding the task context and execute it fully before stopping.",
-            ),
-        )
-    };
-
-    // ── Create agent ───────────────────────────────────────────────────────────
+    // ── Prepare agent configuration (computed once, reused across retries) ────
     //
     // Look up the context window from models.dev (our catalog) and inject it
     // into Goose's ModelConfig so that Goose's built-in auto-compaction uses the
@@ -481,7 +414,6 @@ pub async fn run_task_lifecycle(
     let goose_model = match ModelConfig::new(&model_name) {
         Ok(m) => {
             let mut cfg = m.with_canonical_limits(&goose_provider_id);
-            // Only apply catalog value if no env var or canonical limit was found.
             if cfg.context_limit.is_none() {
                 cfg = cfg.with_context_limit(catalog_context_window);
             }
@@ -495,44 +427,6 @@ pub async fn run_task_lifecycle(
         }
     };
 
-    let exts = extensions_for(agent_type);
-    let provider = match providers::create(&goose_provider_id, goose_model.clone(), exts.clone())
-        .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            app_state.health_tracker().record_failure(&model_id);
-            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create provider");
-            transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
-            cleanup_worktree(&task_id, &worktree_path, &app_state).await;
-            return_free!();
-        }
-    };
-
-    let agent = Arc::new(GooseAgent::with_config(GooseAgentConfig::new(
-        session_manager.clone(),
-        PermissionManager::instance(),
-        None,
-        GooseMode::Auto,
-        true,
-        GoosePlatform::GooseCli,
-    )));
-
-    if let Err(e) = agent.update_provider(provider, &current_session_id).await {
-        app_state.health_tracker().record_failure(&model_id);
-        tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to set provider");
-        transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
-        cleanup_worktree(&task_id, &worktree_path, &app_state).await;
-        return_free!();
-    }
-
-    for ext in exts {
-        if let Err(e) = agent.add_extension(ext, &current_session_id).await {
-            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to add extension");
-        }
-    }
-
-    // ── Build and set system prompt ───────────────────────────────────────────
     let conflict_files = conflict_ctx.as_ref().map(|m| {
         m.conflicting_files
             .iter()
@@ -540,7 +434,7 @@ pub async fn run_task_lifecycle(
             .collect::<Vec<_>>()
             .join("\n")
     });
-    let prompt = render_prompt(
+    let system_prompt = render_prompt(
         agent_type,
         &task,
         &TaskContext {
@@ -558,50 +452,138 @@ pub async fn run_task_lifecycle(
             verification_commands: prompt_verification_commands,
         },
     );
-    agent
-        .extend_system_prompt("djinn_task".to_string(), prompt)
-        .await;
 
-    // Register the final_output tool so Goose keeps the agent loop running until
-    // the model explicitly signals completion.  Without this, a text-only response
-    // (no tool calls) causes Goose to exit immediately.
-    agent
-        .add_final_output_tool(GooseResponse {
-            json_schema: Some(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": "Brief summary of what was accomplished in this session"
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["completed"],
-                        "description": "Session completion status"
-                    }
-                },
-                "required": ["summary", "status"]
-            })),
-        })
-        .await;
+    let final_output_schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": "Brief summary of what was accomplished in this session"
+            },
+            "status": {
+                "type": "string",
+                "enum": ["completed"],
+                "description": "Session completion status"
+            }
+        },
+        "required": ["summary", "status"]
+    });
 
     // Context window for SSE token-usage events (desktop UI).  Goose now owns
     // compaction using the context_limit we injected into ModelConfig above, so
     // this is purely informational.
     let context_window = goose_model.context_limit() as i64;
 
-    // ── Main lifecycle loop (verification retry) ─────────────────────────────
-    let current_agent = agent;
+    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
 
-    let (final_result, final_output) = loop {
+    // ── Main lifecycle loop (fresh session + agent per iteration) ─────────────
+    //
+    // Each iteration creates a fresh Goose session and agent.  This avoids
+    // stale final_output_tool state when verification fails and we retry.
+    let mut kickoff_text: Option<String> = None;
+
+    let (final_result, final_output, current_session_id, _current_record_id) = loop {
+        // ── Create Goose session ─────────────────────────────────────────
+        let session = match session_manager
+            .create_session(worktree_path.clone(), session_name.clone(), SessionType::SubAgent)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create Goose session");
+                transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+                cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+                return_free!();
+            }
+        };
+
+        let current_session_id = session.id;
+        let current_record_id = match session_repo
+            .create(
+                &task.project_id,
+                &task.id,
+                &model_id,
+                agent_type.as_str(),
+                worktree_path.to_str(),
+                Some(current_session_id.as_str()),
+            )
+            .await
+        {
+            Ok(r) => Some(r.id),
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
+                transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+                cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+                return_free!();
+            }
+        };
+
+        // ── Create fresh agent ───────────────────────────────────────────
+        let exts = extensions_for(agent_type);
+        let provider =
+            match providers::create(&goose_provider_id, goose_model.clone(), exts.clone()).await {
+                Ok(p) => p,
+                Err(e) => {
+                    app_state.health_tracker().record_failure(&model_id);
+                    tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create provider");
+                    transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+                    cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+                    return_free!();
+                }
+            };
+
+        let agent = Arc::new(GooseAgent::with_config(GooseAgentConfig::new(
+            session_manager.clone(),
+            PermissionManager::instance(),
+            None,
+            GooseMode::Auto,
+            true,
+            GoosePlatform::GooseCli,
+        )));
+
+        if let Err(e) = agent.update_provider(provider, &current_session_id).await {
+            app_state.health_tracker().record_failure(&model_id);
+            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to set provider");
+            transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+            cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+            return_free!();
+        }
+
+        for ext in exts {
+            if let Err(e) = agent.add_extension(ext, &current_session_id).await {
+                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to add extension");
+            }
+        }
+
+        agent
+            .extend_system_prompt("djinn_task".to_string(), system_prompt.clone())
+            .await;
+
+        // Register the final_output tool so Goose keeps the agent loop running
+        // until the model explicitly signals completion.
+        agent
+            .add_final_output_tool(GooseResponse {
+                json_schema: Some(final_output_schema.clone()),
+            })
+            .await;
+
+        let kickoff = if let Some(feedback) = kickoff_text.take() {
+            GooseMessage::user().with_text(&feedback)
+        } else {
+            GooseMessage::user().with_text(
+                "Start by understanding the task context and execute it fully before stopping.",
+            )
+        };
+
+        // ── Run reply loop ───────────────────────────────────────────────
         let (reply_result, output) = run_reply_loop(
-            &current_agent,
+            &agent,
             &current_session_id,
             &task_id,
             &project_path,
             &worktree_path,
             agent_type,
-            kickoff.clone(),
+            kickoff,
             &cancel,
             &pause,
             &app_state,
@@ -610,16 +592,18 @@ pub async fn run_task_lifecycle(
         )
         .await;
 
-        // ── Handle pause/kill cancellation ─────────────────────────────────
+        // Always commit whatever the agent wrote before verification or cleanup.
+        commit_wip_if_needed(&task_id, &worktree_path, &app_state).await;
+
+        // ── Handle pause/kill cancellation ────────────────────────────────
         if pause.is_cancelled() {
-            tracing::info!(task_id = %task_id, "Lifecycle: paused; committing WIP and preserving worktree");
+            tracing::info!(task_id = %task_id, "Lifecycle: paused; preserving worktree");
             let (ti, to) = tokens_for_session(&current_session_id, &session_manager).await;
             update_session_record_paused(current_record_id.as_deref(), ti, to, &app_state).await;
-            commit_wip_if_needed(&task_id, &worktree_path, &app_state).await;
             return_free!();
         }
         if cancel.is_cancelled() {
-            tracing::info!(task_id = %task_id, "Lifecycle: cancelled; committing WIP and cleaning up");
+            tracing::info!(task_id = %task_id, "Lifecycle: cancelled; cleaning up");
             let (ti, to) = tokens_for_session(&current_session_id, &session_manager).await;
             update_session_record(
                 current_record_id.as_deref(),
@@ -629,13 +613,28 @@ pub async fn run_task_lifecycle(
                 &app_state,
             )
             .await;
-            commit_wip_if_needed(&task_id, &worktree_path, &app_state).await;
             cleanup_worktree(&task_id, &worktree_path, &app_state).await;
             transition_interrupted(&task_id, agent_type, "session cancelled", &app_state).await;
             return_killed!();
         }
 
-        // ── Verification pipeline for worker DONE ───────────────────────────
+        // ── Close this session record before possible retry ──────────────
+        let (ti, to) = tokens_for_session(&current_session_id, &session_manager).await;
+        let session_status = if reply_result.is_ok() {
+            SessionStatus::Completed
+        } else {
+            SessionStatus::Failed
+        };
+        update_session_record(
+            current_record_id.as_deref(),
+            session_status,
+            ti,
+            to,
+            &app_state,
+        )
+        .await;
+
+        // ── Verification pipeline for worker DONE ────────────────────────
         let is_worker_done = reply_result.is_ok()
             && matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver);
 
@@ -643,8 +642,7 @@ pub async fn run_task_lifecycle(
             if let Some(feedback) =
                 run_setup_commands_checked(&task_id, &worktree_path, &app_state).await
             {
-                tracing::info!(task_id = %task_id, "Lifecycle: setup verification failed; resuming with feedback");
-                // Log the feedback as a comment.
+                tracing::info!(task_id = %task_id, "Lifecycle: setup verification failed; spawning fresh session");
                 let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
                 let payload = serde_json::json!({ "body": feedback }).to_string();
                 let _ = repo
@@ -656,13 +654,13 @@ pub async fn run_task_lifecycle(
                         &payload,
                     )
                     .await;
-                kickoff = GooseMessage::user().with_text(&feedback);
+                kickoff_text = Some(feedback);
                 continue;
             }
             if let Some(feedback) =
                 run_verification_commands(&task_id, &worktree_path, &app_state).await
             {
-                tracing::info!(task_id = %task_id, "Lifecycle: verification failed; resuming with feedback");
+                tracing::info!(task_id = %task_id, "Lifecycle: verification failed; spawning fresh session");
                 let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
                 let payload = serde_json::json!({ "body": feedback }).to_string();
                 let _ = repo
@@ -674,16 +672,17 @@ pub async fn run_task_lifecycle(
                         &payload,
                     )
                     .await;
-                kickoff = GooseMessage::user().with_text(&feedback);
+                kickoff_text = Some(feedback);
                 continue;
             }
         }
 
-        // ── Done ────────────────────────────────────────────────────────────
-        break (reply_result, output);
+        // ── Done ─────────────────────────────────────────────────────────
+        break (reply_result, output, current_session_id, current_record_id);
     };
 
-    // ── Post-loop: session record + health + transitions + cleanup ────────────
+    // ── Post-loop: health + transitions + cleanup ─────────────────────────────
+    // Session record was already updated inside the loop.
     let (tokens_in, tokens_out) = tokens_for_session(&current_session_id, &session_manager).await;
 
     // Health tracking.
@@ -695,31 +694,6 @@ pub async fn run_task_lifecycle(
 
     let is_worker_done = final_result.is_ok()
         && matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver);
-
-    // Update session record.
-    if is_worker_done {
-        update_session_record_paused(
-            current_record_id.as_deref(),
-            tokens_in,
-            tokens_out,
-            &app_state,
-        )
-        .await;
-    } else {
-        let status = if final_result.is_ok() {
-            SessionStatus::Completed
-        } else {
-            SessionStatus::Failed
-        };
-        update_session_record(
-            current_record_id.as_deref(),
-            status,
-            tokens_in,
-            tokens_out,
-            &app_state,
-        )
-        .await;
-    }
 
     // Worktree: commit and keep for worker done; cleanup otherwise.
     if let Some(worktree_ref) = Some(&worktree_path) {
