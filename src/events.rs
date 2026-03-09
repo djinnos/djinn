@@ -101,6 +101,13 @@ pub enum DjinnEvent {
         message: serde_json::Value,
     },
 
+    /// Emitted when a message is stored in the session_messages table.
+    SessionMessageInserted {
+        session_id: String,
+        task_id: String,
+        role: String,
+    },
+
     // Sync lifecycle (SYNC-13)
     SyncCompleted {
         channel: String,

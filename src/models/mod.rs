@@ -5,5 +5,6 @@ pub mod note;
 pub mod project;
 pub mod provider;
 pub mod session;
+pub mod session_message;
 pub mod settings;
 pub mod task;

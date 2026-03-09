@@ -218,6 +218,21 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             id: None,
             project_id: None,
         },
+        DjinnEvent::SessionMessageInserted {
+            session_id,
+            task_id,
+            role,
+        } => Envelope {
+            entity_type: "session_message",
+            action: "inserted",
+            data: Some(serde_json::json!({
+                "session_id": session_id,
+                "task_id": task_id,
+                "role": role,
+            })),
+            id: None,
+            project_id: None,
+        },
         DjinnEvent::SyncCompleted {
             channel,
             direction,
