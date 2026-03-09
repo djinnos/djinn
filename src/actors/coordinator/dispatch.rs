@@ -68,17 +68,17 @@ impl CoordinatorActor {
             }
             // Detect rapid failure: if this task was dispatched very recently and
             // is already back as ready, it failed lifecycle early → add to cooldown.
-            if let Some(last) = self.last_dispatched.get(&task.id) {
-                if last.elapsed() < RAPID_FAILURE_THRESHOLD {
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        elapsed_ms = last.elapsed().as_millis(),
-                        cooldown_secs = DISPATCH_COOLDOWN.as_secs(),
-                        "CoordinatorActor: rapid failure detected, adding dispatch cooldown"
-                    );
-                    self.dispatch_cooldowns
-                        .insert(task.id.clone(), Instant::now());
-                }
+            if let Some(last) = self.last_dispatched.get(&task.id)
+                && last.elapsed() < RAPID_FAILURE_THRESHOLD
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    elapsed_ms = last.elapsed().as_millis(),
+                    cooldown_secs = DISPATCH_COOLDOWN.as_secs(),
+                    "CoordinatorActor: rapid failure detected, adding dispatch cooldown"
+                );
+                self.dispatch_cooldowns
+                    .insert(task.id.clone(), Instant::now());
             }
             // Skip tasks in cooldown (recently failed lifecycle setup).
             if self.dispatch_cooldowns.contains_key(&task.id) {

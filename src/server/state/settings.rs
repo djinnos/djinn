@@ -91,36 +91,7 @@ impl AppState {
             .list()
             .await
             .map_err(|e| format!("list credentials: {e}"))?;
-        let mut connected_provider_ids: HashSet<String> =
-            credentials.into_iter().map(|c| c.provider_id).collect();
-
-        // Also consider OAuth-connected providers (e.g. chatgpt_codex, github_copilot).
-        // Include merged children's OAuth keys (e.g. openai inherits chatgpt_codex tokens).
-        let catalog_providers = self.catalog().list_providers();
-        for provider in &catalog_providers {
-            let mut oauth_keys = crate::provider::builtin::oauth_keys_for_provider(&provider.id);
-            oauth_keys.extend(crate::provider::builtin::merged_oauth_keys_for(&provider.id));
-            if !oauth_keys.is_empty()
-                && crate::provider::builtin::is_oauth_key_present(&oauth_keys)
-            {
-                connected_provider_ids.insert(provider.id.clone());
-            }
-        }
-
-        // If a merged child is connected, also mark its parent as connected.
-        // E.g. chatgpt_codex (connected via OAuth) → openai (parent) is also connected.
-        for bp in crate::provider::builtin::BUILTIN_PROVIDERS {
-            if let Some(parent_id) = bp.merge_into {
-                let oauth_keys: Vec<String> =
-                    bp.oauth_keys.iter().map(|k| k.to_string()).collect();
-                let credential_connected = connected_provider_ids.contains(bp.id);
-                let oauth_connected = !oauth_keys.is_empty()
-                    && crate::provider::builtin::is_oauth_key_present(&oauth_keys);
-                if credential_connected || oauth_connected {
-                    connected_provider_ids.insert(parent_id.to_string());
-                }
-            }
-        }
+        let connected_provider_ids = self.catalog().connected_provider_ids(&credentials);
 
         let mut missing_provider_ids: Vec<String> = configured_provider_ids
             .difference(&connected_provider_ids)

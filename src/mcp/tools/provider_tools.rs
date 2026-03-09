@@ -390,9 +390,7 @@ impl DjinnMcpServer {
             // Hide providers that are merged into a parent (e.g. chatgpt_codex → openai).
             .filter(|p| !merged_ids.contains(&p.id))
             .map(|p| {
-                // Own OAuth keys + any from children merged into this provider.
-                let mut oauth_keys = builtin::oauth_keys_for_provider(&p.id);
-                oauth_keys.extend(builtin::merged_oauth_keys_for(&p.id));
+                let oauth_keys = builtin::all_oauth_keys_for_provider(&p.id);
                 let (connected, methods) = provider_connection_status(
                     p,
                     &oauth_keys,
@@ -447,8 +445,7 @@ impl DjinnMcpServer {
             .filter(|p| is_provider_usable(p, &builtin_ids))
             .filter(|p| !merged_ids.contains(&p.id))
             .filter_map(|p| {
-                let mut oauth_keys = builtin::oauth_keys_for_provider(&p.id);
-                oauth_keys.extend(builtin::merged_oauth_keys_for(&p.id));
+                let oauth_keys = builtin::all_oauth_keys_for_provider(&p.id);
                 let (connected, methods) = provider_connection_status(
                     p,
                     &oauth_keys,
@@ -532,33 +529,16 @@ impl DjinnMcpServer {
         let merged_ids = builtin::merged_provider_ids();
         let credential_repo =
             CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
-        let (credential_provider_ids, credential_key_names) = match credential_repo.list().await {
-            Ok(creds) => {
-                let provider_ids = creds.iter().map(|c| c.provider_id.clone()).collect();
-                let key_names = creds.iter().map(|c| c.key_name.clone()).collect();
-                (provider_ids, key_names)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "provider_models_connected: failed to load credentials");
-                (HashSet::new(), HashSet::new())
-            }
-        };
+        let credentials = credential_repo.list().await.unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "provider_models_connected: failed to load credentials");
+            Vec::new()
+        });
+        let connected_set = self.state.catalog().connected_provider_ids(&credentials);
 
         // Collect connected provider IDs including merged children.
         let mut connected_provider_ids: Vec<String> = Vec::new();
         for p in self.state.catalog().list_providers().iter() {
-            if !is_provider_usable(p, &builtin_ids) {
-                continue;
-            }
-            let mut oauth_keys = builtin::oauth_keys_for_provider(&p.id);
-            oauth_keys.extend(builtin::merged_oauth_keys_for(&p.id));
-            let (connected, _) = provider_connection_status(
-                p,
-                &oauth_keys,
-                &credential_provider_ids,
-                &credential_key_names,
-            );
-            if !connected {
+            if !is_provider_usable(p, &builtin_ids) || !connected_set.contains(&p.id) {
                 continue;
             }
             connected_provider_ids.push(p.id.clone());
@@ -631,16 +611,13 @@ impl DjinnMcpServer {
             });
         };
 
-        // If the provider itself has no OAuth keys, check if a child provider
-        // was merged into it (e.g. "openai" → "chatgpt_codex").
-        let mut oauth_keys = builtin::oauth_keys_for_provider(builtin_id);
+        // Resolve OAuth keys (own + merged children, e.g. "openai" inherits "chatgpt_codex" keys).
+        let oauth_keys = builtin::all_oauth_keys_for_provider(builtin_id);
         let effective_id = if oauth_keys.is_empty() {
-            if let Some(child_id) = builtin::resolve_oauth_provider(builtin_id) {
-                oauth_keys = builtin::oauth_keys_for_provider(child_id);
-                child_id
-            } else {
-                builtin_id
-            }
+            builtin_id
+        } else if builtin::oauth_keys_for_provider(builtin_id).is_empty() {
+            // OAuth comes from a merged child — resolve to child for the actual flow.
+            builtin::resolve_oauth_provider(builtin_id).unwrap_or(builtin_id)
         } else {
             builtin_id
         };

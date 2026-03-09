@@ -253,6 +253,46 @@ impl CatalogService {
         }
     }
 
+    /// Compute the set of provider IDs that have valid credentials,
+    /// combining API-key credentials from the vault with OAuth token checks
+    /// and merged-child propagation.
+    ///
+    /// This is the single source of truth for "is provider X connected?".
+    pub fn connected_provider_ids(
+        &self,
+        vault_credentials: &[crate::models::credential::Credential],
+    ) -> HashSet<String> {
+        use super::builtin;
+
+        // 1. API-key credentials from the vault.
+        let mut connected: HashSet<String> =
+            vault_credentials.iter().map(|c| c.provider_id.clone()).collect();
+
+        // 2. OAuth-connected providers (own keys + merged children).
+        for provider in self.list_providers() {
+            let oauth_keys = builtin::all_oauth_keys_for_provider(&provider.id);
+            if !oauth_keys.is_empty() && builtin::is_oauth_key_present(&oauth_keys) {
+                connected.insert(provider.id.clone());
+            }
+        }
+
+        // 3. Merged children propagate connectivity to their parent.
+        // E.g. chatgpt_codex (connected via OAuth) → openai is also connected.
+        for bp in builtin::BUILTIN_PROVIDERS {
+            if let Some(parent_id) = bp.merge_into {
+                let child_oauth: Vec<String> =
+                    bp.oauth_keys.iter().map(|k| k.to_string()).collect();
+                let child_connected = connected.contains(bp.id)
+                    || (!child_oauth.is_empty() && builtin::is_oauth_key_present(&child_oauth));
+                if child_connected {
+                    connected.insert(parent_id.to_string());
+                }
+            }
+        }
+
+        connected
+    }
+
     /// Add or replace a custom provider and its seed models in the in-memory catalog.
     /// Persisting to DB is the caller's responsibility.
     pub fn add_custom_provider(&self, provider: Provider, seed_models: Vec<Model>) {

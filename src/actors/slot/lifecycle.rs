@@ -407,7 +407,7 @@ pub async fn run_task_lifecycle(
     let context_window = app_state
         .catalog()
         .find_model(&model_id)
-        .map(|m| m.context_window as i64)
+        .map(|m| m.context_window)
         .unwrap_or(0);
 
     let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
@@ -607,15 +607,15 @@ pub async fn run_task_lifecycle(
     }
     if is_worker_done {
         // Save conversation for potential resume after review cycle.
-        if let Some(ref record_id) = current_record_id {
-            if let Err(e) = super::conversation_store::save(record_id, &conversation).await {
-                tracing::warn!(
-                    task_id = %task_id,
-                    record_id = %record_id,
-                    error = %e,
-                    "Lifecycle: failed to save conversation for resume"
-                );
-            }
+        if let Some(ref record_id) = current_record_id
+            && let Err(e) = super::conversation_store::save(record_id, &conversation).await
+        {
+            tracing::warn!(
+                task_id = %task_id,
+                record_id = %record_id,
+                error = %e,
+                "Lifecycle: failed to save conversation for resume"
+            );
         }
         // Mark session as Paused (not Completed) — worker may resume.
         update_session_record_paused(

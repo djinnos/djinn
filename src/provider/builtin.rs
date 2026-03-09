@@ -132,6 +132,14 @@ pub fn oauth_keys_for_provider(provider_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// All OAuth keys for a provider, including keys inherited from merged children.
+/// E.g. `"openai"` gets its own (empty) plus `chatgpt_codex`'s `CHATGPT_CODEX_TOKEN`.
+pub fn all_oauth_keys_for_provider(provider_id: &str) -> Vec<String> {
+    let mut keys = oauth_keys_for_provider(provider_id);
+    keys.extend(merged_oauth_keys_for(provider_id));
+    keys
+}
+
 /// Check whether a provider is a built-in (not custom/user-added).
 pub fn is_builtin_provider(provider_id: &str) -> bool {
     find_builtin_provider(provider_id).is_some()

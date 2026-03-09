@@ -492,24 +492,10 @@ impl CoordinatorActor {
                 Ok(credentials) => credentials,
                 Err(_) => return Vec::new(),
             };
-            if credentials.is_empty() {
+
+            let credential_provider_ids = self.catalog.connected_provider_ids(&credentials);
+            if credential_provider_ids.is_empty() {
                 return Vec::new();
-            }
-
-            let mut credential_provider_ids: HashSet<String> =
-                credentials.iter().map(|c| c.provider_id.clone()).collect();
-
-            // Also consider OAuth-connected providers (e.g. chatgpt_codex).
-            // Include merged children's OAuth keys (e.g. openai inherits chatgpt_codex tokens).
-            for provider in self.catalog.list_providers() {
-                let mut oauth_keys =
-                    crate::provider::builtin::oauth_keys_for_provider(&provider.id);
-                oauth_keys.extend(crate::provider::builtin::merged_oauth_keys_for(&provider.id));
-                if !oauth_keys.is_empty()
-                    && crate::provider::builtin::is_oauth_key_present(&oauth_keys)
-                {
-                    credential_provider_ids.insert(provider.id.clone());
-                }
             }
 
             let mut selected = Vec::new();
