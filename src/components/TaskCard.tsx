@@ -120,10 +120,10 @@ function PipelineIndicator({ status }: { status: string }) {
 
 function getCardTint(task: Task): { ring: string; bg: string; hover: string } | null {
   if (task.status === "conflict_resolution") {
-    return { ring: "ring-orange-500/40", bg: "bg-orange-500/5", hover: "hover:bg-orange-500/10" };
+    return { ring: "ring-orange-500/40", bg: "bg-orange-500/5", hover: "hover:bg-orange-500/10 hover:ring-orange-500/60" };
   }
   if (task.status === "needs_pm_intervention" || task.status === "in_pm_intervention") {
-    return { ring: "ring-red-500/40", bg: "bg-red-500/5", hover: "hover:bg-red-500/10" };
+    return { ring: "ring-red-500/40", bg: "bg-red-500/5", hover: "hover:bg-red-500/10 hover:ring-red-500/60" };
   }
   return null;
 }
@@ -208,7 +208,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
       size="sm"
       className={cn(
         "cursor-pointer py-2 ring-1 transition-all duration-200 ease-in-out",
-        cardTint ? `${cardTint.ring} ${cardTint.bg} ${cardTint.hover} hover:ring-white/[0.1]` : "bg-zinc-800 ring-white/[0.06] hover:bg-zinc-700/80 hover:ring-white/[0.1]",
+        cardTint ? `${cardTint.ring} ${cardTint.bg} ${cardTint.hover}` : "bg-zinc-800 ring-white/[0.06] hover:bg-zinc-700/80 hover:ring-white/[0.1]",
         moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"
       )}
       onClick={onClick}
