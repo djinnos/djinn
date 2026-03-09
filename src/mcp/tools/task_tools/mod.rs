@@ -419,7 +419,6 @@ impl DjinnMcpServer {
                         tokens_out: s.tokens_out,
                         worktree_path: s.worktree_path,
                         goose_session_id: s.goose_session_id,
-                        continuation_of: s.continuation_of,
                     });
                 Json(ErrorOr::Ok(TaskShowResponse {
                     task: task_to_response(&t),

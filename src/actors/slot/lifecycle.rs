@@ -465,7 +465,6 @@ pub async fn run_task_lifecycle(
                 agent_type.as_str(),
                 worktree_path.to_str(),
                 Some(session.id.as_str()),
-                None,
             )
             .await
         {

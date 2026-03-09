@@ -12,10 +12,6 @@ pub struct SessionListParams {
     pub task_id: String,
     /// Absolute project path (required).
     pub project: String,
-    /// When true, return sessions in continuation-chain order (oldest root first, each
-    /// subsequent session linked via continuation_of) instead of started_at DESC.
-    /// Useful for rendering the session timeline with compaction boundaries.
-    pub chain_ordered: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -46,7 +42,6 @@ pub struct SessionToolSession {
     pub tokens_out: i64,
     pub worktree_path: Option<String>,
     pub goose_session_id: Option<String>,
-    pub continuation_of: Option<String>,
 }
 
 impl From<SessionRecord> for SessionToolSession {
@@ -64,7 +59,6 @@ impl From<SessionRecord> for SessionToolSession {
             tokens_out: value.tokens_out,
             worktree_path: value.worktree_path,
             goose_session_id: value.goose_session_id,
-            continuation_of: value.continuation_of,
         }
     }
 }
@@ -134,12 +128,7 @@ impl DjinnMcpServer {
         };
 
         let repo = SessionRepository::new(self.state.db().clone(), self.state.events().clone());
-        let result = if p.chain_ordered.unwrap_or(false) {
-            repo.chain_for_task(&task.id).await
-        } else {
-            repo.list_for_task_in_project(&project_id, &task.id).await
-        };
-        match result {
+        match repo.list_for_task_in_project(&project_id, &task.id).await {
             Ok(sessions) => Json(SessionListResponse {
                 task_id: Some(task.id),
                 sessions: Some(sessions.into_iter().map(Into::into).collect()),
