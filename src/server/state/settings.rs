@@ -95,9 +95,11 @@ impl AppState {
             credentials.into_iter().map(|c| c.provider_id).collect();
 
         // Also consider OAuth-connected providers (e.g. chatgpt_codex, github_copilot).
+        // Include merged children's OAuth keys (e.g. openai inherits chatgpt_codex tokens).
         let catalog_providers = self.catalog().list_providers();
         for provider in &catalog_providers {
-            let oauth_keys = crate::provider::builtin::oauth_keys_for_provider(&provider.id);
+            let mut oauth_keys = crate::provider::builtin::oauth_keys_for_provider(&provider.id);
+            oauth_keys.extend(crate::provider::builtin::merged_oauth_keys_for(&provider.id));
             if !oauth_keys.is_empty()
                 && crate::provider::builtin::is_oauth_key_present(&oauth_keys)
             {
