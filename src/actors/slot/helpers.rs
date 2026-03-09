@@ -476,6 +476,7 @@ pub(crate) async fn build_dev_proxy(
 
     Some(crate::agent::provider::DevProxy {
         url: base_url,
+        target_url: String::new(), // Set by caller with the provider's real base URL.
         auth_key: settings.dev_proxy_key.unwrap_or_default(),
         task_id: Some(task_id.to_owned()),
         agent_type: Some(agent_type.as_str().to_owned()),

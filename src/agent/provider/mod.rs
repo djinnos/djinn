@@ -52,6 +52,10 @@ pub struct ProviderConfig {
 pub struct DevProxy {
     /// Proxy base URL (replaces provider base URL).
     pub url: String,
+    /// The real provider base URL (sent as `Helicone-Target-Url` so the proxy
+    /// knows where to forward). This lets any provider work without needing
+    /// provider-specific gateway paths.
+    pub target_url: String,
     /// Auth key sent as `Helicone-Auth: Bearer {key}`.
     pub auth_key: String,
     /// Task ID for tracing (sent as `Helicone-Property-TaskId`).
@@ -69,6 +73,9 @@ impl DevProxy {
         if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", self.auth_key)) {
             headers.insert(HeaderName::from_static("helicone-auth"), val);
         }
+        if let Ok(val) = HeaderValue::from_str(&self.target_url) {
+            headers.insert(HeaderName::from_static("helicone-target-url"), val);
+        }
         if let Some(ref tid) = self.task_id {
             if let Ok(val) = HeaderValue::from_str(tid) {
                 headers.insert(HeaderName::from_static("helicone-property-taskid"), val);
@@ -85,16 +92,6 @@ impl DevProxy {
             }
         }
     }
-}
-
-/// Helicone gateway path segment for a given format family.
-pub fn helicone_gateway_url(base_url: &str, family: FormatFamily) -> String {
-    let gateway = match family {
-        FormatFamily::OpenAI | FormatFamily::OpenAIResponses => "oai/v1",
-        FormatFamily::Anthropic => "anthropic",
-        FormatFamily::Google => "google",
-    };
-    format!("{}/v1/gateway/{}", base_url.trim_end_matches('/'), gateway)
 }
 
 /// Authentication method for provider API requests.
