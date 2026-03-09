@@ -285,8 +285,9 @@ pub async fn events_handler(
     State(state): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let rx = state.events().subscribe();
+    let cancel = state.cancel().clone();
 
-    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+    let event_stream = BroadcastStream::new(rx).filter_map(|result| match result {
         Ok(evt) => {
             let envelope = to_envelope(evt);
             let event_name = format!("{}.{}", envelope.entity_type, envelope.action);
@@ -301,6 +302,10 @@ pub async fn events_handler(
             Some(Ok(Event::default().event("lagged").data("{}")))
         }
     });
+
+    // End the SSE stream when the server is shutting down so axum's graceful
+    // shutdown doesn't hang waiting for long-lived connections to close.
+    let stream = futures::StreamExt::take_until(event_stream, cancel.cancelled_owned());
 
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
