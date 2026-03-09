@@ -48,7 +48,8 @@ export interface SettingsActions {
 const DEFAULT_MODEL_PRIORITIES: Record<AgentRole, ModelPriorityItem[]> = {
   worker: [],
   task_reviewer: [],
-  epic_reviewer: [],
+  conflict_resolver: [],
+  pm: [],
 };
 
 const initialState: SettingsState = {
@@ -170,7 +171,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
 
   removeModelsByProvider: (provider: string) => {
     const { modelPriorities, sessionLimits } = get();
-    const roles: AgentRole[] = ['worker', 'task_reviewer', 'epic_reviewer'];
+    const roles: AgentRole[] = ['worker', 'task_reviewer', 'conflict_resolver', 'pm'];
     const newPriorities = { ...modelPriorities };
     for (const role of roles) {
       newPriorities[role] = modelPriorities[role].filter(

@@ -19,7 +19,8 @@ import { Badge } from "@/components/ui/badge";
 const ROLE_LABELS: Record<AgentRole, string> = {
   worker: "Worker",
   task_reviewer: "Task Reviewer",
-  epic_reviewer: "Epic Reviewer",
+  conflict_resolver: "Conflict Resolver",
+  pm: "PM",
 };
 
 interface DraggableItemProps {
@@ -318,7 +319,7 @@ export function AgentConfig({
   onSave,
 }: AgentConfigProps) {
 
-  const roles: AgentRole[] = ["worker", "task_reviewer", "epic_reviewer"];
+  const roles: AgentRole[] = ["worker", "task_reviewer", "conflict_resolver", "pm"];
 
   // Get all models that are in use across all roles
   const modelsInUse = new Set<string>();
@@ -377,7 +378,7 @@ export function AgentConfig({
               )}
             </div>
 
-            <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               {roles.map((role) => (
                 <ModelPrioritySection
                   key={role}
