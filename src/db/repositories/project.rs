@@ -52,6 +52,82 @@ impl ProjectRepository {
         .await?)
     }
 
+    /// Resolve a project path to its ID. Normalizes trailing slashes.
+    pub async fn resolve_id_by_path(&self, project_path: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        let normalized = project_path.trim_end_matches('/');
+        Ok(
+            sqlx::query_scalar::<_, String>(
+                "SELECT id FROM projects WHERE path = ?1",
+            )
+            .bind(normalized)
+            .fetch_optional(self.db.pool())
+            .await?,
+        )
+    }
+
+    /// Resolve a project path to its ID, with fuzzy matching for subdirectories.
+    /// If exact match fails, finds the project whose path is the longest prefix
+    /// of the given path (useful when agents pass a subdirectory).
+    pub async fn resolve_id_by_path_fuzzy(&self, project_path: &str) -> Result<Option<String>> {
+        let normalized = project_path.trim_end_matches('/');
+
+        // Try exact match first.
+        if let Some(id) = self.resolve_id_by_path(normalized).await? {
+            return Ok(Some(id));
+        }
+
+        // Fuzzy: find the project whose path is the longest prefix.
+        self.db.ensure_initialized().await?;
+        let all = sqlx::query_as::<_, (String, String)>("SELECT id, path FROM projects")
+            .fetch_all(self.db.pool())
+            .await?;
+
+        let mut best: Option<(String, usize)> = None;
+        for (id, path) in all {
+            let root = path.trim_end_matches('/');
+            let matches = normalized
+                .strip_prefix(root)
+                .is_some_and(|suffix| suffix.starts_with('/'));
+            if matches {
+                let len = root.len();
+                if best.as_ref().is_none_or(|(_, best_len)| len > *best_len) {
+                    best = Some((id, len));
+                }
+            }
+        }
+
+        Ok(best.map(|(id, _)| id))
+    }
+
+    /// Resolve a project path to its ID, creating a new project entry if not found.
+    pub async fn resolve_or_create(&self, project_path: &str) -> Result<String> {
+        if let Some(id) = self.resolve_id_by_path(project_path).await? {
+            return Ok(id);
+        }
+
+        let name = std::path::Path::new(project_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("project");
+
+        self.create(name, project_path).await.map(|p| p.id)
+    }
+
+    /// Get the filesystem path for a project by ID.
+    pub async fn get_path(&self, id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_scalar::<_, String>(
+                "SELECT path FROM projects WHERE id = ?1",
+            )
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await?,
+        )
+    }
+
     pub async fn create(&self, name: &str, path: &str) -> Result<Project> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
