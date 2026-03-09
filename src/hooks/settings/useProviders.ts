@@ -7,6 +7,7 @@ import {
   fetchProviderCatalog,
   invalidateProviderCatalogCache,
   saveProviderCredentials,
+  startProviderOAuth,
   validateProviderApiKey,
   type Provider,
   type ProviderCredential,
@@ -21,6 +22,7 @@ export function useProviders() {
   const [validationStatus, setValidationStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [validating, setValidating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [oauthInProgress, setOauthInProgress] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -109,6 +111,26 @@ export function useProviders() {
     }
   }, [loadData, loadProviderModels]);
 
+  const connectOAuth = useCallback(async (providerId: string) => {
+    setOauthInProgress(true);
+    try {
+      const result = await startProviderOAuth(providerId);
+      if (!result.success) {
+        showToast.error('OAuth failed', { description: result.error ?? 'Unknown error' });
+        return false;
+      }
+      await loadData();
+      await loadProviderModels();
+      showToast.success('Connected via OAuth');
+      return true;
+    } catch (error) {
+      showToast.error('OAuth failed', { description: error instanceof Error ? error.message : 'Unknown error' });
+      return false;
+    } finally {
+      setOauthInProgress(false);
+    }
+  }, [loadData, loadProviderModels]);
+
   const removeProvider = useCallback(async (providerId: string) => {
     try {
       await deleteProviderCredentials(providerId);
@@ -131,10 +153,12 @@ export function useProviders() {
     validationStatus,
     validating,
     saving,
+    oauthInProgress,
     setValidationStatus,
     loadData,
     validateInline,
     saveProvider,
+    connectOAuth,
     addCustom,
     removeProvider,
   };

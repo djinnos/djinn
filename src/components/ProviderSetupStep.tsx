@@ -3,6 +3,7 @@ import {
   fetchProviderCatalog,
   validateProviderApiKey,
   saveProviderCredentials,
+  startProviderOAuth,
   type Provider,
 } from "@/api/server";
 import { useWizardStore } from "@/stores/wizardStore";
@@ -30,6 +31,7 @@ export function ProviderSetupStep() {
   const [isLoading, setIsLoading] = useState(true);
   const [isValidating, setIsValidating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isOAuthInProgress, setIsOAuthInProgress] = useState(false);
   const [isValidated, setIsValidated] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -61,7 +63,7 @@ export function ProviderSetupStep() {
   const handleProviderChange = (value: string | null) => {
     if (value) {
       setSelectedProvider(value);
-      // Reset validation when provider changes
+      setApiKey("");
       setIsValidated(false);
       setValidationError(null);
     }
@@ -96,14 +98,13 @@ export function ProviderSetupStep() {
     }
   };
 
-  // Save and advance
+  // Save API key and advance
   const handleSave = async () => {
     if (!selectedProvider) return;
 
     const providerData = providers.find((p) => p.id === selectedProvider);
     if (providerData?.requires_api_key && !apiKey.trim()) return;
 
-    // Validate first if not already validated and provider requires key
     if (providerData?.requires_api_key && !isValidated) {
       const valid = await validateKey();
       if (!valid) return;
@@ -123,7 +124,30 @@ export function ProviderSetupStep() {
     }
   };
 
+  // OAuth flow and advance
+  const handleOAuth = async () => {
+    if (!selectedProvider) return;
+
+    setIsOAuthInProgress(true);
+    setValidationError(null);
+    try {
+      const result = await startProviderOAuth(selectedProvider);
+      if (result.success) {
+        nextStep();
+      } else {
+        setValidationError(result.error ?? "OAuth flow failed");
+      }
+    } catch (error) {
+      setValidationError(
+        error instanceof Error ? error.message : "OAuth flow failed"
+      );
+    } finally {
+      setIsOAuthInProgress(false);
+    }
+  };
+
   const selectedProviderData = providers.find((p) => p.id === selectedProvider);
+  const busy = isSaving || isOAuthInProgress;
 
   if (isLoading) {
     return (
@@ -170,9 +194,11 @@ export function ProviderSetupStep() {
                 <SelectItem key={provider.id} value={provider.id}>
                   <div className="flex flex-col items-start">
                     <span>{provider.name}</span>
-                    <span className="text-xs text-muted-foreground">
-                      {provider.description}
-                    </span>
+                    {provider.description && (
+                      <span className="text-xs text-muted-foreground">
+                        {provider.description}
+                      </span>
+                    )}
                   </div>
                 </SelectItem>
               ))}
@@ -182,6 +208,31 @@ export function ProviderSetupStep() {
             Choose your AI provider from the available options.
           </FieldDescription>
         </Field>
+
+        {selectedProviderData?.oauth_supported && (
+          <Button
+            onClick={() => void handleOAuth()}
+            disabled={busy}
+            className="w-full"
+          >
+            {isOAuthInProgress ? (
+              <>
+                <Loader2Icon className="mr-2 h-4 w-4 animate-spin" />
+                Waiting for browser...
+              </>
+            ) : (
+              `Connect with OAuth`
+            )}
+          </Button>
+        )}
+
+        {selectedProviderData?.oauth_supported && selectedProviderData?.requires_api_key && (
+          <div className="flex items-center gap-3 text-xs text-muted-foreground">
+            <div className="h-px flex-1 bg-border" />
+            <span>or enter an API key</span>
+            <div className="h-px flex-1 bg-border" />
+          </div>
+        )}
 
         {selectedProviderData?.requires_api_key && (
           <Field>
@@ -193,7 +244,6 @@ export function ProviderSetupStep() {
                 value={apiKey}
                 onChange={(e) => {
                   setApiKey(e.target.value);
-                  // Reset validation when input changes
                   if (isValidated) {
                     setIsValidated(false);
                     setValidationError(null);
@@ -203,7 +253,7 @@ export function ProviderSetupStep() {
               />
               <Button
                 onClick={() => void validateKey()}
-                disabled={!apiKey.trim() || isValidating}
+                disabled={!apiKey.trim() || isValidating || busy}
                 variant="secondary"
               >
                 {isValidating ? (
@@ -228,24 +278,44 @@ export function ProviderSetupStep() {
           </Field>
         )}
 
-        <Button
-          onClick={() => void handleSave()}
-          disabled={
-            !selectedProvider ||
-            (selectedProviderData?.requires_api_key && !apiKey.trim()) ||
-            isSaving
-          }
-          className="w-full"
-        >
-          {isSaving ? (
-            <>
-              <Loader2Icon className="mr-2 h-4 w-4 animate-spin" />
-              Saving...
-            </>
-          ) : (
-            "Continue"
-          )}
-        </Button>
+        {selectedProviderData && !selectedProviderData.oauth_supported && (
+          <Button
+            onClick={() => void handleSave()}
+            disabled={
+              !selectedProvider ||
+              (selectedProviderData.requires_api_key && !apiKey.trim()) ||
+              busy
+            }
+            className="w-full"
+          >
+            {isSaving ? (
+              <>
+                <Loader2Icon className="mr-2 h-4 w-4 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              "Continue"
+            )}
+          </Button>
+        )}
+
+        {selectedProviderData?.oauth_supported && selectedProviderData?.requires_api_key && apiKey.trim() && (
+          <Button
+            variant="outline"
+            onClick={() => void handleSave()}
+            disabled={busy}
+            className="w-full"
+          >
+            {isSaving ? (
+              <>
+                <Loader2Icon className="mr-2 h-4 w-4 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              "Save API Key & Continue"
+            )}
+          </Button>
+        )}
       </div>
     </div>
   );

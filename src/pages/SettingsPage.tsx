@@ -31,10 +31,12 @@ function ProvidersSettings() {
     validationStatus,
     validating: _validating,
     saving,
+    oauthInProgress,
     setValidationStatus,
     loadData,
     validateInline,
     saveProvider,
+    connectOAuth,
     addCustom,
     removeProvider,
   } = useProviders();
@@ -124,31 +126,52 @@ function ProvidersSettings() {
                 }}
               >
                 <p className="font-medium">{provider.name}</p>
-                <p className="text-xs text-muted-foreground">{provider.description}</p>
+                {provider.description && <p className="text-xs text-muted-foreground">{provider.description}</p>}
               </button>
             ))}
           </div>
 
           {selectedProvider && (
-            <div className="space-y-2">
-              <Input
-                type="password"
-                placeholder={`Enter ${selectedProvider.name} API key`}
-                value={apiKey}
-                onChange={(e) => {
-                  setApiKey(e.target.value);
-                  setValidationStatus(null);
-                }}
-                onBlur={() => void validateInline(selectedProviderId, apiKey)}
-              />
-              {validationStatus && <p className={cn('text-xs', validationStatus.type === 'success' ? 'text-green-500' : 'text-red-500')}>{validationStatus.message}</p>}
-              <Button
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => void handleSave()}
-                disabled={saving || !apiKey.trim()}
-              >
-                {saving ? 'Saving...' : 'Save Provider'}
-              </Button>
+            <div className="space-y-3">
+              {selectedProvider.oauth_supported && (
+                <Button
+                  className="w-full"
+                  onClick={() => void connectOAuth(selectedProviderId)}
+                  disabled={oauthInProgress || saving}
+                >
+                  {oauthInProgress ? 'Waiting for browser...' : `Connect ${selectedProvider.name} with OAuth`}
+                </Button>
+              )}
+              {selectedProvider.oauth_supported && selectedProvider.requires_api_key && (
+                <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                  <div className="h-px flex-1 bg-border" />
+                  <span>or enter an API key</span>
+                  <div className="h-px flex-1 bg-border" />
+                </div>
+              )}
+              {selectedProvider.requires_api_key && (
+                <>
+                  <Input
+                    type="password"
+                    placeholder={`Enter ${selectedProvider.name} API key`}
+                    value={apiKey}
+                    onChange={(e) => {
+                      setApiKey(e.target.value);
+                      setValidationStatus(null);
+                    }}
+                    onBlur={() => void validateInline(selectedProviderId, apiKey)}
+                  />
+                  {validationStatus && <p className={cn('text-xs', validationStatus.type === 'success' ? 'text-green-500' : 'text-red-500')}>{validationStatus.message}</p>}
+                  <Button
+                    variant={selectedProvider.oauth_supported ? 'outline' : 'default'}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => void handleSave()}
+                    disabled={saving || oauthInProgress || !apiKey.trim()}
+                  >
+                    {saving ? 'Saving...' : 'Save API Key'}
+                  </Button>
+                </>
+              )}
             </div>
           )}
 

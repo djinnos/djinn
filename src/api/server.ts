@@ -10,10 +10,8 @@ async function getBaseUrl(): Promise<string> {
 
 function providerDescription(provider: ProviderCatalogItem): string {
   const tags: string[] = [];
-  if (provider.is_openai_compatible) tags.push("openai-compatible");
-  if (provider.oauth_supported) tags.push("oauth");
-  const suffix = tags.length > 0 ? ` (${tags.join(", ")})` : "";
-  return `${provider.npm}${suffix}`;
+  if (provider.oauth_supported) tags.push("OAuth supported");
+  return tags.join(", ");
 }
 
 function fallbackKeyName(providerId: string): string {
@@ -54,6 +52,8 @@ export interface Provider {
   name: string;
   description: string;
   requires_api_key: boolean;
+  oauth_supported: boolean;
+  connection_methods: string[];
 }
 
 export interface CustomProviderRequest {
@@ -78,7 +78,28 @@ export async function fetchProviderCatalog(): Promise<Provider[]> {
     name: provider.name,
     description: providerDescription(provider),
     requires_api_key: provider.env_vars.length > 0,
+    oauth_supported: provider.oauth_supported,
+    connection_methods: provider.connection_methods,
   }));
+}
+
+export async function startProviderOAuth(
+  providerId: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const result = await callMcpTool("provider_oauth_start", {
+      provider_id: providerId,
+    });
+    if (!result.ok || !result.success) {
+      return { success: false, error: result.error ?? "OAuth flow failed" };
+    }
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "OAuth flow failed",
+    };
+  }
 }
 
 export async function validateProviderApiKey(
