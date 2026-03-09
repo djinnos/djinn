@@ -78,6 +78,11 @@ pub(super) async fn run_reply_loop(
     let mut total_tokens_in: u32 = 0;
     let mut total_tokens_out: u32 = 0;
 
+    // A resumed session has more than 2 messages (system + initial user).
+    // In that case a text-only first response is valid (worker may decide the
+    // reviewer's concerns are already addressed).
+    let is_resumed_session = conversation.messages.len() > 2;
+
     let run_result: anyhow::Result<()> = async {
         let mut saw_any_event = false;
         let mut saw_any_tool_use = false;
@@ -344,14 +349,9 @@ pub(super) async fn run_reply_loop(
                     total_tokens_in = 0;
                     total_tokens_out = 0;
                 }
-                // If this was a text-only turn, we need another LLM turn to
-                // continue after the compacted context is in place.
-                if turn_tool_calls.is_empty() {
-                    conversation.push(crate::agent::message::Message::user(
-                        "Continue with the task.",
-                    ));
-                    continue;
-                }
+                // Text-only after compaction = worker thinks it's done.
+                // Let it fall through to the normal text-only exit below —
+                // the reviewer will validate and resume if needed.
             }
 
             // ── Dispatch tool calls, if any ──────────────────────────────────
@@ -447,25 +447,35 @@ pub(super) async fn run_reply_loop(
         }
 
         if !saw_any_tool_use {
-            let reason = match agent_type {
-                AgentType::Worker | AgentType::ConflictResolver => {
-                    "worker ended without any tool use (provider error?)"
-                }
-                AgentType::TaskReviewer => {
-                    "task reviewer ended without any tool use (provider error?)"
-                }
-                AgentType::PM => "PM agent ended without any tool use (provider error?)",
-            };
-            tracing::warn!(
-                task_id = %task_id,
-                agent_type = %agent_type.as_str(),
-                saw_any_event,
-                assistant_message_count,
-                runtime_error = ?output.runtime_error,
-                assistant_fragments = ?assistant_fragments,
-                "ReplyLoop: session ended without any tool use"
-            );
-            return Err(anyhow::anyhow!(reason));
+            if is_resumed_session {
+                // Resumed worker may immediately respond text-only if it
+                // determines the reviewer's concerns are already addressed.
+                tracing::info!(
+                    task_id = %task_id,
+                    agent_type = %agent_type.as_str(),
+                    "ReplyLoop: resumed session ended text-only (worker deems feedback addressed)"
+                );
+            } else {
+                let reason = match agent_type {
+                    AgentType::Worker | AgentType::ConflictResolver => {
+                        "worker ended without any tool use (provider error?)"
+                    }
+                    AgentType::TaskReviewer => {
+                        "task reviewer ended without any tool use (provider error?)"
+                    }
+                    AgentType::PM => "PM agent ended without any tool use (provider error?)",
+                };
+                tracing::warn!(
+                    task_id = %task_id,
+                    agent_type = %agent_type.as_str(),
+                    saw_any_event,
+                    assistant_message_count,
+                    runtime_error = ?output.runtime_error,
+                    assistant_fragments = ?assistant_fragments,
+                    "ReplyLoop: session ended without any tool use"
+                );
+                return Err(anyhow::anyhow!(reason));
+            }
         }
 
         tracing::info!(

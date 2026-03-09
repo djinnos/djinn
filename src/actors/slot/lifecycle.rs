@@ -113,9 +113,9 @@ pub async fn run_task_lifecycle(
             return_free!();
         }
     };
-    let (_api_key_name, api_key) =
-        match load_provider_api_key(&catalog_provider_id, &app_state).await {
-            Ok(pair) => pair,
+    let provider_credential =
+        match load_provider_credential(&catalog_provider_id, &app_state).await {
+            Ok(cred) => cred,
             Err(e) => {
                 tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");
                 transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
@@ -127,6 +127,10 @@ pub async fn run_task_lifecycle(
     let project_dir = PathBuf::from(&project_path);
 
     let paused = find_paused_session_record(&task_id, &app_state).await;
+
+    // `resume_record_id` is set when we can resume a paused worker session
+    // (same model, same agent type, worktree intact, conversation file present).
+    let mut resume_record_id: Option<String> = None;
 
     let worktree_path = if agent_type == AgentType::PM {
         // PM has no dedicated worktree — use the project dir directly.
@@ -192,23 +196,14 @@ pub async fn run_task_lifecycle(
                     }
                 }
             } else {
-                // Always start a fresh session even when reusing the worktree —
-                // this forces the agent to re-read the worktree and reviewer
-                // feedback instead of repeating "DONE".
+                // Model + agent type match, worktree intact — resume the
+                // paused session instead of starting fresh.
                 tracing::info!(
                     task_id = %task_id,
-                    "Lifecycle: starting fresh session (no resume); reusing worktree"
+                    session_record_id = %paused.id,
+                    "Lifecycle: resuming paused session; reusing worktree"
                 );
-                let session_repo =
-                    SessionRepository::new(app_state.db().clone(), app_state.events().clone());
-                let _ = session_repo
-                    .update(
-                        &paused.id,
-                        SessionStatus::Interrupted,
-                        paused.tokens_in,
-                        paused.tokens_out,
-                    )
-                    .await;
+                resume_record_id = Some(paused.id);
                 paused_worktree_path
             }
         } else {
@@ -406,46 +401,123 @@ pub async fn run_task_lifecycle(
 
     let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
 
-    // ── Create session record and run Djinn-native reply loop ───────────────────
-    let current_session_id = uuid::Uuid::now_v7().to_string();
-    let current_record_id = match session_repo
-        .create(
-            &task.project_id,
-            &task.id,
-            &model_id,
-            agent_type.as_str(),
-            worktree_path.to_str(),
-            None,
-        )
-        .await
-    {
-        Ok(r) => Some(r.id),
-        Err(e) => {
-            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
-            transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
-            cleanup_worktree(&task_id, &worktree_path, &app_state).await;
-            return_free!();
-        }
-    };
-
     // ── Build Djinn-native provider ───────────────────────────────────────────
-    let provider_config = crate::agent::provider::ProviderConfig {
-        base_url: default_base_url(&catalog_provider_id),
-        auth: auth_method_for_provider(&catalog_provider_id, &api_key),
-        format_family: format_family_for_provider(&catalog_provider_id),
-        model_id: model_name.clone(),
-        context_window: context_window.max(0) as u32,
-        dev_proxy: None,
+    let provider_config = match provider_credential {
+        ProviderCredential::OAuthConfig(mut cfg) => {
+            // OAuth config carries defaults; override model_id and context_window
+            // from the dispatch request.
+            cfg.model_id = model_name.clone();
+            cfg.context_window = context_window.max(0) as u32;
+            cfg
+        }
+        ProviderCredential::ApiKey(_key_name, api_key) => {
+            crate::agent::provider::ProviderConfig {
+                base_url: default_base_url(&catalog_provider_id),
+                auth: auth_method_for_provider(&catalog_provider_id, &api_key),
+                format_family: format_family_for_provider(&catalog_provider_id),
+                model_id: model_name.clone(),
+                context_window: context_window.max(0) as u32,
+                dev_proxy: None,
+            }
+        }
     };
     let provider = create_provider(provider_config);
 
-    // ── Build conversation ────────────────────────────────────────────────────
+    // ── Create or resume session record + build conversation ─────────────────
     let tools = extension::tool_schemas(agent_type);
-    let mut conversation = Conversation::new();
-    conversation.push(Message::system(system_prompt.clone()));
-    conversation.push(Message::user(
-        "Start by understanding the task context and execute it fully before stopping.",
-    ));
+    let current_session_id = uuid::Uuid::now_v7().to_string();
+
+    // Try to resume from a paused session's saved conversation.
+    let (current_record_id, mut conversation) = if let Some(ref resume_id) = resume_record_id {
+        match super::conversation_store::load(resume_id).await {
+            Ok(Some(mut saved_conv)) => {
+                // Replace the system prompt with a fresh one (reflects updated AC).
+                if !saved_conv.messages.is_empty()
+                    && saved_conv.messages[0].role == crate::agent::message::Role::System
+                {
+                    saved_conv.messages[0] = Message::system(system_prompt.clone());
+                }
+                // Append reviewer feedback as a user message.
+                let feedback = resume_context_for_task(&task_id, &app_state).await;
+                saved_conv.push(Message::user(feedback));
+
+                // Reuse the paused session record.
+                session_repo.set_running(resume_id).await.ok();
+                tracing::info!(
+                    task_id = %task_id,
+                    session_record_id = %resume_id,
+                    conversation_len = saved_conv.messages.len(),
+                    "Lifecycle: resumed paused session with reviewer feedback"
+                );
+                (Some(resume_id.clone()), saved_conv)
+            }
+            Ok(None) | Err(_) => {
+                // Conversation file missing/corrupt — fall back to fresh session.
+                tracing::warn!(
+                    task_id = %task_id,
+                    session_record_id = %resume_id,
+                    "Lifecycle: conversation file missing; falling back to fresh session"
+                );
+                // Mark the stale paused session as interrupted.
+                let _ = session_repo
+                    .update(resume_id, SessionStatus::Interrupted, 0, 0)
+                    .await;
+                let record_id = match session_repo
+                    .create(
+                        &task.project_id,
+                        &task.id,
+                        &model_id,
+                        agent_type.as_str(),
+                        worktree_path.to_str(),
+                        None,
+                    )
+                    .await
+                {
+                    Ok(r) => Some(r.id),
+                    Err(e) => {
+                        tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
+                        transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state)
+                            .await;
+                        cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+                        return_free!();
+                    }
+                };
+                let mut conv = Conversation::new();
+                conv.push(Message::system(system_prompt.clone()));
+                conv.push(Message::user(
+                    "Start by understanding the task context and execute it fully before stopping.",
+                ));
+                (record_id, conv)
+            }
+        }
+    } else {
+        // Fresh session — no paused session to resume.
+        let record_id = match session_repo
+            .create(
+                &task.project_id,
+                &task.id,
+                &model_id,
+                agent_type.as_str(),
+                worktree_path.to_str(),
+                None,
+            )
+            .await
+        {
+            Ok(r) => Some(r.id),
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
+                transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+                cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+                return_free!();
+            }
+        };
+        let mut conv = Conversation::new();
+        conv.push(Message::system(system_prompt.clone()));
+        conv.push(Message::user(
+            "Start by understanding the task context and execute it fully before stopping.",
+        ));
+        (record_id, conv)
+    };
 
     // ── Run reply loop ────────────────────────────────────────────────────────
     let (reply_result, final_output, tokens_in_loop, tokens_out_loop): (anyhow::Result<()>, _, i64, i64) = run_reply_loop(
@@ -494,21 +566,6 @@ pub async fn run_task_lifecycle(
         return_killed!();
     }
 
-    // ── Close this session record ─────────────────────────────────────────────
-    let session_status = if reply_result.is_ok() {
-        SessionStatus::Completed
-    } else {
-        SessionStatus::Failed
-    };
-    update_session_record(
-        current_record_id.as_deref(),
-        session_status,
-        tokens_in_loop,
-        tokens_out_loop,
-        &app_state,
-    )
-    .await;
-
     let final_result = reply_result;
     let tokens_in = tokens_in_loop;
     let tokens_out = tokens_out_loop;
@@ -525,8 +582,9 @@ pub async fn run_task_lifecycle(
     let is_worker_done = final_result.is_ok()
         && matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver);
 
-    // Worktree: commit final work then clean up.  Verification and review
-    // create their own fresh worktrees from the branch.
+    // Worktree: commit final work.  For workers, preserve the worktree and
+    // save the conversation so the session can be resumed after review.
+    // Non-workers (reviewers, PM) still clean up immediately.
     if is_worker_done
         && let Err(e) = commit_final_work_if_needed(&task_id, &worktree_path, &app_state).await
     {
@@ -536,7 +594,44 @@ pub async fn run_task_lifecycle(
             "Lifecycle: failed to commit final work"
         );
     }
-    cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+    if is_worker_done {
+        // Save conversation for potential resume after review cycle.
+        if let Some(ref record_id) = current_record_id {
+            if let Err(e) = super::conversation_store::save(record_id, &conversation).await {
+                tracing::warn!(
+                    task_id = %task_id,
+                    record_id = %record_id,
+                    error = %e,
+                    "Lifecycle: failed to save conversation for resume"
+                );
+            }
+        }
+        // Mark session as Paused (not Completed) — worker may resume.
+        update_session_record_paused(
+            current_record_id.as_deref(),
+            tokens_in,
+            tokens_out,
+            &app_state,
+        )
+        .await;
+        // Don't clean up worktree — will be reused on resume.
+    } else {
+        // Non-worker or failed: close session and clean up.
+        let session_status = if final_result.is_ok() {
+            SessionStatus::Completed
+        } else {
+            SessionStatus::Failed
+        };
+        update_session_record(
+            current_record_id.as_deref(),
+            session_status,
+            tokens_in,
+            tokens_out,
+            &app_state,
+        )
+        .await;
+        cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+    }
 
     // Log reviewer feedback.
     let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
@@ -620,12 +715,7 @@ pub async fn run_task_lifecycle(
             tokens_out,
             "Lifecycle: applying session transition"
         );
-        let is_reviewer_rejection = matches!(
-            action,
-            TransitionAction::TaskReviewReject
-                | TransitionAction::TaskReviewRejectStale
-                | TransitionAction::TaskReviewRejectConflict
-        );
+        let is_conflict_rejection = action == TransitionAction::TaskReviewRejectConflict;
         let is_submit_verification = action == TransitionAction::SubmitVerification;
         if let Err(e) = task_repo
             .transition(
@@ -640,7 +730,11 @@ pub async fn run_task_lifecycle(
         {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to transition task after session");
         }
-        if is_reviewer_rejection {
+        // Only interrupt the paused worker session on conflict rejection
+        // (agent type changes to ConflictResolver, so the saved conversation
+        // is not useful).  For regular reject/reject_stale, the paused session
+        // stays so the worker can resume with reviewer feedback.
+        if is_conflict_rejection {
             interrupt_paused_worker_session(&task_id, &app_state).await;
         }
         // Spawn background verification — runs outside the slot so the slot is

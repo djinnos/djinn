@@ -199,6 +199,9 @@ pub(crate) async fn cleanup_paused_worker_session(task_id: &str, app_state: &App
         );
     }
 
+    // Delete saved conversation file (no longer needed after approval).
+    super::conversation_store::delete(&paused.id).await;
+
     if let Some(worktree_path) = paused.worktree_path.as_deref().map(PathBuf::from) {
         cleanup_worktree(task_id, &worktree_path, app_state).await;
     }
@@ -209,6 +212,9 @@ pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &A
     let Ok(Some(paused)) = repo.paused_for_task(task_id).await else {
         return;
     };
+    // Delete saved conversation file (session is being discarded).
+    super::conversation_store::delete(&paused.id).await;
+
     if let Err(e) = repo
         .update(
             &paused.id,
