@@ -1227,3 +1227,71 @@ where
 {
     serde_json::from_value(value)
 }
+
+/// Returns the JSON tool schemas for the given agent type, suitable for
+/// passing directly to the `LlmProvider::stream` call in the Djinn-native
+/// reply loop.
+#[allow(dead_code)]
+pub fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
+    let mut tool_values = vec![
+        serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
+        serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
+        serde_json::to_value(tool_memory_read()).expect("serialize tool_memory_read"),
+        serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
+    ];
+
+    tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
+
+    if matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver) {
+        tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
+        tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
+    }
+
+    if matches!(agent_type, AgentType::TaskReviewer) {
+        tool_values.push(
+            serde_json::to_value(tool_task_update_ac()).expect("serialize tool_task_update_ac"),
+        );
+    }
+
+    if matches!(agent_type, AgentType::PM) {
+        for value in [
+            serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
+            serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
+            serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
+            serde_json::to_value(tool_task_pm_reset_branch())
+                .expect("serialize tool_task_pm_reset_branch"),
+            serde_json::to_value(tool_task_pm_archive_activity())
+                .expect("serialize tool_task_pm_archive_activity"),
+            serde_json::to_value(tool_task_pm_reset_counters())
+                .expect("serialize tool_task_pm_reset_counters"),
+            serde_json::to_value(tool_task_pm_reset_for_rework())
+                .expect("serialize tool_task_pm_reset_for_rework"),
+        ] {
+            tool_values.push(value);
+        }
+    }
+
+    tool_values
+}
+
+/// Public entry point for the Djinn-native reply loop to call a tool by name.
+///
+/// `arguments` should be the `input` field from a `ContentBlock::ToolUse`
+/// converted to an `Option<Map>`:
+///
+/// ```rust,ignore
+/// let args = match input {
+///     Value::Object(map) => Some(map),
+///     _ => None,
+/// };
+/// ```
+#[allow(dead_code)]
+pub(crate) async fn call_tool(
+    state: &AppState,
+    name: &str,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    worktree_path: &Path,
+) -> Result<serde_json::Value, String> {
+    let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
+    dispatch_tool_call(state, &synthetic, worktree_path).await
+}

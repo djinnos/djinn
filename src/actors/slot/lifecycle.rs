@@ -22,7 +22,6 @@ use crate::models::task::TransitionAction;
 use crate::server::AppState;
 
 use super::*;
-use super::reply_loop::run_reply_loop;
 
 /// Standalone async function that runs the full per-task lifecycle:
 /// load -> worktree -> session -> reply loop -> post-session work -> cleanup.
@@ -459,7 +458,7 @@ pub async fn run_task_lifecycle(
     // Context window for SSE token-usage events (desktop UI).  Goose now owns
     // compaction using the context_limit we injected into ModelConfig above, so
     // this is purely informational.
-    let context_window = goose_model.context_limit() as i64;
+    let _context_window = goose_model.context_limit() as i64;
 
     let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
 
@@ -541,26 +540,23 @@ pub async fn run_task_lifecycle(
             .extend_system_prompt("djinn_task".to_string(), system_prompt.clone())
             .await;
 
+        // TODO(g7qy): Wire run_reply_loop to the Djinn-native provider/conversation
+        // types once lifecycle.rs is fully migrated off Goose. For now we return
+        // an error so the slot is freed cleanly without panicking.
+        #[allow(unused_variables)]
         let kickoff = GooseMessage::user().with_text(
             "Start by understanding the task context and execute it fully before stopping.",
         );
 
         // ── Run reply loop ───────────────────────────────────────────────
-        let (reply_result, output) = run_reply_loop(
-            &agent,
-            &current_session_id,
-            &task_id,
-            &project_path,
-            &worktree_path,
-            agent_type,
-            kickoff,
-            &cancel,
-            &pause,
-            &app_state,
-            context_window,
-            &session_manager,
-        )
-        .await;
+        // TODO(g7qy): Replace with Djinn-native run_reply_loop once lifecycle
+        // rewiring task (g7qy) is complete.
+        let (reply_result, output) = (
+            Err::<(), _>(anyhow::anyhow!(
+                "reply loop not yet wired: pending g7qy lifecycle rewiring task"
+            )),
+            crate::agent::output_parser::ParsedAgentOutput::new(agent_type),
+        );
 
         // Always commit whatever the agent wrote before verification or cleanup.
         commit_wip_if_needed(&task_id, &worktree_path, &app_state).await;
@@ -623,14 +619,14 @@ pub async fn run_task_lifecycle(
 
     // Worktree: commit final work then clean up.  Verification and review
     // create their own fresh worktrees from the branch.
-    if is_worker_done {
-        if let Err(e) = commit_final_work_if_needed(&task_id, &worktree_path, &app_state).await {
-            tracing::warn!(
-                task_id = %task_id,
-                error = %e,
-                "Lifecycle: failed to commit final work"
-            );
-        }
+    if is_worker_done
+        && let Err(e) = commit_final_work_if_needed(&task_id, &worktree_path, &app_state).await
+    {
+        tracing::warn!(
+            task_id = %task_id,
+            error = %e,
+            "Lifecycle: failed to commit final work"
+        );
     }
     cleanup_worktree(&task_id, &worktree_path, &app_state).await;
 
