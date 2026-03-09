@@ -15,7 +15,6 @@ const DEV_TEMPLATE: &str = include_str!("prompts/dev.md");
 const CONFLICT_RESOLVER_TEMPLATE: &str = include_str!("prompts/conflict-resolver.md");
 const TASK_REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.md");
 const EPIC_REVIEWER_TEMPLATE: &str = include_str!("prompts/epic-reviewer-batch.md");
-const COMPACTION_TEMPLATE: &str = include_str!("prompts/compaction.md");
 
 // ─── Context ───────────────────────────────────────────────────────────────────
 
@@ -150,14 +149,6 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
     out = out.replace("{{verification_section}}", &verification_section);
 
     out
-}
-
-/// Return the compaction system prompt.
-///
-/// This is used for a pure text-completion call (no tools). The caller injects
-/// the full conversation history as messages; the model responds with a summary.
-pub fn render_compaction_prompt() -> &'static str {
-    COMPACTION_TEMPLATE
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

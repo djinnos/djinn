@@ -132,7 +132,6 @@ impl MergeValidationFailureMetadata {
 
 mod actor;
 mod commands;
-mod compaction;
 mod epic_review;
 mod helpers;
 mod lifecycle;

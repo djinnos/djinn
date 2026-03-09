@@ -26,17 +26,8 @@ fn serialize_goose_message(msg: &GooseMessage) -> serde_json::Value {
     })
 }
 
-/// Compaction signal returned by the reply loop when the 80% threshold is hit.
-pub(super) struct CompactionSignal {
-    pub(super) session_id: String,
-    pub(super) tokens_in: i64,
-    pub(super) context_window: i64,
-}
-
-/// Runs the Goose reply loop for one session turn. Returns the result, the
-/// accumulated output, and an optional compaction signal (if the 80% context
-/// window threshold was reached mid-stream). The caller should compact and
-/// restart the loop if a compaction signal is returned.
+/// Runs the Goose reply loop for one session turn. Returns the result and the
+/// accumulated output. Compaction is handled internally by Goose.
 ///
 /// When `cancel` is triggered, the loop exits and returns `Err("cancelled")`.
 #[allow(clippy::too_many_arguments)]
@@ -56,10 +47,8 @@ pub(super) async fn run_reply_loop(
 ) -> (
     anyhow::Result<()>,
     ParsedAgentOutput,
-    Option<CompactionSignal>,
 ) {
     let mut output = ParsedAgentOutput::new(agent_type);
-    let mut compaction_signal: Option<CompactionSignal> = None;
 
     let run_result: anyhow::Result<()> = async {
         let mut pending_message = Some(kickoff);
@@ -68,7 +57,6 @@ pub(super) async fn run_reply_loop(
         let assistant_role = GooseMessage::assistant().role;
         let mut assistant_message_count: usize = 0;
         let mut assistant_fragments: Vec<String> = Vec::new();
-        let mut compaction_signaled = false;
 
         let push_fragment = |fragments: &mut Vec<String>, value: String| {
             const MAX_FRAGMENTS: usize = 12;
@@ -83,7 +71,7 @@ pub(super) async fn run_reply_loop(
             fragments.push(snippet);
         };
 
-        'outer: while let Some(next_message) = pending_message.take() {
+        while let Some(next_message) = pending_message.take() {
             let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);
             tracing::info!(
                 task_id = %task_id,
@@ -145,41 +133,6 @@ pub(super) async fn run_reply_loop(
                                     match content {
                                         MessageContent::Text(text) => {
                                             push_fragment(&mut assistant_fragments, format!("text:{}", text.text));
-                                            // Detect context exhaustion from streaming text
-                                            // (Goose may not persist the error message to SQLite).
-                                            // Trigger compaction signal immediately — no point
-                                            // nudging or checking markers when context is blown.
-                                            if !compaction_signaled && !output.context_exhausted {
-                                                let lower = text.text.to_lowercase();
-                                                if lower.contains("context_length_exceeded")
-                                                    || lower.contains("context length exceeded")
-                                                {
-                                                    output.context_exhausted = true;
-                                                    #[allow(unused_assignments)]
-                                                    { compaction_signaled = true; }
-                                                    let (ti, _to) = if let Ok(s) = session_manager.get_session(session_id, false).await {
-                                                        let ti = s.accumulated_input_tokens.or(s.input_tokens).unwrap_or(0) as i64;
-                                                        let to = s.accumulated_output_tokens.or(s.output_tokens).unwrap_or(0) as i64;
-                                                        (ti, to)
-                                                    } else {
-                                                        tokens_from_goose_sqlite(session_id).await.unwrap_or((0, 0))
-                                                    };
-                                                    let cw = if context_window > 0 { context_window } else { 200_000 };
-                                                    tracing::info!(
-                                                        task_id = %task_id,
-                                                        session_id = %session_id,
-                                                        tokens_in = ti,
-                                                        context_window = cw,
-                                                        "Lifecycle: context_length_exceeded detected in stream; triggering compaction"
-                                                    );
-                                                    compaction_signal = Some(CompactionSignal {
-                                                        session_id: session_id.to_owned(),
-                                                        tokens_in: ti,
-                                                        context_window: cw,
-                                                    });
-                                                    break 'outer;
-                                                }
-                                            }
                                         }
                                         MessageContent::ToolRequest(req) => {
                                             push_fragment(&mut assistant_fragments, format!("tool_request:{}", req.id));
@@ -195,7 +148,7 @@ pub(super) async fn run_reply_loop(
                                     }
                                 }
 
-                                // Token tracking + compaction threshold check.
+                                // Token tracking for desktop UI.
                                 {
                                     let goose_session = session_manager.get_session(session_id, false).await;
                                     let (tokens_in, tokens_out) = if let Ok(s) = goose_session {
@@ -222,25 +175,6 @@ pub(super) async fn run_reply_loop(
                                         context_window,
                                         usage_pct,
                                     });
-                                    #[allow(unused_assignments)]
-                                    if !compaction_signaled && context_window > 0 && usage_pct >= 0.8 {
-                                        compaction_signaled = true;
-                                        tracing::info!(
-                                            task_id = %task_id,
-                                            session_id = %session_id,
-                                            tokens_in,
-                                            context_window,
-                                            threshold_pct = 80,
-                                            "Lifecycle: compaction threshold reached; breaking reply loop"
-                                        );
-                                        compaction_signal = Some(CompactionSignal {
-                                            session_id: session_id.to_owned(),
-                                            tokens_in,
-                                            context_window,
-                                        });
-                                        // Break out of both loops — compaction will restart with a fresh session.
-                                        break 'outer;
-                                    }
                                 }
 
                                 let _ = app_state.events().send(DjinnEvent::SessionMessage {
@@ -267,11 +201,6 @@ pub(super) async fn run_reply_loop(
                     diag
                 ));
             }
-        }
-
-        // If we broke out for compaction, skip the nudge / marker checks.
-        if compaction_signal.is_some() {
-            return Ok(());
         }
 
         if !saw_any_event {
@@ -370,5 +299,5 @@ pub(super) async fn run_reply_loop(
     }
     .await;
 
-    (run_result, output, compaction_signal)
+    (run_result, output)
 }

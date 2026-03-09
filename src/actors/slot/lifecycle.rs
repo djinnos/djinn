@@ -24,7 +24,6 @@ use crate::models::task::TransitionAction;
 use crate::server::AppState;
 
 use super::*;
-use super::compaction::compact_inline;
 use super::reply_loop::run_reply_loop;
 
 /// Standalone async function that runs the full per-task lifecycle:
@@ -425,7 +424,7 @@ pub async fn run_task_lifecycle(
 
     // ── Create or resume Goose session ─────────────────────────────────────────
     let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
-    let (mut current_session_id, mut current_record_id, mut kickoff) = if let (
+    let (current_session_id, current_record_id, mut kickoff) = if let (
         Some(session_id),
         Some(record_id),
         Some(kickoff),
@@ -499,8 +498,26 @@ pub async fn run_task_lifecycle(
     };
 
     // ── Create agent ───────────────────────────────────────────────────────────
+    //
+    // Look up the context window from models.dev (our catalog) and inject it
+    // into Goose's ModelConfig so that Goose's built-in auto-compaction uses the
+    // correct limit — especially for models not in Goose's canonical registry
+    // (e.g. codex-5.3 injected via models.dev).
+    let catalog_context_window = app_state
+        .catalog()
+        .find_model(&model_id)
+        .map(|m| m.context_window as usize)
+        .filter(|&w| w > 0);
+
     let goose_model = match ModelConfig::new(&model_name) {
-        Ok(m) => m.with_canonical_limits(&goose_provider_id),
+        Ok(m) => {
+            let mut cfg = m.with_canonical_limits(&goose_provider_id);
+            // Only apply catalog value if no env var or canonical limit was found.
+            if cfg.context_limit.is_none() {
+                cfg = cfg.with_context_limit(catalog_context_window);
+            }
+            cfg
+        }
         Err(e) => {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to build ModelConfig");
             transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
@@ -576,19 +593,20 @@ pub async fn run_task_lifecycle(
             verification_commands: prompt_verification_commands,
         },
     );
-    agent.override_system_prompt(prompt).await;
+    agent
+        .extend_system_prompt("djinn_task".to_string(), prompt)
+        .await;
 
-    let context_window = app_state
-        .catalog()
-        .find_model(&model_id)
-        .map(|m| m.context_window)
-        .unwrap_or(0);
+    // Context window for SSE token-usage events (desktop UI).  Goose now owns
+    // compaction using the context_limit we injected into ModelConfig above, so
+    // this is purely informational.
+    let context_window = goose_model.context_limit() as i64;
 
-    // ── Main lifecycle loop (compaction + verification retry) ─────────────────
-    let mut current_agent = agent;
+    // ── Main lifecycle loop (verification retry) ─────────────────────────────
+    let current_agent = agent;
 
     let (final_result, final_output) = loop {
-        let (reply_result, output, compaction_signal) = run_reply_loop(
+        let (reply_result, output) = run_reply_loop(
             &current_agent,
             &current_session_id,
             &task_id,
@@ -627,81 +645,6 @@ pub async fn run_task_lifecycle(
             cleanup_worktree(&task_id, &worktree_path, &app_state).await;
             transition_interrupted(&task_id, agent_type, "session cancelled", &app_state).await;
             return_killed!();
-        }
-
-        // ── Handle compaction signal (80% threshold) ────────────────────────
-        if let Some(sig) = compaction_signal {
-            tracing::info!(
-                task_id = %task_id,
-                tokens_in = sig.tokens_in,
-                context_window = sig.context_window,
-                "Lifecycle: compaction threshold reached; running inline compaction"
-            );
-            match compact_inline(
-                &task_id,
-                agent_type,
-                &task.project_id,
-                &sig.session_id,
-                current_record_id.as_deref(),
-                &model_id,
-                &goose_provider_id,
-                &model_name,
-                &worktree_path,
-                sig.context_window,
-                sig.tokens_in,
-                &session_manager,
-                &app_state,
-                None,
-            )
-            .await
-            {
-                Ok(compact) => {
-                    // Refresh system prompt on the new agent.
-                    let new_prompt = render_prompt(
-                        agent_type,
-                        &task,
-                        &TaskContext {
-                            project_path: project_path.clone(),
-                            workspace_path: worktree_path.display().to_string(),
-                            diff: None,
-                            commits: None,
-                            start_commit: None,
-                            end_commit: None,
-                            batch_num: None,
-                            task_count: None,
-                            tasks_summary: None,
-                            common_labels: None,
-                            conflict_files: None,
-                            merge_base_branch: None,
-                            merge_target_branch: None,
-                            merge_failure_context: None,
-                            setup_commands: None,
-                            verification_commands: None,
-                        },
-                    );
-                    compact.agent.override_system_prompt(new_prompt).await;
-                    current_session_id = compact.new_session_id;
-                    current_record_id = Some(compact.new_record_id);
-                    current_agent = compact.agent;
-                    kickoff = GooseMessage::user().with_text(&compact.kickoff_summary);
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: compaction failed; releasing task");
-                    let (ti, to) = tokens_for_session(&current_session_id, &session_manager).await;
-                    update_session_record(
-                        current_record_id.as_deref(),
-                        SessionStatus::Failed,
-                        ti,
-                        to,
-                        &app_state,
-                    )
-                    .await;
-                    cleanup_worktree(&task_id, &worktree_path, &app_state).await;
-                    transition_interrupted(&task_id, agent_type, &e, &app_state).await;
-                    return_free!();
-                }
-            }
         }
 
         // ── Verification pipeline for worker DONE ───────────────────────────
