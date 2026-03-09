@@ -4564,6 +4564,14 @@
             "nullable": true,
             "type": "array"
           },
+          "model_priority_pm": {
+            "description": "Ordered model list for the 'pm' role. Omit to keep current value.",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
           "model_priority_task_reviewer": {
             "description": "Ordered model list for the 'task_reviewer' role. Omit to keep current value.",
             "items": {
