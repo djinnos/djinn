@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::commands::CommandSpec;
+use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::task::TaskRepository;
 use crate::models::task::TransitionAction;
 use crate::server::AppState;
@@ -61,6 +63,30 @@ async fn run_verification_pipeline(
     let task = load_task(task_id, app_state).await?;
     let project_dir = PathBuf::from(project_path);
     let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+
+    // Fast path: if no setup or verification commands are configured, skip
+    // worktree creation entirely and go straight to needs_task_review.
+    let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
+    if let Ok(Some(project)) = project_repo.get(&task.project_id).await {
+        let setup: Vec<CommandSpec> =
+            serde_json::from_str(&project.setup_commands).unwrap_or_default();
+        let verify: Vec<CommandSpec> =
+            serde_json::from_str(&project.verification_commands).unwrap_or_default();
+        if setup.is_empty() && verify.is_empty() {
+            tracing::info!(task_id = %task_id, "Verification: no commands configured; skipping");
+            let _ = task_repo
+                .transition(
+                    task_id,
+                    TransitionAction::VerificationPass,
+                    "agent-supervisor",
+                    "system",
+                    None,
+                    None,
+                )
+                .await;
+            return Ok(());
+        }
+    }
 
     // Create a fresh worktree from the task branch.
     let worktree_path = prepare_worktree(&project_dir, &task, app_state).await?;

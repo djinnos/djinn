@@ -1,3 +1,2 @@
 -- Add 'verifying' task status for background verification after agent session.
--- The status CHECK constraint is enforced at the application layer (TaskStatus::parse)
--- since SQLite does not support ALTER CHECK. No schema change needed.
+-- This was originally a no-op — the actual table rebuild is in V20260309000002.

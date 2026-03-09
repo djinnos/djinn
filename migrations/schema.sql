@@ -1,6 +1,6 @@
 -- Canonical schema — ground truth. Matches result of running all migrations.
 -- Updated manually after each migration is added.
--- Last updated: V20260309000001__drop_epic_review_batches.sql
+-- Last updated: V20260309000002__rebuild_tasks_add_verifying.sql
 
 CREATE TABLE settings (
     key        TEXT NOT NULL PRIMARY KEY,
