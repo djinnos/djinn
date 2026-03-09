@@ -37,6 +37,8 @@ pub struct SettingsSetParams {
     pub model_priority_task_reviewer: Option<Vec<String>>,
     /// Ordered model list for the 'conflict_resolver' role. Omit to keep current value.
     pub model_priority_conflict_resolver: Option<Vec<String>>,
+    /// Ordered model list for the 'pm' role. Omit to keep current value.
+    pub model_priority_pm: Option<Vec<String>>,
     /// Per-model concurrent session caps (e.g. {"chatgpt_codex/gpt-5.3-codex": 4}). Omit to keep current value.
     #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
@@ -145,6 +147,12 @@ impl DjinnMcpServer {
                 .model_priority
                 .get_or_insert_with(HashMap::new)
                 .insert("conflict_resolver".to_string(), v);
+        }
+        if let Some(v) = p.model_priority_pm {
+            settings
+                .model_priority
+                .get_or_insert_with(HashMap::new)
+                .insert("pm".to_string(), v);
         }
 
         match self.state.apply_settings(&settings).await {
