@@ -205,20 +205,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
       onClick={onClick}
     >
       <CardContent className="flex flex-col gap-1.5">
-        {/* Row 1: Title */}
-        <div className="flex items-start gap-2">
-          <h4
-            className={cn(
-              "flex-1 text-sm font-medium leading-snug",
-              isDone && "text-muted-foreground line-through decoration-muted-foreground/30"
-            )}
-            title={task.title}
-          >
-            {task.title}
-          </h4>
-        </div>
-
-        {/* Row 2: Metadata line */}
+        {/* Row 1: ID, priority, badges, pipeline */}
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
           <TaskIdLabel taskId={task.id} shortId={task.short_id} />
           <PriorityBadge priority={task.priority} />
@@ -262,6 +249,17 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
             </span>
           )}
         </div>
+
+        {/* Row 2: Title */}
+        <h4
+          className={cn(
+            "text-sm font-medium leading-snug",
+            isDone && "text-muted-foreground line-through decoration-muted-foreground/30"
+          )}
+          title={task.title}
+        >
+          {task.title}
+        </h4>
       </CardContent>
     </Card>
   );
