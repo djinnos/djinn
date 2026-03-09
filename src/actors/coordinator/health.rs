@@ -4,47 +4,32 @@ impl CoordinatorActor {
     /// Spawn background health-check tasks for all projects (or one) that have
     /// setup/verification commands configured (ADR-014, task bit0).
     pub(super) async fn validate_all_project_health(&mut self, project_id_filter: Option<String>) {
-        struct ProjectRow {
-            id: String,
-            path: String,
-            setup_commands: String,
-            verification_commands: String,
-        }
+        let repo = ProjectRepository::new(self.db.clone(), self.events_tx.clone());
+        let projects = match repo.list().await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: failed to list projects for health check");
+                return;
+            }
+        };
 
-        let rows: Vec<ProjectRow> =
-            sqlx::query("SELECT id, path, setup_commands, verification_commands FROM projects")
-                .fetch_all(self.db.pool())
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|row| {
-                    use sqlx::Row;
-                    ProjectRow {
-                        id: row.get("id"),
-                        path: row.get("path"),
-                        setup_commands: row.get("setup_commands"),
-                        verification_commands: row.get("verification_commands"),
-                    }
-                })
-                .collect();
-
-        for row in rows {
+        for project in projects {
             if let Some(ref filter) = project_id_filter
-                && row.id != *filter
+                && project.id != *filter
             {
                 continue;
             }
 
             let setup_cmds: Vec<CommandSpec> =
-                serde_json::from_str(&row.setup_commands).unwrap_or_default();
+                serde_json::from_str(&project.setup_commands).unwrap_or_default();
             let verify_cmds: Vec<CommandSpec> =
-                serde_json::from_str(&row.verification_commands).unwrap_or_default();
+                serde_json::from_str(&project.verification_commands).unwrap_or_default();
 
             // ── Pre-flight: verify git remote 'origin' exists ────────────
             // The squash-merge flow assumes `origin` is available. Without it,
             // execution loops infinitely (merge fails → task released → repeat).
             // This is a fast local check — no network calls.
-            let project_path = std::path::PathBuf::from(&row.path);
+            let project_path = std::path::PathBuf::from(&project.path);
             if project_path.exists() {
                 let origin_check = tokio::process::Command::new("git")
                     .args(["remote", "get-url", "origin"])
@@ -58,12 +43,12 @@ impl CoordinatorActor {
                         let err = "No git remote 'origin' configured. Execution requires a remote to merge completed work. \
                              Add one with: git remote add origin <url> && git push -u origin main".to_string();
                         tracing::warn!(
-                            project_id = %row.id,
+                            project_id = %project.id,
                             "CoordinatorActor: project missing git remote 'origin' — blocking dispatch"
                         );
                         let _ = self.self_sender
                             .send(CoordinatorMessage::SetProjectHealth {
-                                project_id: row.id.clone(),
+                                project_id: project.id.clone(),
                                 healthy: false,
                                 error: Some(err),
                             })
@@ -76,13 +61,13 @@ impl CoordinatorActor {
                              Ensure git is installed and the project path is a valid repository."
                         );
                         tracing::warn!(
-                            project_id = %row.id,
+                            project_id = %project.id,
                             error = %e,
                             "CoordinatorActor: failed to run git remote check"
                         );
                         let _ = self.self_sender
                             .send(CoordinatorMessage::SetProjectHealth {
-                                project_id: row.id.clone(),
+                                project_id: project.id.clone(),
                                 healthy: false,
                                 error: Some(err),
                             })
@@ -95,9 +80,9 @@ impl CoordinatorActor {
 
             if setup_cmds.is_empty() && verify_cmds.is_empty() {
                 // No commands configured — always healthy; clear any stale failure.
-                if self.unhealthy_projects.remove(&row.id).is_some() {
+                if self.unhealthy_projects.remove(&project.id).is_some() {
                     let _ = self.events_tx.send(DjinnEvent::ProjectHealthChanged {
-                        project_id: row.id.clone(),
+                        project_id: project.id.clone(),
                         healthy: true,
                         error: None,
                     });
@@ -108,8 +93,8 @@ impl CoordinatorActor {
             let sender = self.self_sender.clone();
             let db = self.db.clone();
             let events_tx = self.events_tx.clone();
-            let project_id = row.id.clone();
-            let path = row.path.clone();
+            let project_id = project.id.clone();
+            let path = project.path.clone();
 
             tracing::info!(
                 project_id = %project_id,
