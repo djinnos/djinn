@@ -50,7 +50,7 @@ For each acceptance criterion, find evidence in the code:
 
 ### Step 4: Update Acceptance Criteria
 
-**MANDATORY**: Call `task_update(id="{{task_id}}", acceptance_criteria=[...])` with every criterion set to `met: true` or `met: false`.
+**MANDATORY**: Call `task_update_ac(id="{{task_id}}", acceptance_criteria=[...])` with every criterion set to `met: true` or `met: false`.
 
 The system will automatically approve the task if all criteria are met, or send it back to the worker if any are unmet. You do not need to emit any special markers — just update the AC state accurately.
 

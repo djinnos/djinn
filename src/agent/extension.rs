@@ -18,12 +18,13 @@ use crate::db::repositories::task::TaskRepository;
 use crate::models::task::Task;
 use crate::server::AppState;
 
-pub fn config(_agent_type: AgentType) -> ExtensionConfig {
+pub fn config(agent_type: AgentType) -> ExtensionConfig {
     let mut tool_values = vec![
         serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
         serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
         serde_json::to_value(tool_memory_read()).expect("serialize tool_memory_read"),
         serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
+        serde_json::to_value(tool_shell()).expect("serialize tool_shell"),
     ];
 
     let mut available_tools = vec![
@@ -31,15 +32,15 @@ pub fn config(_agent_type: AgentType) -> ExtensionConfig {
         "task_comment_add".to_string(),
         "memory_read".to_string(),
         "memory_search".to_string(),
+        "shell".to_string(),
     ];
 
-    // All agent types get task_update and shell tools.
-    {
-        tool_values
-            .push(serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"));
-        tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
-        available_tools.push("task_update".to_string());
-        available_tools.push("shell".to_string());
+    // Only TaskReviewer gets the AC-update tool (ADR-022).
+    if matches!(agent_type, AgentType::TaskReviewer) {
+        tool_values.push(
+            serde_json::to_value(tool_task_update_ac()).expect("serialize tool_task_update_ac"),
+        );
+        available_tools.push("task_update_ac".to_string());
     }
 
     let tools = serde_json::from_value(serde_json::Value::Array(tool_values))
@@ -129,6 +130,7 @@ where
         "task_show" => call_task_show(state, &call.arguments).await,
         "task_create" => call_task_create(state, &call.arguments).await,
         "task_update" => call_task_update(state, &call.arguments).await,
+        "task_update_ac" => call_task_update_ac(state, &call.arguments).await,
         "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments).await,
@@ -155,6 +157,12 @@ struct TaskUpdateParams {
     acceptance_criteria: Option<Vec<serde_json::Value>>,
     memory_refs_add: Option<Vec<String>>,
     memory_refs_remove: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct TaskUpdateAcParams {
+    id: String,
+    acceptance_criteria: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -331,6 +339,37 @@ async fn call_task_update(
             .map_err(|e| e.to_string())?;
         return Ok(task_to_value(&out));
     }
+
+    Ok(task_to_value(&updated))
+}
+
+async fn call_task_update_ac(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: TaskUpdateAcParams = parse_args(arguments)?;
+    let repo = TaskRepository::new(state.db().clone(), state.events().clone());
+
+    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
+    };
+
+    let ac_json = serde_json::to_string(&p.acceptance_criteria)
+        .unwrap_or_else(|_| "[]".to_string());
+
+    let updated = repo
+        .update(
+            &task.id,
+            &task.title,
+            &task.description,
+            &task.design,
+            task.priority,
+            &task.owner,
+            &task.labels,
+            &ac_json,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(task_to_value(&updated))
 }
@@ -640,25 +679,16 @@ fn tool_task_show() -> RmcpTool {
     )
 }
 
-fn tool_task_update() -> RmcpTool {
+fn tool_task_update_ac() -> RmcpTool {
     RmcpTool::new(
-        "task_update".to_string(),
-        "Update fields on a work item.".to_string(),
+        "task_update_ac".to_string(),
+        "Update acceptance criteria met/unmet state on a task. Each criterion must include 'met: true' or 'met: false'.".to_string(),
         object!({
             "type": "object",
-            "required": ["id"],
+            "required": ["id", "acceptance_criteria"],
             "properties": {
-                "id": {"type": "string"},
-                "title": {"type": "string"},
-                "description": {"type": "string"},
-                "design": {"type": "string"},
-                "priority": {"type": "integer"},
-                "owner": {"type": "string"},
-                "labels_add": {"type": "array", "items": {"type": "string"}},
-                "labels_remove": {"type": "array", "items": {"type": "string"}},
-                "acceptance_criteria": {"type": "array", "items": {}},
-                "memory_refs_add": {"type": "array", "items": {"type": "string"}},
-                "memory_refs_remove": {"type": "array", "items": {"type": "string"}}
+                "id": {"type": "string", "description": "Task UUID or short ID"},
+                "acceptance_criteria": {"type": "array", "items": {"type": "object"}, "description": "Full acceptance criteria array with met state updated"}
             }
         }),
     )
