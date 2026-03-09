@@ -47,13 +47,15 @@ fn push_fragment(fragments: &mut Vec<String>, value: String) {
     fragments.push(snippet);
 }
 
+/// Maximum reactive compaction attempts before giving up.
+const MAX_COMPACTION_RETRIES: u32 = 2;
+
 /// Djinn-native reply loop. Drives an `LlmProvider` stream, dispatches tool
 /// calls via the extension layer, and continues until the assistant produces a
 /// text-only response or a termination condition is reached.
 ///
-/// Returns `(result, parsed_output)`.  A context-length-exceeded condition is
-/// returned as `Err(anyhow!("context_length_exceeded"))` so the lifecycle can
-/// trigger compaction rather than treating it as a fatal error.
+/// Context-length-exceeded errors trigger reactive compaction and retry
+/// (up to `MAX_COMPACTION_RETRIES` times) before failing the session.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_reply_loop(
     provider: &dyn LlmProvider,
@@ -81,6 +83,7 @@ pub(super) async fn run_reply_loop(
         let mut saw_any_tool_use = false;
         let mut assistant_message_count: usize = 0;
         let mut assistant_fragments: Vec<String> = Vec::new();
+        let mut compaction_attempts: u32 = 0;
 
         // Track the last assistant text for output parsing.
         let mut last_assistant_text = String::new();
@@ -107,21 +110,41 @@ pub(super) async fn run_reply_loop(
             );
 
             // ── Start streaming from the provider ────────────────────────────
-            let mut stream = provider.stream(conversation, tools).await.map_err(|e| {
-                if is_context_length_error(&e) {
-                    // Bubble up as a distinct sentinel so the caller can compact.
-                    return anyhow::anyhow!("context_length_exceeded");
+            let stream_result = provider.stream(conversation, tools).await;
+            let mut stream = match stream_result {
+                Ok(s) => s,
+                Err(e) if is_context_length_error(&e) && compaction_attempts < MAX_COMPACTION_RETRIES => {
+                    // Reactive compaction: context exceeded on stream init.
+                    tracing::warn!(
+                        task_id = %task_id,
+                        compaction_attempts,
+                        "ReplyLoop: context_length_exceeded on stream init; compacting reactively"
+                    );
+                    let compacted = crate::agent::compaction::compact_conversation(
+                        provider, conversation, session_id, task_id, app_state,
+                    ).await;
+                    if compacted {
+                        total_tokens_in = 0;
+                        total_tokens_out = 0;
+                        compaction_attempts += 1;
+                        conversation.push(crate::agent::message::Message::user(
+                            "Continue with the task.",
+                        ));
+                        continue;
+                    }
+                    return Err(anyhow::anyhow!(
+                        "context_length_exceeded and reactive compaction failed"
+                    ));
                 }
-                let diag = runtime_fs_diagnostics(project_path, worktree_path);
-                let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);
-                anyhow::anyhow!(
-                    "provider stream init failed: display={} debug={:?}; {}; {}",
-                    e,
-                    e,
-                    diag,
-                    env_diag
-                )
-            })?;
+                Err(e) => {
+                    let diag = runtime_fs_diagnostics(project_path, worktree_path);
+                    let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);
+                    return Err(anyhow::anyhow!(
+                        "provider stream init failed: display={} debug={:?}; {}; {}",
+                        e, e, diag, env_diag
+                    ));
+                }
+            };
 
             // Accumulate the assistant turn from stream events.
             let mut turn_text = String::new();
@@ -130,6 +153,7 @@ pub(super) async fn run_reply_loop(
             let mut turn_tokens_out: u32 = 0;
             let mut interrupted: Option<&'static str> = None;
             let mut saw_round_event = false;
+            let mut needs_reactive_compaction = false;
 
             loop {
                 tokio::select! {
@@ -143,17 +167,21 @@ pub(super) async fn run_reply_loop(
                     }
                     evt = stream.next() => {
                         let Some(evt) = evt else { break; };
-                        let evt = evt.map_err(|e| {
-                            if is_context_length_error(&e) {
-                                return anyhow::anyhow!("context_length_exceeded");
+                        let evt = match evt {
+                            Ok(e) => e,
+                            Err(e) if is_context_length_error(&e) && compaction_attempts < MAX_COMPACTION_RETRIES => {
+                                needs_reactive_compaction = true;
+                                break;
                             }
-                            let diag = runtime_fs_diagnostics(project_path, worktree_path);
-                            let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);
-                            anyhow::anyhow!(
-                                "provider stream event failed: display={} debug={:?}; {}; {}",
-                                e, e, diag, env_diag
-                            )
-                        })?;
+                            Err(e) => {
+                                let diag = runtime_fs_diagnostics(project_path, worktree_path);
+                                let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);
+                                return Err(anyhow::anyhow!(
+                                    "provider stream event failed: display={} debug={:?}; {}; {}",
+                                    e, e, diag, env_diag
+                                ));
+                            }
+                        };
 
                         saw_any_event = true;
                         saw_round_event = true;
@@ -209,6 +237,30 @@ pub(super) async fn run_reply_loop(
 
             if let Some(reason) = interrupted {
                 return Err(anyhow::anyhow!(reason));
+            }
+
+            // ── Reactive compaction: mid-stream context overflow ─────────────
+            if needs_reactive_compaction {
+                tracing::warn!(
+                    task_id = %task_id,
+                    compaction_attempts,
+                    "ReplyLoop: context_length_exceeded mid-stream; compacting reactively"
+                );
+                let compacted = crate::agent::compaction::compact_conversation(
+                    provider, conversation, session_id, task_id, app_state,
+                ).await;
+                if compacted {
+                    total_tokens_in = 0;
+                    total_tokens_out = 0;
+                    compaction_attempts += 1;
+                    conversation.push(crate::agent::message::Message::user(
+                        "Continue with the task.",
+                    ));
+                    continue;
+                }
+                return Err(anyhow::anyhow!(
+                    "context_length_exceeded and reactive compaction failed"
+                ));
             }
 
             if !saw_round_event {
@@ -277,16 +329,21 @@ pub(super) async fn run_reply_loop(
                     usage_pct = total_tokens_in as f64 / context_window as f64,
                     "ReplyLoop: compaction threshold reached, compacting"
                 );
-                let mut cont_count = 0u32;
-                crate::agent::compaction::compact_conversation(
+                let compacted = crate::agent::compaction::compact_conversation(
                     provider,
                     conversation,
                     session_id,
                     task_id,
                     app_state,
-                    &mut cont_count,
                 )
                 .await;
+                if compacted {
+                    // Reset token counters — the compacted conversation is much
+                    // smaller.  The next turn's usage report will set accurate
+                    // values for the new context size.
+                    total_tokens_in = 0;
+                    total_tokens_out = 0;
+                }
                 // If this was a text-only turn, we need another LLM turn to
                 // continue after the compacted context is in place.
                 if turn_tool_calls.is_empty() {
@@ -310,57 +367,60 @@ pub(super) async fn run_reply_loop(
                 break;
             }
 
-            // Dispatch each tool call and collect results.
-            let mut tool_result_blocks: Vec<ContentBlock> = Vec::new();
-            for tool_call in &turn_tool_calls {
-                let ContentBlock::ToolUse { id, name, input } = tool_call else {
-                    continue;
-                };
-
-                tracing::debug!(
-                    task_id = %task_id,
-                    tool = %name,
-                    tool_use_id = %id,
-                    "ReplyLoop: dispatching tool call"
-                );
-
-                let args = match input {
-                    serde_json::Value::Object(map) => Some(map.clone()),
-                    _ => None,
-                };
-
-                let (content, is_error) =
-                    match extension::call_tool(app_state, name, args, worktree_path).await {
-                        Ok(value) => {
-                            let text = if value.is_string() {
-                                value.as_str().unwrap_or("").to_string()
-                            } else {
-                                value.to_string()
-                            };
-                            (vec![ContentBlock::Text { text }], false)
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                task_id = %task_id,
-                                tool = %name,
-                                error = %err,
-                                "ReplyLoop: tool call returned error"
-                            );
-                            (
-                                vec![ContentBlock::Text {
-                                    text: format!("error: {err}"),
-                                }],
-                                true,
-                            )
-                        }
+            // Dispatch tool calls concurrently and collect results.
+            let tool_futures: Vec<_> = turn_tool_calls
+                .iter()
+                .filter_map(|tool_call| {
+                    let ContentBlock::ToolUse { id, name, input } = tool_call else {
+                        return None;
                     };
-
-                tool_result_blocks.push(ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content,
-                    is_error,
-                });
-            }
+                    tracing::debug!(
+                        task_id = %task_id,
+                        tool = %name,
+                        tool_use_id = %id,
+                        "ReplyLoop: dispatching tool call"
+                    );
+                    let id = id.clone();
+                    let name = name.clone();
+                    let args = match input {
+                        serde_json::Value::Object(map) => Some(map.clone()),
+                        _ => None,
+                    };
+                    Some(async move {
+                        let (content, is_error) =
+                            match extension::call_tool(app_state, &name, args, worktree_path).await {
+                                Ok(value) => {
+                                    let text = if value.is_string() {
+                                        value.as_str().unwrap_or("").to_string()
+                                    } else {
+                                        value.to_string()
+                                    };
+                                    (vec![ContentBlock::Text { text }], false)
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        task_id = %task_id,
+                                        tool = %name,
+                                        error = %err,
+                                        "ReplyLoop: tool call returned error"
+                                    );
+                                    (
+                                        vec![ContentBlock::Text {
+                                            text: format!("error: {err}"),
+                                        }],
+                                        true,
+                                    )
+                                }
+                            };
+                        ContentBlock::ToolResult {
+                            tool_use_id: id,
+                            content,
+                            is_error,
+                        }
+                    })
+                })
+                .collect();
+            let tool_result_blocks = futures::future::join_all(tool_futures).await;
 
             // Push a user message containing all tool results.
             let tool_result_msg = Message {

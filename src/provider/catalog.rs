@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use crate::models::provider::{Model, Pricing, Provider};
-use goose::providers::base::{ProviderMetadata, ProviderType};
+use super::builtin::BuiltinProvider;
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -185,47 +185,36 @@ impl CatalogService {
 
     // ── Write accessors ───────────────────────────────────────────────────────
 
-    /// Inject synthetic catalog entries for Goose-registered providers that have no
+    /// Inject synthetic catalog entries for built-in providers that have no
     /// corresponding models.dev entry.  This makes providers like `chatgpt_codex` and
     /// `gcp_vertex_ai` visible in `provider_catalog` without requiring them to exist
     /// in the upstream models.dev JSON.
     ///
     /// Model lists are sourced from models.dev when a mapping exists (see
-    /// [`MODEL_SOURCE_MAP`]), falling back to Goose's hardcoded `known_models`.
-    pub fn inject_goose_providers(&self, entries: &[(ProviderMetadata, ProviderType)]) {
+    /// [`MODEL_SOURCE_MAP`]).
+    pub fn inject_builtin_providers(&self, entries: &[BuiltinProvider]) {
         let mut data = self.inner.write().unwrap();
         let existing_ids: HashSet<String> = data.providers.iter().map(|p| p.id.clone()).collect();
 
-        for (meta, _) in entries {
-            if existing_ids.contains(&meta.name) {
+        for bp in entries {
+            if existing_ids.contains(bp.id) {
                 continue;
             }
 
-            let env_vars: Vec<String> = meta
-                .config_keys
-                .iter()
-                .filter(|k| k.required)
-                .map(|k| k.name.clone())
-                .collect();
-
             let provider = Provider {
-                id: meta.name.clone(),
-                name: meta.display_name.clone(),
+                id: bp.id.to_string(),
+                name: bp.display_name.to_string(),
                 npm: String::new(),
-                env_vars,
+                env_vars: bp.required_env_vars.iter().map(|s| s.to_string()).collect(),
                 base_url: String::new(),
-                docs_url: meta.model_doc_link.clone(),
-                is_openai_compatible: false, // filtered via goose_ids instead
+                docs_url: bp.docs_url.to_string(),
+                is_openai_compatible: false, // filtered via builtin_ids instead
             };
             data.providers.push(provider);
 
             // Try to source models from models.dev via the mapping table.
-            let models = self
-                .models_from_catalog_source(&data, &meta.name)
-                .unwrap_or_else(|| models_from_goose_metadata(meta));
-
-            if !models.is_empty() {
-                data.models_idx.insert(meta.name.clone(), models);
+            if let Some(models) = self.models_from_catalog_source(&data, bp.id) {
+                data.models_idx.insert(bp.id.to_string(), models);
             }
         }
 
@@ -238,11 +227,11 @@ impl CatalogService {
     fn models_from_catalog_source(
         &self,
         data: &CatalogData,
-        goose_provider_id: &str,
+        builtin_provider_id: &str,
     ) -> Option<Vec<Model>> {
         let (_, source_id, prefix) = MODEL_SOURCE_MAP
             .iter()
-            .find(|(goose_id, _, _)| *goose_id == goose_provider_id)?;
+            .find(|(builtin_id, _, _)| *builtin_id == builtin_provider_id)?;
 
         let source_models = data.models_idx.get(*source_id)?;
         let models: Vec<Model> = source_models
@@ -252,7 +241,7 @@ impl CatalogService {
                 None => true,
             })
             .map(|m| Model {
-                provider_id: goose_provider_id.to_string(),
+                provider_id: builtin_provider_id.to_string(),
                 ..m.clone()
             })
             .collect();
@@ -343,13 +332,13 @@ fn is_openai_compatible(npm: &str) -> bool {
     npm.contains("openai-compatible") || npm == "@ai-sdk/openai"
 }
 
-// ── Goose → models.dev model source mapping ──────────────────────────────────
+// ── Built-in → models.dev model source mapping ───────────────────────────────
 //
-// Maps Goose-only provider IDs to a models.dev provider whose model list should
-// be used instead of Goose's hardcoded `known_models`.  The optional filter
-// prefix narrows the source list to relevant models.
+// Maps built-in provider IDs to a models.dev provider whose model list should
+// be used.  The optional filter prefix narrows the source list to relevant
+// models.
 //
-// (goose_provider_id, models_dev_provider_id, optional_model_name_filter)
+// (builtin_provider_id, models_dev_provider_id, optional_model_name_filter)
 const MODEL_SOURCE_MAP: &[(&str, &str, Option<&str>)] = &[
     ("chatgpt_codex", "openai", Some("codex")),
     ("gcp_vertex_ai", "google-vertex", None),
@@ -359,28 +348,6 @@ const MODEL_SOURCE_MAP: &[(&str, &str, Option<&str>)] = &[
     ("claude-code", "anthropic", None),
     ("gemini-cli", "google", None),
 ];
-
-/// Build a model list from Goose's `ProviderMetadata.known_models` (fallback).
-fn models_from_goose_metadata(meta: &ProviderMetadata) -> Vec<Model> {
-    meta.known_models
-        .iter()
-        .map(|info| Model {
-            id: info.name.clone(),
-            provider_id: meta.name.clone(),
-            name: info.name.clone(),
-            tool_call: true,
-            reasoning: false,
-            attachment: false,
-            context_window: info.context_limit as i64,
-            output_limit: 0,
-            pricing: Pricing {
-                input_per_million: info.input_token_cost.unwrap_or(0.0) * 1_000_000.0,
-                output_per_million: info.output_token_cost.unwrap_or(0.0) * 1_000_000.0,
-                ..Pricing::default()
-            },
-        })
-        .collect()
-}
 
 #[cfg(test)]
 mod tests {
@@ -455,63 +422,44 @@ mod tests {
     }
 
     #[test]
-    fn inject_goose_providers_adds_missing_entries() {
-        use goose::providers::base::ConfigKey;
-
+    fn inject_builtin_providers_adds_missing_entries() {
         let catalog = CatalogService::new();
         let initial_count = catalog.list_providers().len();
 
-        // Simulate a Goose-only provider not in models.dev.
-        let meta = ProviderMetadata::new(
-            "test_oauth_provider",
-            "Test OAuth",
-            "An OAuth-only test provider",
-            "test-model-v1",
-            vec!["test-model-v1", "test-model-v2"],
-            "https://example.com/docs",
-            vec![ConfigKey::new_oauth(
-                "TEST_OAUTH_TOKEN",
-                true,
-                true,
-                None,
-                false,
-            )],
-        );
-        let entries = vec![(meta, ProviderType::Preferred)];
-        catalog.inject_goose_providers(&entries);
+        let entries = &[BuiltinProvider {
+            id: "test_builtin",
+            display_name: "Test Builtin",
+            required_env_vars: &["TEST_API_KEY"],
+            oauth_keys: &[],
+            docs_url: "https://example.com/docs",
+        }];
+        catalog.inject_builtin_providers(entries);
 
         let providers = catalog.list_providers();
         assert_eq!(providers.len(), initial_count + 1);
 
         let injected = providers
             .iter()
-            .find(|p| p.id == "test_oauth_provider")
+            .find(|p| p.id == "test_builtin")
             .expect("injected provider should exist");
-        assert_eq!(injected.name, "Test OAuth");
+        assert_eq!(injected.name, "Test Builtin");
         assert!(!injected.is_openai_compatible);
-
-        let models = catalog.list_models("test_oauth_provider");
-        assert_eq!(models.len(), 2);
-        assert_eq!(models[0].provider_id, "test_oauth_provider");
     }
 
     #[test]
-    fn inject_goose_providers_skips_existing() {
+    fn inject_builtin_providers_skips_existing() {
         let catalog = CatalogService::new();
         let initial_count = catalog.list_providers().len();
 
         // "anthropic" is already in the snapshot — should not be duplicated.
-        let meta = ProviderMetadata::new(
-            "anthropic",
-            "Anthropic (dupe)",
-            "",
-            "claude-3",
-            vec![],
-            "",
-            vec![],
-        );
-        let entries = vec![(meta, ProviderType::Preferred)];
-        catalog.inject_goose_providers(&entries);
+        let entries = &[BuiltinProvider {
+            id: "anthropic",
+            display_name: "Anthropic (dupe)",
+            required_env_vars: &[],
+            oauth_keys: &[],
+            docs_url: "",
+        }];
+        catalog.inject_builtin_providers(entries);
 
         assert_eq!(catalog.list_providers().len(), initial_count);
     }

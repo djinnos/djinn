@@ -4,9 +4,7 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
-use goose::agents::ExtensionConfig;
-use goose::conversation::message::{Message, MessageContent};
-use rmcp::model::{CallToolResult as RmcpCallToolResult, Content as RmcpContent, Tool as RmcpTool};
+use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -17,121 +15,6 @@ use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
 use crate::models::task::Task;
 use crate::server::AppState;
-
-pub fn config(agent_type: AgentType) -> ExtensionConfig {
-    let mut tool_values = vec![
-        serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
-        serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
-        serde_json::to_value(tool_memory_read()).expect("serialize tool_memory_read"),
-        serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
-    ];
-
-    let mut available_tools = vec![
-        "task_show".to_string(),
-        "task_comment_add".to_string(),
-        "memory_read".to_string(),
-        "memory_search".to_string(),
-    ];
-
-    tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
-    available_tools.push("shell".to_string());
-
-    // Worker and ConflictResolver get file write/edit tools (ADR-027).
-    if matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver) {
-        tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
-        available_tools.push("write".to_string());
-        tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
-        available_tools.push("edit".to_string());
-    }
-
-    // Only TaskReviewer gets the AC-update tool (ADR-022).
-    if matches!(agent_type, AgentType::TaskReviewer) {
-        tool_values.push(
-            serde_json::to_value(tool_task_update_ac()).expect("serialize tool_task_update_ac"),
-        );
-        available_tools.push("task_update_ac".to_string());
-    }
-
-    // PM gets: task management tools + PM-only intervention tools (no worktree tools).
-    if matches!(agent_type, AgentType::PM) {
-        for (value, name) in [
-            (serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"), "task_create"),
-            (serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"), "task_update"),
-            (serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"), "task_transition"),
-            (serde_json::to_value(tool_task_pm_reset_branch()).expect("serialize tool_task_pm_reset_branch"), "task_pm_reset_branch"),
-            (serde_json::to_value(tool_task_pm_archive_activity()).expect("serialize tool_task_pm_archive_activity"), "task_pm_archive_activity"),
-            (serde_json::to_value(tool_task_pm_reset_counters()).expect("serialize tool_task_pm_reset_counters"), "task_pm_reset_counters"),
-            (serde_json::to_value(tool_task_pm_reset_for_rework()).expect("serialize tool_task_pm_reset_for_rework"), "task_pm_reset_for_rework"),
-        ] {
-            tool_values.push(value);
-            available_tools.push(name.to_string());
-        }
-    }
-
-    let tools = serde_json::from_value(serde_json::Value::Array(tool_values))
-        .expect("deserialize goose frontend tools");
-
-    ExtensionConfig::Frontend {
-        name: "djinn".to_string(),
-        description: "Djinn task and memory tools".to_string(),
-        tools,
-        instructions: Some(
-            "Use Djinn tools for task lifecycle and project memory. For shell calls, pass workdir as the active task worktree path.".to_string(),
-        ),
-        bundled: Some(true),
-        available_tools,
-    }
-}
-
-pub async fn handle_event(
-    state: &AppState,
-    agent: &goose::agents::Agent,
-    event: &goose::agents::AgentEvent,
-    worktree_path: &Path,
-) {
-    let goose::agents::AgentEvent::Message(msg) = event else {
-        return;
-    };
-
-    handle_frontend_requests_in_message(state, agent, msg, worktree_path).await;
-}
-
-async fn handle_frontend_requests_in_message(
-    state: &AppState,
-    agent: &goose::agents::Agent,
-    message: &Message,
-    worktree_path: &Path,
-) {
-    for content in &message.content {
-        let MessageContent::FrontendToolRequest(req) = content else {
-            continue;
-        };
-
-        let payload = match &req.tool_call {
-            Ok(tool_call) => dispatch_tool_call(state, tool_call, worktree_path).await,
-            Err(err) => Err(format!("invalid frontend tool call: {err}")),
-        };
-
-        let (value, is_error) = match payload {
-            Ok(value) => (value, false),
-            Err(err) => (serde_json::json!({ "error": err }), true),
-        };
-
-        let ours = RmcpCallToolResult {
-            content: vec![RmcpContent::text(value.to_string())],
-            structured_content: None,
-            is_error: Some(is_error),
-            meta: None,
-        };
-
-        let result = Ok(serde_json::from_value(
-            serde_json::to_value(ours).expect("serialize call_tool_result"),
-        )
-        .expect("deserialize goose call_tool_result"));
-
-        agent.handle_tool_result(req.id.clone(), result).await;
-    }
-}
 
 #[derive(Deserialize)]
 struct IncomingToolCall {

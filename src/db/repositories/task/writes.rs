@@ -158,6 +158,20 @@ impl TaskRepository {
         Ok(task)
     }
 
+    /// Increment `continuation_count` by 1 (used by compaction).
+    pub async fn increment_continuation_count(&self, id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE tasks SET continuation_count = continuation_count + 1,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
     /// Replace the `memory_refs` JSON array on a task.
     pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;

@@ -201,18 +201,17 @@ impl AppState {
             Err(e) => tracing::warn!(error = %e, "failed to load custom providers from DB"),
         }
 
-        // Inject synthetic catalog entries for Goose-only providers (e.g.
+        // Inject synthetic catalog entries for built-in providers (e.g.
         // chatgpt_codex, gcp_vertex_ai) that aren't in models.dev.
-        let goose_entries = goose::providers::providers().await;
-        self.catalog().inject_goose_providers(&goose_entries);
+        use crate::provider::builtin::BUILTIN_PROVIDERS;
+        self.catalog().inject_builtin_providers(BUILTIN_PROVIDERS);
 
         // Kick off background refresh from models.dev.
         let catalog = self.catalog().clone();
-        let goose_entries_for_refresh = goose_entries.clone();
         tokio::spawn(async move {
             catalog.refresh().await;
-            // Re-inject after refresh so Goose-only providers survive the replace.
-            catalog.inject_goose_providers(&goose_entries_for_refresh);
+            // Re-inject after refresh so built-in providers survive the replace.
+            catalog.inject_builtin_providers(BUILTIN_PROVIDERS);
         });
 
         // Restore sync state from DB and start background auto-export task.

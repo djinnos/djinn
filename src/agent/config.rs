@@ -1,15 +1,10 @@
 // AgentConfig construction helpers.
 //
-// Djinn-specific configuration bundles used when spawning Goose agents.
-// Full provider wiring and AgentConfig assembly is implemented in d9s4
-// (AgentSupervisor with session tracking and capacity).
+// Djinn-specific configuration bundles used when spawning agent sessions.
 
 use super::AgentType;
 
-/// Lightweight config bundle passed to AgentSupervisor::dispatch().
-///
-/// Holds the provider/model selection and the agent role. The supervisor
-/// uses this to build a full `goose::agents::AgentConfig` in d9s4.
+/// Lightweight config bundle passed to the slot pool for dispatching.
 pub struct DispatchConfig {
     pub agent_type: AgentType,
     pub provider_name: String,
