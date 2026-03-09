@@ -220,8 +220,8 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
 
         {/* Row 2: Metadata line */}
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-          <PriorityBadge priority={task.priority} />
           <TaskIdLabel taskId={task.id} shortId={task.short_id} />
+          <PriorityBadge priority={task.priority} />
 
           {/* Blocker badge */}
           {hasBlockers && (
