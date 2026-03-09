@@ -33,6 +33,13 @@ impl TaskRepository {
             .await?;
         let from = TaskStatus::parse(&current.status)?;
 
+        // Snapshot AC when reviewer starts so we can detect stale cycles later.
+        let ac_snapshot = if action == TransitionAction::TaskReviewStart {
+            Some(current.acceptance_criteria.clone())
+        } else {
+            None
+        };
+
         // Validate and compute side effects.
         let apply = compute_transition(&action, &from, target_override.as_ref())?;
 
@@ -66,15 +73,15 @@ impl TaskRepository {
             "UPDATE tasks SET
                 status = ?2,
                 reopen_count = reopen_count + ?3,
-                continuation_count = CASE WHEN ?4 THEN 0 ELSE continuation_count END,
+                continuation_count = CASE WHEN ?4 THEN 0 WHEN ?5 THEN continuation_count + 1 ELSE continuation_count END,
                 closed_at = CASE
-                    WHEN ?5 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                    WHEN ?6 THEN NULL
+                    WHEN ?6 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHEN ?7 THEN NULL
                     ELSE closed_at
                 END,
                 close_reason = CASE
-                    WHEN ?7 IS NOT NULL THEN ?7
-                    WHEN ?8 THEN NULL
+                    WHEN ?8 IS NOT NULL THEN ?8
+                    WHEN ?9 THEN NULL
                     ELSE close_reason
                 END,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -84,6 +91,7 @@ impl TaskRepository {
         .bind(to_str)
         .bind(if apply.increment_reopen { 1i64 } else { 0 })
         .bind(apply.reset_continuation)
+        .bind(apply.increment_continuation)
         .bind(apply.set_closed_at)
         .bind(apply.clear_closed_at)
         .bind(apply.close_reason)
@@ -93,12 +101,16 @@ impl TaskRepository {
 
         // Append activity log entry.
         let activity_id = uuid::Uuid::now_v7().to_string();
-        let payload = serde_json::json!({
+        let mut payload_obj = serde_json::json!({
             "from_status": from_str,
             "to_status": to_str,
             "reason": if reason_str.is_empty() { None } else { Some(reason_str.as_str()) },
-        })
-        .to_string();
+        });
+        if let Some(ref ac) = ac_snapshot {
+            let ac_value: serde_json::Value = serde_json::from_str(ac).unwrap_or(serde_json::json!([]));
+            payload_obj["ac_snapshot"] = ac_value;
+        }
+        let payload = payload_obj.to_string();
 
         sqlx::query(
             "INSERT INTO activity_log

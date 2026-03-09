@@ -147,7 +147,10 @@ pub async fn run_task_lifecycle(
 
     let paused = find_paused_session_record(&task_id, &app_state).await;
 
-    let worktree_path = if let Some(paused) = paused {
+    let worktree_path = if agent_type == AgentType::PM {
+        // PM has no dedicated worktree — use the project dir directly.
+        project_dir.clone()
+    } else if let Some(paused) = paused {
         if let (Some(paused_session_id), Some(paused_worktree_path)) = (
             paused.goose_session_id.clone(),
             paused.worktree_path.as_deref().map(PathBuf::from),
@@ -696,6 +699,10 @@ pub async fn run_task_lifecycle(
                 TransitionAction::ReleaseTaskReview,
                 Some(reason.to_string()),
             )),
+            AgentType::PM => Some((
+                TransitionAction::PmInterventionRelease,
+                Some(reason.to_string()),
+            )),
         },
     };
 
@@ -711,7 +718,9 @@ pub async fn run_task_lifecycle(
         );
         let is_reviewer_rejection = matches!(
             action,
-            TransitionAction::TaskReviewReject | TransitionAction::TaskReviewRejectConflict
+            TransitionAction::TaskReviewReject
+                | TransitionAction::TaskReviewRejectStale
+                | TransitionAction::TaskReviewRejectConflict
         );
         let is_submit_verification = action == TransitionAction::SubmitVerification;
         if let Err(e) = task_repo

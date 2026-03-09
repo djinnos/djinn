@@ -221,6 +221,7 @@ pub(super) async fn run_reply_loop(
             let reason = match agent_type {
                 AgentType::Worker | AgentType::ConflictResolver => "worker ended without any tool use (provider error?)",
                 AgentType::TaskReviewer => "task reviewer ended without any tool use (provider error?)",
+                AgentType::PM => "PM agent ended without any tool use (provider error?)",
             };
             tracing::warn!(
                 task_id = %task_id,

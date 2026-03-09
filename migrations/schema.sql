@@ -1,6 +1,6 @@
 -- Canonical schema — ground truth. Matches result of running all migrations.
 -- Updated manually after each migration is added.
--- Last updated: V20260309000002__rebuild_tasks_add_verifying.sql
+-- Last updated: V20260309000004__activity_log_archived.sql
 
 CREATE TABLE settings (
     key        TEXT NOT NULL PRIMARY KEY,
@@ -54,6 +54,7 @@ CREATE TABLE tasks (
                              CHECK(status IN (
                                  'draft', 'open', 'in_progress', 'verifying',
                                  'needs_task_review', 'in_task_review',
+                                 'needs_pm_intervention', 'in_pm_intervention',
                                  'closed'
                              )),
     priority            INTEGER NOT NULL DEFAULT 0,
@@ -89,7 +90,8 @@ CREATE TABLE activity_log (
     actor_role  TEXT NOT NULL DEFAULT '',
     event_type  TEXT NOT NULL,
     payload     TEXT NOT NULL DEFAULT '{}',
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    archived    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX activity_log_task_id ON activity_log(task_id);

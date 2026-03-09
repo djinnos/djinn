@@ -14,6 +14,7 @@ use crate::models::task::Task;
 const DEV_TEMPLATE: &str = include_str!("prompts/dev.md");
 const CONFLICT_RESOLVER_TEMPLATE: &str = include_str!("prompts/conflict-resolver.md");
 const TASK_REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.md");
+const PM_TEMPLATE: &str = include_str!("prompts/pm.md");
 
 // ─── Context ───────────────────────────────────────────────────────────────────
 
@@ -61,6 +62,7 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
         AgentType::Worker => DEV_TEMPLATE,
         AgentType::ConflictResolver => CONFLICT_RESOLVER_TEMPLATE,
         AgentType::TaskReviewer => TASK_REVIEWER_TEMPLATE,
+        AgentType::PM => PM_TEMPLATE,
     };
 
     let ac = format_acceptance_criteria(&task.acceptance_criteria);

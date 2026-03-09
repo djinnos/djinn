@@ -9,6 +9,9 @@ use crate::models::session::SessionStatus;
 use crate::models::task::TransitionAction;
 use crate::server::AppState;
 
+// Stale cycle threshold: escalate after this many stale continuations.
+const STALE_ESCALATION_THRESHOLD: i64 = 3;
+
 use super::*;
 
 // ─── Epic review helpers ──────────────────────────────────────────────────────
@@ -244,6 +247,11 @@ pub(crate) async fn success_transition(
             // Worker completed — submit for background verification.
             Some((TransitionAction::SubmitVerification, None))
         }
+        AgentType::PM => {
+            // PM agent completed — mark intervention done; task returns to open.
+            tracing::info!(task_id = %task_id, "PM agent: intervention complete → task back to open");
+            Some((TransitionAction::PmInterventionComplete, None))
+        }
         AgentType::TaskReviewer => {
             // Derive verdict from acceptance criteria state on the task.
             let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
@@ -257,8 +265,30 @@ pub(crate) async fn success_transition(
                             .reviewer_feedback
                             .clone()
                             .unwrap_or_else(|| "reviewer found unmet acceptance criteria".to_string());
-                        tracing::info!(task_id = %task_id, feedback = %feedback, "task reviewer: unmet AC → reject");
-                        Some((TransitionAction::TaskReviewReject, Some(feedback)))
+
+                        // Detect stale reopen cycle: check AC met-state against snapshot from
+                        // when the current review cycle started.
+                        let is_stale = is_stale_review_cycle(task_id, &task.acceptance_criteria, app_state).await;
+                        let continuation_count = task.continuation_count;
+
+                        if is_stale && continuation_count + 1 >= STALE_ESCALATION_THRESHOLD {
+                            tracing::info!(
+                                task_id = %task_id,
+                                continuation_count = continuation_count,
+                                "task reviewer: stale cycle limit reached → escalating to PM intervention"
+                            );
+                            Some((TransitionAction::Escalate, Some(format!("stale reopen limit reached after {} cycles: {}", continuation_count + 1, feedback))))
+                        } else if is_stale {
+                            tracing::info!(
+                                task_id = %task_id,
+                                continuation_count = continuation_count,
+                                "task reviewer: stale cycle detected → increment continuation"
+                            );
+                            Some((TransitionAction::TaskReviewRejectStale, Some(feedback)))
+                        } else {
+                            tracing::info!(task_id = %task_id, "task reviewer: unmet AC, AC progress detected → reject");
+                            Some((TransitionAction::TaskReviewReject, Some(feedback)))
+                        }
                     }
                 }
                 Ok(None) => {
@@ -292,4 +322,34 @@ fn all_acceptance_criteria_met(ac_json: &str) -> bool {
         Ok(criteria) => !criteria.is_empty() && criteria.iter().all(|c| c.met),
         Err(_) => false,
     }
+}
+
+/// Returns true if the AC met-state is identical to the snapshot from when
+/// the current review cycle started (i.e. the worker made no AC progress).
+async fn is_stale_review_cycle(
+    task_id: &str,
+    current_ac_json: &str,
+    app_state: &AppState,
+) -> bool {
+    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let snapshot_json = match repo.last_review_start_ac_snapshot(task_id).await {
+        Ok(Some(s)) => s,
+        _ => return false, // no snapshot → assume not stale
+    };
+
+    // Compare only the `met` booleans, not the full AC (description may differ).
+    fn extract_met_pattern(json: &str) -> Vec<bool> {
+        #[derive(serde::Deserialize)]
+        struct Criterion {
+            #[serde(default)]
+            met: bool,
+        }
+        serde_json::from_str::<Vec<Criterion>>(json)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| c.met)
+            .collect()
+    }
+
+    extract_met_pattern(current_ac_json) == extract_met_pattern(&snapshot_json)
 }

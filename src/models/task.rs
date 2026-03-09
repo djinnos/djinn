@@ -60,6 +60,8 @@ pub enum TaskStatus {
     Verifying,
     NeedsTaskReview,
     InTaskReview,
+    NeedsPmIntervention,
+    InPmIntervention,
     Closed,
 }
 
@@ -73,6 +75,8 @@ impl TaskStatus {
             Self::Verifying => "verifying",
             Self::NeedsTaskReview => "needs_task_review",
             Self::InTaskReview => "in_task_review",
+            Self::NeedsPmIntervention => "needs_pm_intervention",
+            Self::InPmIntervention => "in_pm_intervention",
             Self::Closed => "closed",
         }
     }
@@ -86,6 +90,8 @@ impl TaskStatus {
             "verifying" => Ok(Self::Verifying),
             "needs_task_review" => Ok(Self::NeedsTaskReview),
             "in_task_review" => Ok(Self::InTaskReview),
+            "needs_pm_intervention" => Ok(Self::NeedsPmIntervention),
+            "in_pm_intervention" => Ok(Self::InPmIntervention),
             "closed" => Ok(Self::Closed),
             other => Err(Error::Internal(format!("unknown task status: {other}"))),
         }
@@ -111,6 +117,8 @@ pub enum TransitionAction {
     SubmitTaskReview,
     TaskReviewStart,
     TaskReviewReject,
+    /// Reviewer rejects with no AC progress — increments continuation_count.
+    TaskReviewRejectStale,
     TaskReviewRejectConflict,
     TaskReviewApprove,
     Close,
@@ -119,6 +127,14 @@ pub enum TransitionAction {
     ReleaseTaskReview,
     ForceClose,
     UserOverride,
+    /// System escalates stuck task to PM intervention queue.
+    Escalate,
+    /// PM agent starts working on an intervention task.
+    PmInterventionStart,
+    /// PM agent releases intervention (still needs attention).
+    PmInterventionRelease,
+    /// PM agent finishes intervention; task ready for worker again.
+    PmInterventionComplete,
 }
 
 impl TransitionAction {
@@ -129,11 +145,14 @@ impl TransitionAction {
             Self::VerificationFail
                 | Self::ReleaseVerification
                 | Self::TaskReviewReject
+                | Self::TaskReviewRejectStale
                 | Self::TaskReviewRejectConflict
                 | Self::Reopen
                 | Self::Release
                 | Self::ReleaseTaskReview
                 | Self::ForceClose
+                | Self::Escalate
+                | Self::PmInterventionRelease
         )
     }
 
@@ -149,6 +168,7 @@ impl TransitionAction {
             "submit_task_review" => Ok(Self::SubmitTaskReview),
             "task_review_start" => Ok(Self::TaskReviewStart),
             "task_review_reject" => Ok(Self::TaskReviewReject),
+            "task_review_reject_stale" => Ok(Self::TaskReviewRejectStale),
             "task_review_reject_conflict" => Ok(Self::TaskReviewRejectConflict),
             "task_review_approve" => Ok(Self::TaskReviewApprove),
             "close" => Ok(Self::Close),
@@ -157,6 +177,10 @@ impl TransitionAction {
             "release_task_review" => Ok(Self::ReleaseTaskReview),
             "force_close" => Ok(Self::ForceClose),
             "user_override" => Ok(Self::UserOverride),
+            "escalate" => Ok(Self::Escalate),
+            "pm_intervention_start" => Ok(Self::PmInterventionStart),
+            "pm_intervention_release" => Ok(Self::PmInterventionRelease),
+            "pm_intervention_complete" => Ok(Self::PmInterventionComplete),
             other => Err(Error::Internal(format!(
                 "unknown transition action: {other}"
             ))),
@@ -174,6 +198,8 @@ pub struct TransitionApply {
     pub increment_reopen: bool,
     /// Reset `continuation_count` to 0.
     pub reset_continuation: bool,
+    /// Increment `continuation_count` by 1 (for stale reopen detection).
+    pub increment_continuation: bool,
     /// Set `closed_at` to the current timestamp.
     pub set_closed_at: bool,
     /// Set `closed_at` to NULL.
@@ -192,6 +218,7 @@ impl Default for TransitionApply {
             to_status: None,
             increment_reopen: false,
             reset_continuation: false,
+            increment_continuation: false,
             set_closed_at: false,
             clear_closed_at: false,
             close_reason: None,
@@ -285,7 +312,19 @@ pub fn compute_transition(
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
                 increment_reopen: true,
-                reset_continuation: true,
+                // continuation_count handled by circuit breaker (reset if progress, increment if stale)
+                ..Default::default()
+            }
+        }
+
+        TransitionAction::TaskReviewRejectStale => {
+            if *from != TaskStatus::InTaskReview {
+                return bad("task_review_reject_stale is only valid from in_task_review");
+            }
+            TransitionApply {
+                to_status: Some(TaskStatus::Open),
+                increment_reopen: true,
+                increment_continuation: true,
                 ..Default::default()
             }
         }
@@ -377,6 +416,42 @@ pub fn compute_transition(
                 clear_closed_at: !closing,
                 close_reason: if closing { Some("force_closed") } else { None },
                 clear_close_reason: !closing,
+                ..Default::default()
+            }
+        }
+
+        TransitionAction::Escalate => {
+            if !matches!(from, TaskStatus::Open | TaskStatus::InTaskReview) {
+                return bad("escalate is only valid from open or in_task_review");
+            }
+            TransitionApply {
+                to_status: Some(TaskStatus::NeedsPmIntervention),
+                reset_continuation: true,
+                ..Default::default()
+            }
+        }
+
+        TransitionAction::PmInterventionStart => {
+            if *from != TaskStatus::NeedsPmIntervention {
+                return bad("pm_intervention_start is only valid from needs_pm_intervention");
+            }
+            TransitionApply::simple(TaskStatus::InPmIntervention)
+        }
+
+        TransitionAction::PmInterventionRelease => {
+            if *from != TaskStatus::InPmIntervention {
+                return bad("pm_intervention_release is only valid from in_pm_intervention");
+            }
+            TransitionApply::simple(TaskStatus::NeedsPmIntervention)
+        }
+
+        TransitionAction::PmInterventionComplete => {
+            if *from != TaskStatus::InPmIntervention {
+                return bad("pm_intervention_complete is only valid from in_pm_intervention");
+            }
+            TransitionApply {
+                to_status: Some(TaskStatus::Open),
+                reset_continuation: true,
                 ..Default::default()
             }
         }

@@ -454,6 +454,7 @@ pub(crate) async fn transition_start(
             Some(TransitionAction::Start)
         }
         (AgentType::TaskReviewer, "needs_task_review") => Some(TransitionAction::TaskReviewStart),
+        (AgentType::PM, "needs_pm_intervention") => Some(TransitionAction::PmInterventionStart),
         _ => None,
     };
 
@@ -475,6 +476,7 @@ pub(crate) async fn transition_interrupted(
     let action = match agent_type {
         AgentType::Worker | AgentType::ConflictResolver => TransitionAction::Release,
         AgentType::TaskReviewer => TransitionAction::ReleaseTaskReview,
+        AgentType::PM => TransitionAction::PmInterventionRelease,
     };
 
     let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
@@ -611,6 +613,8 @@ pub(crate) fn extensions_for(agent_type: AgentType) -> Vec<goose::config::Extens
                 available_tools: vec!["tree".to_string()],
             });
         }
+        // PM: no worktree tools — task management only
+        AgentType::PM => {}
     }
 
     exts
@@ -619,6 +623,7 @@ pub(crate) fn extensions_for(agent_type: AgentType) -> Vec<goose::config::Extens
 pub(crate) fn agent_type_for_task(task: &Task, has_conflict_context: bool) -> AgentType {
     match task.status.as_str() {
         "needs_task_review" | "in_task_review" => AgentType::TaskReviewer,
+        "needs_pm_intervention" | "in_pm_intervention" => AgentType::PM,
         "open" if has_conflict_context => AgentType::ConflictResolver,
         _ => AgentType::Worker,
     }

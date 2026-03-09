@@ -46,6 +46,8 @@ pub enum AgentType {
     ConflictResolver,
     /// Reviews a single task's diff and approves or rejects it.
     TaskReviewer,
+    /// PM agent that grooms backlog and handles intervention for stuck tasks.
+    PM,
 }
 
 impl AgentType {
@@ -54,6 +56,7 @@ impl AgentType {
             Self::Worker => "worker",
             Self::ConflictResolver => "conflict_resolver",
             Self::TaskReviewer => "task_reviewer",
+            Self::PM => "pm",
         }
     }
 }

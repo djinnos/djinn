@@ -43,6 +43,22 @@ pub fn config(agent_type: AgentType) -> ExtensionConfig {
         available_tools.push("task_update_ac".to_string());
     }
 
+    // PM gets: task management tools + PM-only intervention tools (no worktree tools).
+    if matches!(agent_type, AgentType::PM) {
+        for (value, name) in [
+            (serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"), "task_create"),
+            (serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"), "task_update"),
+            (serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"), "task_transition"),
+            (serde_json::to_value(tool_task_pm_reset_branch()).expect("serialize tool_task_pm_reset_branch"), "task_pm_reset_branch"),
+            (serde_json::to_value(tool_task_pm_archive_activity()).expect("serialize tool_task_pm_archive_activity"), "task_pm_archive_activity"),
+            (serde_json::to_value(tool_task_pm_reset_counters()).expect("serialize tool_task_pm_reset_counters"), "task_pm_reset_counters"),
+            (serde_json::to_value(tool_task_pm_reset_for_rework()).expect("serialize tool_task_pm_reset_for_rework"), "task_pm_reset_for_rework"),
+        ] {
+            tool_values.push(value);
+            available_tools.push(name.to_string());
+        }
+    }
+
     let tools = serde_json::from_value(serde_json::Value::Array(tool_values))
         .expect("deserialize goose frontend tools");
 
@@ -132,6 +148,11 @@ where
         "task_update" => call_task_update(state, &call.arguments).await,
         "task_update_ac" => call_task_update_ac(state, &call.arguments).await,
         "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
+        "task_transition" => call_task_transition(state, &call.arguments).await,
+        "task_pm_reset_branch" => call_task_pm_reset_branch(state, &call.arguments).await,
+        "task_pm_archive_activity" => call_task_pm_archive_activity(state, &call.arguments).await,
+        "task_pm_reset_counters" => call_task_pm_reset_counters(state, &call.arguments).await,
+        "task_pm_reset_for_rework" => call_task_pm_reset_for_rework(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
@@ -665,6 +686,168 @@ fn task_to_value(t: &Task) -> serde_json::Value {
     })
 }
 
+// ── PM-only tool params and handlers ─────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct TaskTransitionParams {
+    id: String,
+    action: String,
+    reason: Option<String>,
+    target_status: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TaskPmResetBranchParams {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct TaskPmArchiveActivityParams {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct TaskPmResetCountersParams {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct TaskPmResetForReworkParams {
+    id: String,
+}
+
+async fn call_task_transition(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    use crate::models::task::{TaskStatus, TransitionAction};
+    let p: TaskTransitionParams = parse_args(arguments)?;
+    let repo = TaskRepository::new(state.db().clone(), state.events().clone());
+    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
+    };
+    let action = TransitionAction::parse(&p.action).map_err(|e| e.to_string())?;
+    let target = p.target_status
+        .as_deref()
+        .map(TaskStatus::parse)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let updated = repo
+        .transition(&task.id, action, "pm-agent", "pm", p.reason.as_deref(), target)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(task_to_value(&updated))
+}
+
+async fn call_task_pm_reset_branch(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: TaskPmResetBranchParams = parse_args(arguments)?;
+    let repo = TaskRepository::new(state.db().clone(), state.events().clone());
+    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
+    };
+
+    // Interrupt and clean up any paused worker session (handles worktree cleanup too).
+    crate::actors::slot::interrupt_paused_worker_session(&task.id, state).await;
+    crate::actors::slot::cleanup_paused_worker_session(&task.id, state).await;
+
+    // Delete the task branch from git.
+    let project_dir = match crate::actors::slot::project_path_for_id(&task.project_id, state).await {
+        Some(p) => std::path::PathBuf::from(p),
+        None => return Ok(serde_json::json!({ "error": "project not found" })),
+    };
+    let base_branch = format!("task/{}", task.short_id);
+    match state.git_actor(&project_dir).await {
+        Ok(git) => {
+            if let Err(e) = git.delete_branch(&base_branch).await {
+                // Not fatal — branch may not exist
+                tracing::warn!(task_id = %task.short_id, branch = %base_branch, error = %e, "PM reset_branch: branch deletion failed (may not exist)");
+            }
+        }
+        Err(e) => {
+            return Ok(serde_json::json!({ "error": format!("git actor failed: {e}") }));
+        }
+    }
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "task_id": task.short_id,
+        "branch_deleted": base_branch,
+    }))
+}
+
+async fn call_task_pm_archive_activity(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: TaskPmArchiveActivityParams = parse_args(arguments)?;
+    let repo = TaskRepository::new(state.db().clone(), state.events().clone());
+    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
+    };
+    let count = repo.archive_activity_for_task(&task.id).await.map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "ok": true, "task_id": task.short_id, "archived_count": count }))
+}
+
+async fn call_task_pm_reset_counters(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: TaskPmResetCountersParams = parse_args(arguments)?;
+    let repo = TaskRepository::new(state.db().clone(), state.events().clone());
+    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
+    };
+    sqlx::query(
+        "UPDATE tasks SET reopen_count = 0, continuation_count = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1"
+    )
+    .bind(&task.id)
+    .execute(state.db().pool())
+    .await
+    .map_err(|e| e.to_string())?;
+    let updated = repo.get(&task.id).await.map_err(|e| e.to_string())?.unwrap_or(task.clone());
+    let _ = state.events().send(crate::events::DjinnEvent::TaskUpdated {
+        task: updated.clone(),
+        from_sync: false,
+    });
+    Ok(serde_json::json!({ "ok": true, "task_id": task.short_id, "reopen_count": 0, "continuation_count": 0 }))
+}
+
+async fn call_task_pm_reset_for_rework(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: TaskPmResetForReworkParams = parse_args(arguments)?;
+    // Archive activity
+    let archive_args = Some({
+        let mut m = serde_json::Map::new();
+        m.insert("id".to_string(), serde_json::json!(p.id));
+        m
+    });
+    call_task_pm_archive_activity(state, &archive_args).await?;
+    // Reset counters
+    let counters_args = Some({
+        let mut m = serde_json::Map::new();
+        m.insert("id".to_string(), serde_json::json!(p.id));
+        m
+    });
+    call_task_pm_reset_counters(state, &counters_args).await?;
+    // Reset branch
+    let branch_args = Some({
+        let mut m = serde_json::Map::new();
+        m.insert("id".to_string(), serde_json::json!(p.id));
+        m
+    });
+    let branch_result = call_task_pm_reset_branch(state, &branch_args).await?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "task_id": p.id,
+        "branch": branch_result,
+    }))
+}
+
 fn tool_task_show() -> RmcpTool {
     RmcpTool::new(
         "task_show".to_string(),
@@ -755,6 +938,123 @@ fn tool_shell() -> RmcpTool {
                 "command": {"type": "string"},
                 "workdir": {"type": "string", "description": "Absolute task worktree path"},
                 "timeout_ms": {"type": "integer"}
+            }
+        }),
+    )
+}
+
+fn tool_task_create() -> RmcpTool {
+    RmcpTool::new(
+        "task_create".to_string(),
+        "Create a new task under an epic.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["epic_id", "title"],
+            "properties": {
+                "epic_id": {"type": "string"},
+                "title": {"type": "string"},
+                "issue_type": {"type": "string"},
+                "description": {"type": "string"},
+                "design": {"type": "string"},
+                "priority": {"type": "integer"},
+                "owner": {"type": "string"}
+            }
+        }),
+    )
+}
+
+fn tool_task_update() -> RmcpTool {
+    RmcpTool::new(
+        "task_update".to_string(),
+        "Update task fields: title, description, design, priority, owner, labels, acceptance_criteria, memory_refs.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string"},
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "design": {"type": "string"},
+                "priority": {"type": "integer"},
+                "owner": {"type": "string"},
+                "labels_add": {"type": "array", "items": {"type": "string"}},
+                "labels_remove": {"type": "array", "items": {"type": "string"}},
+                "acceptance_criteria": {"type": "array", "items": {"type": "object"}},
+                "memory_refs_add": {"type": "array", "items": {"type": "string"}},
+                "memory_refs_remove": {"type": "array", "items": {"type": "string"}}
+            }
+        }),
+    )
+}
+
+fn tool_task_transition() -> RmcpTool {
+    RmcpTool::new(
+        "task_transition".to_string(),
+        "Execute a state machine transition on a task. PM can use: pm_intervention_start, pm_intervention_release, pm_intervention_complete, escalate, force_close.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id", "action"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"},
+                "action": {"type": "string", "description": "Transition action"},
+                "reason": {"type": "string"},
+                "target_status": {"type": "string"}
+            }
+        }),
+    )
+}
+
+fn tool_task_pm_reset_branch() -> RmcpTool {
+    RmcpTool::new(
+        "task_pm_reset_branch".to_string(),
+        "Delete the task's git branch and worktree so the next worker starts with a clean slate. Use after decomposing or rescoping a stuck task.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"}
+            }
+        }),
+    )
+}
+
+fn tool_task_pm_archive_activity() -> RmcpTool {
+    RmcpTool::new(
+        "task_pm_archive_activity".to_string(),
+        "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"}
+            }
+        }),
+    )
+}
+
+fn tool_task_pm_reset_counters() -> RmcpTool {
+    RmcpTool::new(
+        "task_pm_reset_counters".to_string(),
+        "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"}
+            }
+        }),
+    )
+}
+
+fn tool_task_pm_reset_for_rework() -> RmcpTool {
+    RmcpTool::new(
+        "task_pm_reset_for_rework".to_string(),
+        "Full intervention reset: archives all activity, resets counters, and deletes the branch/worktree. Use this after rescoping or decomposing a stuck task so the next worker starts completely fresh.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"}
             }
         }),
     )

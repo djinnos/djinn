@@ -373,6 +373,18 @@ pub(crate) async fn commit_final_work_if_needed(
 }
 
 pub(crate) async fn cleanup_worktree(task_id: &str, worktree_path: &Path, app_state: &AppState) {
+    // Never remove the main worktree (project root). Linked worktrees have `.git`
+    // as a file; the main worktree has `.git` as a directory.
+    let git_entry = worktree_path.join(".git");
+    if git_entry.is_dir() {
+        tracing::debug!(
+            task_id = %task_id,
+            worktree = %worktree_path.display(),
+            "Lifecycle: skipping cleanup — path is the main worktree (project root)"
+        );
+        return;
+    }
+
     let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
     if let Ok(Some(paused)) = session_repo.paused_for_task(task_id).await
         && paused.worktree_path.as_deref() == Some(worktree_path.to_str().unwrap_or(""))
