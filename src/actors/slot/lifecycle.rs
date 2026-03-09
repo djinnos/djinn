@@ -8,6 +8,7 @@ use goose::config::{GooseMode, PermissionManager};
 use goose::conversation::message::Message as GooseMessage;
 use goose::model::ModelConfig;
 use goose::providers;
+use goose::recipe::Response as GooseResponse;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -559,6 +560,29 @@ pub async fn run_task_lifecycle(
     );
     agent
         .extend_system_prompt("djinn_task".to_string(), prompt)
+        .await;
+
+    // Register the final_output tool so Goose keeps the agent loop running until
+    // the model explicitly signals completion.  Without this, a text-only response
+    // (no tool calls) causes Goose to exit immediately.
+    agent
+        .add_final_output_tool(GooseResponse {
+            json_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Brief summary of what was accomplished in this session"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["completed"],
+                        "description": "Session completion status"
+                    }
+                },
+                "required": ["summary", "status"]
+            })),
+        })
         .await;
 
     // Context window for SSE token-usage events (desktop UI).  Goose now owns
