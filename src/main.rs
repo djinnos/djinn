@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use clap::Parser;
 use rmcp::{
@@ -15,6 +16,7 @@ use rmcp::{
     },
 };
 use tokio::signal;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
@@ -67,7 +69,7 @@ async fn async_main() {
     let cli = Cli::parse();
 
     if cli.ensure_daemon {
-        if let Err(e) = ensure_daemon_running(&cli).await {
+        if let Err(e) = ensure_daemon_running(cli.port, cli.db_path.as_deref()).await {
             tracing::error!(error = %e, "failed to ensure daemon is running");
             std::process::exit(1);
         }
@@ -110,8 +112,39 @@ async fn async_main() {
 
 #[derive(Clone)]
 struct StdioBridge {
-    upstream: Peer<RoleClient>,
+    upstream: Arc<Mutex<Peer<RoleClient>>>,
     upstream_url: String,
+    port: u16,
+    db_path: Option<PathBuf>,
+}
+
+impl StdioBridge {
+    async fn connect(url: &str) -> Result<Peer<RoleClient>, Box<dyn std::error::Error>> {
+        let config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
+        let transport = StreamableHttpClientTransport::from_config(config);
+        let service = ().serve(transport).await?;
+        let peer = service.peer().clone();
+        // Keep the upstream service alive in the background
+        tokio::spawn(async move {
+            let _ = service.waiting().await;
+        });
+        Ok(peer)
+    }
+
+    async fn reconnect(&self) -> Result<(), McpError> {
+        tracing::info!("upstream connection lost, attempting reconnect");
+        ensure_daemon_running(self.port, self.db_path.as_deref())
+            .await
+            .map_err(|e| McpError::internal_error(format!("ensure daemon: {e}"), None))?;
+
+        let peer = Self::connect(&self.upstream_url)
+            .await
+            .map_err(|e| McpError::internal_error(format!("reconnect failed: {e}"), None))?;
+
+        *self.upstream.lock().await = peer;
+        tracing::info!("upstream reconnected successfully");
+        Ok(())
+    }
 }
 
 impl ServerHandler for StdioBridge {
@@ -133,10 +166,21 @@ impl ServerHandler for StdioBridge {
         request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        self.upstream
-            .list_tools(request)
-            .await
-            .map_err(|e| McpError::internal_error(format!("upstream list_tools failed: {e}"), None))
+        let peer = self.upstream.lock().await.clone();
+        match peer.list_tools(request.clone()).await {
+            Ok(result) => Ok(result),
+            Err(first_err) => {
+                tracing::warn!(error = %first_err, "upstream list_tools failed, reconnecting");
+                self.reconnect().await?;
+                let peer = self.upstream.lock().await.clone();
+                peer.list_tools(request).await.map_err(|e| {
+                    McpError::internal_error(
+                        format!("upstream list_tools failed after reconnect: {e}"),
+                        None,
+                    )
+                })
+            }
+        }
     }
 
     async fn call_tool(
@@ -144,28 +188,39 @@ impl ServerHandler for StdioBridge {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        self.upstream
-            .call_tool(request)
-            .await
-            .map_err(|e| McpError::internal_error(format!("upstream call_tool failed: {e}"), None))
+        let peer = self.upstream.lock().await.clone();
+        match peer.call_tool(request.clone()).await {
+            Ok(result) => Ok(result),
+            Err(first_err) => {
+                tracing::warn!(error = %first_err, "upstream call_tool failed, reconnecting");
+                self.reconnect().await?;
+                let peer = self.upstream.lock().await.clone();
+                peer.call_tool(request).await.map_err(|e| {
+                    McpError::internal_error(
+                        format!("upstream call_tool failed after reconnect: {e}"),
+                        None,
+                    )
+                })
+            }
+        }
     }
 }
 
 async fn run_stdio_bridge(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    ensure_daemon_running(cli).await?;
+    ensure_daemon_running(cli.port, cli.db_path.as_deref()).await?;
 
     let daemon_info = read_daemon_info();
     let upstream_url = resolve_upstream_url(cli.mcp_url.clone(), daemon_info.as_ref());
 
     tracing::info!(url = %upstream_url, "starting stdio bridge");
 
-    let config = StreamableHttpClientTransportConfig::with_uri(upstream_url.clone());
-    let upstream_transport = StreamableHttpClientTransport::from_config(config);
-    let upstream_service = ().serve(upstream_transport).await?;
+    let peer = StdioBridge::connect(&upstream_url).await?;
 
     let bridge = StdioBridge {
-        upstream: upstream_service.peer().clone(),
+        upstream: Arc::new(Mutex::new(peer)),
         upstream_url,
+        port: cli.port,
+        db_path: cli.db_path.clone(),
     };
 
     let stdio_service = bridge.serve(stdio()).await?;
@@ -173,7 +228,7 @@ async fn run_stdio_bridge(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn ensure_daemon_running(cli: &Cli) -> Result<(), String> {
+async fn ensure_daemon_running(port: u16, db_path: Option<&std::path::Path>) -> Result<(), String> {
     if let Some(info) = read_daemon_info()
         && daemon::pid_is_alive(info.pid)
     {
@@ -183,8 +238,8 @@ async fn ensure_daemon_running(cli: &Cli) -> Result<(), String> {
 
     let exe = std::env::current_exe().map_err(|e| format!("resolve current exe: {e}"))?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--port").arg(cli.port.to_string());
-    if let Some(path) = &cli.db_path {
+    cmd.arg("--port").arg(port.to_string());
+    if let Some(path) = db_path {
         cmd.arg("--db-path").arg(path);
     }
     cmd.stdin(Stdio::null())
