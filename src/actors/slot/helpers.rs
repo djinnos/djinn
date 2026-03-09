@@ -386,7 +386,12 @@ pub(crate) async fn load_provider_credential(
     app_state: &AppState,
 ) -> anyhow::Result<ProviderCredential> {
     // 1. Try OAuth tokens first for OAuth-capable providers.
-    match provider_id {
+    // Also resolve merged children: e.g. "openai" → "chatgpt_codex".
+    let effective_oauth_id = match provider_id {
+        "chatgpt_codex" | "githubcopilot" => provider_id,
+        other => crate::provider::builtin::resolve_oauth_provider(other).unwrap_or(other),
+    };
+    match effective_oauth_id {
         "chatgpt_codex" => {
             if let Some(tokens) = crate::agent::oauth::codex::CodexTokens::load_cached() {
                 if tokens.is_expired() {

@@ -106,7 +106,18 @@ pub async fn run_task_lifecycle(
 
     // ── Parse model ID and load credentials ───────────────────────────────────
     let (catalog_provider_id, model_name) = match parse_model_id(&model_id) {
-        Ok(v) => v,
+        Ok((provider_id, name)) => {
+            // Settings may store display names (e.g. "GPT-5.3 Codex") — resolve
+            // to the actual model ID (e.g. "gpt-5.3-codex") for the API.
+            let resolved = app_state
+                .catalog()
+                .list_models(&provider_id)
+                .iter()
+                .find(|m| m.id == name || m.name == name)
+                .map(|m| m.id.clone())
+                .unwrap_or(name);
+            (provider_id, resolved)
+        }
         Err(e) => {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: invalid model ID");
             transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;

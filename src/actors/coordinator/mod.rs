@@ -500,9 +500,11 @@ impl CoordinatorActor {
                 credentials.iter().map(|c| c.provider_id.clone()).collect();
 
             // Also consider OAuth-connected providers (e.g. chatgpt_codex).
+            // Include merged children's OAuth keys (e.g. openai inherits chatgpt_codex tokens).
             for provider in self.catalog.list_providers() {
-                let oauth_keys =
+                let mut oauth_keys =
                     crate::provider::builtin::oauth_keys_for_provider(&provider.id);
+                oauth_keys.extend(crate::provider::builtin::merged_oauth_keys_for(&provider.id));
                 if !oauth_keys.is_empty()
                     && crate::provider::builtin::is_oauth_key_present(&oauth_keys)
                 {
@@ -519,11 +521,12 @@ impl CoordinatorActor {
                         if !credential_provider_ids.contains(provider_id) {
                             continue;
                         }
+                        // Match by model ID or display name (settings may store either).
                         let exists = self
                             .catalog
                             .list_models(provider_id)
                             .iter()
-                            .any(|m| m.id == model_name);
+                            .any(|m| m.id == model_name || m.name == model_name);
                         if exists && seen.insert(configured.clone()) {
                             selected.push(configured.clone());
                         }
