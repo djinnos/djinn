@@ -432,6 +432,7 @@ mod tests {
             required_env_vars: &["TEST_API_KEY"],
             oauth_keys: &[],
             docs_url: "https://example.com/docs",
+            merge_into: None,
         }];
         catalog.inject_builtin_providers(entries);
 
@@ -458,6 +459,7 @@ mod tests {
             required_env_vars: &[],
             oauth_keys: &[],
             docs_url: "",
+            merge_into: None,
         }];
         catalog.inject_builtin_providers(entries);
 

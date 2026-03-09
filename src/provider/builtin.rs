@@ -21,6 +21,10 @@ pub struct BuiltinProvider {
     pub oauth_keys: &'static [&'static str],
     /// Documentation link shown in the catalog.
     pub docs_url: &'static str,
+    /// If set, this provider's OAuth capabilities are folded into the
+    /// given parent in the catalog response and this entry is hidden.
+    /// Internally the provider still exists for dispatch/model sourcing.
+    pub merge_into: Option<&'static str>,
 }
 
 /// All providers Djinn can use out of the box.
@@ -36,6 +40,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         required_env_vars: &["ANTHROPIC_API_KEY"],
         oauth_keys: &[],
         docs_url: "https://docs.anthropic.com",
+        merge_into: None,
     },
     BuiltinProvider {
         id: "openai",
@@ -43,6 +48,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         required_env_vars: &["OPENAI_API_KEY"],
         oauth_keys: &[],
         docs_url: "https://platform.openai.com/docs",
+        merge_into: None,
     },
     BuiltinProvider {
         id: "google",
@@ -50,13 +56,17 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         required_env_vars: &["GOOGLE_API_KEY"],
         oauth_keys: &[],
         docs_url: "https://ai.google.dev/docs",
+        merge_into: None,
     },
+    // OAuth-only provider whose capabilities are folded into "openai" in the
+    // catalog.  Internally still a distinct provider for dispatch & models.
     BuiltinProvider {
         id: "chatgpt_codex",
         display_name: "ChatGPT Codex",
         required_env_vars: &[],
         oauth_keys: &["CHATGPT_CODEX_TOKEN"],
         docs_url: "https://platform.openai.com/docs",
+        merge_into: Some("openai"),
     },
     BuiltinProvider {
         id: "githubcopilot",
@@ -64,6 +74,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         required_env_vars: &[],
         oauth_keys: &["GITHUB_COPILOT_TOKEN"],
         docs_url: "https://docs.github.com/en/copilot",
+        merge_into: None,
     },
     BuiltinProvider {
         id: "gcp_vertex_ai",
@@ -71,6 +82,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         required_env_vars: &["GCP_VERTEX_PROJECT_ID"],
         oauth_keys: &[],
         docs_url: "https://cloud.google.com/vertex-ai/docs",
+        merge_into: None,
     },
     BuiltinProvider {
         id: "aws_bedrock",
@@ -78,6 +90,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         required_env_vars: &["AWS_ACCESS_KEY_ID"],
         oauth_keys: &[],
         docs_url: "https://docs.aws.amazon.com/bedrock/",
+        merge_into: None,
     },
     BuiltinProvider {
         id: "azure_openai",
@@ -85,6 +98,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         required_env_vars: &["AZURE_OPENAI_API_KEY"],
         oauth_keys: &[],
         docs_url: "https://learn.microsoft.com/en-us/azure/ai-services/openai/",
+        merge_into: None,
     },
 ];
 
@@ -129,6 +143,33 @@ fn canonical_id(id: &str) -> String {
         .filter(char::is_ascii_alphanumeric)
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+/// IDs of providers that should be hidden from the catalog (merged into a parent).
+pub fn merged_provider_ids() -> HashSet<String> {
+    BUILTIN_PROVIDERS
+        .iter()
+        .filter_map(|p| p.merge_into.map(|_| p.id.to_string()))
+        .collect()
+}
+
+/// Collect OAuth keys from child providers that merge into `parent_id`.
+pub fn merged_oauth_keys_for(parent_id: &str) -> Vec<String> {
+    BUILTIN_PROVIDERS
+        .iter()
+        .filter(|p| p.merge_into == Some(parent_id))
+        .flat_map(|p| p.oauth_keys.iter().map(|k| k.to_string()))
+        .collect()
+}
+
+/// Resolve a catalog-facing provider ID to the internal provider that handles
+/// its OAuth flow.  E.g. `"openai"` → `"chatgpt_codex"` (because codex is
+/// merged into openai).
+pub fn resolve_oauth_provider(provider_id: &str) -> Option<&'static str> {
+    BUILTIN_PROVIDERS
+        .iter()
+        .find(|p| p.merge_into == Some(provider_id) && !p.oauth_keys.is_empty())
+        .map(|p| p.id)
 }
 
 /// Check whether any of the given OAuth keys have a stored token on disk.

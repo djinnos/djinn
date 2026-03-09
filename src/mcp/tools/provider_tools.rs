@@ -366,6 +366,7 @@ impl DjinnMcpServer {
     )]
     pub async fn provider_catalog(&self) -> Json<ProviderCatalogResponse> {
         let builtin_ids = builtin::builtin_provider_ids();
+        let merged_ids = builtin::merged_provider_ids();
         let credential_repo =
             CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
         let (credential_provider_ids, credential_key_names) = match credential_repo.list().await {
@@ -386,8 +387,12 @@ impl DjinnMcpServer {
             .list_providers()
             .iter()
             .filter(|p| is_provider_usable(p, &builtin_ids))
+            // Hide providers that are merged into a parent (e.g. chatgpt_codex → openai).
+            .filter(|p| !merged_ids.contains(&p.id))
             .map(|p| {
-                let oauth_keys = builtin::oauth_keys_for_provider(&p.id);
+                // Own OAuth keys + any from children merged into this provider.
+                let mut oauth_keys = builtin::oauth_keys_for_provider(&p.id);
+                oauth_keys.extend(builtin::merged_oauth_keys_for(&p.id));
                 let (connected, methods) = provider_connection_status(
                     p,
                     &oauth_keys,
@@ -419,6 +424,7 @@ impl DjinnMcpServer {
     )]
     pub async fn provider_connected(&self) -> Json<ProviderConnectedResponse> {
         let builtin_ids = builtin::builtin_provider_ids();
+        let merged_ids = builtin::merged_provider_ids();
         let credential_repo =
             CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
         let (credential_provider_ids, credential_key_names) = match credential_repo.list().await {
@@ -439,8 +445,10 @@ impl DjinnMcpServer {
             .list_providers()
             .iter()
             .filter(|p| is_provider_usable(p, &builtin_ids))
+            .filter(|p| !merged_ids.contains(&p.id))
             .filter_map(|p| {
-                let oauth_keys = builtin::oauth_keys_for_provider(&p.id);
+                let mut oauth_keys = builtin::oauth_keys_for_provider(&p.id);
+                oauth_keys.extend(builtin::merged_oauth_keys_for(&p.id));
                 let (connected, methods) = provider_connection_status(
                     p,
                     &oauth_keys,
@@ -521,6 +529,7 @@ impl DjinnMcpServer {
     )]
     pub async fn provider_models_connected(&self) -> Json<ProviderModelsConnectedResponse> {
         let builtin_ids = builtin::builtin_provider_ids();
+        let merged_ids = builtin::merged_provider_ids();
         let credential_repo =
             CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
         let (credential_provider_ids, credential_key_names) = match credential_repo.list().await {
@@ -535,24 +544,36 @@ impl DjinnMcpServer {
             }
         };
 
-        let connected_provider_ids: Vec<String> = self
-            .state
-            .catalog()
-            .list_providers()
-            .iter()
-            .filter(|p| is_provider_usable(p, &builtin_ids))
-            .filter(|p| {
-                let oauth_keys = builtin::oauth_keys_for_provider(&p.id);
-                let (connected, _) = provider_connection_status(
-                    p,
-                    &oauth_keys,
-                    &credential_provider_ids,
-                    &credential_key_names,
-                );
-                connected
-            })
-            .map(|p| p.id.clone())
-            .collect();
+        // Collect connected provider IDs including merged children.
+        let mut connected_provider_ids: Vec<String> = Vec::new();
+        for p in self.state.catalog().list_providers().iter() {
+            if !is_provider_usable(p, &builtin_ids) {
+                continue;
+            }
+            let mut oauth_keys = builtin::oauth_keys_for_provider(&p.id);
+            oauth_keys.extend(builtin::merged_oauth_keys_for(&p.id));
+            let (connected, _) = provider_connection_status(
+                p,
+                &oauth_keys,
+                &credential_provider_ids,
+                &credential_key_names,
+            );
+            if !connected {
+                continue;
+            }
+            connected_provider_ids.push(p.id.clone());
+            // If this parent has merged children, include their models too.
+            if !merged_ids.is_empty() {
+                for child_id in &merged_ids {
+                    if builtin::find_builtin_provider(child_id)
+                        .and_then(|bp| bp.merge_into)
+                        == Some(p.id.as_str())
+                    {
+                        connected_provider_ids.push(child_id.clone());
+                    }
+                }
+            }
+        }
 
         let models: Vec<ProviderModelOutput> = connected_provider_ids
             .iter()
@@ -592,7 +613,20 @@ impl DjinnMcpServer {
             });
         };
 
-        let oauth_keys = builtin::oauth_keys_for_provider(builtin_id);
+        // If the provider itself has no OAuth keys, check if a child provider
+        // was merged into it (e.g. "openai" → "chatgpt_codex").
+        let mut oauth_keys = builtin::oauth_keys_for_provider(builtin_id);
+        let effective_id = if oauth_keys.is_empty() {
+            if let Some(child_id) = builtin::resolve_oauth_provider(builtin_id) {
+                oauth_keys = builtin::oauth_keys_for_provider(child_id);
+                child_id
+            } else {
+                builtin_id
+            }
+        } else {
+            builtin_id
+        };
+
         if oauth_keys.is_empty() {
             return Json(ProviderOauthStartResponse {
                 ok: false,
@@ -605,7 +639,7 @@ impl DjinnMcpServer {
             });
         }
 
-        let flow_kind = OAuthFlowKind::from_provider_id(builtin_id);
+        let flow_kind = OAuthFlowKind::from_provider_id(effective_id);
         let Some(flow_kind) = flow_kind else {
             return Json(ProviderOauthStartResponse {
                 ok: false,
@@ -614,7 +648,7 @@ impl DjinnMcpServer {
                 goose_provider_id: Some(builtin_id.to_string()),
                 oauth_supported: true,
                 configured_keys: vec![],
-                error: Some(format!("no OAuth flow implemented for '{builtin_id}'")),
+                error: Some(format!("no OAuth flow implemented for '{effective_id}'")),
             });
         };
 
