@@ -307,7 +307,7 @@ impl MemoryNoteResponse {
             file_path: Some(note.file_path.clone()),
             note_type: Some(note.note_type.clone()),
             folder: Some(note.folder.clone()),
-            tags: Some(parse_tags_json(&note.tags)),
+            tags: Some(parse_json_array(&note.tags)),
             content: Some(note.content.clone()),
             created_at: Some(note.created_at.clone()),
             updated_at: Some(note.updated_at.clone()),

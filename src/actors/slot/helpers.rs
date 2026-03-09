@@ -149,12 +149,8 @@ pub(crate) async fn default_target_branch(project_id: &str, app_state: &AppState
 }
 
 pub(crate) async fn project_path_for_id(project_id: &str, app_state: &AppState) -> Option<String> {
-    sqlx::query_scalar::<_, String>("SELECT path FROM projects WHERE id = ?1")
-        .bind(project_id)
-        .fetch_optional(app_state.db().pool())
-        .await
-        .ok()
-        .flatten()
+    let repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
+    repo.get_path(project_id).await.ok().flatten()
 }
 
 pub(crate) async fn find_paused_session_record(
@@ -165,36 +161,10 @@ pub(crate) async fn find_paused_session_record(
     repo.paused_for_task(task_id).await.ok().flatten()
 }
 
-pub(crate) async fn conflict_context_for_dispatch(
-    task_id: &str,
-    app_state: &AppState,
-) -> Option<MergeConflictMetadata> {
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
-    let activity = repo.list_activity(task_id).await.ok()?;
-    let last_status = activity
-        .iter()
-        .rev()
-        .find(|e| e.event_type == "status_changed")?;
-    let payload: serde_json::Value = serde_json::from_str(&last_status.payload).ok()?;
-    let from_status = payload
-        .get("from_status")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let to_status = payload
-        .get("to_status")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    if from_status != "in_task_review" || to_status != "open" {
-        return None;
-    }
-    let reason = payload
-        .get("reason")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    parse_conflict_metadata(reason)
-}
-
-pub(crate) async fn merge_validation_context_for_dispatch(
+/// Extract the `reason` field from the last `status_changed` activity entry
+/// that represents a review-to-open rejection (from_status = "in_task_review",
+/// to_status = "open"). Returns `None` if no such transition exists.
+async fn last_review_rejection_reason(
     task_id: &str,
     app_state: &AppState,
 ) -> Option<String> {
@@ -216,11 +186,29 @@ pub(crate) async fn merge_validation_context_for_dispatch(
     if from_status != "in_task_review" || to_status != "open" {
         return None;
     }
-    let reason = payload
-        .get("reason")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let metadata = parse_merge_validation_metadata(reason)?;
+    Some(
+        payload
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+    )
+}
+
+pub(crate) async fn conflict_context_for_dispatch(
+    task_id: &str,
+    app_state: &AppState,
+) -> Option<MergeConflictMetadata> {
+    let reason = last_review_rejection_reason(task_id, app_state).await?;
+    parse_conflict_metadata(&reason)
+}
+
+pub(crate) async fn merge_validation_context_for_dispatch(
+    task_id: &str,
+    app_state: &AppState,
+) -> Option<String> {
+    let reason = last_review_rejection_reason(task_id, app_state).await?;
+    let metadata = parse_merge_validation_metadata(&reason)?;
     Some(metadata.as_prompt_context())
 }
 
@@ -340,6 +328,8 @@ pub(crate) fn format_family_for_provider(
         FormatFamily::Anthropic
     } else if lower.contains("google") || lower.contains("gemini") || lower.contains("vertex") {
         FormatFamily::Google
+    } else if lower.contains("codex") {
+        FormatFamily::OpenAIResponses
     } else {
         FormatFamily::OpenAI
     }

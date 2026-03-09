@@ -273,7 +273,7 @@ impl DjinnMcpServer {
 
         // Merge label changes.
         let labels_json = if p.labels_add.is_some() || p.labels_remove.is_some() {
-            let mut current: Vec<String> = serde_json::from_str(&task.labels).unwrap_or_default();
+            let mut current: Vec<String> = crate::models::parse_json_array(&task.labels);
             if let Some(add) = &p.labels_add {
                 for lbl in add {
                     if !current.contains(lbl) {

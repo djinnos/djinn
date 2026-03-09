@@ -92,7 +92,7 @@ fn note_to_view(note: &Note) -> MemoryNoteView {
         file_path: note.file_path.clone(),
         note_type: note.note_type.clone(),
         folder: note.folder.clone(),
-        tags: parse_tags_json(&note.tags),
+        tags: parse_json_array(&note.tags),
         content: note.content.clone(),
         created_at: note.created_at.clone(),
         updated_at: note.updated_at.clone(),
@@ -100,9 +100,8 @@ fn note_to_view(note: &Note) -> MemoryNoteView {
     }
 }
 
-fn parse_tags_json(tags: &str) -> Vec<String> {
-    serde_json::from_str(tags).unwrap_or_default()
-}
+// Re-export for `use super::*` in submodules.
+use crate::models::parse_json_array;
 
 fn parse_task_ref_item(raw: serde_json::Value) -> Option<MemoryTaskRefItem> {
     serde_json::from_value(raw).ok()

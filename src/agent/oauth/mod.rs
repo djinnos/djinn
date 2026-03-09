@@ -25,7 +25,7 @@ pub fn codex_provider_config(tokens: &codex::CodexTokens) -> ProviderConfig {
     ProviderConfig {
         base_url: codex::CODEX_API_BASE.to_string(),
         auth: AuthMethod::BearerToken(tokens.access_token.clone()),
-        format_family: FormatFamily::OpenAI,
+        format_family: FormatFamily::OpenAIResponses,
         model_id: codex::CODEX_DEFAULT_MODEL.to_string(),
         context_window: 128_000,
         dev_proxy: None,

@@ -5,6 +5,11 @@ use crate::error::Result;
 use crate::events::DjinnEvent;
 use crate::models::session::{SessionRecord, SessionStatus};
 
+/// Column list shared by all session SELECT queries.
+const SESSION_COLS: &str =
+    "id, project_id, task_id, model_id, agent_type, started_at, ended_at, \
+     status, tokens_in, tokens_out, worktree_path, goose_session_id";
+
 pub struct SessionRepository {
     db: Database,
     events: broadcast::Sender<DjinnEvent>,
@@ -13,6 +18,20 @@ pub struct SessionRepository {
 impl SessionRepository {
     pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
         Self { db, events }
+    }
+
+    /// Re-fetch a session by id and emit `SessionUpdated`.
+    async fn fetch_and_emit_update(&self, id: &str) -> Result<SessionRecord> {
+        let session = sqlx::query_as::<_, SessionRecord>(&format!(
+            "SELECT {SESSION_COLS} FROM sessions WHERE id = ?1"
+        ))
+        .bind(id)
+        .fetch_one(self.db.pool())
+        .await?;
+        let _ = self
+            .events
+            .send(DjinnEvent::SessionUpdated(session.clone()));
+        Ok(session)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -43,12 +62,9 @@ impl SessionRepository {
         .execute(self.db.pool())
         .await?;
 
-        let session = sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
-             FROM sessions
-             WHERE id = ?1",
-        )
+        let session = sqlx::query_as::<_, SessionRecord>(&format!(
+            "SELECT {SESSION_COLS} FROM sessions WHERE id = ?1"
+        ))
         .bind(&id)
         .fetch_one(self.db.pool())
         .await?;
@@ -83,20 +99,7 @@ impl SessionRepository {
         .execute(self.db.pool())
         .await?;
 
-        let session = sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
-             FROM sessions
-             WHERE id = ?1",
-        )
-        .bind(id)
-        .fetch_one(self.db.pool())
-        .await?;
-
-        let _ = self
-            .events
-            .send(DjinnEvent::SessionUpdated(session.clone()));
-        Ok(session)
+        self.fetch_and_emit_update(id).await
     }
 
     /// Mark all `running` sessions as `interrupted`.
@@ -116,15 +119,14 @@ impl SessionRepository {
 
     pub async fn get(&self, id: &str) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
-             FROM sessions
-             WHERE id = ?1",
+        Ok(
+            sqlx::query_as::<_, SessionRecord>(&format!(
+                "SELECT {SESSION_COLS} FROM sessions WHERE id = ?1"
+            ))
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await?,
         )
-        .bind(id)
-        .fetch_optional(self.db.pool())
-        .await?)
     }
 
     pub async fn get_in_project(
@@ -133,30 +135,27 @@ impl SessionRepository {
         id: &str,
     ) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
-             FROM sessions
-             WHERE project_id = ?1 AND id = ?2",
+        Ok(
+            sqlx::query_as::<_, SessionRecord>(&format!(
+                "SELECT {SESSION_COLS} FROM sessions WHERE project_id = ?1 AND id = ?2"
+            ))
+            .bind(project_id)
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await?,
         )
-        .bind(project_id)
-        .bind(id)
-        .fetch_optional(self.db.pool())
-        .await?)
     }
 
     pub async fn list_for_task(&self, task_id: &str) -> Result<Vec<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
-             FROM sessions
-             WHERE task_id = ?1
-             ORDER BY started_at DESC",
+        Ok(
+            sqlx::query_as::<_, SessionRecord>(&format!(
+                "SELECT {SESSION_COLS} FROM sessions WHERE task_id = ?1 ORDER BY started_at DESC"
+            ))
+            .bind(task_id)
+            .fetch_all(self.db.pool())
+            .await?,
         )
-        .bind(task_id)
-        .fetch_all(self.db.pool())
-        .await?)
     }
 
     pub async fn list_for_task_in_project(
@@ -165,13 +164,10 @@ impl SessionRepository {
         task_id: &str,
     ) -> Result<Vec<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
-             FROM sessions
-             WHERE project_id = ?1 AND task_id = ?2
-             ORDER BY started_at DESC",
-        )
+        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
+            "SELECT {SESSION_COLS} FROM sessions \
+             WHERE project_id = ?1 AND task_id = ?2 ORDER BY started_at DESC"
+        ))
         .bind(project_id)
         .bind(task_id)
         .fetch_all(self.db.pool())
@@ -180,26 +176,20 @@ impl SessionRepository {
 
     pub async fn list_active(&self) -> Result<Vec<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
-             FROM sessions
-             WHERE status = 'running'
-             ORDER BY started_at DESC",
-        )
+        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
+            "SELECT {SESSION_COLS} FROM sessions \
+             WHERE status = 'running' ORDER BY started_at DESC"
+        ))
         .fetch_all(self.db.pool())
         .await?)
     }
 
     pub async fn list_active_in_project(&self, project_id: &str) -> Result<Vec<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
-             FROM sessions
-             WHERE project_id = ?1 AND status = 'running'
-             ORDER BY started_at DESC",
-        )
+        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
+            "SELECT {SESSION_COLS} FROM sessions \
+             WHERE project_id = ?1 AND status = 'running' ORDER BY started_at DESC"
+        ))
         .bind(project_id)
         .fetch_all(self.db.pool())
         .await?)
@@ -207,14 +197,10 @@ impl SessionRepository {
 
     pub async fn active_for_task(&self, task_id: &str) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                    status, tokens_in, tokens_out, worktree_path, goose_session_id
-             FROM sessions
-             WHERE task_id = ?1 AND status = 'running'
-             ORDER BY started_at DESC
-             LIMIT 1",
-        )
+        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
+            "SELECT {SESSION_COLS} FROM sessions \
+             WHERE task_id = ?1 AND status = 'running' ORDER BY started_at DESC LIMIT 1"
+        ))
         .bind(task_id)
         .fetch_optional(self.db.pool())
         .await?)

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::AgentType;
 use super::sandbox;
 use crate::db::repositories::note::NoteRepository;
+use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
 use crate::models::task::Task;
@@ -212,7 +213,7 @@ async fn call_task_update(
     let owner = p.owner.as_deref().unwrap_or(&task.owner);
 
     let labels_json = if p.labels_add.is_some() || p.labels_remove.is_some() {
-        let mut labels: Vec<String> = serde_json::from_str(&task.labels).unwrap_or_default();
+        let mut labels: Vec<String> = crate::models::parse_json_array(&task.labels);
         if let Some(add) = p.labels_add {
             for label in add {
                 if !labels.contains(&label) {
@@ -537,50 +538,10 @@ where
 }
 
 async fn project_id_for_path(state: &AppState, project_path: &str) -> Result<String, String> {
-    state
-        .db()
-        .ensure_initialized()
+    let repo = ProjectRepository::new(state.db().clone(), state.events().clone());
+    repo.resolve_id_by_path_fuzzy(project_path)
         .await
-        .map_err(|e| e.to_string())?;
-
-    let normalized = project_path.trim_end_matches('/');
-
-    let project_id = sqlx::query_scalar::<_, String>("SELECT id FROM projects WHERE path = ?1")
-        .bind(normalized)
-        .fetch_optional(state.db().pool())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if let Some(project_id) = project_id {
-        return Ok(project_id);
-    }
-
-    let all_projects = sqlx::query_as::<_, (String, String)>("SELECT id, path FROM projects")
-        .fetch_all(state.db().pool())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let mut best: Option<(String, usize)> = None;
-    for (id, path) in all_projects {
-        let root = path.trim_end_matches('/');
-        let matches = normalized == root
-            || normalized
-                .strip_prefix(root)
-                .map(|suffix| suffix.starts_with('/'))
-                .unwrap_or(false);
-        if matches {
-            let len = root.len();
-            if best
-                .as_ref()
-                .map(|(_, best_len)| len > *best_len)
-                .unwrap_or(true)
-            {
-                best = Some((id, len));
-            }
-        }
-    }
-
-    best.map(|(id, _)| id)
+        .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("project not found: {project_path}"))
 }
 
@@ -611,7 +572,6 @@ async fn resolve_note_by_identifier(
 }
 
 fn note_to_value(note: &crate::models::note::Note) -> serde_json::Value {
-    let tags: serde_json::Value = serde_json::from_str(&note.tags).unwrap_or(serde_json::json!([]));
     serde_json::json!({
         "id": note.id,
         "project_id": note.project_id,
@@ -620,7 +580,7 @@ fn note_to_value(note: &crate::models::note::Note) -> serde_json::Value {
         "file_path": note.file_path,
         "note_type": note.note_type,
         "folder": note.folder,
-        "tags": tags,
+        "tags": crate::models::parse_json_array(&note.tags),
         "content": note.content,
         "created_at": note.created_at,
         "updated_at": note.updated_at,
@@ -629,8 +589,7 @@ fn note_to_value(note: &crate::models::note::Note) -> serde_json::Value {
 }
 
 fn task_to_value(t: &Task) -> serde_json::Value {
-    let labels: serde_json::Value =
-        serde_json::from_str(&t.labels).unwrap_or(serde_json::json!([]));
+    let labels = crate::models::parse_json_array(&t.labels);
     let ac: serde_json::Value =
         serde_json::from_str(&t.acceptance_criteria).unwrap_or(serde_json::json!([]));
     let memory_refs: serde_json::Value =

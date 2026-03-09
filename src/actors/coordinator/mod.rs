@@ -22,6 +22,7 @@ use crate::actors::slot::{PoolError, SlotPoolHandle};
 use crate::commands::{CommandSpec, run_commands};
 use crate::db::connection::Database;
 use crate::db::repositories::git_settings::GitSettingsRepository;
+use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::task::{ReadyQuery, TaskRepository};
 use crate::events::DjinnEvent;
 use crate::models::task::TransitionAction;
@@ -557,12 +558,9 @@ impl CoordinatorActor {
     }
 
     async fn project_path_for_id(&self, project_id: &str) -> Option<String> {
-        sqlx::query_scalar::<_, String>("SELECT path FROM projects WHERE id = ?1")
-            .bind(project_id)
-            .fetch_optional(self.db.pool())
-            .await
-            .ok()
-            .flatten()
+        let repo =
+            ProjectRepository::new(self.db.clone(), self.events_tx.clone());
+        repo.get_path(project_id).await.ok().flatten()
     }
 }
 

@@ -160,10 +160,7 @@ fn format_acceptance_criteria(json: &str) -> String {
 /// Input: `["wave:1", "tech-debt"]`
 /// Output: `wave:1, tech-debt`
 fn format_labels(json: &str) -> String {
-    let Ok(labels) = serde_json::from_str::<Vec<String>>(json) else {
-        return String::new();
-    };
-    labels.join(", ")
+    crate::models::parse_json_array(json).join(", ")
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

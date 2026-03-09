@@ -72,6 +72,8 @@ pub enum AuthMethod {
 pub enum FormatFamily {
     /// OpenAI chat completions API (also used by compatible providers).
     OpenAI,
+    /// OpenAI Responses API (used by ChatGPT Codex and newer OpenAI endpoints).
+    OpenAIResponses,
     /// Anthropic Messages API.
     Anthropic,
     /// Google AI Studio / Vertex AI generateContent API.
@@ -111,6 +113,9 @@ pub trait LlmProvider: Send + Sync {
 pub fn create_provider(config: ProviderConfig) -> Box<dyn LlmProvider> {
     match config.format_family {
         FormatFamily::OpenAI => Box::new(format::openai::OpenAIProvider::new(config)),
+        FormatFamily::OpenAIResponses => {
+            Box::new(format::openai_responses::OpenAIResponsesProvider::new(config))
+        }
         FormatFamily::Anthropic => Box::new(format::anthropic::AnthropicProvider::new(config)),
         FormatFamily::Google => Box::new(format::google::GoogleProvider::new(config)),
     }
