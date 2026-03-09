@@ -7,6 +7,11 @@ import {
   LowSignalIcon,
   MediumSignalIcon,
   NoSignalIcon,
+  Progress01Icon,
+  Progress02Icon,
+  Progress03Icon,
+  Progress04Icon,
+  Tick01Icon,
   UnavailableIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -21,10 +26,10 @@ type TaskCardProps = {
 };
 
 const PRIORITY_CONFIG: Record<number, { icon: typeof NoSignalIcon; color: string }> = {
-  0: { icon: FullSignalIcon, color: "text-red-500" },
-  1: { icon: MediumSignalIcon, color: "text-yellow-500" },
-  2: { icon: LowSignalIcon, color: "text-green-500" },
-  3: { icon: NoSignalIcon, color: "text-muted-foreground" },
+  0: { icon: FullSignalIcon, color: "text-[#F97316]" },
+  1: { icon: MediumSignalIcon, color: "text-[#A78BFA]" },
+  2: { icon: LowSignalIcon, color: "text-[#6B7280]" },
+  3: { icon: NoSignalIcon, color: "text-[#4B5563]" },
 };
 
 function PriorityBadge({ priority }: { priority: number }) {
@@ -91,42 +96,34 @@ function PipelineIndicator({ status }: { status: string }) {
   const activeIdx = PIPELINE_STAGES.indexOf(activeStage);
 
   return (
-    <div className="flex items-center gap-0.5" aria-label={`Pipeline: ${activeStage}`}>
+    <span className="text-[10px] tracking-tight" aria-label={`Pipeline: ${activeStage}`}>
       {PIPELINE_STAGES.map((stage, idx) => (
-        <div key={stage} className="flex items-center">
-          {idx > 0 && (
-            <div
-              className={cn(
-                "mx-px h-px w-1.5",
-                idx <= activeIdx ? "bg-emerald-400/60" : "bg-blue-400/20"
-              )}
-            />
+        <span
+          key={stage}
+          className={cn(
+            idx < activeIdx
+              ? "text-[#34D399]"
+              : idx === activeIdx
+                ? "text-[#10B981] animate-pulse"
+                : "text-[#374151]"
           )}
-          <div
-            className={cn(
-              "size-1.5 rounded-full",
-              idx < activeIdx
-                ? "bg-emerald-400"
-                : idx === activeIdx
-                  ? "bg-blue-400 animate-pulse"
-                  : "bg-blue-400/40"
-            )}
-            title={stage}
-          />
-        </div>
+          title={stage}
+        >
+          {idx <= activeIdx ? "▰" : "▱"}
+        </span>
       ))}
-    </div>
+    </span>
   );
 }
 
 // --- Card tint based on status ---
 
-function getCardTint(task: Task): { ring: string; bg: string } | null {
+function getCardTint(task: Task): { ring: string; bg: string; hover: string } | null {
   if (task.status === "conflict_resolution") {
-    return { ring: "ring-orange-500/40", bg: "bg-orange-500/5" };
+    return { ring: "ring-orange-500/40", bg: "bg-orange-500/5", hover: "hover:bg-orange-500/10" };
   }
   if (task.status === "needs_pm_intervention" || task.status === "in_pm_intervention") {
-    return { ring: "ring-red-500/40", bg: "bg-red-500/5" };
+    return { ring: "ring-red-500/40", bg: "bg-red-500/5", hover: "hover:bg-red-500/10" };
   }
   return null;
 }
@@ -141,6 +138,15 @@ function getBacklogBadge(status: string): { label: string; className: string } |
     return { label: "ready", className: "text-violet-400 bg-violet-400/10" };
   }
   return null;
+}
+
+function acProgressIcon(met: number, total: number) {
+  if (met === total) return Tick01Icon;
+  if (met === 0) return Progress01Icon;
+  const pct = met / total;
+  if (pct <= 0.25) return Progress02Icon;
+  if (pct <= 0.5) return Progress03Icon;
+  return Progress04Icon;
 }
 
 export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
@@ -191,6 +197,9 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
     task.status === "conflict_resolution";
   const isDone = task.status === "closed";
   const hasBlockers = (task.unresolved_blocker_count ?? 0) > 0;
+  const ac = task.acceptance_criteria ?? [];
+  const acTotal = ac.length;
+  const acMet = ac.filter((c: { met?: boolean }) => c.met).length;
   const cardTint = getCardTint(task);
   const backlogBadge = getBacklogBadge(task.status);
 
@@ -198,8 +207,8 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
     <Card
       size="sm"
       className={cn(
-        "cursor-pointer py-2 ring-1 transition-all duration-200 ease-in-out hover:bg-zinc-700/80 hover:ring-white/[0.1]",
-        cardTint ? `${cardTint.ring} ${cardTint.bg}` : "bg-zinc-800 ring-white/[0.06]",
+        "cursor-pointer py-2 ring-1 transition-all duration-200 ease-in-out",
+        cardTint ? `${cardTint.ring} ${cardTint.bg} ${cardTint.hover} hover:ring-white/[0.1]` : "bg-zinc-800 ring-white/[0.06] hover:bg-zinc-700/80 hover:ring-white/[0.1]",
         moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"
       )}
       onClick={onClick}
@@ -209,6 +218,21 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
           <TaskIdLabel taskId={task.id} shortId={task.short_id} />
           <PriorityBadge priority={task.priority} />
+
+          {/* Acceptance criteria progress */}
+          {acTotal > 0 && (
+            <span className={cn(
+              "inline-flex items-center gap-0.5 rounded px-1 py-px text-[10px] font-medium",
+              acMet === acTotal
+                ? "bg-emerald-500/15 text-emerald-400"
+                : acMet === 0
+                  ? "bg-zinc-500/10 text-muted-foreground"
+                  : "bg-amber-500/15 text-amber-400"
+            )}>
+              <HugeiconsIcon icon={acProgressIcon(acMet, acTotal)} size={10} className="shrink-0" />
+              {acMet}/{acTotal}
+            </span>
+          )}
 
           {/* Blocker badge */}
           {hasBlockers && (
@@ -271,7 +295,7 @@ export function DoneTaskRow({ task, onClick }: { task: Task; onClick?: () => voi
   return (
     <button
       type="button"
-      className="flex w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-left text-[11px] text-muted-foreground transition-colors hover:bg-muted/40"
+      className="flex w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-0.5 text-left text-[11px] leading-tight text-muted-foreground transition-colors hover:bg-muted/40"
       onClick={onClick}
       title={task.title}
     >

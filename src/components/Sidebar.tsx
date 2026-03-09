@@ -30,7 +30,7 @@ function NavItem({ icon, label, hotkey, isActive, isCollapsed, onClick }: NavIte
       className={cn(
         'w-full justify-start gap-3 transition-all duration-200',
         isCollapsed ? 'h-10 w-10 justify-center' : 'h-9 px-3',
-        isActive && 'bg-secondary text-secondary-foreground'
+        isActive && 'bg-white/[0.05] text-foreground'
       )}
       title={isCollapsed ? `${label}${hotkey ? ` (${hotkey.toUpperCase()})` : ''}` : undefined}
     >

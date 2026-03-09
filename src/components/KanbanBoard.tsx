@@ -49,19 +49,19 @@ const STATUS_COLUMNS: Array<{
   glowClass: string;
   icon: typeof UnavailableIcon;
 }> = [
-  { key: "backlog", label: "Backlog", colorClass: "bg-zinc-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-zinc-500/40", icon: DashedLineCircleIcon },
-  { key: "open", label: "Open", colorClass: "bg-violet-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-violet-500/40", icon: CircleIcon },
-  { key: "in_flight", label: "In Flight", colorClass: "bg-blue-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-blue-500/40", icon: Progress02Icon },
-  { key: "done", label: "Done", colorClass: "bg-emerald-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-emerald-500/40", icon: CheckmarkCircle03Icon },
+  { key: "backlog", label: "Backlog", colorClass: "bg-[#4B5563]", glowClass: "", icon: DashedLineCircleIcon },
+  { key: "open", label: "Open", colorClass: "bg-[#4B5563]", glowClass: "", icon: CircleIcon },
+  { key: "in_flight", label: "In Flight", colorClass: "bg-[#3B82F6]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#3B82F6]/40", icon: Progress02Icon },
+  { key: "done", label: "Done", colorClass: "bg-[#10B981]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#10B981]/40", icon: CheckmarkCircle03Icon },
 ];
 
 const PRIORITIES = [0, 1, 2, 3] as const;
 
 const PRIORITY_ICONS: Record<number, { icon: typeof FullSignalIcon; color: string; activeColor: string }> = {
-  0: { icon: FullSignalIcon, color: "text-muted-foreground/50", activeColor: "text-red-500" },
-  1: { icon: MediumSignalIcon, color: "text-muted-foreground/50", activeColor: "text-yellow-500" },
-  2: { icon: LowSignalIcon, color: "text-muted-foreground/50", activeColor: "text-green-500" },
-  3: { icon: NoSignalIcon, color: "text-muted-foreground/50", activeColor: "text-muted-foreground" },
+  0: { icon: FullSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#F97316]" },
+  1: { icon: MediumSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#A78BFA]" },
+  2: { icon: LowSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#6B7280]" },
+  3: { icon: NoSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#4B5563]" },
 };
 
 function taskToColumnKey(task: Task): ColumnKey {
@@ -268,7 +268,7 @@ export function KanbanBoard({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-5 overflow-hidden px-4 pt-5 pb-2">
-      <div className="flex flex-wrap items-center gap-3 px-4">
+      <div className="flex flex-wrap items-center gap-3 border-b border-white/[0.04] px-4 pb-5">
         <Combobox
           value={selectedProjectId ?? ""}
           onValueChange={(v) => setSelectedProjectId(v || null)}
@@ -388,16 +388,17 @@ export function KanbanBoard({
         />
       )}
 
-      <div className="flex min-h-0 flex-1 gap-5 overflow-x-auto pb-1">
-        {STATUS_COLUMNS.map((column) => {
+      <div className="flex min-h-0 flex-1 overflow-x-auto pb-1">
+        {STATUS_COLUMNS.map((column, colIdx) => {
           const statusMap = groupedByStatusThenEpic.get(column.key) ?? new Map<string, Task[]>();
           const epicGroups = Array.from(statusMap.entries());
           const taskCount = epicGroups.reduce((total, [, epicTasks]) => total + epicTasks.length, 0);
 
           return (
-            <Card
-              key={column.key}
-              className="min-h-0 min-w-[320px] flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
+            <div key={column.key} className="flex min-h-0 min-w-[320px] flex-1">
+              {colIdx > 0 && <div className="w-px shrink-0 self-stretch bg-white/[0.03]" />}
+              <Card
+                className="min-h-0 flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
             >
               <div className="flex flex-col">
                 <div className="px-4 pb-2.5 pt-3.5 text-sm font-semibold">
@@ -410,19 +411,22 @@ export function KanbanBoard({
                     ) : (
                       <HugeiconsIcon
                         icon={column.icon}
-                        className="size-4 shrink-0 text-muted-foreground"
+                        className={cn("size-4 shrink-0", column.key === "done" ? "text-[#10B981]" : "text-muted-foreground")}
                       />
                     )}
                     <span className="leading-none">{column.label}</span>
                     <span className="text-xs leading-none text-muted-foreground">{taskCount}</span>
                   </div>
                 </div>
-                <div className="px-3">
-                  <div className={cn("h-0.5 w-full rounded-full", column.colorClass, column.glowClass)} />
+                <div className="px-4">
+                  <div className={cn("h-0.5 w-10 rounded-full", column.colorClass, column.glowClass)} />
                 </div>
               </div>
 
               <CardContent className="flex-1 overflow-y-auto px-3 pt-4">
+                {taskCount === 0 ? (
+                  <p className="px-1 text-xs text-muted-foreground/50">No tasks</p>
+                ) : (
                 <div className="flex flex-col gap-3.5">
                   {epicGroups.map(([epicKey, epicTasks]) => {
                     const firstTaskEpicId = epicTasks[0]?.epic_id;
@@ -476,8 +480,10 @@ export function KanbanBoard({
                     );
                   })}
                 </div>
+                )}
               </CardContent>
             </Card>
+            </div>
           );
         })}
       </div>
