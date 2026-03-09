@@ -47,17 +47,14 @@ You have access to Djinn tools via the `djinn` extension. Use them during implem
 2. **Pre-work check** — before writing any code, verify the workspace has the foundations your task needs:
    - Inspect the existing code structure relevant to your task (components, modules, services it depends on)
    - If something your task requires doesn't exist yet, search the board: `task_list(project="{{project_path}}", text="<keywords>")`
-   - If the dependency is an incomplete task, add it as a blocker: `task_update(id="{{task_id}}", blocked_by_add=["<dep_task_id>"])` — then emit `WORKER_RESULT: DONE` so the system can schedule the dependency first
-   - If the required scope is entirely missing from the board, create the task: `task_create(epic_id="<epic_id>", title="...", description="...", blocked_by=["{{task_id}}"])` — then emit `WORKER_RESULT: DONE`
+   - If the dependency is an incomplete task, add it as a blocker: `task_update(id="{{task_id}}", blocked_by_add=["<dep_task_id>"])` — then stop so the system can schedule the dependency first
+   - If the required scope is entirely missing from the board, create the task: `task_create(epic_id="<epic_id>", title="...", description="...", blocked_by=["{{task_id}}"])` — then stop
    - Only proceed to step 3 when all required foundations exist in the workspace
 3. **Read the task** — understand what needs to be done from the description, design, and acceptance criteria
 4. **Check memory** — look up any ADRs or patterns referenced in the design field
 5. **Implement** — write the code following the design approach exactly as specified
 6. **Add progress note** — comment on the task with what you implemented
-7. **Emit completion marker** — only when the task is fully complete:
-   - `WORKER_RESULT: DONE`
-   - ALL acceptance criteria must be met. ALL code changes written and saved. ALL TODOs from your plan addressed.
-   - Do NOT emit DONE if you have only planned, read files, or partially implemented. Finish the work first.
+7. **Verify completeness** — ensure ALL acceptance criteria are met, ALL code changes written and saved, ALL TODOs from your plan addressed. Do NOT stop if you have only planned, read files, or partially implemented. Finish the work first.
 
 ## Rules
 
@@ -69,4 +66,3 @@ You have access to Djinn tools via the `djinn` extension. Use them during implem
 - **Do not commit.** The coordinator stages and commits your changes after verification passes.
 - **Do not install dependencies.** Setup commands already ran before your session started.
 - **Operate only in the active workspace.** Use relative paths and do not target parent repo paths directly.
-- **Always emit a result marker.** The supervisor reads your final `WORKER_RESULT` line to transition task state.

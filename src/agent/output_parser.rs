@@ -1,33 +1,16 @@
-use goose::agents::AgentEvent;
-
 use super::AgentType;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkerSignal {
-    Done,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReviewerVerdict {
-    Verified,
-    Reopen,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EpicReviewVerdict {
-    Clean,
-    IssuesFound,
-}
-
+/// Parsed output from an agent session.
+///
+/// After removing markers and nudging (see ADR-022 revision), this struct only
+/// tracks runtime errors and reviewer feedback extracted from agent text.
+/// Worker completion is determined by session end (agent stops calling tools).
+/// Reviewer verdict is determined by acceptance criteria state on the task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedAgentOutput {
     agent_type: AgentType,
-    pub worker_signal: Option<WorkerSignal>,
-    pub worker_reason: Option<String>,
     pub runtime_error: Option<String>,
-    pub reviewer_verdict: Option<ReviewerVerdict>,
     pub reviewer_feedback: Option<String>,
-    pub epic_verdict: Option<EpicReviewVerdict>,
 }
 
 impl Default for ParsedAgentOutput {
@@ -40,17 +23,9 @@ impl ParsedAgentOutput {
     pub fn new(agent_type: AgentType) -> Self {
         Self {
             agent_type,
-            worker_signal: None,
-            worker_reason: None,
             runtime_error: None,
-            reviewer_verdict: None,
             reviewer_feedback: None,
-            epic_verdict: None,
         }
-    }
-
-    pub fn ingest_event(&mut self, event: &AgentEvent) {
-        self.ingest_text(&format!("{event:?}"));
     }
 
     pub fn ingest_text(&mut self, text: &str) {
@@ -61,28 +36,12 @@ impl ParsedAgentOutput {
                 continue;
             }
 
-            match self.agent_type {
-                AgentType::Worker | AgentType::ConflictResolver => {
-                    if let Some(payload) = marker_payload(&line, "WORKER_RESULT") {
-                        self.parse_worker_signal(payload, &line);
-                    } else {
-                        self.parse_worker_signal(line.as_str(), &line);
-                    }
-                }
-                AgentType::TaskReviewer => {
-                    if let Some(payload) = marker_payload(&line, "REVIEW_RESULT") {
-                        self.parse_reviewer_verdict(payload);
-                    }
-                    if let Some(payload) = marker_payload(&line, "FEEDBACK") {
-                        let feedback = payload.trim();
-                        if !feedback.is_empty() {
-                            self.reviewer_feedback = Some(feedback.to_string());
-                        }
-                    }
-                }
-                AgentType::EpicReviewer => {
-                    if let Some(payload) = marker_payload(&line, "EPIC_REVIEW_RESULT") {
-                        self.parse_epic_verdict(payload);
+            // Extract reviewer feedback if present (still useful for logging).
+            if matches!(self.agent_type, AgentType::TaskReviewer) {
+                if let Some(payload) = marker_payload(&line, "FEEDBACK") {
+                    let feedback = payload.trim();
+                    if !feedback.is_empty() {
+                        self.reviewer_feedback = Some(feedback.to_string());
                     }
                 }
             }
@@ -92,62 +51,7 @@ impl ParsedAgentOutput {
             {
                 self.runtime_error = Some(error.to_string());
             }
-
         }
-    }
-
-    fn parse_worker_signal(&mut self, payload: &str, raw_line: &str) {
-        let normalized = payload.trim();
-        if normalized.is_empty() {
-            return;
-        }
-        let upper = normalized.to_ascii_uppercase();
-
-        if upper.starts_with("DONE") {
-            self.worker_signal = Some(WorkerSignal::Done);
-            self.worker_reason = None;
-            return;
-        }
-
-        if raw_line.to_ascii_uppercase().contains("WORKER_RESULT") {
-            tracing::warn!(line = %raw_line, "malformed WORKER_RESULT marker");
-        }
-    }
-
-    fn parse_reviewer_verdict(&mut self, payload: &str) {
-        let verdict = payload
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .to_ascii_uppercase();
-
-        self.reviewer_verdict = match verdict.as_str() {
-            "VERIFIED" => Some(ReviewerVerdict::Verified),
-            "REOPEN" => Some(ReviewerVerdict::Reopen),
-            _ => {
-                tracing::warn!(value = %payload, "malformed REVIEW_RESULT marker");
-                self.reviewer_verdict
-            }
-        };
-    }
-
-    fn parse_epic_verdict(&mut self, payload: &str) {
-        let verdict = payload
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .to_ascii_uppercase();
-
-        self.epic_verdict = match verdict.as_str() {
-            "CLEAN" => Some(EpicReviewVerdict::Clean),
-            "ISSUES_FOUND" => Some(EpicReviewVerdict::IssuesFound),
-            _ => {
-                tracing::warn!(value = %payload, "malformed EPIC_REVIEW_RESULT marker");
-                self.epic_verdict
-            }
-        };
     }
 }
 
@@ -177,43 +81,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_worker_done() {
-        let mut out = ParsedAgentOutput::new(AgentType::Worker);
-        out.ingest_text("WORKER_RESULT: DONE");
-        assert_eq!(out.worker_signal, Some(WorkerSignal::Done));
-    }
-
-    #[test]
-    fn parses_reviewer_verdict_and_feedback() {
-        let mut out = ParsedAgentOutput::new(AgentType::TaskReviewer);
-        out.ingest_text("REVIEW_RESULT: REOPEN\nFEEDBACK: missing test for malformed payload");
-
-        assert_eq!(out.reviewer_verdict, Some(ReviewerVerdict::Reopen));
-        assert_eq!(
-            out.reviewer_feedback.as_deref(),
-            Some("missing test for malformed payload")
-        );
-    }
-
-    #[test]
-    fn parses_epic_review_result() {
-        let mut out = ParsedAgentOutput::new(AgentType::EpicReviewer);
-        out.ingest_text("EPIC_REVIEW_RESULT: CLEAN");
-        assert_eq!(out.epic_verdict, Some(EpicReviewVerdict::Clean));
-    }
-
-    #[test]
-    fn ignores_malformed_markers_without_crashing() {
-        let mut reviewer = ParsedAgentOutput::new(AgentType::TaskReviewer);
-        reviewer.ingest_text("REVIEW_RESULT: MAYBE");
-        assert_eq!(reviewer.reviewer_verdict, None);
-
-        let mut epic = ParsedAgentOutput::new(AgentType::EpicReviewer);
-        epic.ingest_text("EPIC_REVIEW_RESULT: ???");
-        assert_eq!(epic.epic_verdict, None);
-    }
-
-    #[test]
     fn extracts_runtime_execution_errors() {
         let mut out = ParsedAgentOutput::new(AgentType::Worker);
         out.ingest_text("Error: Execution error: No such file or directory (os error 2)");
@@ -221,5 +88,22 @@ mod tests {
             out.runtime_error.as_deref(),
             Some("No such file or directory (os error 2)")
         );
+    }
+
+    #[test]
+    fn extracts_reviewer_feedback() {
+        let mut out = ParsedAgentOutput::new(AgentType::TaskReviewer);
+        out.ingest_text("FEEDBACK: missing test for malformed payload");
+        assert_eq!(
+            out.reviewer_feedback.as_deref(),
+            Some("missing test for malformed payload")
+        );
+    }
+
+    #[test]
+    fn ignores_feedback_for_non_reviewer() {
+        let mut out = ParsedAgentOutput::new(AgentType::Worker);
+        out.ingest_text("FEEDBACK: something");
+        assert_eq!(out.reviewer_feedback, None);
     }
 }

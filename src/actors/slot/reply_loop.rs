@@ -208,92 +208,39 @@ pub(super) async fn run_reply_loop(
             return Err(anyhow::anyhow!("agent session produced no events; {}", diag));
         }
 
-        // Parse markers from the persisted final assistant message (not from streaming chunks).
+        // Parse the persisted final assistant message for runtime errors and feedback.
         if let Some(last_text) = last_assistant_text_from_goose_sqlite(session_id).await {
             output.ingest_text(&last_text);
         }
 
-        // Send a nudge if the required marker is missing.
-        if saw_any_tool_use && missing_required_marker(agent_type, &output)
-            && let Some(nudge) = missing_marker_nudge(agent_type, &output) {
-                tracing::info!(
-                    task_id = %task_id,
-                    agent_type = %agent_type.as_str(),
-                    "Lifecycle: session ended without required marker; sending post-session nudge"
-                );
-                let nudge_msg = GooseMessage::user().with_text(nudge);
-                let mut stream = agent
-                    .reply(
-                        nudge_msg,
-                        GooseSessionConfig {
-                            id: session_id.to_owned(),
-                            schedule_id: None,
-                            max_turns: Some(MAX_TURNS),
-                            retry_config: None,
-                        },
-                        Some(cancel.clone()),
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("nudge reply init failed: {e}"))?;
+        // No markers or nudging — the agent stopping tool calls is the natural
+        // completion signal. Routing is determined by AC state (reviewers) and
+        // session completion (workers) in the lifecycle.
 
-                let assistant_role = GooseMessage::assistant().role;
-                while let Some(evt) = stream.next().await {
-                    let evt = evt.map_err(|e| anyhow::anyhow!("nudge stream error: {e}"))?;
-                    if let goose::agents::AgentEvent::Message(msg) = &evt
-                        && msg.role == assistant_role {
-                            let _ = app_state.events().send(DjinnEvent::SessionMessage {
-                                session_id: session_id.to_owned(),
-                                task_id: task_id.to_owned(),
-                                agent_type: agent_type.as_str().to_owned(),
-                                message: serialize_goose_message(msg),
-                            });
-                        }
-                    extension::handle_event(app_state, agent, &evt, worktree_path).await;
-                }
-            }
-
-        if let Some(last_assistant_text) =
-            last_assistant_text_from_goose_sqlite(session_id).await
-        {
-            output.ingest_text(&last_assistant_text);
-            tracing::info!(
-                task_id = %task_id,
-                agent_type = %agent_type.as_str(),
-                marker_present_after_persisted_check = !missing_required_marker(agent_type, &output),
-                "Lifecycle: parsed persisted last assistant message before marker decision"
-            );
-        }
-
-        if missing_required_marker(agent_type, &output) {
+        if !saw_any_tool_use {
+            let reason = match agent_type {
+                AgentType::Worker | AgentType::ConflictResolver => "worker ended without any tool use (provider error?)",
+                AgentType::TaskReviewer => "task reviewer ended without any tool use (provider error?)",
+            };
             tracing::warn!(
                 task_id = %task_id,
                 agent_type = %agent_type.as_str(),
                 saw_any_event,
-                saw_any_tool_use,
                 assistant_message_count,
-                worker_signal = ?output.worker_signal,
-                reviewer_verdict = ?output.reviewer_verdict,
-                epic_verdict = ?output.epic_verdict,
                 runtime_error = ?output.runtime_error,
-                reviewer_feedback = ?output.reviewer_feedback,
                 assistant_fragments = ?assistant_fragments,
-                "Lifecycle: required marker missing at session end"
+                "Lifecycle: session ended without any tool use"
             );
-            let reason = if !saw_any_tool_use {
-                match agent_type {
-                    AgentType::Worker | AgentType::ConflictResolver => "worker ended without any tool use (provider error?)",
-                    AgentType::TaskReviewer => "task reviewer ended without any tool use (provider error?)",
-                    AgentType::EpicReviewer => "epic reviewer ended without any tool use (provider error?)",
-                }
-            } else {
-                match agent_type {
-                    AgentType::Worker | AgentType::ConflictResolver => "worker ended without WORKER_RESULT marker",
-                    AgentType::TaskReviewer => "task reviewer ended without REVIEW_RESULT marker",
-                    AgentType::EpicReviewer => "epic reviewer ended without EPIC_REVIEW_RESULT marker",
-                }
-            };
             return Err(anyhow::anyhow!(reason));
         }
+
+        tracing::info!(
+            task_id = %task_id,
+            agent_type = %agent_type.as_str(),
+            saw_any_event,
+            assistant_message_count,
+            "Lifecycle: session completed normally"
+        );
 
         Ok(())
     }

@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use crate::actors::git::GitError;
 use crate::agent::AgentType;
-use crate::agent::output_parser::{EpicReviewVerdict, ParsedAgentOutput, ReviewerVerdict};
-use crate::db::repositories::epic::EpicRepository;
-use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
+use crate::agent::output_parser::ParsedAgentOutput;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
 use crate::models::session::SessionStatus;
@@ -168,66 +166,6 @@ pub(crate) async fn merge_after_task_review(
     }
 }
 
-pub(crate) async fn finalize_epic_batch(
-    task_id: &str,
-    output: &ParsedAgentOutput,
-    error_reason: Option<&str>,
-    app_state: &AppState,
-) {
-    let Some(batch_id) = active_epic_batch_for_task(task_id, app_state).await else {
-        return;
-    };
-    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
-    let Some(task) = task_repo.get(task_id).await.ok().flatten() else {
-        return;
-    };
-    let Some(epic_id) = task.epic_id.as_deref() else {
-        return;
-    };
-
-    let batch_repo =
-        EpicReviewBatchRepository::new(app_state.db().clone(), app_state.events().clone());
-    let epic_repo = EpicRepository::new(app_state.db().clone(), app_state.events().clone());
-
-    match output.epic_verdict {
-        Some(EpicReviewVerdict::Clean) => {
-            if let Err(e) = batch_repo.mark_clean(&batch_id).await {
-                tracing::warn!(batch_id = %batch_id, error = %e, "failed to mark epic review batch clean");
-                return;
-            }
-            let tasks = match task_repo.list_by_epic(epic_id).await {
-                Ok(tasks) => tasks,
-                Err(e) => {
-                    tracing::warn!(epic_id = %epic_id, error = %e, "failed to list epic tasks after clean review");
-                    return;
-                }
-            };
-            if tasks.iter().all(|t| t.status == "closed") {
-                let _ = epic_repo.close(epic_id).await;
-            }
-        }
-        Some(EpicReviewVerdict::IssuesFound) => {
-            let verdict = "epic reviewer reported EPIC_REVIEW_RESULT: ISSUES_FOUND";
-            let _ = batch_repo.mark_issues_found(&batch_id, verdict).await;
-            if let Ok(Some(epic)) = epic_repo.get(epic_id).await
-                && epic.status == "in_review"
-            {
-                let _ = epic_repo.reopen(epic_id).await;
-            }
-        }
-        None => {
-            let verdict = error_reason
-                .unwrap_or("epic reviewer ended without required EPIC_REVIEW_RESULT marker");
-            let _ = batch_repo.mark_issues_found(&batch_id, verdict).await;
-            if let Ok(Some(epic)) = epic_repo.get(epic_id).await
-                && epic.status == "in_review"
-            {
-                let _ = epic_repo.reopen(epic_id).await;
-            }
-        }
-    }
-}
-
 pub(crate) async fn cleanup_paused_worker_session(task_id: &str, app_state: &AppState) {
     let repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
     let Ok(Some(paused)) = repo.paused_for_task(task_id).await else {
@@ -235,7 +173,6 @@ pub(crate) async fn cleanup_paused_worker_session(task_id: &str, app_state: &App
     };
 
     let (tokens_in, tokens_out) = if let Some(ref gsid) = paused.goose_session_id {
-        // Best effort — use stored tokens if sqlite unavailable
         let from_sqlite = tokens_from_goose_sqlite(gsid).await;
         from_sqlite.unwrap_or((paused.tokens_in, paused.tokens_out))
     } else {
@@ -290,6 +227,12 @@ pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &A
 
 // ─── Success transition ───────────────────────────────────────────────────────
 
+/// Determine the post-session transition for a successfully completed session.
+///
+/// - **Workers/ConflictResolvers**: always proceed to task review (the agent
+///   stopping tool calls is the completion signal).
+/// - **TaskReviewers**: check acceptance criteria on the task — all met means
+///   approve (merge), any unmet means reject back to worker.
 pub(crate) async fn success_transition(
     task_id: &str,
     agent_type: AgentType,
@@ -297,45 +240,56 @@ pub(crate) async fn success_transition(
     app_state: &AppState,
 ) -> Option<(TransitionAction, Option<String>)> {
     match agent_type {
-        AgentType::Worker | AgentType::ConflictResolver => match output.worker_signal {
-            Some(crate::agent::output_parser::WorkerSignal::Done) => {
-                Some((TransitionAction::SubmitTaskReview, None))
+        AgentType::Worker | AgentType::ConflictResolver => {
+            // Worker completed — proceed to task review.
+            Some((TransitionAction::SubmitTaskReview, None))
+        }
+        AgentType::TaskReviewer => {
+            // Derive verdict from acceptance criteria state on the task.
+            let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+            match repo.get(task_id).await {
+                Ok(Some(task)) => {
+                    if all_acceptance_criteria_met(&task.acceptance_criteria) {
+                        tracing::info!(task_id = %task_id, "task reviewer: all AC met → approve");
+                        merge_after_task_review(task_id, app_state).await
+                    } else {
+                        let feedback = output
+                            .reviewer_feedback
+                            .clone()
+                            .unwrap_or_else(|| "reviewer found unmet acceptance criteria".to_string());
+                        tracing::info!(task_id = %task_id, feedback = %feedback, "task reviewer: unmet AC → reject");
+                        Some((TransitionAction::TaskReviewReject, Some(feedback)))
+                    }
+                }
+                Ok(None) => {
+                    tracing::warn!(task_id = %task_id, "task missing during reviewer verdict");
+                    Some((
+                        TransitionAction::ReleaseTaskReview,
+                        Some("task not found during reviewer verdict".to_string()),
+                    ))
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id, error = %e, "failed to load task for reviewer verdict");
+                    Some((
+                        TransitionAction::ReleaseTaskReview,
+                        Some(format!("failed to load task for verdict: {e}")),
+                    ))
+                }
             }
-            None => {
-                let reason = output
-                    .runtime_error
-                    .clone()
-                    .unwrap_or_else(|| "worker session completed without DONE marker".to_string());
-                tracing::warn!(reason = %reason, "worker session completed without structured result marker");
-                Some((TransitionAction::Release, Some(reason)))
-            }
-        },
-        AgentType::TaskReviewer => match output.reviewer_verdict {
-            Some(ReviewerVerdict::Verified) => merge_after_task_review(task_id, app_state).await,
-            Some(ReviewerVerdict::Reopen) => Some((
-                TransitionAction::TaskReviewReject,
-                Some(
-                    output
-                        .reviewer_feedback
-                        .clone()
-                        .unwrap_or_else(|| "reviewer requested REOPEN".to_string()),
-                ),
-            )),
-            None => {
-                tracing::warn!("task reviewer session completed without REVIEW_RESULT marker");
-                Some((
-                    TransitionAction::ReleaseTaskReview,
-                    Some("reviewer session completed without REVIEW_RESULT marker".to_string()),
-                ))
-            }
-        },
-        AgentType::EpicReviewer => match output.epic_verdict {
-            Some(EpicReviewVerdict::Clean) => None,
-            Some(EpicReviewVerdict::IssuesFound) => None,
-            None => {
-                tracing::warn!("epic reviewer session completed without EPIC_REVIEW_RESULT marker");
-                None
-            }
-        },
+        }
+    }
+}
+
+/// Check if all acceptance criteria are met.
+fn all_acceptance_criteria_met(ac_json: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Criterion {
+        #[serde(default)]
+        met: bool,
+    }
+
+    match serde_json::from_str::<Vec<Criterion>>(ac_json) {
+        Ok(criteria) => !criteria.is_empty() && criteria.iter().all(|c| c.met),
+        Err(_) => false,
     }
 }

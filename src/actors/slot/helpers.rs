@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-use crate::agent::output_parser::ParsedAgentOutput;
 use crate::agent::{AgentType, SessionManager};
 use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
@@ -487,13 +486,8 @@ pub(crate) async fn transition_interrupted(
     app_state: &AppState,
 ) {
     let action = match agent_type {
-        AgentType::Worker | AgentType::ConflictResolver => Some(TransitionAction::Release),
-        AgentType::TaskReviewer => Some(TransitionAction::ReleaseTaskReview),
-        AgentType::EpicReviewer => None,
-    };
-
-    let Some(action) = action else {
-        return;
+        AgentType::Worker | AgentType::ConflictResolver => TransitionAction::Release,
+        AgentType::TaskReviewer => TransitionAction::ReleaseTaskReview,
     };
 
     let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
@@ -621,7 +615,7 @@ pub(crate) fn extensions_for(agent_type: AgentType) -> Vec<goose::config::Extens
             });
         }
         // Reviewers: read-only developer tools (tree only), no subagents
-        AgentType::TaskReviewer | AgentType::EpicReviewer => {
+        AgentType::TaskReviewer => {
             exts.push(ExtensionConfig::Platform {
                 name: "developer".to_string(),
                 description: "List directory trees".to_string(),
@@ -643,33 +637,3 @@ pub(crate) fn agent_type_for_task(task: &Task, has_conflict_context: bool) -> Ag
     }
 }
 
-// ─── Output parser helpers ────────────────────────────────────────────────────
-
-pub(crate) fn missing_required_marker(agent_type: AgentType, output: &ParsedAgentOutput) -> bool {
-    match agent_type {
-        AgentType::Worker | AgentType::ConflictResolver => output.worker_signal.is_none(),
-        AgentType::TaskReviewer => output.reviewer_verdict.is_none(),
-        AgentType::EpicReviewer => output.epic_verdict.is_none(),
-    }
-}
-
-pub(crate) fn missing_marker_nudge(
-    agent_type: AgentType,
-    output: &ParsedAgentOutput,
-) -> Option<&'static str> {
-    if !missing_required_marker(agent_type, output) {
-        return None;
-    }
-
-    match agent_type {
-        AgentType::Worker | AgentType::ConflictResolver => {
-            Some("You stopped without finishing. Continue implementing — write and save all required code changes, then emit WORKER_RESULT: DONE when every acceptance criterion is met.")
-        }
-        AgentType::TaskReviewer => Some(
-            "Emit exactly one final marker now: REVIEW_RESULT: VERIFIED | REOPEN | CANCEL. If REOPEN or CANCEL, also emit FEEDBACK: <what is missing>.",
-        ),
-        AgentType::EpicReviewer => Some(
-            "Emit exactly one final marker now: EPIC_REVIEW_RESULT: CLEAN | ISSUES_FOUND. If ISSUES_FOUND, include concise actionable findings and create follow-up tasks in this epic before finishing.",
-        ),
-    }
-}

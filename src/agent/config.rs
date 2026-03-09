@@ -32,12 +32,4 @@ impl DispatchConfig {
             model_name: model_name.into(),
         }
     }
-
-    pub fn epic_reviewer(provider_name: impl Into<String>, model_name: impl Into<String>) -> Self {
-        Self {
-            agent_type: AgentType::EpicReviewer,
-            provider_name: provider_name.into(),
-            model_name: model_name.into(),
-        }
-    }
 }

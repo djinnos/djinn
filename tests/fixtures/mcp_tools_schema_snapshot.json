@@ -1,7 +1,6 @@
 {
   "tools": [
     {
-      "name": "board_health",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -22,6 +21,7 @@
         "title": "BoardHealthParams",
         "type": "object"
       },
+      "name": "board_health",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
@@ -30,7 +30,6 @@
       }
     },
     {
-      "name": "board_reconcile",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -51,6 +50,7 @@
         "title": "BoardReconcileParams",
         "type": "object"
       },
+      "name": "board_reconcile",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
@@ -59,7 +59,6 @@
       }
     },
     {
-      "name": "credential_delete",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -74,6 +73,7 @@
         "title": "CredentialDeleteInput",
         "type": "object"
       },
+      "name": "credential_delete",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -105,11 +105,11 @@
       }
     },
     {
-      "name": "credential_list",
       "input_schema": {
         "properties": {},
         "type": "object"
       },
+      "name": "credential_list",
       "output_schema": {
         "$defs": {
           "CredentialSummary": {
@@ -157,7 +157,6 @@
       }
     },
     {
-      "name": "credential_set",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -182,6 +181,7 @@
         "title": "CredentialSetInput",
         "type": "object"
       },
+      "name": "credential_set",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -213,7 +213,6 @@
       }
     },
     {
-      "name": "epic_close",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -233,6 +232,7 @@
         "title": "EpicCloseParams",
         "type": "object"
       },
+      "name": "epic_close",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -280,7 +280,6 @@
       }
     },
     {
-      "name": "epic_count",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -304,6 +303,7 @@
         "title": "EpicCountParams",
         "type": "object"
       },
+      "name": "epic_count",
       "output_schema": {
         "$defs": {
           "EpicCountGroup": {
@@ -347,7 +347,6 @@
       }
     },
     {
-      "name": "epic_create",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -382,6 +381,7 @@
         "title": "EpicCreateParams",
         "type": "object"
       },
+      "name": "epic_create",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -429,7 +429,6 @@
       }
     },
     {
-      "name": "epic_delete",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -449,6 +448,7 @@
         "title": "EpicDeleteParams",
         "type": "object"
       },
+      "name": "epic_delete",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -471,7 +471,6 @@
       }
     },
     {
-      "name": "epic_list",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -510,6 +509,7 @@
         "title": "EpicListParams",
         "type": "object"
       },
+      "name": "epic_list",
       "output_schema": {
         "$defs": {
           "EpicModel": {
@@ -602,7 +602,6 @@
       }
     },
     {
-      "name": "epic_reopen",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -622,6 +621,7 @@
         "title": "EpicReopenParams",
         "type": "object"
       },
+      "name": "epic_reopen",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -669,7 +669,6 @@
       }
     },
     {
-      "name": "epic_show",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -689,6 +688,7 @@
         "title": "EpicShowParams",
         "type": "object"
       },
+      "name": "epic_show",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -752,7 +752,6 @@
       }
     },
     {
-      "name": "epic_tasks",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -796,6 +795,7 @@
         "title": "EpicTasksParams",
         "type": "object"
       },
+      "name": "epic_tasks",
       "output_schema": {
         "$defs": {
           "AcceptanceCriterionItem": {
@@ -961,7 +961,6 @@
       }
     },
     {
-      "name": "epic_update",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1001,6 +1000,7 @@
         "title": "EpicUpdateParams",
         "type": "object"
       },
+      "name": "epic_update",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1048,7 +1048,6 @@
       }
     },
     {
-      "name": "execution_kill_task",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1068,6 +1067,7 @@
         "title": "ExecutionKillTaskParams",
         "type": "object"
       },
+      "name": "execution_kill_task",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1091,7 +1091,6 @@
       }
     },
     {
-      "name": "execution_pause",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1114,6 +1113,7 @@
         "title": "ExecutionPauseParams",
         "type": "object"
       },
+      "name": "execution_pause",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1149,7 +1149,6 @@
       }
     },
     {
-      "name": "execution_resume",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1162,6 +1161,7 @@
         "title": "ExecutionResumeParams",
         "type": "object"
       },
+      "name": "execution_resume",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1193,7 +1193,6 @@
       }
     },
     {
-      "name": "execution_start",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1206,6 +1205,7 @@
         "title": "ExecutionStartParams",
         "type": "object"
       },
+      "name": "execution_start",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1241,7 +1241,6 @@
       }
     },
     {
-      "name": "execution_status",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1254,6 +1253,7 @@
         "title": "ExecutionStatusParams",
         "type": "object"
       },
+      "name": "execution_status",
       "output_schema": {
         "$defs": {
           "ExecutionStatusCapacity": {
@@ -1347,6 +1347,14 @@
             "nullable": true,
             "type": "string"
           },
+          "project_issues": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Per-project health issues blocking execution (project_id → error message).",
+            "nullable": true,
+            "type": "object"
+          },
           "running_sessions": {
             "format": "int64",
             "nullable": true,
@@ -1377,7 +1385,6 @@
       }
     },
     {
-      "name": "memory_broken_links",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1395,6 +1402,7 @@
         "title": "BrokenLinksParams",
         "type": "object"
       },
+      "name": "memory_broken_links",
       "output_schema": {
         "$defs": {
           "BrokenLink": {
@@ -1443,7 +1451,6 @@
       }
     },
     {
-      "name": "memory_build_context",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1474,6 +1481,7 @@
         "title": "BuildContextParams",
         "type": "object"
       },
+      "name": "memory_build_context",
       "output_schema": {
         "$defs": {
           "MemoryNoteView": {
@@ -1595,7 +1603,6 @@
       }
     },
     {
-      "name": "memory_catalog",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1609,6 +1616,7 @@
         "title": "CatalogParams",
         "type": "object"
       },
+      "name": "memory_catalog",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1628,7 +1636,6 @@
       }
     },
     {
-      "name": "memory_delete",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1646,6 +1653,7 @@
         "title": "DeleteParams",
         "type": "object"
       },
+      "name": "memory_delete",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1665,7 +1673,6 @@
       }
     },
     {
-      "name": "memory_diff",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1688,6 +1695,7 @@
         "title": "DiffParams",
         "type": "object"
       },
+      "name": "memory_diff",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1707,7 +1715,6 @@
       }
     },
     {
-      "name": "memory_edit",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1750,6 +1757,7 @@
         "title": "EditParams",
         "type": "object"
       },
+      "name": "memory_edit",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1814,7 +1822,6 @@
       }
     },
     {
-      "name": "memory_graph",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1828,6 +1835,7 @@
         "title": "GraphParams",
         "type": "object"
       },
+      "name": "memory_graph",
       "output_schema": {
         "$defs": {
           "GraphEdge": {
@@ -1913,7 +1921,6 @@
       }
     },
     {
-      "name": "memory_health",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -1926,6 +1933,7 @@
         "title": "HealthParams",
         "type": "object"
       },
+      "name": "memory_health",
       "output_schema": {
         "$defs": {
           "StaleFolder": {
@@ -1980,7 +1988,6 @@
       }
     },
     {
-      "name": "memory_history",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2003,6 +2010,7 @@
         "title": "HistoryParams",
         "type": "object"
       },
+      "name": "memory_history",
       "output_schema": {
         "$defs": {
           "GitLogEntry": {
@@ -2051,7 +2059,6 @@
       }
     },
     {
-      "name": "memory_list",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2075,6 +2082,7 @@
         "title": "ListParams",
         "type": "object"
       },
+      "name": "memory_list",
       "output_schema": {
         "$defs": {
           "NoteCompact": {
@@ -2131,7 +2139,6 @@
       }
     },
     {
-      "name": "memory_move",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2159,6 +2166,7 @@
         "title": "MoveParams",
         "type": "object"
       },
+      "name": "memory_move",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2223,7 +2231,6 @@
       }
     },
     {
-      "name": "memory_orphans",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2241,6 +2248,7 @@
         "title": "OrphansParams",
         "type": "object"
       },
+      "name": "memory_orphans",
       "output_schema": {
         "$defs": {
           "OrphanNote": {
@@ -2293,7 +2301,6 @@
       }
     },
     {
-      "name": "memory_read",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2312,6 +2319,7 @@
         "title": "ReadParams",
         "type": "object"
       },
+      "name": "memory_read",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2376,7 +2384,6 @@
       }
     },
     {
-      "name": "memory_recent",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2400,6 +2407,7 @@
         "title": "RecentParams",
         "type": "object"
       },
+      "name": "memory_recent",
       "output_schema": {
         "$defs": {
           "NoteCompact": {
@@ -2456,7 +2464,6 @@
       }
     },
     {
-      "name": "memory_reindex",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2470,6 +2477,7 @@
         "title": "ReindexParams",
         "type": "object"
       },
+      "name": "memory_reindex",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2505,7 +2513,6 @@
       }
     },
     {
-      "name": "memory_search",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2536,6 +2543,7 @@
         "title": "SearchParams",
         "type": "object"
       },
+      "name": "memory_search",
       "output_schema": {
         "$defs": {
           "MemorySearchResultItem": {
@@ -2591,7 +2599,6 @@
       }
     },
     {
-      "name": "memory_task_refs",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2609,6 +2616,7 @@
         "title": "TaskRefsParams",
         "type": "object"
       },
+      "name": "memory_task_refs",
       "output_schema": {
         "$defs": {
           "MemoryTaskRefItem": {
@@ -2656,7 +2664,6 @@
       }
     },
     {
-      "name": "memory_write",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2691,6 +2698,7 @@
         "title": "WriteParams",
         "type": "object"
       },
+      "name": "memory_write",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2755,7 +2763,6 @@
       }
     },
     {
-      "name": "model_health",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2773,6 +2780,7 @@
         "title": "ModelHealthInput",
         "type": "object"
       },
+      "name": "model_health",
       "output_schema": {
         "$defs": {
           "ModelHealthOutput": {
@@ -2841,7 +2849,6 @@
       }
     },
     {
-      "name": "project_add",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2861,6 +2868,7 @@
         "title": "ProjectAddParams",
         "type": "object"
       },
+      "name": "project_add",
       "output_schema": {
         "$defs": {
           "ProjectInfo": {
@@ -2901,7 +2909,6 @@
       }
     },
     {
-      "name": "project_commands_get",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -2916,6 +2923,7 @@
         "title": "ProjectCommandsGetParams",
         "type": "object"
       },
+      "name": "project_commands_get",
       "output_schema": {
         "$defs": {
           "ProjectCommandSpec": {
@@ -2975,7 +2983,6 @@
       }
     },
     {
-      "name": "project_commands_set",
       "input_schema": {
         "$defs": {
           "ProjectCommandSpec": {
@@ -3032,6 +3039,7 @@
         "title": "ProjectCommandsSetParams",
         "type": "object"
       },
+      "name": "project_commands_set",
       "output_schema": {
         "$defs": {
           "CommandValidationError": {
@@ -3085,7 +3093,6 @@
       }
     },
     {
-      "name": "project_config_get",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -3099,6 +3106,7 @@
         "title": "ProjectConfigGetParams",
         "type": "object"
       },
+      "name": "project_config_get",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -3134,7 +3142,6 @@
       }
     },
     {
-      "name": "project_config_set",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -3156,6 +3163,7 @@
         "title": "ProjectConfigSetParams",
         "type": "object"
       },
+      "name": "project_config_set",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -3191,11 +3199,11 @@
       }
     },
     {
-      "name": "project_list",
       "input_schema": {
         "properties": {},
         "type": "object"
       },
+      "name": "project_list",
       "output_schema": {
         "$defs": {
           "ProjectInfo": {
@@ -3235,7 +3243,6 @@
       }
     },
     {
-      "name": "project_remove",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -3250,6 +3257,7 @@
         "title": "ProjectRemoveParams",
         "type": "object"
       },
+      "name": "project_remove",
       "output_schema": {
         "$defs": {
           "ProjectInfo": {
@@ -3290,7 +3298,6 @@
       }
     },
     {
-      "name": "provider_add_custom",
       "input_schema": {
         "$defs": {
           "SeedModelInput": {
@@ -3345,6 +3352,7 @@
         "title": "ProviderAddCustomInput",
         "type": "object"
       },
+      "name": "provider_add_custom",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -3372,11 +3380,11 @@
       }
     },
     {
-      "name": "provider_catalog",
       "input_schema": {
         "properties": {},
         "type": "object"
       },
+      "name": "provider_catalog",
       "output_schema": {
         "$defs": {
           "ProviderCatalogItem": {
@@ -3462,11 +3470,11 @@
       }
     },
     {
-      "name": "provider_connected",
       "input_schema": {
         "properties": {},
         "type": "object"
       },
+      "name": "provider_connected",
       "output_schema": {
         "$defs": {
           "ProviderCatalogItem": {
@@ -3552,7 +3560,6 @@
       }
     },
     {
-      "name": "provider_model_lookup",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -3567,6 +3574,7 @@
         "title": "ProviderModelLookupInput",
         "type": "object"
       },
+      "name": "provider_model_lookup",
       "output_schema": {
         "$defs": {
           "ModelPricingOutput": {
@@ -3664,7 +3672,6 @@
       }
     },
     {
-      "name": "provider_models",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -3679,6 +3686,7 @@
         "title": "ProviderModelsInput",
         "type": "object"
       },
+      "name": "provider_models",
       "output_schema": {
         "$defs": {
           "ModelPricingOutput": {
@@ -3780,11 +3788,11 @@
       }
     },
     {
-      "name": "provider_models_connected",
       "input_schema": {
         "properties": {},
         "type": "object"
       },
+      "name": "provider_models_connected",
       "output_schema": {
         "$defs": {
           "ModelPricingOutput": {
@@ -3882,7 +3890,6 @@
       }
     },
     {
-      "name": "provider_oauth_start",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -3897,6 +3904,7 @@
         "title": "ProviderOauthStartInput",
         "type": "object"
       },
+      "name": "provider_oauth_start",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -3939,7 +3947,6 @@
       }
     },
     {
-      "name": "provider_validate",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -3948,22 +3955,23 @@
             "type": "string"
           },
           "base_url": {
-            "description": "Provider API base URL (e.g. https://api.openai.com/v1). The probe appends /models.",
+            "description": "Provider API base URL (e.g. https://api.openai.com/v1). The probe appends /models.\nWhen omitted, the server resolves it from the catalog using provider_id.",
+            "nullable": true,
             "type": "string"
           },
           "provider_id": {
-            "description": "Optional provider identifier for logging/diagnostics.",
+            "description": "Provider identifier. Used for logging and to resolve base_url from the catalog when not supplied.",
             "nullable": true,
             "type": "string"
           }
         },
         "required": [
-          "base_url",
           "api_key"
         ],
         "title": "ProviderValidateInput",
         "type": "object"
       },
+      "name": "provider_validate",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -3999,7 +4007,6 @@
       }
     },
     {
-      "name": "session_active",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4014,15 +4021,12 @@
         "title": "SessionActiveParams",
         "type": "object"
       },
+      "name": "session_active",
       "output_schema": {
         "$defs": {
           "SessionToolSession": {
             "properties": {
               "agent_type": {
-                "type": "string"
-              },
-              "continuation_of": {
-                "nullable": true,
                 "type": "string"
               },
               "ended_at": {
@@ -4108,7 +4112,6 @@
       }
     },
     {
-      "name": "session_for_task",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4128,6 +4131,7 @@
         "title": "SessionForTaskParams",
         "type": "object"
       },
+      "name": "session_for_task",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4172,15 +4176,9 @@
       }
     },
     {
-      "name": "session_list",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
-          "chain_ordered": {
-            "description": "When true, return sessions in continuation-chain order (oldest root first, each\nsubsequent session linked via continuation_of) instead of started_at DESC.\nUseful for rendering the session timeline with compaction boundaries.",
-            "nullable": true,
-            "type": "boolean"
-          },
           "project": {
             "description": "Absolute project path (required).",
             "type": "string"
@@ -4197,15 +4195,12 @@
         "title": "SessionListParams",
         "type": "object"
       },
+      "name": "session_list",
       "output_schema": {
         "$defs": {
           "SessionToolSession": {
             "properties": {
               "agent_type": {
-                "type": "string"
-              },
-              "continuation_of": {
-                "nullable": true,
                 "type": "string"
               },
               "ended_at": {
@@ -4284,7 +4279,6 @@
       }
     },
     {
-      "name": "session_show",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4304,14 +4298,11 @@
         "title": "SessionShowParams",
         "type": "object"
       },
+      "name": "session_show",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "agent_type": {
-            "type": "string"
-          },
-          "continuation_of": {
-            "nullable": true,
             "type": "string"
           },
           "ended_at": {
@@ -4362,7 +4353,6 @@
       }
     },
     {
-      "name": "settings_get",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4375,6 +4365,7 @@
         "title": "SettingsGetParams",
         "type": "object"
       },
+      "name": "settings_get",
       "output_schema": {
         "$defs": {
           "DjinnSettings": {
@@ -4441,12 +4432,12 @@
       }
     },
     {
-      "name": "settings_reset",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "SettingsResetParams",
         "type": "object"
       },
+      "name": "settings_reset",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4470,7 +4461,6 @@
       }
     },
     {
-      "name": "settings_set",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4517,6 +4507,7 @@
         "title": "SettingsSetParams",
         "type": "object"
       },
+      "name": "settings_set",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4540,7 +4531,6 @@
       }
     },
     {
-      "name": "system_logs",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4557,6 +4547,7 @@
         "title": "SystemLogsInput",
         "type": "object"
       },
+      "name": "system_logs",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4587,11 +4578,11 @@
       }
     },
     {
-      "name": "system_ping",
       "input_schema": {
         "properties": {},
         "type": "object"
       },
+      "name": "system_ping",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4611,7 +4602,6 @@
       }
     },
     {
-      "name": "task_activity_list",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4656,6 +4646,7 @@
         "title": "TaskActivityListParams",
         "type": "object"
       },
+      "name": "task_activity_list",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
@@ -4664,7 +4655,6 @@
       }
     },
     {
-      "name": "task_blocked_list",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4684,6 +4674,7 @@
         "title": "TaskBlockedListParams",
         "type": "object"
       },
+      "name": "task_blocked_list",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
@@ -4692,7 +4683,6 @@
       }
     },
     {
-      "name": "task_blockers_list",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4712,6 +4702,7 @@
         "title": "TaskBlockersListParams",
         "type": "object"
       },
+      "name": "task_blockers_list",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
@@ -4720,7 +4711,6 @@
       }
     },
     {
-      "name": "task_claim",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4756,6 +4746,7 @@
         "title": "TaskClaimParams",
         "type": "object"
       },
+      "name": "task_claim",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
@@ -4764,7 +4755,6 @@
       }
     },
     {
-      "name": "task_comment_add",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4797,6 +4787,7 @@
         "title": "TaskCommentAddParams",
         "type": "object"
       },
+      "name": "task_comment_add",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
@@ -4805,7 +4796,6 @@
       }
     },
     {
-      "name": "task_count",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -4846,6 +4836,7 @@
         "title": "TaskCountParams",
         "type": "object"
       },
+      "name": "task_count",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
@@ -4854,7 +4845,6 @@
       }
     },
     {
-      "name": "task_create",
       "input_schema": {
         "$defs": {
           "AcceptanceCriterionItem": {
@@ -4957,6 +4947,7 @@
         "title": "TaskCreateParams",
         "type": "object"
       },
+      "name": "task_create",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
@@ -4965,7 +4956,6 @@
       }
     },
     {
-      "name": "task_list",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -5019,6 +5009,7 @@
         "title": "TaskListParams",
         "type": "object"
       },
+      "name": "task_list",
       "output_schema": {
         "$defs": {
           "AcceptanceCriterionItem": {
@@ -5187,7 +5178,6 @@
       }
     },
     {
-      "name": "task_memory_refs",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -5207,6 +5197,7 @@
         "title": "TaskMemoryRefsParams",
         "type": "object"
       },
+      "name": "task_memory_refs",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
@@ -5215,7 +5206,6 @@
       }
     },
     {
-      "name": "task_ready",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -5251,6 +5241,7 @@
         "title": "TaskReadyParams",
         "type": "object"
       },
+      "name": "task_ready",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
@@ -5259,7 +5250,6 @@
       }
     },
     {
-      "name": "task_show",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -5279,6 +5269,7 @@
         "title": "TaskShowParams",
         "type": "object"
       },
+      "name": "task_show",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
@@ -5287,7 +5278,6 @@
       }
     },
     {
-      "name": "task_sync_disable",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -5300,6 +5290,7 @@
         "title": "TaskSyncDisableParams",
         "type": "object"
       },
+      "name": "task_sync_disable",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -5321,7 +5312,6 @@
       }
     },
     {
-      "name": "task_sync_enable",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -5336,6 +5326,7 @@
         "title": "TaskSyncEnableParams",
         "type": "object"
       },
+      "name": "task_sync_enable",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -5362,7 +5353,6 @@
       }
     },
     {
-      "name": "task_sync_export",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -5375,6 +5365,7 @@
         "title": "TaskSyncExportParams",
         "type": "object"
       },
+      "name": "task_sync_export",
       "output_schema": {
         "$defs": {
           "SyncChannelResult": {
@@ -5425,7 +5416,6 @@
       }
     },
     {
-      "name": "task_sync_import",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -5438,6 +5428,7 @@
         "title": "TaskSyncImportParams",
         "type": "object"
       },
+      "name": "task_sync_import",
       "output_schema": {
         "$defs": {
           "SyncChannelResult": {
@@ -5488,7 +5479,6 @@
       }
     },
     {
-      "name": "task_sync_status",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -5501,6 +5491,7 @@
         "title": "TaskSyncStatusParams",
         "type": "object"
       },
+      "name": "task_sync_status",
       "output_schema": {
         "$defs": {
           "SyncChannelStatus": {
@@ -5564,7 +5555,6 @@
       }
     },
     {
-      "name": "task_transition",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -5607,6 +5597,7 @@
         "title": "TaskTransitionParams",
         "type": "object"
       },
+      "name": "task_transition",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
@@ -5615,7 +5606,6 @@
       }
     },
     {
-      "name": "task_update",
       "input_schema": {
         "$defs": {
           "AcceptanceCriterionItem": {
@@ -5744,6 +5734,7 @@
         "title": "TaskUpdateParams",
         "type": "object"
       },
+      "name": "task_update",
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,

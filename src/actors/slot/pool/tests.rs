@@ -409,7 +409,7 @@ async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
         session_manager,
         cancel,
         config,
-        test_slot_factory(Duration::from_millis(500), signal_tx),
+        test_slot_factory(Duration::from_secs(10), signal_tx),
     );
 
     let task_ids: Vec<String> = (0..4).map(|i| format!("down-{i}")).collect();
@@ -426,9 +426,14 @@ async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
     .await
     .expect("reconfigure should succeed");
 
+    // Tasks are still running (10s runtime), so all 4 slots should still exist.
     let status_during_drain = pool.get_status().await.expect("status should succeed");
     assert_eq!(status_during_drain.total_slots, 4);
 
+    // Kill all tasks so they finish immediately.
+    pool.interrupt_all("test drain")
+        .await
+        .expect("interrupt_all should succeed");
     wait_until_no_sessions(&pool, &task_ids).await;
 
     let status_after = pool.get_status().await.expect("status should succeed");
@@ -445,6 +450,10 @@ async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
             .await,
         Err(PoolError::AtCapacity { .. })
     ));
+    pool.interrupt_all("test cleanup")
+        .await
+        .expect("interrupt_all should succeed");
+    wait_until_no_sessions(&pool, &["down-next-1".into(), "down-next-2".into()]).await;
 }
 
 #[tokio::test]

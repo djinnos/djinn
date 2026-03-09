@@ -14,14 +14,14 @@ use crate::models::task::Task;
 const DEV_TEMPLATE: &str = include_str!("prompts/dev.md");
 const CONFLICT_RESOLVER_TEMPLATE: &str = include_str!("prompts/conflict-resolver.md");
 const TASK_REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.md");
-const EPIC_REVIEWER_TEMPLATE: &str = include_str!("prompts/epic-reviewer-batch.md");
 
 // ─── Context ───────────────────────────────────────────────────────────────────
 
 /// Runtime context injected alongside the task's stored fields at render time.
 ///
-/// Worker agents only need `project_path`. Reviewer agents additionally supply
-/// commit range and diff. Epic reviewer agents supply batch metadata.
+/// Worker agents need `project_path` and `workspace_path`. Reviewer agents
+/// additionally use the workspace to inspect code. Conflict resolvers supply
+/// merge context.
 pub struct TaskContext {
     /// Absolute path to the project root (passed to Djinn tools as `project`).
     pub project_path: String,
@@ -37,15 +37,6 @@ pub struct TaskContext {
     pub start_commit: Option<String>,
     /// HEAD of the task branch (task reviewer).
     pub end_commit: Option<String>,
-
-    // ── Epic reviewer batch fields ────────────────────────────────────────────
-    pub batch_num: Option<u32>,
-    pub task_count: Option<u32>,
-    /// Each line: "<merge_sha> <short_id>: <title>" — agent runs `git show <sha>` per entry.
-    /// SHAs are per-task squash-merge commits; no contiguous range exists since other
-    /// epics' commits may be interleaved on the same branch.
-    pub tasks_summary: Option<String>,
-    pub common_labels: Option<String>,
 
     // -- Conflict resolver fields --------------------------------------------
     pub conflict_files: Option<String>,
@@ -70,7 +61,6 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
         AgentType::Worker => DEV_TEMPLATE,
         AgentType::ConflictResolver => CONFLICT_RESOLVER_TEMPLATE,
         AgentType::TaskReviewer => TASK_REVIEWER_TEMPLATE,
-        AgentType::EpicReviewer => EPIC_REVIEWER_TEMPLATE,
     };
 
     let ac = format_acceptance_criteria(&task.acceptance_criteria);
@@ -98,22 +88,6 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
         ctx.start_commit.as_deref().unwrap_or(""),
     );
     out = out.replace("{{end_commit}}", ctx.end_commit.as_deref().unwrap_or(""));
-    out = out.replace(
-        "{{batch_num}}",
-        &ctx.batch_num.map(|n| n.to_string()).unwrap_or_default(),
-    );
-    out = out.replace(
-        "{{task_count}}",
-        &ctx.task_count.map(|n| n.to_string()).unwrap_or_default(),
-    );
-    out = out.replace(
-        "{{tasks_summary}}",
-        ctx.tasks_summary.as_deref().unwrap_or(""),
-    );
-    out = out.replace(
-        "{{common_labels}}",
-        ctx.common_labels.as_deref().unwrap_or(""),
-    );
     out = out.replace(
         "{{conflict_files}}",
         ctx.conflict_files.as_deref().unwrap_or(""),
@@ -231,10 +205,6 @@ mod tests {
             commits: None,
             start_commit: None,
             end_commit: None,
-            batch_num: None,
-            task_count: None,
-            tasks_summary: None,
-            common_labels: None,
             conflict_files: None,
             merge_base_branch: None,
             merge_target_branch: None,
@@ -273,26 +243,8 @@ mod tests {
         assert!(prompt.contains(&task.id));
         // The reviewer is instructed to run git diff itself, not receive it injected.
         assert!(prompt.contains("git diff"));
-        // REVIEW_RESULT marker instructions are present.
-        assert!(prompt.contains("REVIEW_RESULT"));
-        assert!(!prompt.contains("{{"));
-    }
-
-    #[test]
-    fn epic_reviewer_prompt_contains_batch_meta() {
-        let task = make_task();
-        let ctx = TaskContext {
-            batch_num: Some(2),
-            task_count: Some(5),
-            common_labels: Some("wave:1".into()),
-            tasks_summary: Some("abc1234 lnfo: Add widget\ndef5678 rvmf: Fix regression".into()),
-            ..make_ctx()
-        };
-        let prompt = render_prompt(AgentType::EpicReviewer, &task, &ctx);
-
-        assert!(prompt.contains("Batch: 2") || prompt.contains("**Batch:** 2"));
-        assert!(prompt.contains("abc1234 lnfo: Add widget"));
-        assert!(prompt.contains("git show <sha>"));
+        // Reviewer uses AC state for verdict.
+        assert!(prompt.contains("task_update"));
         assert!(!prompt.contains("{{"));
     }
 

@@ -48,30 +48,19 @@ For each acceptance criterion, find evidence in the code:
 
 **Rule:** If Blue Team has ANY reasonable defense → DROP the finding
 
-### Step 4: Update Acceptance Criteria and Emit Verdict
+### Step 4: Update Acceptance Criteria
 
-1. **MANDATORY**: Call `task_update(id="{{task_id}}", acceptance_criteria=[...])` with every criterion set to `met: true` or `met: false`.
-2. If any criterion is unmet, produce `REVIEW_RESULT: REOPEN` and include `FEEDBACK: <what is missing>`.
-3. If all criteria are met, produce `REVIEW_RESULT: VERIFIED`.
+**MANDATORY**: Call `task_update(id="{{task_id}}", acceptance_criteria=[...])` with every criterion set to `met: true` or `met: false`.
 
-Do not stop after analysis. You must emit a `REVIEW_RESULT` marker.
+The system will automatically approve the task if all criteria are met, or send it back to the worker if any are unmet. You do not need to emit any special markers — just update the AC state accurately.
+
+If any criterion is unmet, also emit `FEEDBACK: <what is missing>` so the worker knows what to fix.
 
 ## Anti-Loop Reminder
 
-- "Could be better" → VERIFY
-- "I'd do differently" → VERIFY
-- "Code smell" → VERIFY (phase reviewer's job)
-- Criterion clearly unmet → REOPEN
+- "Could be better" → mark as MET
+- "I'd do differently" → mark as MET
+- "Code smell" → mark as MET
+- Criterion clearly unmet → mark as NOT MET
 
-**Default to VERIFY.**
-
----
-
-## Output
-
-After calling tools, provide a short review note with:
-
-```
-REVIEW_RESULT: VERIFIED|REOPEN
-FEEDBACK: <optional, required for REOPEN>
-```
+**Default to MET.**

@@ -29,8 +29,6 @@
 1. Resolve only the listed merge conflicts — fix conflict markers in the conflicting files.
 2. Keep both branch intents where possible; do not remove behavior unless required.
 3. Commit your conflict resolution with a focused message.
-4. End with exactly one marker:
-   - `WORKER_RESULT: DONE`
 
 ## Rules
 

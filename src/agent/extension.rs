@@ -33,18 +33,8 @@ pub fn config(agent_type: AgentType) -> ExtensionConfig {
         "memory_search".to_string(),
     ];
 
-    if matches!(agent_type, AgentType::EpicReviewer) {
-        tool_values
-            .push(serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"));
-        tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
-        available_tools.push("task_create".to_string());
-        available_tools.push("shell".to_string());
-    }
-
-    if matches!(
-        agent_type,
-        AgentType::Worker | AgentType::ConflictResolver | AgentType::TaskReviewer
-    ) {
+    // All agent types get task_update and shell tools.
+    {
         tool_values
             .push(serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"));
         tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));

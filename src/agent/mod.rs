@@ -46,8 +46,6 @@ pub enum AgentType {
     ConflictResolver,
     /// Reviews a single task's diff and approves or rejects it.
     TaskReviewer,
-    /// Reviews epic-level completion and readiness to close.
-    EpicReviewer,
 }
 
 impl AgentType {
@@ -56,7 +54,6 @@ impl AgentType {
             Self::Worker => "worker",
             Self::ConflictResolver => "conflict_resolver",
             Self::TaskReviewer => "task_reviewer",
-            Self::EpicReviewer => "epic_reviewer",
         }
     }
 }

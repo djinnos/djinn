@@ -11,11 +11,9 @@ use goose::providers;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::output_parser::WorkerSignal;
 use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::{AgentType, SessionManager, SessionType};
 use crate::commands::{CommandSpec, run_commands};
-use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
 use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
@@ -89,14 +87,9 @@ pub async fn run_task_lifecycle(
     };
 
     // ── Determine agent type and context ──────────────────────────────────────
-    let active_batch = active_epic_batch_for_task(&task.id, &app_state).await;
     let conflict_ctx = conflict_context_for_dispatch(&task.id, &app_state).await;
     let merge_validation_ctx = merge_validation_context_for_dispatch(&task.id, &app_state).await;
-    let agent_type = if active_batch.is_some() {
-        AgentType::EpicReviewer
-    } else {
-        agent_type_for_task(&task, conflict_ctx.is_some())
-    };
+    let agent_type = agent_type_for_task(&task, conflict_ctx.is_some());
 
     tracing::info!(
         task_id = %task.short_id,
@@ -154,11 +147,7 @@ pub async fn run_task_lifecycle(
     let resumed_record_id: Option<String> = None;
     let resumed_kickoff: Option<GooseMessage> = None;
 
-    let paused = if agent_type == AgentType::EpicReviewer {
-        None
-    } else {
-        find_paused_session_record(&task_id, &app_state).await
-    };
+    let paused = find_paused_session_record(&task_id, &app_state).await;
 
     let worktree_path = if let Some(paused) = paused {
         if let (Some(paused_session_id), Some(paused_worktree_path)) = (
@@ -254,16 +243,6 @@ pub async fn run_task_lifecycle(
                     transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
                     return_free!();
                 }
-            }
-        }
-    } else if agent_type == AgentType::EpicReviewer {
-        let batch_id = active_batch.as_deref().unwrap_or_default();
-        match prepare_epic_reviewer_worktree(&project_dir, batch_id, &app_state).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: prepare_epic_reviewer_worktree failed");
-                transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
-                return_free!();
             }
         }
     } else {
@@ -477,16 +456,6 @@ pub async fn run_task_lifecycle(
             }
         };
 
-        if agent_type == AgentType::EpicReviewer
-            && let Some(batch_id) = active_batch.as_deref()
-        {
-            let batch_repo =
-                EpicReviewBatchRepository::new(app_state.db().clone(), app_state.events().clone());
-            if let Err(e) = batch_repo.mark_in_review(batch_id, &session.id).await {
-                tracing::warn!(task_id = %task.short_id, batch_id = %batch_id, error = %e, "failed to mark epic review batch in_review");
-            }
-        }
-
         (
             session.id,
             Some(session_record.id),
@@ -580,10 +549,6 @@ pub async fn run_task_lifecycle(
             commits: None,
             start_commit: None,
             end_commit: None,
-            batch_num: None,
-            task_count: None,
-            tasks_summary: None,
-            common_labels: None,
             conflict_files,
             merge_base_branch: conflict_ctx.as_ref().map(|m| m.base_branch.clone()),
             merge_target_branch: conflict_ctx.as_ref().map(|m| m.merge_target.clone()),
@@ -648,8 +613,7 @@ pub async fn run_task_lifecycle(
 
         // ── Verification pipeline for worker DONE ───────────────────────────
         let is_worker_done = reply_result.is_ok()
-            && matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver)
-            && matches!(output.worker_signal, Some(WorkerSignal::Done));
+            && matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver);
 
         if is_worker_done {
             if let Some(feedback) =
@@ -706,8 +670,7 @@ pub async fn run_task_lifecycle(
     app_state.persist_model_health_state().await;
 
     let is_worker_done = final_result.is_ok()
-        && matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver)
-        && matches!(final_output.worker_signal, Some(WorkerSignal::Done));
+        && matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver);
 
     // Update session record.
     if is_worker_done {
@@ -808,7 +771,6 @@ pub async fn run_task_lifecycle(
     }
 
     // Determine transition.
-    let epic_error = final_result.as_ref().err().map(|e| e.to_string());
     let transition = match final_result {
         Ok(()) => success_transition(&task_id, agent_type, &final_output, &app_state).await,
         Err(reason) => match agent_type {
@@ -819,13 +781,8 @@ pub async fn run_task_lifecycle(
                 TransitionAction::ReleaseTaskReview,
                 Some(reason.to_string()),
             )),
-            AgentType::EpicReviewer => None,
         },
     };
-
-    if agent_type == AgentType::EpicReviewer {
-        finalize_epic_batch(&task_id, &final_output, epic_error.as_deref(), &app_state).await;
-    }
 
     if let Some((action, reason)) = transition {
         tracing::info!(
