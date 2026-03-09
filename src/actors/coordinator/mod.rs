@@ -785,7 +785,6 @@ mod tests {
 
     use super::*;
     use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
-    use crate::agent::init_session_manager;
     use crate::db::repositories::epic::EpicRepository;
     use crate::db::repositories::task::TaskRepository;
     use crate::provider::health::HealthTracker;
@@ -802,11 +801,9 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        let session_manager = init_session_manager(sessions_dir);
+        let _ = sessions_dir;
         let pool = SlotPoolHandle::spawn(
             app_state,
-            session_manager,
             cancel.clone(),
             SlotPoolConfig {
                 models: vec![ModelSlotConfig {

@@ -1,15 +1,12 @@
 ---
-tags:
-    - adr
-    - agent
-    - goose
-    - phase-5
 title: 'ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning'
 type: adr
+tags: []
 ---
+
 # ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning
 
-## Status: Accepted
+## Status: Superseded by [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]]
 
 ## Context
 

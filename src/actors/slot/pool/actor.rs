@@ -6,7 +6,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::actors::coordinator::CoordinatorHandle;
-use crate::agent::SessionManager;
 use crate::db::repositories::task::TaskRepository;
 use crate::server::AppState;
 
@@ -29,7 +28,6 @@ pub struct SlotPool {
     draining_slots: HashSet<usize>,
     retired_slots: HashSet<usize>,
     app_state: AppState,
-    session_manager: Arc<SessionManager>,
     cancel: CancellationToken,
     slot_factory: SlotFactory,
 }
@@ -38,19 +36,17 @@ impl SlotPool {
     pub(super) fn new(
         receiver: mpsc::Receiver<PoolMessage>,
         app_state: AppState,
-        session_manager: Arc<SessionManager>,
         cancel: CancellationToken,
         config: SlotPoolConfig,
     ) -> Self {
         let slot_factory: SlotFactory = Arc::new(
-            |id, model_id, event_tx, app_state, session_manager, cancel| {
-                SlotHandle::spawn(id, model_id, event_tx, app_state, session_manager, cancel)
+            |id, model_id, event_tx, app_state, cancel| {
+                SlotHandle::spawn(id, model_id, event_tx, app_state, cancel)
             },
         );
         Self::new_with_factory(
             receiver,
             app_state,
-            session_manager,
             cancel,
             config,
             slot_factory,
@@ -60,7 +56,6 @@ impl SlotPool {
     pub(super) fn new_with_factory(
         receiver: mpsc::Receiver<PoolMessage>,
         app_state: AppState,
-        session_manager: Arc<SessionManager>,
         cancel: CancellationToken,
         config: SlotPoolConfig,
         slot_factory: SlotFactory,
@@ -82,7 +77,6 @@ impl SlotPool {
             draining_slots: HashSet::new(),
             retired_slots: HashSet::new(),
             app_state,
-            session_manager,
             cancel,
             slot_factory,
         };
@@ -112,7 +106,6 @@ impl SlotPool {
             model_id.clone(),
             self.event_tx.clone(),
             self.app_state.clone(),
-            self.session_manager.clone(),
             self.cancel.clone(),
         );
         self.slots.push(slot);
@@ -186,15 +179,12 @@ impl SlotPool {
                 let _ = respond_to.send(Ok(self.session_for_task(&task_id)));
             }
             PoolMessage::GetGooseSession {
-                goose_session_id,
+                goose_session_id: _,
                 respond_to,
             } => {
-                let result = self
-                    .session_manager
-                    .get_session(&goose_session_id, false)
-                    .await
-                    .map_err(|e| PoolError::LoadSession(e.to_string()));
-                let _ = respond_to.send(result);
+                let _ = respond_to.send(Err(PoolError::LoadSession(
+                    "goose session loading removed; use session_messages DB tool".to_string(),
+                )));
             }
             PoolMessage::Reconfigure { config, respond_to } => {
                 let _ = respond_to.send(self.reconfigure(config).await);

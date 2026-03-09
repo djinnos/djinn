@@ -1,8 +1,4 @@
-// Agent module — Goose-based in-process agent session management.
-//
-// Foundational types for the AgentSupervisor (d9s4). Wraps the Goose library
-// session lifecycle so the rest of the server stays decoupled from Goose internals.
-
+pub mod compaction;
 pub mod config;
 pub mod extension;
 pub mod message;
@@ -12,30 +8,13 @@ pub mod prompts;
 pub mod provider;
 pub mod sandbox;
 
-use std::{path::PathBuf, sync::Arc, time::Instant};
+// ─── Goose session re-exports ─────────────────────────────────────────────────
 
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+pub use goose::session::{SessionManager, SessionType};
 
-pub use goose::agents::AgentEvent;
-pub use goose::session::session_manager::{Session, SessionManager, SessionType};
-
-// ─── Handle ───────────────────────────────────────────────────────────────────
-
-/// Tracks a running in-process Goose agent session.
-pub struct GooseSessionHandle {
-    /// Tokio task running the agent's reply loop.
-    pub join: JoinHandle<anyhow::Result<()>>,
-    /// Token used to request cooperative cancellation of the session.
-    pub cancel: CancellationToken,
-    /// Goose session ID (nanoid string stored in sessions.db).
-    pub session_id: String,
-    /// Djinn task UUID that this session is working on.
-    pub task_id: String,
-    /// Optional isolated git worktree used by this session.
-    pub worktree_path: Option<PathBuf>,
-    /// Monotonic launch timestamp used for runtime duration reporting.
-    pub started_at: Instant,
+/// Create a Goose SessionManager backed by the given directory.
+pub fn init_session_manager(sessions_dir: std::path::PathBuf) -> std::sync::Arc<SessionManager> {
+    std::sync::Arc::new(SessionManager::new(sessions_dir))
 }
 
 // ─── Agent type ───────────────────────────────────────────────────────────────
@@ -62,14 +41,4 @@ impl AgentType {
             Self::PM => "pm",
         }
     }
-}
-
-// ─── SessionManager init ───────────────────────────────────────────────────────
-
-/// Create a `SessionManager` rooted at `data_dir`.
-///
-/// Goose's `SessionManager` manages its own SQLite database (`sessions.db`)
-/// inside `data_dir`. For Djinn this should be `~/.djinn/sessions/`.
-pub fn init_session_manager(data_dir: PathBuf) -> Arc<SessionManager> {
-    Arc::new(SessionManager::new(data_dir))
 }

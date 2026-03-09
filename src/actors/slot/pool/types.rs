@@ -4,7 +4,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::agent::SessionManager;
 use crate::server::AppState;
 
 use super::super::{SlotHandle, SlotPoolConfig};
@@ -15,7 +14,6 @@ pub type SlotFactory = Arc<
             String,
             mpsc::Sender<super::super::SlotEvent>,
             AppState,
-            Arc<SessionManager>,
             tokio_util::sync::CancellationToken,
         ) -> SlotHandle
         + Send
@@ -95,7 +93,7 @@ pub enum PoolMessage {
     },
     GetGooseSession {
         goose_session_id: String,
-        respond_to: Reply<goose::session::Session>,
+        respond_to: Reply<serde_json::Value>,
     },
     Reconfigure {
         config: SlotPoolConfig,

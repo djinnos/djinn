@@ -5,7 +5,6 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::agent::init_session_manager;
 use crate::test_helpers;
 
 use super::super::{ModelSlotConfig, SlotHandle, SlotPoolConfig};
@@ -19,13 +18,12 @@ enum RunnerSignal {
     Paused(String),
 }
 
-fn test_app_state() -> (crate::server::AppState, Arc<crate::agent::SessionManager>, tokio_util::sync::CancellationToken, TempDir) {
+fn test_app_state() -> (crate::server::AppState, tokio_util::sync::CancellationToken, TempDir) {
     let db = test_helpers::create_test_db();
     let cancel = tokio_util::sync::CancellationToken::new();
     let app_state = crate::server::AppState::new(db, cancel.clone());
     let temp = tempfile::tempdir().expect("tempdir");
-    let session_manager = init_session_manager(temp.path().to_path_buf());
-    (app_state, session_manager, cancel, temp)
+    (app_state, cancel, temp)
 }
 
 fn model(model_id: &str, max_slots: u32, roles: &[&str]) -> ModelSlotConfig {
@@ -63,14 +61,13 @@ fn test_slot_factory(
     signal_tx: mpsc::UnboundedSender<RunnerSignal>,
 ) -> SlotFactory {
     Arc::new(
-        move |slot_id, model_id, event_tx, app_state, session_manager, cancel| {
+        move |slot_id, model_id, event_tx, app_state, cancel| {
             let signal_tx = signal_tx.clone();
             let runner: super::super::actor::TestLifecycleRunner = Arc::new(
                 move |task_id,
                       _project_path,
                       _model_id,
                       _app_state,
-                      _session_manager,
                       kill,
                       pause| {
                     let signal_tx = signal_tx.clone();
@@ -97,7 +94,6 @@ fn test_slot_factory(
                 model_id,
                 event_tx,
                 app_state,
-                session_manager,
                 cancel,
                 runner,
             )
@@ -167,7 +163,7 @@ async fn dispatch_for_role(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parallel_completions_finish_concurrently() {
-    let (app_state, session_manager, cancel, _temp) = test_app_state();
+    let (app_state, cancel, _temp) = test_app_state();
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 4, &["worker"])],
@@ -175,7 +171,6 @@ async fn parallel_completions_finish_concurrently() {
     );
     let pool = SlotPoolHandle::spawn_with_factory(
         app_state,
-        session_manager,
         cancel,
         config,
         test_slot_factory(Duration::from_millis(120), signal_tx),
@@ -201,7 +196,7 @@ async fn parallel_completions_finish_concurrently() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_priority_fallback_uses_next_model_when_primary_full() {
-    let (app_state, session_manager, cancel, _temp) = test_app_state();
+    let (app_state, cancel, _temp) = test_app_state();
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![
@@ -218,7 +213,6 @@ async fn model_priority_fallback_uses_next_model_when_primary_full() {
 
     let pool = SlotPoolHandle::spawn_with_factory(
         app_state,
-        session_manager,
         cancel,
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
@@ -278,7 +272,7 @@ async fn model_priority_fallback_uses_next_model_when_primary_full() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn role_isolation_skips_models_that_do_not_serve_role() {
-    let (app_state, session_manager, cancel, _temp) = test_app_state();
+    let (app_state, cancel, _temp) = test_app_state();
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![
@@ -298,7 +292,6 @@ async fn role_isolation_skips_models_that_do_not_serve_role() {
 
     let pool = SlotPoolHandle::spawn_with_factory(
         app_state,
-        session_manager,
         cancel,
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
@@ -338,7 +331,7 @@ async fn role_isolation_skips_models_that_do_not_serve_role() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconfigure_scale_up_adds_free_slots_for_dispatch() {
-    let (app_state, session_manager, cancel, _temp) = test_app_state();
+    let (app_state, cancel, _temp) = test_app_state();
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 2, &["worker"])],
@@ -346,7 +339,6 @@ async fn reconfigure_scale_up_adds_free_slots_for_dispatch() {
     );
     let pool = SlotPoolHandle::spawn_with_factory(
         app_state,
-        session_manager,
         cancel,
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
@@ -398,7 +390,7 @@ async fn reconfigure_scale_up_adds_free_slots_for_dispatch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
-    let (app_state, session_manager, cancel, _temp) = test_app_state();
+    let (app_state, cancel, _temp) = test_app_state();
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 4, &["worker"])],
@@ -406,7 +398,6 @@ async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
     );
     let pool = SlotPoolHandle::spawn_with_factory(
         app_state,
-        session_manager,
         cancel,
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
@@ -458,7 +449,7 @@ async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
-    let (app_state, session_manager, cancel, _temp) = test_app_state();
+    let (app_state, cancel, _temp) = test_app_state();
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 2, &["worker"])],
@@ -466,7 +457,6 @@ async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
     );
     let pool = SlotPoolHandle::spawn_with_factory(
         app_state,
-        session_manager,
         cancel,
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),

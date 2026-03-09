@@ -6,6 +6,7 @@ tags: []
 
 
 
+
 # Roadmap — Djinn Server Rust Rewrite
 
 Phased delivery plan for v1 requirements. Each phase builds on the previous and has testable success criteria. Phases are sequenced by real dependencies — later phases require earlier foundations.
@@ -307,6 +308,58 @@ _Updated: 2026-03-06_
 **Depends on**: Phase 5 (coordinator/supervisor for execution tools), Phase 4 (git for conflict resolution)
 
 ## Phase Dependency Graph
+
+```
+Phase 1-9: V1 Complete
+    |
+Phase 10: Operational Reliability (ADR-022)
+    |
+Phase 11: Cognitive Memory Infrastructure (ADR-023)
+
+Phase 12: Own the Agent Loop (ADR-027) — can run in parallel with 10/11
+```
+
+All V1 server phases complete. Phase 10 addresses operational reliability. Phase 11 upgrades the memory system for multi-agent scale. Phase 12 replaces Goose with a Djinn-owned agent loop.
+
+## Phase 12: Own the Agent Loop — Replace Goose with Direct LLM Integration
+
+**Goal**: Remove the Goose library dependency entirely. Djinn owns the full agent loop: LLM API calls, SSE streaming, tool dispatch, compaction, OAuth, session storage, and observability. **See [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]].**
+
+**Progress**: Not started.
+
+**Requirements addressed**:
+- AGENT-03 (revised: direct LLM API calls replace Goose library)
+- AGENT-17 (revised: provider creation from vault without Goose)
+- AGENT-18 (revised: per-session config without Goose Agent)
+- AGENT-19 (revised: session messages in Djinn's single DB)
+- NEW OBS-03: Langfuse LLM observability (traces + generations)
+
+**Features** (to be broken down by `/breakdown`):
+- Provider HTTP layer with 3 format families (OpenAI-compatible, Anthropic, Google)
+- Reply loop (stream → tool dispatch → continue)
+- Compaction (copied from Goose as-is initially)
+- OAuth flows (ChatGPT Codex PKCE, GitHub Copilot device code)
+- Session message consolidation into Djinn's DB
+- Developer tools port (write/edit)
+- Message types (Djinn-native)
+- Token counting (API response primary, tiktoken fallback)
+- Langfuse observability client
+- Goose crate removal
+
+**Success criteria**:
+1. Agent sessions run without any Goose crate dependency
+2. All 3 format families stream LLM responses and handle tool calls correctly
+3. Codex OAuth flow authenticates and dispatches agents against ChatGPT subscription
+4. Copilot OAuth flow authenticates and dispatches agents against GitHub Copilot
+5. Session conversation history stored in Djinn's main DB (no separate sessions.db)
+6. Compaction fires at 80% context usage and agent continues in fresh context
+7. Langfuse receives traces with token counts for every LLM generation
+8. All existing tests pass with Goose removed
+9. `~/.djinn/sessions/` directory no longer created
+
+**Depends on**: Phase 9 (V1 complete). Can run in parallel with Phases 10 and 11.
+
+**Estimation**: ~3000-3500 LOC new/adapted code. See [[Agent Loop Port Scope]].
 
 ## Phase 10: Operational Reliability — Outcome-Based Validation & Agent Roles
 

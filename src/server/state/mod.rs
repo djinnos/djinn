@@ -8,7 +8,6 @@ use tokio_util::sync::CancellationToken;
 use crate::actors::coordinator::CoordinatorHandle;
 use crate::actors::git::{GitActorHandle, GitError};
 use crate::actors::slot::{SlotPoolConfig, SlotPoolHandle};
-use crate::agent::init_session_manager;
 use crate::db::connection::Database;
 use crate::db::repositories::note::NoteRepository;
 use crate::db::repositories::project::ProjectRepository;
@@ -135,10 +134,8 @@ impl AppState {
             return;
         }
 
-        let session_manager = init_session_manager(sessions_dir);
         let pool = SlotPoolHandle::spawn(
             self.clone(),
-            session_manager,
             self.cancel().clone(),
             SlotPoolConfig {
                 models: Vec::new(),

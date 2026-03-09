@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::SessionManager;
 use crate::server::AppState;
 
 use super::super::SlotPoolConfig;
@@ -20,19 +17,17 @@ pub struct SlotPoolHandle {
 impl SlotPoolHandle {
     pub fn spawn(
         app_state: AppState,
-        session_manager: Arc<SessionManager>,
         cancel: CancellationToken,
         config: SlotPoolConfig,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(64);
-        tokio::spawn(SlotPool::new(receiver, app_state, session_manager, cancel, config).run());
+        tokio::spawn(SlotPool::new(receiver, app_state, cancel, config).run());
         Self { sender }
     }
 
     #[cfg(test)]
     pub(crate) fn spawn_with_factory(
         app_state: AppState,
-        session_manager: Arc<SessionManager>,
         cancel: CancellationToken,
         config: SlotPoolConfig,
         slot_factory: SlotFactory,
@@ -42,7 +37,6 @@ impl SlotPoolHandle {
             SlotPool::new_with_factory(
                 receiver,
                 app_state,
-                session_manager,
                 cancel,
                 config,
                 slot_factory,
@@ -119,7 +113,7 @@ impl SlotPoolHandle {
     pub async fn get_goose_session(
         &self,
         goose_session_id: &str,
-    ) -> Result<goose::session::Session, PoolError> {
+    ) -> Result<serde_json::Value, PoolError> {
         self.request(|tx| PoolMessage::GetGooseSession {
             goose_session_id: goose_session_id.to_owned(),
             respond_to: tx,

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::SessionManager;
 use crate::server::AppState;
 
 use super::{SlotCommand, SlotError, SlotEvent, run_task_lifecycle};
@@ -17,7 +16,6 @@ type LifecycleRunner = Arc<
             String,
             String,
             AppState,
-            Arc<SessionManager>,
             CancellationToken,
             CancellationToken,
         ) -> LifecycleFuture
@@ -42,7 +40,6 @@ pub struct SlotActor {
     receiver: mpsc::Receiver<SlotCommand>,
     event_tx: mpsc::Sender<SlotEvent>,
     app_state: AppState,
-    session_manager: Arc<SessionManager>,
     cancel: CancellationToken,
     runner: LifecycleRunner,
 }
@@ -111,7 +108,6 @@ impl SlotActor {
                                     project_path,
                                     self.model_id.clone(),
                                     self.app_state.clone(),
-                                    self.session_manager.clone(),
                                     kill.clone(),
                                     pause.clone(),
                                 );
@@ -170,11 +166,10 @@ impl SlotHandle {
         model_id: String,
         event_tx: mpsc::Sender<SlotEvent>,
         app_state: AppState,
-        session_manager: Arc<SessionManager>,
         cancel: CancellationToken,
     ) -> Self {
         let runner: LifecycleRunner = Arc::new(
-            |task_id, project_path, model_id, app_state, session_manager, kill, pause| {
+            |task_id, project_path, model_id, app_state, kill, pause| {
                 Box::pin(async move {
                     let (sink, _rx) = mpsc::channel::<SlotEvent>(1);
                     run_task_lifecycle(
@@ -182,7 +177,6 @@ impl SlotHandle {
                         project_path,
                         model_id,
                         app_state,
-                        session_manager,
                         kill,
                         pause,
                         sink,
@@ -191,15 +185,7 @@ impl SlotHandle {
                 })
             },
         );
-        Self::spawn_with_runner(
-            id,
-            model_id,
-            event_tx,
-            app_state,
-            session_manager,
-            cancel,
-            runner,
-        )
+        Self::spawn_with_runner(id, model_id, event_tx, app_state, cancel, runner)
     }
 
     fn spawn_with_runner(
@@ -207,7 +193,6 @@ impl SlotHandle {
         model_id: String,
         event_tx: mpsc::Sender<SlotEvent>,
         app_state: AppState,
-        session_manager: Arc<SessionManager>,
         cancel: CancellationToken,
         runner: LifecycleRunner,
     ) -> Self {
@@ -218,7 +203,6 @@ impl SlotHandle {
             receiver,
             event_tx,
             app_state,
-            session_manager,
             cancel,
             runner,
         };
@@ -236,19 +220,10 @@ impl SlotHandle {
         model_id: String,
         event_tx: mpsc::Sender<SlotEvent>,
         app_state: AppState,
-        session_manager: Arc<SessionManager>,
         cancel: CancellationToken,
         runner: TestLifecycleRunner,
     ) -> Self {
-        Self::spawn_with_runner(
-            id,
-            model_id,
-            event_tx,
-            app_state,
-            session_manager,
-            cancel,
-            runner,
-        )
+        Self::spawn_with_runner(id, model_id, event_tx, app_state, cancel, runner)
     }
 
     pub fn id(&self) -> usize {
@@ -302,25 +277,23 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::agent::init_session_manager;
     use crate::test_helpers;
 
-    fn test_app_state() -> (AppState, Arc<SessionManager>, CancellationToken, TempDir) {
+    fn test_app_state() -> (AppState, CancellationToken, TempDir) {
         let db = test_helpers::create_test_db();
         let cancel = CancellationToken::new();
         let app_state = AppState::new(db, cancel.clone());
         let temp = tempfile::tempdir().expect("tempdir");
-        let session_manager = init_session_manager(temp.path().to_path_buf());
-        (app_state, session_manager, cancel, temp)
+        (app_state, cancel, temp)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_task_completes_and_emits_free_event() {
-        let (app_state, session_manager, cancel, _temp) = test_app_state();
+        let (app_state, cancel, _temp) = test_app_state();
         let (event_tx, mut event_rx) = mpsc::channel(4);
 
         let runner: LifecycleRunner = Arc::new(
-            |_task_id, _project_path, _model_id, _app_state, _session_manager, _kill, _pause| {
+            |_task_id, _project_path, _model_id, _app_state, _kill, _pause| {
                 Box::pin(async move {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     Ok(())
@@ -333,7 +306,6 @@ mod tests {
             "test/mock".to_string(),
             event_tx,
             app_state,
-            session_manager,
             cancel,
             runner,
         );

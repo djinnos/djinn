@@ -366,31 +366,26 @@ impl DjinnMcpServer {
             }
         };
 
-        let messages = goose_session
-            .conversation
-            .as_ref()
-            .map(|conversation| {
-                conversation
-                    .messages()
-                    .iter()
-                    .map(|msg| SessionMessage {
-                        role: match msg.role {
-                            rmcp::model::Role::Assistant => "assistant".to_string(),
-                            rmcp::model::Role::User => "user".to_string(),
-                        },
-                        content: msg
-                            .content
-                            .iter()
-                            .map(|block| {
-                                super::json_object::AnyJson(
-                                    serde_json::to_value(block).unwrap_or_else(|_| {
-                                        serde_json::Value::String(format!("{:?}", block))
-                                    }),
-                                )
+        let messages: Vec<SessionMessage> = goose_session
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|msg| {
+                        let role = msg.get("role")?.as_str()?.to_string();
+                        let content = msg
+                            .get("content")
+                            .and_then(|c| c.as_array())
+                            .map(|blocks| {
+                                blocks
+                                    .iter()
+                                    .map(|block| super::json_object::AnyJson(block.clone()))
+                                    .collect()
                             })
-                            .collect(),
+                            .unwrap_or_default();
+                        Some(SessionMessage { role, content })
                     })
-                    .collect::<Vec<SessionMessage>>()
+                    .collect()
             })
             .unwrap_or_default();
 
