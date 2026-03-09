@@ -12,7 +12,10 @@ anyhow = "1"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 clap = { version = "4", features = ["derive", "env"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+futures = "0.3"
+async-stream = "0.3"
+bytes = "1"
 git2 = "0.20"
 dirs = "6"
 refinery = { version = "0.9", features = ["int8-versions"] }

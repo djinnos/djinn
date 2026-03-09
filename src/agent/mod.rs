@@ -8,6 +8,7 @@ pub mod extension;
 pub mod message;
 pub mod output_parser;
 pub mod prompts;
+pub mod provider;
 pub mod sandbox;
 
 use std::{path::PathBuf, sync::Arc, time::Instant};

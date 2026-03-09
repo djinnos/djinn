@@ -1762,9 +1762,12 @@ name = "djinn-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "axum",
+ "bytes",
  "clap",
  "dirs 6.0.0",
+ "futures",
  "git2",
  "goose",
  "goose-mcp",
