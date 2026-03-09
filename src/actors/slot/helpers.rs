@@ -143,6 +143,7 @@ pub(crate) async fn tokens_from_goose_sqlite(goose_session_id: &str) -> Option<(
     None
 }
 
+#[allow(dead_code)]
 pub(crate) async fn last_assistant_text_from_goose_sqlite(
     goose_session_id: &str,
 ) -> Option<String> {
@@ -208,6 +209,7 @@ pub(crate) async fn tokens_from_goose_sqlite_at(
     Some(row)
 }
 
+#[allow(dead_code)]
 async fn last_assistant_text_from_goose_sqlite_at(
     db_path: &Path,
     goose_session_id: &str,

@@ -6,6 +6,7 @@
 pub mod config;
 pub mod extension;
 pub mod message;
+pub mod oauth;
 pub mod output_parser;
 pub mod prompts;
 pub mod provider;
