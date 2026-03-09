@@ -254,9 +254,12 @@ impl CoordinatorActor {
                     self.handle_event_result(event).await;
                 }
 
-                // 4. 30s safety-net tick for stuck detection (AGENT-08).
+                // 4. 30s safety-net tick — stuck detection + dispatch pass for
+                //    any tasks that missed an event (e.g. needs_pm_intervention
+                //    tasks surviving a server restart).
                 _ = self.tick.tick() => {
                     self.detect_and_recover_stuck_filtered(None).await;
+                    self.dispatch_ready_tasks(None).await;
                 }
             }
         }
@@ -434,7 +437,10 @@ impl CoordinatorActor {
                 self.publish_status();
             }
             DjinnEvent::TaskCreated { task, .. } | DjinnEvent::TaskUpdated { task, .. }
-                if matches!(task.status.as_str(), "open" | "needs_task_review" | "closed") =>
+                if matches!(
+                    task.status.as_str(),
+                    "open" | "needs_task_review" | "needs_pm_intervention" | "closed"
+                ) =>
             {
                 tracing::debug!(
                     task_id = %task.short_id,
