@@ -201,18 +201,17 @@ impl DjinnMcpServer {
             tracing::warn!(error = %e, "execution_start: failed to trigger project health validation");
         }
 
+        // Always use resume_project — it's idempotent (removes from paused set
+        // if present, then dispatches). This avoids a race where the status watch
+        // hasn't yet reflected startup pause state.
         let (resumed, result) = match project_id.as_deref() {
             Some(id) => {
-                let paused = coordinator
+                let was_paused = coordinator
                     .get_project_status(id)
                     .map(|s| s.paused)
-                    .unwrap_or(false);
-                let r = if paused {
-                    coordinator.resume_project(id).await
-                } else {
-                    coordinator.trigger_dispatch_for_project(id).await
-                };
-                (paused, r)
+                    .unwrap_or(true);
+                let r = coordinator.resume_project(id).await;
+                (was_paused, r)
             }
             // Global start: always resume (clears all project pauses + dispatches).
             None => (false, coordinator.resume().await),

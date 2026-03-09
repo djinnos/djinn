@@ -12,7 +12,7 @@ impl CoordinatorActor {
             }
         }
         if role_models.is_empty() {
-            tracing::debug!("CoordinatorActor: no configured model found, skipping dispatch");
+            tracing::warn!("CoordinatorActor: no configured model found, skipping dispatch");
             return;
         }
 
@@ -94,7 +94,7 @@ impl CoordinatorActor {
                 continue;
             }
             let Some(model_ids) = role_models.get(role) else {
-                tracing::debug!(task_id = %task.short_id, role, "CoordinatorActor: no model configured for task role");
+                tracing::warn!(task_id = %task.short_id, role, "CoordinatorActor: no model configured for task role");
                 continue;
             };
 
