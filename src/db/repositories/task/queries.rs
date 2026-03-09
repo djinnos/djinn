@@ -189,7 +189,7 @@ impl TaskRepository {
         let task = Some(task);
 
         if let Some(ref t) = task {
-            let _ = self.events.send(DjinnEvent::TaskUpdated(t.clone()));
+            let _ = self.events.send(DjinnEvent::TaskUpdated { task: t.clone(), from_sync: false });
         }
         Ok(task)
     }
@@ -470,7 +470,7 @@ impl TaskRepository {
         tx.commit().await?;
 
         for task in &healed {
-            let _ = events_tx.send(DjinnEvent::TaskUpdated(task.clone()));
+            let _ = events_tx.send(DjinnEvent::TaskUpdated { task: task.clone(), from_sync: false });
         }
 
         let healed_short_ids: Vec<&str> = healed.iter().map(|t| t.short_id.as_str()).collect();

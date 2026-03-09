@@ -32,7 +32,7 @@ use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::db::connection::Database;
-use crate::db::repositories::settings::SettingsRepository;
+use crate::db::repositories::project::ProjectRepository;
 use crate::events::DjinnEvent;
 use backoff::BackoffState;
 pub use tasks_channel::TaskSyncError;
@@ -60,7 +60,6 @@ pub const REGISTERED_CHANNELS: &[ChannelDef] = &[ChannelDef {
 
 #[derive(Debug, Default)]
 struct ChannelState {
-    project_path: Option<PathBuf>,
     backoff: BackoffState,
     last_synced_at: Option<String>,
     last_error: Option<String>,
@@ -74,7 +73,8 @@ pub struct ChannelStatus {
     pub name: String,
     pub branch: String,
     pub enabled: bool,
-    pub project_path: Option<String>,
+    /// Sync-enabled project paths (SYNC-07).
+    pub project_paths: Vec<String>,
     pub last_synced_at: Option<String>,
     pub last_error: Option<String>,
     pub failure_count: u32,
@@ -121,20 +121,11 @@ impl SyncManager {
         }
     }
 
-    /// Restore persisted project paths from DB settings into in-memory state.
-    ///
-    /// Call once after the DB is ready (e.g. in `AppState::initialize()`).
+    /// Restore is now a no-op — sync-enabled state lives in the `projects` table (SYNC-07).
     pub async fn restore(&self) {
-        let repo = settings_repo(&self.inner);
-        let mut states = self.inner.states.lock().await;
-        for ch in REGISTERED_CHANNELS {
-            let key = format!("sync.{}.project", ch.name);
-            if let Ok(Some(s)) = repo.get(&key).await
-                && let Some(st) = states.get_mut(ch.name)
-            {
-                st.project_path = Some(PathBuf::from(s.value));
-            }
-        }
+        // Previously read sync.{channel}.project from settings into ChannelState.
+        // With SYNC-07, sync-enabled projects are queried from the projects table
+        // at export/import time, so no in-memory state needs restoring.
     }
 
     /// Spawn a background task that auto-exports on task mutations.
@@ -151,22 +142,31 @@ impl SyncManager {
             let mut pending = false;
             let mut debounce = tokio::time::interval(Duration::from_secs(10));
             let mut fallback = tokio::time::interval(Duration::from_secs(300));
+            // Auto-import every 60s using two-phase pull (SYNC-09).
+            let mut import_interval = tokio::time::interval(Duration::from_secs(60));
 
             // Skip the first tick (fires immediately on creation).
             debounce.tick().await;
             fallback.tick().await;
+            import_interval.tick().await;
 
             loop {
                 tokio::select! {
                     result = events_rx.recv() => {
                         match result {
                             Ok(
-                                DjinnEvent::TaskCreated(_)
-                                | DjinnEvent::TaskUpdated(_)
+                                DjinnEvent::TaskCreated { from_sync: false, .. }
+                                | DjinnEvent::TaskUpdated { from_sync: false, .. }
                                 | DjinnEvent::TaskDeleted { .. },
                             ) => {
                                 pending = true;
                             }
+                            // Sync-originated events are intentionally ignored to
+                            // prevent import → export → import feedback loops (SYNC-06).
+                            Ok(
+                                DjinnEvent::TaskCreated { from_sync: true, .. }
+                                | DjinnEvent::TaskUpdated { from_sync: true, .. },
+                            ) => {}
                             Err(broadcast::error::RecvError::Lagged(_)) => {
                                 // We missed some events; schedule a sync anyway.
                                 pending = true;
@@ -184,6 +184,12 @@ impl SyncManager {
                     _ = fallback.tick() => {
                         mgr.export_all(Some(&user_id)).await;
                     }
+                    _ = import_interval.tick() => {
+                        // Auto-import using two-phase pull (SYNC-09).
+                        // Two-phase pull (SYNC-08) makes idle cycles ~50ms.
+                        // Events emitted with from_sync=true won't trigger re-export (SYNC-06).
+                        mgr.import_all().await;
+                    }
                     _ = cancel.cancelled() => break,
                 }
             }
@@ -192,20 +198,14 @@ impl SyncManager {
 
     // ── Public API ────────────────────────────────────────────────────────────
 
-    /// Enable a channel and store the project path in DB settings (SYNC-04).
-    pub async fn enable(&self, channel: &str, project: &Path) -> crate::error::Result<()> {
-        let repo = settings_repo(&self.inner);
-        repo.set(&format!("sync.{channel}.enabled"), "true").await?;
-        repo.set(
-            &format!("sync.{channel}.project"),
-            project.to_str().unwrap_or_default(),
-        )
-        .await?;
+    /// Enable sync for a project by setting `sync_enabled=true` in the projects table (SYNC-07).
+    pub async fn enable_project(&self, project_id: &str) -> crate::error::Result<()> {
+        let project_repo = project_repo(&self.inner);
+        project_repo.update_config_field(project_id, "sync_enabled", "true").await?;
 
-        // Update in-memory state.
+        // Reset backoff on enable.
         let mut states = self.inner.states.lock().await;
-        if let Some(st) = states.get_mut(channel) {
-            st.project_path = Some(project.to_path_buf());
+        for st in states.values_mut() {
             st.backoff = BackoffState::new();
             st.last_error = None;
         }
@@ -213,63 +213,59 @@ impl SyncManager {
         Ok(())
     }
 
-    /// Disable a channel for this machine — clears the local enabled flag (SYNC-04).
-    pub async fn disable(&self, channel: &str) -> crate::error::Result<()> {
-        settings_repo(&self.inner)
-            .set(&format!("sync.{channel}.enabled"), "false")
-            .await?;
+    /// Disable sync for a project by setting `sync_enabled=false` in the projects table (SYNC-07).
+    pub async fn disable_project(&self, project_id: &str) -> crate::error::Result<()> {
+        let project_repo = project_repo(&self.inner);
+        project_repo.update_config_field(project_id, "sync_enabled", "false").await?;
 
+        // Reset backoff.
         let mut states = self.inner.states.lock().await;
-        if let Some(st) = states.get_mut(channel) {
-            st.project_path = None;
+        for st in states.values_mut() {
             st.backoff = BackoffState::new();
         }
 
         Ok(())
     }
 
-    /// Delete the remote branch for a channel (team-wide disable) (SYNC-04).
+    /// Delete the remote branch for a channel on a specific project (team-wide disable) (SYNC-04 + SYNC-07).
     pub async fn delete_remote_branch(
         &self,
         channel: &str,
+        project_path: &Path,
     ) -> std::result::Result<(), TaskSyncError> {
-        let project = self.project_from_db(channel).await;
-        let Some(project) = project else {
-            return Err(TaskSyncError::Database("no project path configured".into()));
-        };
         match channel {
-            "tasks" => tasks_channel::delete_remote_branch(&project).await,
+            "tasks" => tasks_channel::delete_remote_branch(project_path).await,
             _ => Err(TaskSyncError::Database(format!(
                 "unknown channel: {channel}"
             ))),
         }
     }
 
-    /// Per-channel status snapshot for all registered channels (SYNC-01).
+    /// Per-channel status snapshot for all registered channels (SYNC-01 + SYNC-07).
     pub async fn status(&self) -> Vec<ChannelStatus> {
         let mut out = Vec::new();
+
+        // Fetch sync-enabled projects once.
+        let sync_projects = self.list_sync_enabled_projects().await;
+        let project_paths: Vec<String> = sync_projects.iter().map(|p| p.path.clone()).collect();
+
         for def in REGISTERED_CHANNELS {
-            // Read in-memory state without holding the lock across awaits.
-            let (project_path, last_synced_at, last_error, failure_count, backoff_secs) = {
+            let (last_synced_at, last_error, failure_count, backoff_secs) = {
                 let states = self.inner.states.lock().await;
                 let st = states.get(def.name);
                 (
-                    st.and_then(|s| s.project_path.as_ref())
-                        .map(|p| p.to_string_lossy().into_owned()),
                     st.and_then(|s| s.last_synced_at.clone()),
                     st.and_then(|s| s.last_error.clone()),
                     st.map(|s| s.backoff.failure_count()).unwrap_or(0),
                     st.map(|s| s.backoff.delay_secs()).unwrap_or(0),
                 )
-            }; // Lock released here.
-
-            let enabled = self.is_enabled(def.name).await;
+            };
 
             out.push(ChannelStatus {
                 name: def.name.to_string(),
                 branch: def.branch.to_string(),
-                enabled,
-                project_path,
+                enabled: !sync_projects.is_empty(),
+                project_paths: project_paths.clone(),
                 last_synced_at,
                 last_error,
                 failure_count,
@@ -279,80 +275,94 @@ impl SyncManager {
         out
     }
 
-    /// Export all enabled channels (SYNC-02).
+    /// Export all sync-enabled projects across all channels (SYNC-02 + SYNC-07).
     ///
     /// Each channel is independent — a failure in one doesn't stop others (SYNC-05).
+    /// Within a channel, each project is exported independently.
     pub async fn export_all(&self, user_id: Option<&str>) -> Vec<SyncResult> {
         let uid = user_id.unwrap_or("local");
         let mut results = Vec::new();
 
+        let sync_projects = self.list_sync_enabled_projects().await;
+        if sync_projects.is_empty() {
+            return results;
+        }
+
         for def in REGISTERED_CHANNELS {
-            if !self.is_enabled(def.name).await {
-                continue;
-            }
+            for project in &sync_projects {
+                let project_path = PathBuf::from(&project.path);
 
-            let project = self.project_from_memory(def.name).await;
-            let Some(project) = project else {
-                results.push(SyncResult {
-                    channel: def.name.to_string(),
-                    ok: false,
-                    count: None,
-                    error: Some("no project path configured".into()),
-                });
-                continue;
-            };
-
-            let result = match def.name {
-                "tasks" => {
-                    tasks_channel::export(&project, uid, &self.inner.db, &self.inner.events_tx)
+                let result = match def.name {
+                    "tasks" => {
+                        tasks_channel::export(
+                            &project_path,
+                            &project.id,
+                            uid,
+                            &self.inner.db,
+                            &self.inner.events_tx,
+                        )
                         .await
-                }
-                _ => Err(TaskSyncError::Database(format!(
-                    "unknown channel: {}",
-                    def.name
-                ))),
-            };
-
-            match result {
-                Ok(count) => {
-                    {
-                        let mut states = self.inner.states.lock().await;
-                        if let Some(st) = states.get_mut(def.name) {
-                            st.backoff.record_success();
-                            st.last_synced_at = Some(now_utc());
-                            st.last_error = None;
-                        }
                     }
-                    results.push(SyncResult {
-                        channel: def.name.to_string(),
-                        ok: true,
-                        count: Some(count),
-                        error: None,
-                    });
-                }
-                Err(e) => {
-                    let delay = {
-                        let mut states = self.inner.states.lock().await;
-                        states
-                            .get_mut(def.name)
-                            .map(|st| {
-                                st.last_error = Some(e.to_string());
-                                st.backoff.record_failure()
-                            })
-                            .unwrap_or(Duration::ZERO)
-                    };
-                    tracing::warn!(
-                        channel = def.name,
-                        error = %e,
-                        backoff_secs = delay.as_secs(),
-                        "sync export failed"
-                    );
-                    results.push(SyncResult {
-                        channel: def.name.to_string(),
-                        ok: false,
-                        count: None,
-                        error: Some(e.to_string()),
-                    });
+                    _ => Err(TaskSyncError::Database(format!(
+                        "unknown channel: {}",
+                        def.name
+                    ))),
+                };
+
+                match result {
+                    Ok(count) => {
+                        {
+                            let mut states = self.inner.states.lock().await;
+                            if let Some(st) = states.get_mut(def.name) {
+                                st.backoff.record_success();
+                                st.last_synced_at = Some(now_utc());
+                                st.last_error = None;
+                            }
+                        }
+                        let _ = self.inner.events_tx.send(DjinnEvent::SyncCompleted {
+                            channel: def.name.to_string(),
+                            direction: "export".to_string(),
+                            count,
+                            error: None,
+                        });
+                        results.push(SyncResult {
+                            channel: def.name.to_string(),
+                            ok: true,
+                            count: Some(count),
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        let delay = {
+                            let mut states = self.inner.states.lock().await;
+                            states
+                                .get_mut(def.name)
+                                .map(|st| {
+                                    st.last_error = Some(e.to_string());
+                                    st.backoff.record_failure()
+                                })
+                                .unwrap_or(Duration::ZERO)
+                        };
+                        let _ = self.inner.events_tx.send(DjinnEvent::SyncCompleted {
+                            channel: def.name.to_string(),
+                            direction: "export".to_string(),
+                            count: 0,
+                            error: Some(e.to_string()),
+                        });
+                        tracing::warn!(
+                            channel = def.name,
+                            project = project.name,
+                            error = %e,
+                            backoff_secs = delay.as_secs(),
+                            "sync export failed"
+                        );
+                        results.push(SyncResult {
+                            channel: def.name.to_string(),
+                            ok: false,
+                            count: None,
+                            error: Some(e.to_string()),
+                        });
+                    }
                 }
             }
         }
@@ -360,68 +370,86 @@ impl SyncManager {
         results
     }
 
-    /// Import all enabled channels (SYNC-02).
+    /// Import all sync-enabled projects across all channels (SYNC-02 + SYNC-07).
     ///
     /// Each channel is independent — a failure in one doesn't stop others (SYNC-05).
+    /// Within a channel, each project is imported independently.
     pub async fn import_all(&self) -> Vec<SyncResult> {
         let mut results = Vec::new();
 
+        let sync_projects = self.list_sync_enabled_projects().await;
+        if sync_projects.is_empty() {
+            return results;
+        }
+
         for def in REGISTERED_CHANNELS {
-            if !self.is_enabled(def.name).await {
-                continue;
-            }
+            for project in &sync_projects {
+                let project_path = PathBuf::from(&project.path);
 
-            let project = self.project_from_memory(def.name).await;
-            let Some(project) = project else {
-                results.push(SyncResult {
-                    channel: def.name.to_string(),
-                    ok: false,
-                    count: None,
-                    error: Some("no project path configured".into()),
-                });
-                continue;
-            };
-
-            let result = match def.name {
-                "tasks" => {
-                    tasks_channel::import(&project, &self.inner.db, &self.inner.events_tx).await
-                }
-                _ => Err(TaskSyncError::Database(format!(
-                    "unknown channel: {}",
-                    def.name
-                ))),
-            };
-
-            match result {
-                Ok(count) => {
-                    {
-                        let mut states = self.inner.states.lock().await;
-                        if let Some(st) = states.get_mut(def.name) {
-                            st.last_synced_at = Some(now_utc());
-                            st.last_error = None;
-                        }
+                let result = match def.name {
+                    "tasks" => {
+                        tasks_channel::import(
+                            &project_path,
+                            &project.id,
+                            &self.inner.db,
+                            &self.inner.events_tx,
+                        )
+                        .await
                     }
-                    results.push(SyncResult {
-                        channel: def.name.to_string(),
-                        ok: true,
-                        count: Some(count),
-                        error: None,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(channel = def.name, error = %e, "sync import failed");
-                    {
-                        let mut states = self.inner.states.lock().await;
-                        if let Some(st) = states.get_mut(def.name) {
-                            st.last_error = Some(e.to_string());
+                    _ => Err(TaskSyncError::Database(format!(
+                        "unknown channel: {}",
+                        def.name
+                    ))),
+                };
+
+                match result {
+                    Ok(count) => {
+                        {
+                            let mut states = self.inner.states.lock().await;
+                            if let Some(st) = states.get_mut(def.name) {
+                                st.last_synced_at = Some(now_utc());
+                                st.last_error = None;
+                            }
                         }
+                        let _ = self.inner.events_tx.send(DjinnEvent::SyncCompleted {
+                            channel: def.name.to_string(),
+                            direction: "import".to_string(),
+                            count,
+                            error: None,
+                        });
+                        results.push(SyncResult {
+                            channel: def.name.to_string(),
+                            ok: true,
+                            count: Some(count),
+                            error: None,
+                        });
                     }
-                    results.push(SyncResult {
-                        channel: def.name.to_string(),
-                        ok: false,
-                        count: None,
-                        error: Some(e.to_string()),
-                    });
+                    Err(e) => {
+                        tracing::warn!(
+                            channel = def.name,
+                            project = project.name,
+                            error = %e,
+                            "sync import failed"
+                        );
+                        {
+                            let mut states = self.inner.states.lock().await;
+                            if let Some(st) = states.get_mut(def.name) {
+                                st.last_error = Some(e.to_string());
+                            }
+                        }
+                        let _ = self.inner.events_tx.send(DjinnEvent::SyncCompleted {
+                            channel: def.name.to_string(),
+                            direction: "import".to_string(),
+                            count: 0,
+                            error: Some(e.to_string()),
+                        });
+                        results.push(SyncResult {
+                            channel: def.name.to_string(),
+                            ok: false,
+                            count: None,
+                            error: Some(e.to_string()),
+                        });
+                    }
                 }
             }
         }
@@ -431,44 +459,19 @@ impl SyncManager {
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
-    /// Check if a channel is enabled (reads from DB settings).
-    async fn is_enabled(&self, channel: &str) -> bool {
-        settings_repo(&self.inner)
-            .get(&format!("sync.{channel}.enabled"))
+    /// Query sync-enabled projects from the DB (SYNC-07).
+    async fn list_sync_enabled_projects(&self) -> Vec<crate::models::project::Project> {
+        project_repo(&self.inner)
+            .list_sync_enabled()
             .await
-            .ok()
-            .flatten()
-            .map(|s| s.value == "true")
-            .unwrap_or(false)
-    }
-
-    /// Get project path from in-memory state (set by `enable()` or `restore()`).
-    async fn project_from_memory(&self, channel: &str) -> Option<PathBuf> {
-        self.inner
-            .states
-            .lock()
-            .await
-            .get(channel)?
-            .project_path
-            .clone()
-    }
-
-    /// Get project path from DB settings (for operations that don't need
-    /// in-memory state to be current, e.g. `delete_remote_branch`).
-    async fn project_from_db(&self, channel: &str) -> Option<PathBuf> {
-        settings_repo(&self.inner)
-            .get(&format!("sync.{channel}.project"))
-            .await
-            .ok()
-            .flatten()
-            .map(|s| PathBuf::from(s.value))
+            .unwrap_or_default()
     }
 }
 
 // ── Module-level helpers ──────────────────────────────────────────────────────
 
-fn settings_repo(inner: &Inner) -> SettingsRepository {
-    SettingsRepository::new(inner.db.clone(), inner.events_tx.clone())
+fn project_repo(inner: &Inner) -> ProjectRepository {
+    ProjectRepository::new(inner.db.clone(), inner.events_tx.clone())
 }
 
 /// Current UTC time as an ISO-8601 string (second precision).
@@ -545,7 +548,7 @@ mod tests {
         assert_eq!(REGISTERED_CHANNELS[0].branch, "djinn/tasks");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn new_manager_has_all_channels() {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(16);
@@ -554,42 +557,121 @@ mod tests {
         assert_eq!(status.len(), REGISTERED_CHANNELS.len());
     }
 
-    #[tokio::test]
-    async fn enable_persists_flag_to_db() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enable_project_persists_flag() {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(16);
-        let mgr = SyncManager::new(db, tx);
-        let project = PathBuf::from("/tmp/test-project");
-        mgr.enable("tasks", &project).await.unwrap();
-        assert!(mgr.is_enabled("tasks").await);
+        let mgr = SyncManager::new(db.clone(), tx.clone());
+
+        // Create a project.
+        let project_repo = crate::db::repositories::project::ProjectRepository::new(db.clone(), tx.clone());
+        let project = project_repo.create("test-proj", "/tmp/test-project").await.unwrap();
+
+        mgr.enable_project(&project.id).await.unwrap();
+
+        // Verify sync_enabled is true in projects table.
+        let projects = mgr.list_sync_enabled_projects().await;
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, project.id);
     }
 
-    #[tokio::test]
-    async fn disable_clears_flag() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn disable_project_clears_flag() {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(16);
-        let mgr = SyncManager::new(db, tx);
-        let project = PathBuf::from("/tmp/test-project");
-        mgr.enable("tasks", &project).await.unwrap();
-        mgr.disable("tasks").await.unwrap();
-        assert!(!mgr.is_enabled("tasks").await);
+        let mgr = SyncManager::new(db.clone(), tx.clone());
+
+        let project_repo = crate::db::repositories::project::ProjectRepository::new(db.clone(), tx.clone());
+        let project = project_repo.create("test-proj", "/tmp/test-project").await.unwrap();
+
+        mgr.enable_project(&project.id).await.unwrap();
+        mgr.disable_project(&project.id).await.unwrap();
+
+        let projects = mgr.list_sync_enabled_projects().await;
+        assert!(projects.is_empty());
     }
 
-    #[tokio::test]
-    async fn status_shows_enabled_and_project() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn status_shows_enabled_projects() {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(16);
-        let mgr = SyncManager::new(db, tx);
-        let project = PathBuf::from("/tmp/my-repo");
-        mgr.enable("tasks", &project).await.unwrap();
+        let mgr = SyncManager::new(db.clone(), tx.clone());
+
+        let project_repo = crate::db::repositories::project::ProjectRepository::new(db.clone(), tx.clone());
+        let project = project_repo.create("my-repo", "/tmp/my-repo").await.unwrap();
+        mgr.enable_project(&project.id).await.unwrap();
 
         let statuses = mgr.status().await;
         let ch = statuses.iter().find(|s| s.name == "tasks").unwrap();
         assert!(ch.enabled);
-        assert_eq!(ch.project_path.as_deref(), Some("/tmp/my-repo"));
+        assert_eq!(ch.project_paths, vec!["/tmp/my-repo"]);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multi_project_sync_lists_all_enabled() {
+        let db = crate::test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(16);
+        let mgr = SyncManager::new(db.clone(), tx.clone());
+
+        let project_repo = crate::db::repositories::project::ProjectRepository::new(db.clone(), tx.clone());
+        let p1 = project_repo.create("alpha", "/tmp/alpha").await.unwrap();
+        let p2 = project_repo.create("beta", "/tmp/beta").await.unwrap();
+        let _p3 = project_repo.create("gamma", "/tmp/gamma").await.unwrap();
+
+        // Enable only alpha and beta.
+        mgr.enable_project(&p1.id).await.unwrap();
+        mgr.enable_project(&p2.id).await.unwrap();
+
+        let projects = mgr.list_sync_enabled_projects().await;
+        assert_eq!(projects.len(), 2);
+        // Ordered by name.
+        assert_eq!(projects[0].name, "alpha");
+        assert_eq!(projects[1].name, "beta");
+    }
+
+    #[test]
+    fn per_project_sha_keys_are_unique() {
+        let key1 = tasks_channel::sha_settings_key("proj-aaa");
+        let key2 = tasks_channel::sha_settings_key("proj-bbb");
+        assert_ne!(key1, key2);
+        assert!(key1.contains("proj-aaa"));
+        assert!(key2.contains("proj-bbb"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_for_export_filters_by_project_id() {
+        use crate::db::repositories::epic::EpicRepository;
+        use crate::db::repositories::task::TaskRepository;
+
+        let db = crate::test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(64);
+
+        // Create two projects with tasks.
+        let project_repo = crate::db::repositories::project::ProjectRepository::new(db.clone(), tx.clone());
+        let p1 = project_repo.create("proj-a", "/tmp/a").await.unwrap();
+        let p2 = project_repo.create("proj-b", "/tmp/b").await.unwrap();
+
+        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let e1 = epic_repo.create("Epic A", "", "", "", "").await.unwrap();
+        // Reassign e1's project to p1 (epic auto-creates a default project).
+        // For simplicity, create tasks directly in each project.
+        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let _t1 = task_repo.create_in_project(&p1.id, Some(&e1.id), "Task in A", "", "", "task", 0, "")
+            .await.unwrap();
+        let _t2 = task_repo.create_in_project(&p2.id, Some(&e1.id), "Task in B", "", "", "task", 0, "")
+            .await.unwrap();
+
+        // list_for_export with project_id should only return that project's tasks.
+        let export_a = task_repo.list_for_export(Some(&p1.id)).await.unwrap();
+        let export_b = task_repo.list_for_export(Some(&p2.id)).await.unwrap();
+        let export_all = task_repo.list_for_export(None).await.unwrap();
+
+        assert_eq!(export_a.len(), 1, "should have 1 task for project A");
+        assert_eq!(export_b.len(), 1, "should have 1 task for project B");
+        assert!(export_all.len() >= 2, "unfiltered should have at least 2 tasks");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn export_all_skips_when_disabled() {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(16);
@@ -599,7 +681,7 @@ mod tests {
         assert!(results.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn import_all_skips_when_disabled() {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(16);
@@ -614,5 +696,220 @@ mod tests {
         assert!(s.starts_with("20"), "timestamp should start with '20': {s}");
         assert!(s.ends_with('Z'), "timestamp should end with 'Z': {s}");
         assert_eq!(s.len(), 20, "timestamp should be 20 chars: {s}");
+    }
+
+    // ── SYNC-06: Loop guard tests ────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upsert_peer_emits_from_sync_true() {
+        use crate::db::repositories::epic::EpicRepository;
+        use crate::db::repositories::task::TaskRepository;
+
+        let db = crate::test_helpers::create_test_db();
+        let (tx, mut rx) = broadcast::channel(64);
+
+        // Create an epic (auto-creates default project) so upsert_peer's FK check passes.
+        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic = epic_repo
+            .create("Test Epic", "", "", "", "")
+            .await
+            .unwrap();
+        // Drain setup events (ProjectCreated + EpicCreated).
+        while rx.try_recv().is_ok() {}
+
+        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let peer_task = crate::models::task::Task {
+            id: uuid::Uuid::now_v7().to_string(),
+            project_id: epic.project_id.clone(),
+            short_id: "abc".to_string(),
+            epic_id: Some(epic.id.clone()),
+            title: "Peer Task".to_string(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".to_string(),
+            status: "open".to_string(),
+            priority: 0,
+            owner: String::new(),
+            labels: "[]".to_string(),
+            acceptance_criteria: "[]".to_string(),
+            reopen_count: 0,
+            continuation_count: 0,
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            updated_at: "2026-03-08T00:00:00.000Z".to_string(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            memory_refs: "[]".to_string(),
+            unresolved_blocker_count: 0,
+        };
+
+        let changed = task_repo.upsert_peer(&peer_task).await.unwrap();
+        assert!(changed, "upsert_peer should insert new task");
+
+        // The emitted event must have from_sync == true.
+        match rx.recv().await.unwrap() {
+            DjinnEvent::TaskUpdated { from_sync, .. } => {
+                assert!(from_sync, "upsert_peer must emit from_sync: true");
+            }
+            other => panic!("expected TaskUpdated, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sse_envelope_excludes_from_sync_field() {
+        // Verify that serde serialization of DjinnEvent skips the from_sync field.
+        let task = crate::models::task::Task {
+            id: "test-id".to_string(),
+            project_id: "proj".to_string(),
+            short_id: "xyz".to_string(),
+            epic_id: None,
+            title: "Test".to_string(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".to_string(),
+            status: "open".to_string(),
+            priority: 0,
+            owner: String::new(),
+            labels: "[]".to_string(),
+            acceptance_criteria: "[]".to_string(),
+            reopen_count: 0,
+            continuation_count: 0,
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            updated_at: "2026-01-01T00:00:00.000Z".to_string(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            memory_refs: "[]".to_string(),
+            unresolved_blocker_count: 0,
+        };
+
+        let evt = DjinnEvent::TaskUpdated {
+            task,
+            from_sync: true,
+        };
+
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(
+            !json.contains("from_sync"),
+            "from_sync should be skipped in serialization: {json}"
+        );
+    }
+
+    #[test]
+    fn background_task_match_filters_from_sync_true() {
+        // Verify the pattern matching logic: from_sync=true events should NOT
+        // match the arm that sets pending=true.
+        let task = crate::models::task::Task {
+            id: "t".to_string(),
+            project_id: "p".to_string(),
+            short_id: "s".to_string(),
+            epic_id: None,
+            title: String::new(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".to_string(),
+            status: "open".to_string(),
+            priority: 0,
+            owner: String::new(),
+            labels: "[]".to_string(),
+            acceptance_criteria: "[]".to_string(),
+            reopen_count: 0,
+            continuation_count: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            memory_refs: "[]".to_string(),
+            unresolved_blocker_count: 0,
+        };
+
+        // Simulate the match logic from spawn_background_task.
+        let should_trigger = |evt: &DjinnEvent| -> bool {
+            matches!(
+                evt,
+                DjinnEvent::TaskCreated { from_sync: false, .. }
+                    | DjinnEvent::TaskUpdated { from_sync: false, .. }
+                    | DjinnEvent::TaskDeleted { .. }
+            )
+        };
+
+        // Local event → should trigger export.
+        let local_created = DjinnEvent::TaskCreated {
+            task: task.clone(),
+            from_sync: false,
+        };
+        assert!(should_trigger(&local_created), "local TaskCreated should trigger export");
+
+        let local_updated = DjinnEvent::TaskUpdated {
+            task: task.clone(),
+            from_sync: false,
+        };
+        assert!(should_trigger(&local_updated), "local TaskUpdated should trigger export");
+
+        // Sync event → should NOT trigger export.
+        let sync_created = DjinnEvent::TaskCreated {
+            task: task.clone(),
+            from_sync: true,
+        };
+        assert!(!should_trigger(&sync_created), "sync TaskCreated should NOT trigger export");
+
+        let sync_updated = DjinnEvent::TaskUpdated {
+            task: task.clone(),
+            from_sync: true,
+        };
+        assert!(!should_trigger(&sync_updated), "sync TaskUpdated should NOT trigger export");
+
+        // Delete always triggers.
+        let deleted = DjinnEvent::TaskDeleted {
+            id: "t".to_string(),
+        };
+        assert!(should_trigger(&deleted), "TaskDeleted should always trigger export");
+    }
+
+    // ── SYNC-13: SyncCompleted event tests ───────────────────────────────────
+
+    #[test]
+    fn sync_completed_serializes_correctly() {
+        let evt = DjinnEvent::SyncCompleted {
+            channel: "tasks".to_string(),
+            direction: "export".to_string(),
+            count: 5,
+            error: None,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(json.contains("\"channel\":\"tasks\""), "json: {json}");
+        assert!(json.contains("\"direction\":\"export\""), "json: {json}");
+        assert!(json.contains("\"count\":5"), "json: {json}");
+    }
+
+    #[test]
+    fn sync_completed_with_error_serializes() {
+        let evt = DjinnEvent::SyncCompleted {
+            channel: "tasks".to_string(),
+            direction: "import".to_string(),
+            count: 0,
+            error: Some("git push failed".to_string()),
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(json.contains("\"error\":\"git push failed\""), "json: {json}");
+    }
+
+    #[test]
+    fn sync_completed_does_not_trigger_export() {
+        // SyncCompleted events should NOT be matched by the background task listener.
+        let evt = DjinnEvent::SyncCompleted {
+            channel: "tasks".to_string(),
+            direction: "export".to_string(),
+            count: 5,
+            error: None,
+        };
+        let triggers = matches!(
+            evt,
+            DjinnEvent::TaskCreated { from_sync: false, .. }
+                | DjinnEvent::TaskUpdated { from_sync: false, .. }
+                | DjinnEvent::TaskDeleted { .. }
+        );
+        assert!(!triggers, "SyncCompleted should not trigger background export");
     }
 }

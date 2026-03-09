@@ -79,7 +79,7 @@ impl TaskRepository {
             }
         }
 
-        let _ = self.events.send(DjinnEvent::TaskCreated(task.clone()));
+        let _ = self.events.send(DjinnEvent::TaskCreated { task: task.clone(), from_sync: false });
         Ok(task)
     }
 
@@ -119,7 +119,7 @@ impl TaskRepository {
             .fetch_one(self.db.pool())
             .await?;
 
-        let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
+        let _ = self.events.send(DjinnEvent::TaskUpdated { task: task.clone(), from_sync: false });
         Ok(task)
     }
 
@@ -154,7 +154,7 @@ impl TaskRepository {
             .fetch_one(self.db.pool())
             .await?;
 
-        let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
+        let _ = self.events.send(DjinnEvent::TaskUpdated { task: task.clone(), from_sync: false });
         Ok(task)
     }
 
@@ -175,7 +175,7 @@ impl TaskRepository {
             .fetch_one(self.db.pool())
             .await?;
 
-        let _ = self.events.send(DjinnEvent::TaskUpdated(task.clone()));
+        let _ = self.events.send(DjinnEvent::TaskUpdated { task: task.clone(), from_sync: false });
         Ok(task)
     }
 }

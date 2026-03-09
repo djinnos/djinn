@@ -86,7 +86,7 @@ mod tests {
     use super::*;
     use crate::test_helpers;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_and_get_setting() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
@@ -100,7 +100,7 @@ mod tests {
         assert_eq!(fetched.value, "dark");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
@@ -118,7 +118,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_missing_returns_none() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
@@ -127,7 +127,7 @@ mod tests {
         assert!(repo.get("nonexistent").await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_upserts() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(fetched.value, "v2");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_returns_all_keys_sorted() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(rows[1].key, "b");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_removes_key() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);

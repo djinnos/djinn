@@ -185,6 +185,16 @@ impl ProjectRepository {
         Ok(Some(config))
     }
 
+    /// List all projects with `sync_enabled = true` (SYNC-07).
+    pub async fn list_sync_enabled(&self) -> Result<Vec<Project>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Project>(
+            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE sync_enabled = 1 ORDER BY name",
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     pub async fn delete(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query("DELETE FROM projects WHERE id = ?1")
@@ -204,7 +214,7 @@ mod tests {
     use super::*;
     use crate::test_helpers;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_and_get_project() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
@@ -219,7 +229,7 @@ mod tests {
         assert_eq!(fetched.name, "myapp");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
@@ -234,7 +244,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_project() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
@@ -253,7 +263,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_project() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
@@ -271,7 +281,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_projects() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
@@ -287,7 +297,7 @@ mod tests {
         assert_eq!(projects[1].name, "beta");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_by_path_returns_project() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);

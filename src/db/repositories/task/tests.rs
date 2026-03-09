@@ -21,7 +21,7 @@ async fn open_task(repo: &TaskRepository, epic_id: &str) -> Task {
 
 // ── Existing tests ────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_and_get_task() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -40,7 +40,7 @@ async fn create_and_get_task() {
     assert_eq!(fetched.title, "My Task");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn creating_task_reopens_closed_epic() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -59,7 +59,7 @@ async fn creating_task_reopens_closed_epic() {
     assert!(reopened.closed_at.is_none());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn short_id_lookup() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -74,7 +74,7 @@ async fn short_id_lookup() {
     assert_eq!(found.id, task.id);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_emits_event() {
     let db = test_helpers::create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
@@ -86,12 +86,12 @@ async fn create_emits_event() {
         .await
         .unwrap();
     match rx.recv().await.unwrap() {
-        DjinnEvent::TaskCreated(t) => assert_eq!(t.title, "Event Task"),
+        DjinnEvent::TaskCreated { task: t, from_sync: false } => assert_eq!(t.title, "Event Task"),
         _ => panic!("expected TaskCreated"),
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn set_status_transitions() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -110,7 +110,7 @@ async fn set_status_transitions() {
     assert!(closed.closed_at.is_some());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reopen_increments_counter() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -126,7 +126,7 @@ async fn reopen_increments_counter() {
     assert_eq!(reopened.reopen_count, 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocker_management() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -163,7 +163,7 @@ async fn blocker_management() {
     assert!(repo.list_blockers(&t2.id).await.unwrap().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocker_cycle_detection() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -192,7 +192,7 @@ async fn blocker_cycle_detection() {
     assert!(result.is_err(), "expected cycle detection to reject this");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_blocked_by_unresolved_blocker() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -222,7 +222,7 @@ async fn start_blocked_by_unresolved_blocker() {
         .expect("should start after blocker resolved");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_ready_excludes_blocked_tasks() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -259,7 +259,7 @@ async fn list_ready_excludes_blocked_tasks() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn activity_log() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -286,7 +286,7 @@ async fn activity_log() {
     assert_eq!(entries[0].task_id.as_deref(), Some(task.id.as_str()));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_by_epic() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -306,7 +306,7 @@ async fn list_by_epic() {
     assert_eq!(tasks[0].title, "B");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_task_emits_event() {
     let db = test_helpers::create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
@@ -329,7 +329,7 @@ async fn delete_task_emits_event() {
 
 // ── State machine tests ───────────────────────────────────────────────────
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_enum_roundtrips() {
     let statuses = [
         "draft",
@@ -346,7 +346,7 @@ async fn status_enum_roundtrips() {
     assert!(TaskStatus::parse("unknown").is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_happy_path() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -409,7 +409,7 @@ async fn full_happy_path() {
     assert_eq!(t.close_reason.as_deref(), Some("completed"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_transition_returns_error() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -443,7 +443,7 @@ async fn invalid_transition_returns_error() {
     assert!(matches!(err, Error::InvalidTransition(_)));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_review_reject_increments_reopen() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -495,7 +495,7 @@ async fn task_review_reject_increments_reopen() {
     assert_eq!(t.continuation_count, 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_review_reject_conflict_does_not_increment_reopen() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -547,7 +547,7 @@ async fn task_review_reject_conflict_does_not_increment_reopen() {
     assert_eq!(t.continuation_count, 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn force_close_from_any_state() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -577,7 +577,7 @@ async fn force_close_from_any_state() {
     assert_eq!(t.close_reason.as_deref(), Some("force_closed"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reopen_clears_closed_at_and_increments_reopen() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -618,7 +618,7 @@ async fn reopen_clears_closed_at_and_increments_reopen() {
     assert_eq!(t.reopen_count, 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_blocked_by_unresolved_blockers() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -644,7 +644,7 @@ async fn start_blocked_by_unresolved_blockers() {
     assert_eq!(t.status, "in_progress");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_allowed_when_blocker_is_closed() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -672,7 +672,7 @@ async fn start_allowed_when_blocker_is_closed() {
     assert_eq!(started.status, "in_progress");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_override_to_closed() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -697,7 +697,7 @@ async fn user_override_to_closed() {
     assert_eq!(t.close_reason.as_deref(), Some("force_closed"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn requires_reason_enforced() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -734,7 +734,7 @@ async fn requires_reason_enforced() {
     assert_eq!(t.status, "closed");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transition_writes_activity_log() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -763,7 +763,7 @@ async fn transition_writes_activity_log() {
     assert_eq!(payload["to_status"], "in_progress");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_activity_filters() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -814,7 +814,7 @@ async fn query_activity_filters() {
     assert_eq!(all.len(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn set_merge_commit_sha_persists_value() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -833,7 +833,7 @@ async fn set_merge_commit_sha_persists_value() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn board_health_report() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -866,7 +866,7 @@ async fn board_health_report() {
     assert_eq!(stale[0]["short_id"], t2.short_id.as_str());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconcile_heals_stale_tasks() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
@@ -902,5 +902,173 @@ async fn reconcile_heals_stale_tasks() {
     assert!(
         reconcile_entry.is_some(),
         "expected reconcile_stale activity entry"
+    );
+}
+
+// ── SYNC-11: Terminal state protection tests ─────────────────────────────
+
+fn make_peer_task(id: &str, project_id: &str, epic_id: &str, status: &str, updated_at: &str) -> Task {
+    Task {
+        id: id.to_string(),
+        project_id: project_id.to_string(),
+        short_id: format!("p{}", &id[..3]),
+        epic_id: Some(epic_id.to_string()),
+        title: "Peer Task".to_string(),
+        description: String::new(),
+        design: String::new(),
+        issue_type: "task".to_string(),
+        status: status.to_string(),
+        priority: 0,
+        owner: String::new(),
+        labels: "[]".to_string(),
+        acceptance_criteria: "[]".to_string(),
+        reopen_count: 0,
+        continuation_count: 0,
+        created_at: "2026-01-01T00:00:00.000Z".to_string(),
+        updated_at: updated_at.to_string(),
+        closed_at: if status == "closed" { Some(updated_at.to_string()) } else { None },
+        close_reason: if status == "closed" { Some("completed".to_string()) } else { None },
+        merge_commit_sha: None,
+        memory_refs: "[]".to_string(),
+        unresolved_blocker_count: 0,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_peer_closed_task_not_regressed() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(64);
+    let epic = make_epic(&db, tx.clone()).await;
+    let repo = TaskRepository::new(db.clone(), tx.clone());
+
+    // Create and close a task locally.
+    let task = open_task(&repo, &epic.id).await;
+    repo.set_status(&task.id, "closed").await.unwrap();
+
+    // Peer sends the same task as in_progress with a LATER updated_at.
+    let peer = make_peer_task(
+        &task.id,
+        &epic.project_id,
+        &epic.id,
+        "in_progress",
+        "2099-01-01T00:00:00.000Z",
+    );
+    let changed = repo.upsert_peer(&peer).await.unwrap();
+    assert!(!changed, "closed task should NOT be regressed by peer");
+
+    let local = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(local.status, "closed", "task should remain closed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_peer_closed_updated_by_peer_close() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(64);
+    let epic = make_epic(&db, tx.clone()).await;
+    let repo = TaskRepository::new(db.clone(), tx.clone());
+
+    // Create and close a task locally.
+    let task = open_task(&repo, &epic.id).await;
+    repo.set_status(&task.id, "closed").await.unwrap();
+
+    // Peer sends the same task as closed with later updated_at and a new title.
+    let mut peer = make_peer_task(
+        &task.id,
+        &epic.project_id,
+        &epic.id,
+        "closed",
+        "2099-01-01T00:00:00.000Z",
+    );
+    peer.title = "Updated Title From Peer".to_string();
+    let changed = repo.upsert_peer(&peer).await.unwrap();
+    assert!(changed, "closed→closed update with newer timestamp should succeed");
+
+    let local = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(local.title, "Updated Title From Peer");
+    assert_eq!(local.status, "closed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_peer_non_terminal_lww_works() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(64);
+    let epic = make_epic(&db, tx.clone()).await;
+    let repo = TaskRepository::new(db.clone(), tx.clone());
+
+    // Create an open task.
+    let task = open_task(&repo, &epic.id).await;
+
+    // Peer sends it as in_progress with a later updated_at.
+    let peer = make_peer_task(
+        &task.id,
+        &epic.project_id,
+        &epic.id,
+        "in_progress",
+        "2099-01-01T00:00:00.000Z",
+    );
+    let changed = repo.upsert_peer(&peer).await.unwrap();
+    assert!(changed, "non-terminal LWW should update");
+
+    let local = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(local.status, "in_progress");
+}
+
+// ── SYNC-12: Closed task eviction tests ──────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_for_export_includes_open_tasks() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(64);
+    let epic = make_epic(&db, tx.clone()).await;
+    let repo = TaskRepository::new(db.clone(), tx.clone());
+
+    let _t1 = open_task(&repo, &epic.id).await;
+    let _t2 = open_task(&repo, &epic.id).await;
+
+    let exported = repo.list_for_export(None).await.unwrap();
+    assert_eq!(exported.len(), 2, "all open tasks should be exported");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_for_export_includes_recently_closed() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(64);
+    let epic = make_epic(&db, tx.clone()).await;
+    let repo = TaskRepository::new(db.clone(), tx.clone());
+
+    let task = open_task(&repo, &epic.id).await;
+    repo.set_status(&task.id, "closed").await.unwrap();
+
+    // Task was just closed — should be included.
+    let exported = repo.list_for_export(None).await.unwrap();
+    assert!(
+        exported.iter().any(|t| t.id == task.id),
+        "recently closed task should be in export"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_for_export_excludes_old_closed() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(64);
+    let epic = make_epic(&db, tx.clone()).await;
+    let repo = TaskRepository::new(db.clone(), tx.clone());
+
+    let task = open_task(&repo, &epic.id).await;
+    repo.set_status(&task.id, "closed").await.unwrap();
+
+    // Backdate closed_at to 2 hours ago.
+    sqlx::query(
+        "UPDATE tasks SET closed_at = datetime('now', '-2 hours') WHERE id = ?1",
+    )
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let exported = repo.list_for_export(None).await.unwrap();
+    assert!(
+        !exported.iter().any(|t| t.id == task.id),
+        "task closed >1 hour ago should be evicted from export"
     );
 }

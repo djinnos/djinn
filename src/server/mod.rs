@@ -257,7 +257,7 @@ mod tests {
     }
 
     /// Integration test: hit /health via tower::ServiceExt::oneshot().
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn health_returns_ok() {
         let app = test_helpers::create_test_app();
 
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(json["status"], "ok");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_initialize_returns_ok() {
         let app = test_helpers::create_test_app();
 
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(resp.status(), 200);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_tool_schemas_avoid_nonstandard_uint_formats() {
         fn collect_bad_formats(
             tool_name: &str,
@@ -408,7 +408,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_tools_list_schema_snapshot_matches_repo_file() {
         let app = test_helpers::create_test_app();
         let session_id = initialize_mcp_session(&app).await;
@@ -464,7 +464,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_contract_desktop_critical_tools_success_shapes() {
         let app = test_helpers::create_test_app();
         let session_id = initialize_mcp_session(&app).await;
@@ -558,7 +558,7 @@ mod tests {
         assert!(epic_list.get("has_more").and_then(Value::as_bool).is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_contract_not_found_shapes_include_error_field() {
         let app = test_helpers::create_test_app();
         let session_id = initialize_mcp_session(&app).await;
@@ -661,7 +661,7 @@ mod tests {
     }
 
     /// Unit test: verify the in-memory test DB has migrations applied.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_db_has_tables() {
         let db = test_helpers::create_test_db();
         db.ensure_initialized().await.unwrap();
@@ -687,7 +687,7 @@ mod tests {
         assert_eq!(elapsed.as_secs(), 60);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn apply_settings_rejects_disconnected_model_priority_provider() {
         let db = test_helpers::create_test_db();
         let state = AppState::new(db, CancellationToken::new());
@@ -713,7 +713,7 @@ mod tests {
         assert!(err.contains("nvidia"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn apply_settings_accepts_connected_model_priority_provider() {
         let db = test_helpers::create_test_db();
         let state = AppState::new(db, CancellationToken::new());

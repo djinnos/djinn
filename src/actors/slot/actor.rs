@@ -314,7 +314,7 @@ mod tests {
         (app_state, session_manager, cancel, temp)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_task_completes_and_emits_free_event() {
         let (app_state, session_manager, cancel, _temp) = test_app_state();
         let (event_tx, mut event_rx) = mpsc::channel(4);

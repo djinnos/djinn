@@ -88,17 +88,17 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             id: Some(id),
             project_id: None,
         },
-        DjinnEvent::TaskCreated(v) => Envelope {
+        DjinnEvent::TaskCreated { task, .. } => Envelope {
             entity_type: "task",
             action: "created",
-            data: serde_json::to_value(v).ok(),
+            data: serde_json::to_value(task).ok(),
             id: None,
             project_id: None,
         },
-        DjinnEvent::TaskUpdated(v) => Envelope {
+        DjinnEvent::TaskUpdated { task, .. } => Envelope {
             entity_type: "task",
             action: "updated",
-            data: serde_json::to_value(v).ok(),
+            data: serde_json::to_value(task).ok(),
             id: None,
             project_id: None,
         },
@@ -214,6 +214,23 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
                 "task_id": task_id,
                 "agent_type": agent_type,
                 "message": message,
+            })),
+            id: None,
+            project_id: None,
+        },
+        DjinnEvent::SyncCompleted {
+            channel,
+            direction,
+            count,
+            error,
+        } => Envelope {
+            entity_type: "sync",
+            action: "completed",
+            data: Some(serde_json::json!({
+                "channel": channel,
+                "direction": direction,
+                "count": count,
+                "error": error,
             })),
             id: None,
             project_id: None,
@@ -336,7 +353,7 @@ mod tests {
 
     use crate::test_helpers;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn events_returns_200_with_sse_content_type() {
         let app = test_helpers::create_test_app();
 
@@ -357,7 +374,7 @@ mod tests {
         assert!(ct.contains("text/event-stream"), "got: {ct}");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn db_info_returns_path_and_flags() {
         let app = test_helpers::create_test_app();
 

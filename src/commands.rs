@@ -83,7 +83,7 @@ mod tests {
         std::env::temp_dir()
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_echo_command() {
         let commands = vec![CommandSpec {
             name: "greet".into(),
@@ -96,7 +96,7 @@ mod tests {
         assert!(results[0].stdout.contains("hello"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_fail_fast_on_nonzero_exit() {
         let commands = vec![
             CommandSpec {
@@ -115,7 +115,7 @@ mod tests {
         assert_ne!(results[0].exit_code, 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_timeout_enforced() {
         let commands = vec![CommandSpec {
             name: "slow".into(),
@@ -126,7 +126,7 @@ mod tests {
         assert!(err.to_string().contains("timed out"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_stderr_captured() {
         let commands = vec![CommandSpec {
             name: "err".into(),
@@ -138,7 +138,7 @@ mod tests {
         assert_ne!(results[0].exit_code, 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_multiple_commands_sequential() {
         let commands = vec![
             CommandSpec {

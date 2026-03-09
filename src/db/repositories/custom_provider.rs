@@ -101,7 +101,7 @@ mod tests {
     use super::*;
     use crate::test_helpers;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upsert_and_list() {
         let db = test_helpers::create_test_db();
         let repo = CustomProviderRepository::new(db);
@@ -127,14 +127,14 @@ mod tests {
         assert_eq!(list[0].seed_models[0].id, "my-model");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_returns_none_for_missing() {
         let db = test_helpers::create_test_db();
         let repo = CustomProviderRepository::new(db);
         assert!(repo.get("nonexistent").await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upsert_is_idempotent() {
         let db = test_helpers::create_test_db();
         let repo = CustomProviderRepository::new(db);

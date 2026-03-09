@@ -546,7 +546,7 @@ mod tests {
     use super::*;
     use crate::test_helpers;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_and_get_epic() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -564,7 +564,7 @@ mod tests {
         assert_eq!(fetched.title, "My Epic");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn short_id_lookup() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -575,7 +575,7 @@ mod tests {
         assert_eq!(found.id, epic.id);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(256);
@@ -588,7 +588,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_epic() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(256);
@@ -609,7 +609,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn close_epic() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -621,7 +621,7 @@ mod tests {
         assert!(closed.closed_at.is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_epic() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(256);
@@ -639,7 +639,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resolve_by_id_and_short_id() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -656,7 +656,7 @@ mod tests {
         assert!(repo.resolve("nonexistent").await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reopen_from_closed() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -670,7 +670,7 @@ mod tests {
         assert!(reopened.closed_at.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reopen_from_open_is_error() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -680,7 +680,7 @@ mod tests {
         assert!(repo.reopen(&epic.id).await.is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn task_counts_aggregation() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -708,7 +708,7 @@ mod tests {
         assert_eq!(counts.closed_count, 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_with_count_returns_child_count() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -730,7 +730,7 @@ mod tests {
         assert!(epic_repo.get(&epic.id).await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn encode_base36_roundtrip() {
         assert_eq!(encode_base36(0), "0000");
         assert_eq!(encode_base36(1_679_615), "zzzz");

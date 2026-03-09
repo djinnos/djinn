@@ -62,7 +62,7 @@ mod tests {
             .unwrap()
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_and_get_note() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -96,7 +96,7 @@ mod tests {
         assert_eq!(fetched.title, "My ADR");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn singleton_brief() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -120,7 +120,7 @@ mod tests {
         assert!(note.file_path.ends_with(".djinn/brief.md"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_by_permalink() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -148,7 +148,7 @@ mod tests {
         assert_eq!(found.id, note.id);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_note() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -183,7 +183,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_note() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -216,7 +216,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fts5_search() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -255,7 +255,7 @@ mod tests {
         assert!(results[0].snippet.contains("rusqlite"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fts5_search_folder_filter() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(results[0].folder, "design");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn catalog_generation() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -326,7 +326,7 @@ mod tests {
         assert!(catalog.contains("A Pattern"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_with_folder_filter() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(all.len(), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_emits_event() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -382,7 +382,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn slugify_roundtrip() {
         assert_eq!(slugify("My ADR Title"), "my-adr-title");
         assert_eq!(slugify("Hello  World"), "hello-world");
@@ -390,7 +390,7 @@ mod tests {
         assert_eq!(slugify("rust/database"), "rust-database");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn touch_accessed_does_not_emit_event() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -450,7 +450,7 @@ mod tests {
         assert!(links.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wikilink_resolves_on_create() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(graph.edges[0].raw_text, "Connection Strategy");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn broken_link_detection() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(broken[0].source_title, "Source Note");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn orphan_detection() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -565,7 +565,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resolve_previously_broken_links_on_create() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();
@@ -594,7 +594,7 @@ mod tests {
         assert_eq!(repo.graph(&project.id).await.unwrap().edges.len(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reindex_from_disk_detects_created_updated_and_deleted() {
         let tmp = tempfile::tempdir().unwrap();
         let db = test_helpers::create_test_db();

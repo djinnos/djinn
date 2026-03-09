@@ -144,7 +144,7 @@ mod tests {
         CredentialRepository::new(db, tx)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_and_list() {
         let repo = make_repo();
         let cred = repo
@@ -159,7 +159,7 @@ mod tests {
         assert_eq!(list[0].key_name, "ANTHROPIC_API_KEY");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_emits_created_then_updated() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
@@ -178,7 +178,7 @@ mod tests {
         assert!(matches!(ev2, DjinnEvent::CredentialUpdated(_)));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_decrypted_round_trip() {
         let repo = make_repo();
         repo.set("openai", "OPENAI_API_KEY", "sk-secret-value")
@@ -189,14 +189,14 @@ mod tests {
         assert_eq!(decrypted.as_deref(), Some("sk-secret-value"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_decrypted_missing_returns_none() {
         let repo = make_repo();
         let result = repo.get_decrypted("NO_SUCH_KEY").await.unwrap();
         assert!(result.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_removes_and_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
@@ -218,14 +218,14 @@ mod tests {
         assert!(list.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_nonexistent_returns_false() {
         let repo = make_repo();
         let deleted = repo.delete("NO_SUCH_KEY").await.unwrap();
         assert!(!deleted);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upsert_keeps_unique_key_name() {
         let repo = make_repo();
         repo.set("anthropic", "ANTHROPIC_API_KEY", "v1")

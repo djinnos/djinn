@@ -44,6 +44,12 @@ struct Inner {
     pub coordinator: Mutex<Option<CoordinatorHandle>>,
     /// Long-running slot pool actor handle.
     pub pool: Mutex<Option<SlotPoolHandle>>,
+    /// User identity for sync (JSONL filename). Single source of truth.
+    ///
+    /// Resolved once at startup from `git config user.email`. When djinn
+    /// authentication is added, update `resolve_sync_user_id()` to return
+    /// the authenticated email instead — everything else follows.
+    pub sync_user_id: String,
 }
 
 impl AppState {
@@ -54,6 +60,8 @@ impl AppState {
     fn new_inner(db: Database, cancel: CancellationToken) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let sync = SyncManager::new(db.clone(), events.clone());
+        let sync_user_id = resolve_sync_user_id();
+        tracing::info!(sync_user_id = %sync_user_id, "resolved sync user identity");
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -65,6 +73,7 @@ impl AppState {
                 sync,
                 coordinator: Mutex::new(None),
                 pool: Mutex::new(None),
+                sync_user_id,
             }),
         }
     }
@@ -82,7 +91,7 @@ impl AppState {
     }
 
     pub fn sync_user_id(&self) -> &str {
-        "local"
+        &self.inner.sync_user_id
     }
 
     /// Get or spawn a `GitActorHandle` for the given project path (GIT-04).
@@ -301,4 +310,51 @@ impl AppState {
             Err(e) => tracing::warn!(error = %e, "failed to parse model health state"),
         }
     }
+}
+
+/// Resolve the sync user identity.
+///
+/// **Single point of update:** When djinn authentication is added, change this
+/// function to return the authenticated email. Every caller (JSONL filename,
+/// commit author, event metadata) flows through `AppState::sync_user_id()`
+/// which reads the value set here at startup.
+///
+/// Current strategy: `git config user.email` → sanitized email.
+/// Fallback chain: git email → hostname → "local".
+fn resolve_sync_user_id() -> String {
+    // Try git config user.email first.
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["config", "user.email"])
+        .output()
+    {
+        if output.status.success() {
+            let email = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !email.is_empty() {
+                return sanitize_sync_id(&email);
+            }
+        }
+    }
+
+    // Fallback: machine hostname.
+    if let Ok(output) = std::process::Command::new("hostname").output() {
+        if output.status.success() {
+            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !name.is_empty() {
+                return sanitize_sync_id(&name);
+            }
+        }
+    }
+
+    "local".to_string()
+}
+
+/// Sanitize a string for use as a JSONL filename stem.
+/// Replaces characters that are problematic in filenames with underscores.
+fn sanitize_sync_id(raw: &str) -> String {
+    raw.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' | '@' => c,
+            _ => '_',
+        })
+        .collect()
 }

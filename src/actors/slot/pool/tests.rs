@@ -165,7 +165,7 @@ async fn dispatch_for_role(
     }))
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parallel_completions_finish_concurrently() {
     let (app_state, session_manager, cancel, _temp) = test_app_state();
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
@@ -199,7 +199,7 @@ async fn parallel_completions_finish_concurrently() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_priority_fallback_uses_next_model_when_primary_full() {
     let (app_state, session_manager, cancel, _temp) = test_app_state();
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
@@ -276,7 +276,7 @@ async fn model_priority_fallback_uses_next_model_when_primary_full() {
     wait_until_no_sessions(&pool, &["task-1".into(), "task-2".into(), "task-3".into()]).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn role_isolation_skips_models_that_do_not_serve_role() {
     let (app_state, session_manager, cancel, _temp) = test_app_state();
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
@@ -336,7 +336,7 @@ async fn role_isolation_skips_models_that_do_not_serve_role() {
     wait_until_no_sessions(&pool, &["worker-1".into()]).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconfigure_scale_up_adds_free_slots_for_dispatch() {
     let (app_state, session_manager, cancel, _temp) = test_app_state();
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
@@ -396,7 +396,7 @@ async fn reconfigure_scale_up_adds_free_slots_for_dispatch() {
     .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
     let (app_state, session_manager, cancel, _temp) = test_app_state();
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
@@ -456,7 +456,7 @@ async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
     wait_until_no_sessions(&pool, &["down-next-1".into(), "down-next-2".into()]).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
     let (app_state, session_manager, cancel, _temp) = test_app_state();
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();

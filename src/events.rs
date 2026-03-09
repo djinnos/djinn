@@ -40,8 +40,20 @@ pub enum DjinnEvent {
     },
 
     // Tasks
-    TaskCreated(Task),
-    TaskUpdated(Task),
+    TaskCreated {
+        task: Task,
+        /// `true` when the event originated from a peer sync import.
+        /// The background export listener ignores these to prevent loops.
+        #[serde(skip)]
+        from_sync: bool,
+    },
+    TaskUpdated {
+        task: Task,
+        /// `true` when the event originated from a peer sync import.
+        /// The background export listener ignores these to prevent loops.
+        #[serde(skip)]
+        from_sync: bool,
+    },
     TaskDeleted {
         id: String,
     },
@@ -87,6 +99,15 @@ pub enum DjinnEvent {
         task_id: String,
         agent_type: String,
         message: serde_json::Value,
+    },
+
+    // Sync lifecycle (SYNC-13)
+    SyncCompleted {
+        channel: String,
+        /// "export" | "import"
+        direction: String,
+        count: usize,
+        error: Option<String>,
     },
 
     // Project health (setup/verification commands result)

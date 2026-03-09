@@ -1,7 +1,5 @@
 // MCP tools for djinn/ namespace git sync (SYNC-01 through SYNC-05).
 
-use std::path::PathBuf;
-
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +16,8 @@ pub struct TaskSyncEnableParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskSyncDisableParams {
+    /// Absolute path to the project git repository.
+    pub project: String,
     /// If true, delete the remote `djinn/tasks` branch (team-wide disable).
     /// If false or absent, only clear the local enabled flag (machine opt-out).
     pub team_wide: Option<bool>,
@@ -66,7 +66,8 @@ pub struct SyncChannelStatus {
     pub name: String,
     pub branch: String,
     pub enabled: bool,
-    pub project_path: Option<String>,
+    /// Sync-enabled project paths (SYNC-07).
+    pub project_paths: Vec<String>,
     pub last_synced_at: Option<String>,
     pub last_error: Option<String>,
     #[schemars(with = "i64")]
@@ -81,7 +82,7 @@ impl From<ChannelStatus> for SyncChannelStatus {
             name: value.name,
             branch: value.branch,
             enabled: value.enabled,
-            project_path: value.project_path,
+            project_paths: value.project_paths,
             last_synced_at: value.last_synced_at,
             last_error: value.last_error,
             failure_count: value.failure_count,
@@ -144,18 +145,20 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskSyncEnableParams>,
     ) -> Json<TaskSyncEnableResponse> {
-        if self.project_id_for_path(&p.project).await.is_none() {
-            return Json(TaskSyncEnableResponse {
-                ok: None,
-                tasks_exported: None,
-                note: None,
-                error: Some(format!("project not found: {}", p.project)),
-            });
-        }
-        let project = PathBuf::from(&p.project);
+        let project_id = match self.project_id_for_path(&p.project).await {
+            Some(id) => id,
+            None => {
+                return Json(TaskSyncEnableResponse {
+                    ok: None,
+                    tasks_exported: None,
+                    note: None,
+                    error: Some(format!("project not found: {}", p.project)),
+                });
+            }
+        };
 
         let mgr = self.state.sync_manager();
-        if let Err(e) = mgr.enable("tasks", &project).await {
+        if let Err(e) = mgr.enable_project(&project_id).await {
             return Json(TaskSyncEnableResponse {
                 ok: None,
                 tasks_exported: None,
@@ -192,22 +195,32 @@ impl DjinnMcpServer {
         }
     }
 
-    /// Disable task sync for this machine (personal opt-out). Stops push/pull
-    /// without deleting the remote branch.
+    /// Disable task sync for a project. Stops push/pull
+    /// without deleting the remote branch (unless team_wide=true).
     #[tool(
-        description = "Disable task sync for this machine (personal opt-out). Stops push/pull without deleting the remote branch."
+        description = "Disable task sync for a project. Stops push/pull without deleting the remote branch (unless team_wide=true)."
     )]
     pub async fn task_sync_disable(
         &self,
         Parameters(p): Parameters<TaskSyncDisableParams>,
     ) -> Json<TaskSyncDisableResponse> {
+        let project_id = match self.project_id_for_path(&p.project).await {
+            Some(id) => id,
+            None => {
+                return Json(TaskSyncDisableResponse {
+                    ok: None,
+                    team_wide: None,
+                    error: Some(format!("project not found: {}", p.project)),
+                });
+            }
+        };
+
         let mgr = self.state.sync_manager();
         let team_wide = p.team_wide.unwrap_or(false);
 
         if team_wide {
-            // Best-effort: delete remote branch. Log warning on failure but
-            // continue with local disable regardless (SYNC-04).
-            if let Err(e) = mgr.delete_remote_branch("tasks").await {
+            let project_path = std::path::PathBuf::from(&p.project);
+            if let Err(e) = mgr.delete_remote_branch("tasks", &project_path).await {
                 tracing::warn!(
                     error = %e,
                     "failed to delete remote djinn/tasks branch; disabling locally anyway"
@@ -215,7 +228,7 @@ impl DjinnMcpServer {
             }
         }
 
-        if let Err(e) = mgr.disable("tasks").await {
+        if let Err(e) = mgr.disable_project(&project_id).await {
             return Json(TaskSyncDisableResponse {
                 ok: None,
                 team_wide: None,

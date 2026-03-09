@@ -5281,12 +5281,19 @@
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "project": {
+            "description": "Absolute path to the project git repository.",
+            "type": "string"
+          },
           "team_wide": {
             "description": "If true, delete the remote `djinn/tasks` branch (team-wide disable).\nIf false or absent, only clear the local enabled flag (machine opt-out).",
             "nullable": true,
             "type": "boolean"
           }
         },
+        "required": [
+          "project"
+        ],
         "title": "TaskSyncDisableParams",
         "type": "object"
       },
@@ -5521,15 +5528,19 @@
               "name": {
                 "type": "string"
               },
-              "project_path": {
-                "nullable": true,
-                "type": "string"
+              "project_paths": {
+                "description": "Sync-enabled project paths (SYNC-07).",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
               "name",
               "branch",
               "enabled",
+              "project_paths",
               "failure_count",
               "backoff_secs"
             ],

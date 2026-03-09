@@ -105,7 +105,7 @@ impl TaskRepository {
         .await?;
 
         for t in unblocked {
-            let _ = self.events.send(DjinnEvent::TaskUpdated(t));
+            let _ = self.events.send(DjinnEvent::TaskUpdated { task: t, from_sync: false });
         }
         Ok(())
     }

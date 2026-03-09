@@ -18,7 +18,7 @@ async fn reads_from_server_repo() {
 }
 
 /// Verify that RunCommand works for a read-only git command.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_command_git_log() {
     let repo_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let handle = GitActorHandle::spawn(repo_path).expect("spawn");
@@ -452,7 +452,12 @@ async fn list_worktrees_includes_main_and_task() {
     assert!(main_wt.is_some(), "main worktree should be listed");
 
     // Task worktree should be present at the expected path.
-    let task_wt = worktrees.iter().find(|w| w.path == wt_path);
+    // Canonicalize both sides because macOS tempdir /var/folders/ is a symlink
+    // to /private/var/folders/, and git resolves symlinks in porcelain output.
+    let wt_canonical = wt_path.canonicalize().unwrap_or(wt_path.clone());
+    let task_wt = worktrees.iter().find(|w| {
+        w.path.canonicalize().unwrap_or(w.path.clone()) == wt_canonical
+    });
     assert!(task_wt.is_some(), "task worktree should be listed");
     let task_wt = task_wt.unwrap();
     assert_eq!(task_wt.branch.as_deref(), Some("task/wt3"));

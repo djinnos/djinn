@@ -109,7 +109,7 @@ mod tests {
     use super::*;
     use crate::test_helpers;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn defaults_to_main_when_no_settings() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
@@ -119,7 +119,7 @@ mod tests {
         assert_eq!(settings.target_branch, "main");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn project_override_takes_precedence() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
@@ -130,7 +130,7 @@ mod tests {
         assert_eq!(settings.target_branch, "develop");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn global_default_applies_when_no_project_override() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(settings.target_branch, "develop");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn project_override_supersedes_global() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(other.target_branch, "develop");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_target_branch_upserts() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);

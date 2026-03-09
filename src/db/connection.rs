@@ -136,7 +136,7 @@ mod tests {
     use super::*;
     use sqlx::Row;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pragmas_applied() {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
@@ -170,7 +170,7 @@ mod tests {
         assert_eq!(fk, 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn open_file_db_and_readonly_reader() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");

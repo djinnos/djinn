@@ -324,7 +324,7 @@ mod tests {
         (task.project_id, task.id)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_and_update_emit_events() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
@@ -374,7 +374,7 @@ mod tests {
         assert!(updated_seen, "expected SessionUpdated event");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_and_active_queries() {
         let db = test_helpers::create_test_db();
         let (tx, _) = broadcast::channel(1024);

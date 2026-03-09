@@ -433,15 +433,15 @@ impl CoordinatorActor {
                 );
                 self.publish_status();
             }
-            DjinnEvent::TaskCreated(t) | DjinnEvent::TaskUpdated(t)
-                if matches!(t.status.as_str(), "open" | "needs_task_review" | "closed") =>
+            DjinnEvent::TaskCreated { task, .. } | DjinnEvent::TaskUpdated { task, .. }
+                if matches!(task.status.as_str(), "open" | "needs_task_review" | "closed") =>
             {
                 tracing::debug!(
-                    task_id = %t.short_id,
-                    status = %t.status,
+                    task_id = %task.short_id,
+                    status = %task.status,
                     "CoordinatorActor: ready-task event → dispatch pass"
                 );
-                self.dispatch_ready_tasks(Some(&t.project_id)).await;
+                self.dispatch_ready_tasks(Some(&task.project_id)).await;
             }
             _ => {}
         }
@@ -830,7 +830,7 @@ mod tests {
 
     // ── Status ───────────────────────────────────────────────────────────────
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn initial_status_is_active() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -847,7 +847,7 @@ mod tests {
 
     // ── Pause / Resume ───────────────────────────────────────────────────────
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pause_project_and_resume_toggle_state() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -870,7 +870,7 @@ mod tests {
         assert!(!handle.get_project_status(project_id).unwrap().paused);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn trigger_dispatch_while_project_paused_is_a_noop() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -893,7 +893,7 @@ mod tests {
 
     // ── Dispatch on open-task event ──────────────────────────────────────────
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn trigger_dispatch_increments_counter_for_ready_task() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -916,7 +916,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn trigger_dispatch_increments_counter_for_review_tasks() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -962,7 +962,7 @@ mod tests {
 
     // ── Stuck detection ───────────────────────────────────────────────────────
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stuck_detection_releases_orphaned_in_progress_task() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
