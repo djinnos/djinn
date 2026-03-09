@@ -69,11 +69,11 @@ function MainLayout() {
   }, [location.pathname, setActiveSection]);
 
   return (
-    <main className="flex h-screen flex-col overflow-hidden bg-background">
-      <Titlebar />
-      <div className="flex min-h-0 flex-1">
-        <Sidebar />
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <main className="flex h-screen overflow-hidden bg-background">
+      <Sidebar />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <Titlebar />
+        <div className="flex min-h-0 flex-1 flex-col">
           <Routes>
             <Route path="/" element={<KanbanPage />} />
             <Route path="/roadmap" element={<RoadmapPage />} />

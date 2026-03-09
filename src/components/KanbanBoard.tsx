@@ -390,7 +390,7 @@ export function KanbanBoard({
           return (
             <Card
               key={column.key}
-              className="min-h-0 min-w-[280px] flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
+              className="min-h-0 min-w-[320px] flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
             >
               <div className="flex flex-col">
                 <div className="px-4 pb-2.5 pt-3.5 text-sm font-semibold">
@@ -417,13 +417,9 @@ export function KanbanBoard({
                     const isCollapsed = !!collapsedEpics[collapseKey];
 
                     return (
-                      <Card key={epicKey} size="sm" className="gap-0 bg-muted/30 py-3 ring-white/[0.04]">
+                      <Card key={epicKey} size="sm" className="gap-0 cursor-pointer bg-muted/30 py-3 ring-white/[0.04] transition-colors hover:bg-muted/50" onClick={() => toggleEpic(column.key, epicKey)}>
                         <CardContent>
-                          <button
-                            type="button"
-                            onClick={() => toggleEpic(column.key, epicKey)}
-                            className="flex w-full items-center justify-between gap-2 rounded-md px-1 py-1.5 text-left text-sm font-medium transition-colors hover:bg-muted/40"
-                          >
+                          <div className="flex w-full items-center justify-between gap-2 px-1 py-1.5 text-sm font-medium">
                             <span className="flex items-center gap-2 truncate">
                               <span className="shrink-0 text-xs leading-none">{getEpicEmoji(epic)}</span>
                               <span className="truncate">{getEpicTitle(epic, firstTaskEpicId)}</span>
@@ -432,10 +428,10 @@ export function KanbanBoard({
                               icon={isCollapsed ? ArrowRight01Icon : ArrowDown01Icon}
                               className="size-4 shrink-0 text-muted-foreground"
                             />
-                          </button>
+                          </div>
 
                           {!isCollapsed && (
-                            <ul className="flex flex-col gap-3 pt-2.5">
+                            <ul className="flex flex-col gap-3 pt-2.5" onClick={(e) => e.stopPropagation()}>
                               {epicTasks.map((task) => (
                                 <li key={task.id}>
                                   <TaskCard

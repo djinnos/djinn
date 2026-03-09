@@ -121,10 +121,12 @@ export function Sidebar() {
         isCollapsed ? 'w-14' : 'w-64'
       )}
     >
-      {/* Header */}
-      <div className="flex h-12 items-center border-b px-3">
-        <div className={cn("flex items-center gap-2", isCollapsed ? "mx-auto" : "flex-1")}>
-          <img src={logoSvg} alt="Djinn" className="h-5 w-5 shrink-0" />
+      {/* Header — px-5 aligns logo with nav icons (nav p-2 + button px-3) */}
+      <div data-tauri-drag-region className={cn("flex h-12 items-center border-b", isCollapsed ? "justify-center px-2" : "px-5")}>
+        <div className={cn("flex items-center gap-3", !isCollapsed && "flex-1")}>
+          <span className="flex h-4 w-4 items-center justify-center shrink-0">
+            <img src={logoSvg} alt="Djinn" className="h-4 w-4" />
+          </span>
           {!isCollapsed && (
             <span className="text-sm font-semibold text-sidebar-foreground truncate">
               Djinn
@@ -132,30 +134,26 @@ export function Sidebar() {
           )}
         </div>
         {!isCollapsed && (
-          <div className="flex items-center gap-1 text-[10px] text-sidebar-foreground/50">
-            <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono">
-              <Command className="h-2.5 w-2.5" />
-            </kbd>
-            <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono">
-              /
-            </kbd>
-          </div>
+          <>
+            <div className="flex items-center gap-1 text-[10px] text-sidebar-foreground/50">
+              <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono">
+                <Command className="h-2.5 w-2.5" />
+              </kbd>
+              <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono">
+                /
+              </kbd>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={toggleCollapse}
+              className="h-8 w-8 shrink-0"
+              title="Collapse sidebar (Cmd+/)"
+            >
+              <PanelLeft className="h-4 w-4 transition-transform duration-200" />
+            </Button>
+          </>
         )}
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={toggleCollapse}
-          className={cn(
-            'h-8 w-8 shrink-0',
-            isCollapsed && 'mx-auto'
-          )}
-          title={isCollapsed ? 'Expand sidebar (Cmd+/)' : 'Collapse sidebar (Cmd+/)'}
-        >
-          <PanelLeft className={cn(
-            'h-4 w-4 transition-transform duration-200',
-            isCollapsed && 'rotate-180'
-          )} />
-        </Button>
       </div>
 
       {/* Navigation */}
