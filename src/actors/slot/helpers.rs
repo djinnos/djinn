@@ -236,7 +236,6 @@ pub(crate) fn parse_merge_validation_metadata(
     serde_json::from_str(raw).ok()
 }
 
-#[allow(dead_code)]
 pub(crate) async fn resume_context_for_task(task_id: &str, app_state: &AppState) -> String {
     let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
@@ -372,10 +371,75 @@ pub(crate) fn default_base_url(provider_id: &str) -> String {
     }
 }
 
-pub(crate) async fn load_provider_api_key(
+/// Resolved provider credentials — either an API key from the vault or an
+/// OAuth-derived `ProviderConfig` that already carries the right base URL,
+/// auth method, and model defaults.
+pub(crate) enum ProviderCredential {
+    /// Traditional API-key credential (key_name, decrypted key).
+    ApiKey(String, String),
+    /// OAuth-derived full provider config (base_url, auth, model already set).
+    OAuthConfig(crate::agent::provider::ProviderConfig),
+}
+
+pub(crate) async fn load_provider_credential(
     provider_id: &str,
     app_state: &AppState,
-) -> anyhow::Result<(String, String)> {
+) -> anyhow::Result<ProviderCredential> {
+    // 1. Try OAuth tokens first for OAuth-capable providers.
+    match provider_id {
+        "chatgpt_codex" => {
+            if let Some(tokens) = crate::agent::oauth::codex::CodexTokens::load_cached() {
+                if tokens.is_expired() {
+                    // Attempt silent refresh.
+                    match crate::agent::oauth::codex::refresh_cached_token(&tokens).await {
+                        Ok(refreshed) => {
+                            return Ok(ProviderCredential::OAuthConfig(
+                                crate::agent::oauth::codex_provider_config(&refreshed),
+                            ));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                provider = provider_id,
+                                error = %e,
+                                "OAuth token refresh failed; falling back to credential vault"
+                            );
+                        }
+                    }
+                } else {
+                    return Ok(ProviderCredential::OAuthConfig(
+                        crate::agent::oauth::codex_provider_config(&tokens),
+                    ));
+                }
+            }
+        }
+        "githubcopilot" => {
+            if let Some(tokens) = crate::agent::oauth::copilot::CopilotTokens::load_cached() {
+                if !tokens.is_expired() {
+                    return Ok(ProviderCredential::OAuthConfig(
+                        crate::agent::oauth::copilot_provider_config(&tokens),
+                    ));
+                }
+                // Copilot refresh requires the github_token → try exchange.
+                match crate::agent::oauth::copilot::refresh_copilot_token(&tokens).await {
+                    Ok(refreshed) => {
+                        return Ok(ProviderCredential::OAuthConfig(
+                            crate::agent::oauth::copilot_provider_config(&refreshed),
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            provider = provider_id,
+                            error = %e,
+                            "Copilot token refresh failed; falling back to credential vault"
+                        );
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // 2. Fall back to credential vault (DB).
     let key_name = app_state
         .catalog()
         .list_providers()
@@ -391,7 +455,7 @@ pub(crate) async fn load_provider_api_key(
         .map_err(|e| anyhow::anyhow!("credential lookup failed: {e}"))?;
 
     match key {
-        Some(v) => Ok((key_name, v)),
+        Some(v) => Ok(ProviderCredential::ApiKey(key_name, v)),
         None => Err(anyhow::anyhow!(
             "no credential stored for provider {provider_id} (expected key {key_name})"
         )),

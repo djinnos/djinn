@@ -11,7 +11,7 @@
 //   4. 30-second Interval tick — stuck detection safety net (AGENT-08).
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{self, Interval};
@@ -33,6 +33,14 @@ mod health;
 
 /// Interval between stuck-detection passes (AGENT-08).
 const STUCK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Cooldown before re-dispatching a task that failed lifecycle setup
+/// (e.g. missing credential).  Prevents hot dispatch loops.
+const DISPATCH_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// If a task becomes dispatch-ready again within this threshold of its last
+/// dispatch, it is considered a rapid failure and placed in cooldown.
+const RAPID_FAILURE_THRESHOLD: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const DEFAULT_MODEL_ID: &str = "test/mock";
 
@@ -163,6 +171,12 @@ struct CoordinatorActor {
     model_priorities: HashMap<String, Vec<String>>,
     // Per-project health: project_id → error message (only unhealthy projects appear here).
     unhealthy_projects: HashMap<String, String>,
+    /// Per-task dispatch tracking: task UUID → last dispatch instant.
+    /// When a task becomes ready again within `RAPID_FAILURE_THRESHOLD` of its
+    /// last dispatch, it is placed in cooldown for `DISPATCH_COOLDOWN` to prevent
+    /// hot dispatch loops (e.g. missing credential → release → re-dispatch).
+    last_dispatched: HashMap<String, Instant>,
+    dispatch_cooldowns: HashMap<String, Instant>,
     // Metrics
     dispatched: u64,
     recovered: u64,
@@ -203,6 +217,8 @@ impl CoordinatorActor {
             dispatch_limit: 50,
             model_priorities: HashMap::new(),
             unhealthy_projects: HashMap::new(),
+            last_dispatched: HashMap::new(),
+            dispatch_cooldowns: HashMap::new(),
             dispatched: 0,
             recovered: 0,
         }

@@ -93,6 +93,17 @@ impl CodexTokens {
     }
 }
 
+/// Attempt a silent token refresh using the cached refresh_token.
+/// Returns refreshed `CodexTokens` on success, saving them to disk.
+pub async fn refresh_cached_token(cached: &CodexTokens) -> Result<CodexTokens> {
+    let tr = refresh_token(ISSUER, &cached.refresh_token).await?;
+    let account_id = pick_account_id(&tr).or(cached.account_id.clone());
+    let tokens = token_response_to_tokens(tr, account_id);
+    let _ = tokens.save();
+    tracing::info!("Codex: token refreshed successfully (lifecycle)");
+    Ok(tokens)
+}
+
 // ─── PKCE helpers ─────────────────────────────────────────────────────────────
 
 struct PkceChallenge {

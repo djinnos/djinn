@@ -92,6 +92,16 @@ impl CopilotTokens {
     }
 }
 
+/// Refresh an expired Copilot token by re-exchanging the long-lived GitHub
+/// token for a new short-lived Copilot API token.  Saves the result to disk.
+pub async fn refresh_copilot_token(cached: &CopilotTokens) -> Result<CopilotTokens> {
+    let client = build_client()?;
+    let tokens = exchange_for_copilot_token(&client, &cached.github_token).await?;
+    let _ = tokens.save();
+    tracing::info!("Copilot: token refreshed successfully (lifecycle)");
+    Ok(tokens)
+}
+
 // ─── Device code session ──────────────────────────────────────────────────────
 
 /// Data returned from the first phase of the device code flow.
@@ -287,15 +297,6 @@ pub async fn exchange_for_copilot_token(client: &Client, github_token: &str) -> 
         api_endpoint,
         expires_at: resp.expires_at,
     })
-}
-
-/// Refresh the Copilot API token using a stored GitHub token.
-///
-/// Used to silently renew the short-lived Copilot token without re-running
-/// the full device code flow.
-pub async fn refresh_copilot_token(github_token: &str) -> Result<CopilotTokens> {
-    let client = build_client()?;
-    exchange_for_copilot_token(&client, github_token).await
 }
 
 #[cfg(test)]

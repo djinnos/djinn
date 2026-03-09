@@ -51,6 +51,12 @@ impl CoordinatorActor {
 
         let mut exhausted_roles: HashSet<&'static str> = HashSet::new();
 
+        // Expire stale cooldowns and old dispatch timestamps.
+        self.dispatch_cooldowns
+            .retain(|_, instant| instant.elapsed() < DISPATCH_COOLDOWN);
+        self.last_dispatched
+            .retain(|_, instant| instant.elapsed() < RAPID_FAILURE_THRESHOLD);
+
         for task in ready {
             if let Some(project_id) = project_filter
                 && task.project_id != project_id
@@ -58,6 +64,28 @@ impl CoordinatorActor {
                 continue;
             }
             if !self.is_project_dispatch_enabled(&task.project_id) {
+                continue;
+            }
+            // Detect rapid failure: if this task was dispatched very recently and
+            // is already back as ready, it failed lifecycle early → add to cooldown.
+            if let Some(last) = self.last_dispatched.get(&task.id) {
+                if last.elapsed() < RAPID_FAILURE_THRESHOLD {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        elapsed_ms = last.elapsed().as_millis(),
+                        cooldown_secs = DISPATCH_COOLDOWN.as_secs(),
+                        "CoordinatorActor: rapid failure detected, adding dispatch cooldown"
+                    );
+                    self.dispatch_cooldowns
+                        .insert(task.id.clone(), Instant::now());
+                }
+            }
+            // Skip tasks in cooldown (recently failed lifecycle setup).
+            if self.dispatch_cooldowns.contains_key(&task.id) {
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    "CoordinatorActor: task in dispatch cooldown, skipping"
+                );
                 continue;
             }
 
@@ -117,6 +145,8 @@ impl CoordinatorActor {
                             project_path,
                             "CoordinatorActor: task dispatched"
                         );
+                        self.last_dispatched
+                            .insert(task.id.clone(), Instant::now());
                         self.dispatched += 1;
                         dispatched = true;
                         break;
