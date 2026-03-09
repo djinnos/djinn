@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use goose::agents::{Agent as GooseAgent, AgentEvent, SessionConfig as GooseSessionConfig};
+use goose::agents::{Agent as GooseAgent, SessionConfig as GooseSessionConfig};
 use goose::conversation::message::{Message as GooseMessage, MessageContent};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -15,15 +15,6 @@ use crate::server::AppState;
 use super::*;
 
 const MAX_TURNS: u32 = 1000;
-
-/// Maximum number of times we re-prompt Goose when it ends a stream without
-/// tool calls.  Goose exits its internal loop when the model produces a
-/// text-only turn and there is no `final_output_tool` or `retry_config`
-/// configured (both are `None` in our setup).  We work around this by
-/// injecting a synthetic user message and calling `agent.reply()` again.
-/// Worst case for a genuinely-finished agent: one extra cheap LLM call that
-/// returns "I'm done".
-const MAX_CONTINUATIONS: u32 = 3;
 
 fn serialize_goose_message(msg: &GooseMessage) -> serde_json::Value {
     serde_json::to_value(msg).unwrap_or_else(|e| {
@@ -63,7 +54,6 @@ pub(super) async fn run_reply_loop(
         let mut pending_message = Some(kickoff);
         let mut saw_any_event = false;
         let mut saw_any_tool_use = false;
-        let mut continuation_count: u32 = 0;
         let assistant_role = GooseMessage::assistant().role;
         let mut assistant_message_count: usize = 0;
         let mut assistant_fragments: Vec<String> = Vec::new();
@@ -114,7 +104,6 @@ pub(super) async fn run_reply_loop(
 
             let mut interrupted: Option<&'static str> = None;
             let mut saw_round_event = false;
-            let mut round_had_tool_use = false;
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => {
@@ -137,7 +126,7 @@ pub(super) async fn run_reply_loop(
                         })?;
                         saw_any_event = true;
                         saw_round_event = true;
-                        if let AgentEvent::Message(msg) = &evt {
+                        if let goose::agents::AgentEvent::Message(msg) = &evt {
                             if msg.role == assistant_role {
                                 assistant_message_count += 1;
                                 for content in &msg.content {
@@ -148,12 +137,10 @@ pub(super) async fn run_reply_loop(
                                         MessageContent::ToolRequest(req) => {
                                             push_fragment(&mut assistant_fragments, format!("tool_request:{}", req.id));
                                             saw_any_tool_use = true;
-                                            round_had_tool_use = true;
                                         }
                                         MessageContent::FrontendToolRequest(req) => {
                                             push_fragment(&mut assistant_fragments, format!("frontend_tool_request:{}", req.id));
                                             saw_any_tool_use = true;
-                                            round_had_tool_use = true;
                                         }
                                         _ => {
                                             push_fragment(&mut assistant_fragments, format!("{}", content));
@@ -214,27 +201,6 @@ pub(super) async fn run_reply_loop(
                     diag
                 ));
             }
-
-            // Goose exits its internal loop when the model produces a text-only
-            // turn (no tool calls) because we have no final_output_tool or
-            // retry_config.  Re-prompt to keep working if there are
-            // continuations left.
-            if !round_had_tool_use && continuation_count < MAX_CONTINUATIONS {
-                continuation_count += 1;
-                tracing::info!(
-                    task_id = %task_id,
-                    agent_type = %agent_type.as_str(),
-                    continuation_count,
-                    "Lifecycle: model stopped with text-only turn, injecting continuation"
-                );
-                pending_message = Some(
-                    GooseMessage::user().with_text(
-                        "You are not done yet. Continue working — use your tools to make \
-                         progress on the task. Do not repeat what you already said, do not \
-                         ask for confirmation — just continue where you left off."
-                    )
-                );
-            }
         }
 
         if !saw_any_event {
@@ -246,6 +212,10 @@ pub(super) async fn run_reply_loop(
         if let Some(last_text) = last_assistant_text_from_goose_sqlite(session_id).await {
             output.ingest_text(&last_text);
         }
+
+        // No markers or nudging — the agent stopping tool calls is the natural
+        // completion signal. Routing is determined by AC state (reviewers) and
+        // session completion (workers) in the lifecycle.
 
         if !saw_any_tool_use {
             let reason = match agent_type {
@@ -270,7 +240,6 @@ pub(super) async fn run_reply_loop(
             agent_type = %agent_type.as_str(),
             saw_any_event,
             assistant_message_count,
-            continuation_count,
             "Lifecycle: session completed normally"
         );
 
