@@ -135,9 +135,15 @@ export interface ProviderModel {
 
 export async function fetchProviderModels(): Promise<ProviderModel[]> {
   const response = await callMcpTool("provider_models_connected");
-  return response.models.map((model) => ({
-    id: model.id,
-    name: model.name,
-    provider: model.provider_id,
-  }));
+  const seen = new Set<string>();
+  const models: ProviderModel[] = [];
+  for (const model of response.models) {
+    const key = `${model.provider_id}/${model.id}`;
+    if (seen.has(key)) continue;
+    // Skip embedding-only models
+    if (model.id.startsWith("text-embedding")) continue;
+    seen.add(key);
+    models.push({ id: model.id, name: model.name, provider: model.provider_id });
+  }
+  return models;
 }

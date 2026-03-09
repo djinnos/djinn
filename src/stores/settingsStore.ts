@@ -1,7 +1,7 @@
 import { create } from 'zustand';
-import { 
-  fetchSettings, 
-  saveSettings, 
+import {
+  fetchSettings,
+  saveSettings,
   fetchProviderModels,
   AgentRole,
   ModelPriorityItem,
@@ -9,13 +9,17 @@ import {
   ProviderModel
 } from '@/api/settings';
 
+export interface UnifiedModelEntry {
+  model: string;
+  provider: string;
+  enabledRoles: AgentRole[];
+  max_concurrent: number;
+  current_active: number;
+}
+
 export interface SettingsState {
-  // Data
-  modelPriorities: Record<AgentRole, ModelPriorityItem[]>;
-  sessionLimits: ModelSessionLimit[];
+  models: UnifiedModelEntry[];
   availableModels: ProviderModel[];
-  
-  // Status
   isLoading: boolean;
   isSaving: boolean;
   error: string | null;
@@ -23,38 +27,85 @@ export interface SettingsState {
 }
 
 export interface SettingsActions {
-  // Load actions
   loadSettings: () => Promise<void>;
   loadProviderModels: () => Promise<void>;
-  
-  // Model priority actions
-  addModelToRole: (role: AgentRole, model: ModelPriorityItem) => void;
-  removeModelFromRole: (role: AgentRole, index: number) => void;
-  reorderModelsInRole: (role: AgentRole, fromIndex: number, toIndex: number) => void;
-  
-  // Session limit actions
-  updateSessionLimit: (model: string, provider: string, maxConcurrent: number) => void;
-  
-  // Provider cleanup
+  addModel: (model: ModelPriorityItem) => void;
+  removeModel: (index: number) => void;
+  reorderModels: (fromIndex: number, toIndex: number) => void;
+  toggleRoleForModel: (index: number, role: AgentRole) => void;
+  updateMaxSessions: (index: number, maxConcurrent: number) => void;
   removeModelsByProvider: (provider: string) => void;
-
-  // Save action
   saveSettings: () => Promise<void>;
-
-  // Reset
   resetError: () => void;
 }
 
-const DEFAULT_MODEL_PRIORITIES: Record<AgentRole, ModelPriorityItem[]> = {
-  worker: [],
-  task_reviewer: [],
-  conflict_resolver: [],
-  pm: [],
-};
+const ALL_ROLES: AgentRole[] = ['worker', 'task_reviewer', 'conflict_resolver', 'pm'];
+
+function mergeToUnified(
+  priorities: Record<AgentRole, ModelPriorityItem[]>,
+  sessionLimits: ModelSessionLimit[],
+): UnifiedModelEntry[] {
+  const entries: UnifiedModelEntry[] = [];
+  const seen = new Map<string, number>(); // key -> index in entries
+
+  for (const role of ALL_ROLES) {
+    for (const item of priorities[role]) {
+      const key = `${item.provider}::${item.model}`;
+      const idx = seen.get(key);
+      if (idx !== undefined) {
+        if (!entries[idx].enabledRoles.includes(role)) {
+          entries[idx].enabledRoles.push(role);
+        }
+      } else {
+        const limit = sessionLimits.find(
+          (sl) => sl.model === item.model && sl.provider === item.provider
+        );
+        seen.set(key, entries.length);
+        entries.push({
+          model: item.model,
+          provider: item.provider,
+          enabledRoles: [role],
+          max_concurrent: limit?.max_concurrent ?? 1,
+          current_active: limit?.current_active ?? 0,
+        });
+      }
+    }
+  }
+  return entries;
+}
+
+function splitFromUnified(models: UnifiedModelEntry[]): {
+  priorities: Record<AgentRole, ModelPriorityItem[]>;
+  sessionLimits: ModelSessionLimit[];
+} {
+  const priorities: Record<AgentRole, ModelPriorityItem[]> = {
+    worker: [],
+    task_reviewer: [],
+    conflict_resolver: [],
+    pm: [],
+  };
+
+  const sessionLimits: ModelSessionLimit[] = [];
+
+  for (const entry of models) {
+    for (const role of ALL_ROLES) {
+      if (entry.enabledRoles.includes(role)) {
+        priorities[role].push({ model: entry.model, provider: entry.provider });
+      }
+    }
+    sessionLimits.push({
+      model: entry.model,
+      provider: entry.provider,
+      max_concurrent: entry.max_concurrent,
+      current_active: entry.current_active,
+    });
+  }
+
+  return { priorities, sessionLimits };
+}
 
 const initialState: SettingsState = {
-  modelPriorities: DEFAULT_MODEL_PRIORITIES,
-  sessionLimits: [],
+  models: [],
   availableModels: [],
   isLoading: false,
   isSaving: false,
@@ -69,16 +120,15 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
     set({ isLoading: true, error: null });
     try {
       const settings = await fetchSettings();
-      set({
-        modelPriorities: settings.agents.model_priorities,
-        sessionLimits: settings.agents.session_limits,
-        isLoading: false,
-        hasUnsavedChanges: false,
-      });
+      const models = mergeToUnified(
+        settings.agents.model_priorities,
+        settings.agents.session_limits,
+      );
+      set({ models, isLoading: false, hasUnsavedChanges: false });
     } catch (error) {
-      set({ 
+      set({
         error: error instanceof Error ? error.message : 'Failed to load settings',
-        isLoading: false 
+        isLoading: false
       });
     }
   },
@@ -88,119 +138,100 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
       const models = await fetchProviderModels();
       set({ availableModels: models });
     } catch (error) {
-      set({ 
+      set({
         error: error instanceof Error ? error.message : 'Failed to load provider models'
       });
     }
   },
 
-  addModelToRole: (role: AgentRole, model: ModelPriorityItem) => {
-    const { modelPriorities } = get();
-    const currentList = modelPriorities[role];
-    
-    // Check if model already exists in this role
-    const exists = currentList.some(
-      item => item.model === model.model && item.provider === model.provider
+  addModel: (model: ModelPriorityItem) => {
+    const { models } = get();
+    const exists = models.some(
+      (m) => m.model === model.model && m.provider === model.provider
     );
-    
     if (exists) return;
-    
+
     set({
-      modelPriorities: {
-        ...modelPriorities,
-        [role]: [...currentList, model],
-      },
+      models: [
+        ...models,
+        {
+          model: model.model,
+          provider: model.provider,
+          enabledRoles: [...ALL_ROLES],
+          max_concurrent: 1,
+          current_active: 0,
+        },
+      ],
       hasUnsavedChanges: true,
     });
   },
 
-  removeModelFromRole: (role: AgentRole, index: number) => {
-    const { modelPriorities } = get();
-    const currentList = modelPriorities[role];
-    
+  removeModel: (index: number) => {
+    const { models } = get();
     set({
-      modelPriorities: {
-        ...modelPriorities,
-        [role]: currentList.filter((_, i) => i !== index),
-      },
+      models: models.filter((_, i) => i !== index),
       hasUnsavedChanges: true,
     });
   },
 
-  reorderModelsInRole: (role: AgentRole, fromIndex: number, toIndex: number) => {
-    const { modelPriorities } = get();
-    const currentList = [...modelPriorities[role]];
-    
-    const [movedItem] = currentList.splice(fromIndex, 1);
-    currentList.splice(toIndex, 0, movedItem);
-    
-    set({
-      modelPriorities: {
-        ...modelPriorities,
-        [role]: currentList,
-      },
-      hasUnsavedChanges: true,
-    });
+  reorderModels: (fromIndex: number, toIndex: number) => {
+    const { models } = get();
+    const newModels = [...models];
+    const [moved] = newModels.splice(fromIndex, 1);
+    newModels.splice(toIndex, 0, moved);
+    set({ models: newModels, hasUnsavedChanges: true });
   },
 
-  updateSessionLimit: (model: string, provider: string, maxConcurrent: number) => {
-    const { sessionLimits } = get();
-    
-    const existingIndex = sessionLimits.findIndex(
-      item => item.model === model && item.provider === provider
-    );
-    
-    let newSessionLimits: ModelSessionLimit[];
-    
-    if (existingIndex >= 0) {
-      newSessionLimits = sessionLimits.map((item, i) =>
-        i === existingIndex ? { ...item, max_concurrent: maxConcurrent } : item
-      );
-    } else {
-      newSessionLimits = [
-        ...sessionLimits,
-        { model, provider, max_concurrent: maxConcurrent, current_active: 0 },
-      ];
-    }
-    
-    set({
-      sessionLimits: newSessionLimits,
-      hasUnsavedChanges: true,
-    });
+  toggleRoleForModel: (index: number, role: AgentRole) => {
+    const { models } = get();
+    const entry = models[index];
+    if (!entry) return;
+
+    const hasRole = entry.enabledRoles.includes(role);
+    const newRoles = hasRole
+      ? entry.enabledRoles.filter((r) => r !== role)
+      : [...entry.enabledRoles, role];
+
+    const newModels = [...models];
+    newModels[index] = { ...entry, enabledRoles: newRoles };
+    set({ models: newModels, hasUnsavedChanges: true });
+  },
+
+  updateMaxSessions: (index: number, maxConcurrent: number) => {
+    const { models } = get();
+    const entry = models[index];
+    if (!entry) return;
+
+    const newModels = [...models];
+    newModels[index] = { ...entry, max_concurrent: maxConcurrent };
+    set({ models: newModels, hasUnsavedChanges: true });
   },
 
   removeModelsByProvider: (provider: string) => {
-    const { modelPriorities, sessionLimits } = get();
-    const roles: AgentRole[] = ['worker', 'task_reviewer', 'conflict_resolver', 'pm'];
-    const newPriorities = { ...modelPriorities };
-    for (const role of roles) {
-      newPriorities[role] = modelPriorities[role].filter(
-        (item) => item.provider !== provider
-      );
-    }
+    const { models } = get();
     set({
-      modelPriorities: newPriorities,
-      sessionLimits: sessionLimits.filter((sl) => sl.provider !== provider),
+      models: models.filter((m) => m.provider !== provider),
       hasUnsavedChanges: true,
     });
   },
 
   saveSettings: async () => {
-    const { modelPriorities, sessionLimits } = get();
-    
+    const { models } = get();
+    const { priorities, sessionLimits } = splitFromUnified(models);
+
     set({ isSaving: true, error: null });
     try {
       await saveSettings({
         agents: {
-          model_priorities: modelPriorities,
+          model_priorities: priorities,
           session_limits: sessionLimits,
         },
       });
       set({ isSaving: false, hasUnsavedChanges: false });
     } catch (error) {
-      set({ 
+      set({
         error: error instanceof Error ? error.message : 'Failed to save settings',
-        isSaving: false 
+        isSaving: false
       });
     }
   },
