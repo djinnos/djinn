@@ -184,31 +184,6 @@ pub(crate) async fn prepare_worktree(
         .map_err(|e| anyhow::anyhow!("create worktree: {e}"))
 }
 
-pub(crate) async fn prepare_epic_reviewer_worktree(
-    project_dir: &Path,
-    batch_id: &str,
-    app_state: &AppState,
-) -> anyhow::Result<PathBuf> {
-    let git = app_state
-        .git_actor(project_dir)
-        .await
-        .map_err(|e| anyhow::anyhow!("git actor: {e}"))?;
-
-    let folder_name = format!("batch-{batch_id}");
-    let stale_path = project_dir
-        .join(".djinn")
-        .join("worktrees")
-        .join(&folder_name);
-    let _ = git.remove_worktree(&stale_path).await;
-    if stale_path.exists() {
-        let _ = std::fs::remove_dir_all(&stale_path);
-    }
-
-    git.create_worktree(&folder_name, "HEAD", true)
-        .await
-        .map_err(|e| anyhow::anyhow!("create epic reviewer worktree: {e}"))
-}
-
 pub(crate) async fn try_rebase_existing_task_branch(
     project_dir: &Path,
     branch: &str,

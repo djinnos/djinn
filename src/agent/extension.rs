@@ -18,7 +18,7 @@ use crate::db::repositories::task::TaskRepository;
 use crate::models::task::Task;
 use crate::server::AppState;
 
-pub fn config(agent_type: AgentType) -> ExtensionConfig {
+pub fn config(_agent_type: AgentType) -> ExtensionConfig {
     let mut tool_values = vec![
         serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
         serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
@@ -659,26 +659,6 @@ fn tool_task_update() -> RmcpTool {
                 "acceptance_criteria": {"type": "array", "items": {}},
                 "memory_refs_add": {"type": "array", "items": {"type": "string"}},
                 "memory_refs_remove": {"type": "array", "items": {"type": "string"}}
-            }
-        }),
-    )
-}
-
-fn tool_task_create() -> RmcpTool {
-    RmcpTool::new(
-        "task_create".to_string(),
-        "Create a new work item under an epic.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["epic_id", "title"],
-            "properties": {
-                "epic_id": {"type": "string"},
-                "title": {"type": "string"},
-                "issue_type": {"type": "string"},
-                "description": {"type": "string"},
-                "design": {"type": "string"},
-                "priority": {"type": "integer"},
-                "owner": {"type": "string"}
             }
         }),
     )

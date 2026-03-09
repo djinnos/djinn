@@ -6,7 +6,6 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 use crate::agent::{AgentType, SessionManager};
 use crate::db::repositories::credential::CredentialRepository;
-use crate::db::repositories::epic_review_batch::EpicReviewBatchRepository;
 use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::task::TaskRepository;
@@ -329,18 +328,6 @@ pub(crate) async fn find_paused_session_record(
 ) -> Option<SessionRecord> {
     let repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
     repo.paused_for_task(task_id).await.ok().flatten()
-}
-
-pub(crate) async fn active_epic_batch_for_task(
-    task_id: &str,
-    app_state: &AppState,
-) -> Option<String> {
-    let repo = EpicReviewBatchRepository::new(app_state.db().clone(), app_state.events().clone());
-    repo.active_batch_for_task(task_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|b| b.id)
 }
 
 pub(crate) async fn conflict_context_for_dispatch(

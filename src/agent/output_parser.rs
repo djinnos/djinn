@@ -37,12 +37,12 @@ impl ParsedAgentOutput {
             }
 
             // Extract reviewer feedback if present (still useful for logging).
-            if matches!(self.agent_type, AgentType::TaskReviewer) {
-                if let Some(payload) = marker_payload(&line, "FEEDBACK") {
-                    let feedback = payload.trim();
-                    if !feedback.is_empty() {
-                        self.reviewer_feedback = Some(feedback.to_string());
-                    }
+            if matches!(self.agent_type, AgentType::TaskReviewer)
+                && let Some(payload) = marker_payload(&line, "FEEDBACK")
+            {
+                let feedback = payload.trim();
+                if !feedback.is_empty() {
+                    self.reviewer_feedback = Some(feedback.to_string());
                 }
             }
 
