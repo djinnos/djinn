@@ -8,7 +8,6 @@ use goose::config::{GooseMode, PermissionManager};
 use goose::conversation::message::Message as GooseMessage;
 use goose::model::ModelConfig;
 use goose::providers;
-use goose::recipe::Response as GooseResponse;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -454,22 +453,6 @@ pub async fn run_task_lifecycle(
         },
     );
 
-    let final_output_schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "summary": {
-                "type": "string",
-                "description": "Brief summary of what was accomplished in this session"
-            },
-            "status": {
-                "type": "string",
-                "enum": ["completed"],
-                "description": "Session completion status"
-            }
-        },
-        "required": ["summary", "status"]
-    });
-
     // Context window for SSE token-usage events (desktop UI).  Goose now owns
     // compaction using the context_limit we injected into ModelConfig above, so
     // this is purely informational.
@@ -553,14 +536,6 @@ pub async fn run_task_lifecycle(
 
         agent
             .extend_system_prompt("djinn_task".to_string(), system_prompt.clone())
-            .await;
-
-        // Register the final_output tool so Goose keeps the agent loop running
-        // until the model explicitly signals completion.
-        agent
-            .add_final_output_tool(GooseResponse {
-                json_schema: Some(final_output_schema.clone()),
-            })
             .await;
 
         let kickoff = GooseMessage::user().with_text(
