@@ -26,8 +26,8 @@ type TaskCardProps = {
 };
 
 const PRIORITY_CONFIG: Record<number, { icon: typeof NoSignalIcon; color: string }> = {
-  0: { icon: FullSignalIcon, color: "text-[#F97316]" },
-  1: { icon: MediumSignalIcon, color: "text-[#A78BFA]" },
+  0: { icon: FullSignalIcon, color: "text-[#D1D5DB]" },
+  1: { icon: MediumSignalIcon, color: "text-[#9CA3AF]" },
   2: { icon: LowSignalIcon, color: "text-[#6B7280]" },
   3: { icon: NoSignalIcon, color: "text-[#4B5563]" },
 };
