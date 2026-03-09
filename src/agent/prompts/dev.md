@@ -40,14 +40,11 @@ You have access to Djinn tools via the `djinn` extension. Use them during implem
 ## Instructions
 
 1. **Check for prior feedback** — call `task_show(id="{{task_id}}")` and inspect the activity log. If there are reviewer comments (actor_role `task_reviewer`), read the feedback carefully — your previous attempt was rejected for specific reasons. Fix exactly what the reviewer asked for before proceeding.
-2. **Pre-work check** — before writing any code, verify the workspace has the foundations your task needs:
-   - Inspect the existing code structure relevant to your task (components, modules, services it depends on)
-   - If something your task depends on doesn't exist yet, add a comment explaining the missing dependency and stop — the PM will handle blocker management
-3. **Read the task** — understand what needs to be done from the description, design, and acceptance criteria
-4. **Check memory** — look up any ADRs or patterns referenced in the design field
-5. **Implement** — write the code following the design approach exactly as specified
-6. **Add progress note** — comment on the task with what you implemented
-7. **Verify completeness** — ensure ALL acceptance criteria are met, ALL code changes written and saved, ALL TODOs from your plan addressed. Do NOT stop if you have only planned, read files, or partially implemented. Finish the work first.
+2. **Read the task** — understand what needs to be done from the description, design, and acceptance criteria
+3. **Check memory** — look up any ADRs or patterns referenced in the design field
+4. **Implement** — write the code following the design approach exactly as specified
+5. **Add progress note** — comment on the task with what you implemented
+6. **Verify completeness** — ensure ALL acceptance criteria are met, ALL code changes written and saved, ALL TODOs from your plan addressed. Do NOT stop if you have only planned, read files, or partially implemented. Finish the work first.
 
 ## Rules
 
