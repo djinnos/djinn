@@ -1,6 +1,6 @@
 use async_stream::stream;
 use futures::StreamExt;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::HeaderMap;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::pin::Pin;
@@ -26,17 +26,23 @@ impl OpenAIResponsesProvider {
 
     fn build_request(&self, conversation: &Conversation, tools: &[Value]) -> Value {
         let mut input_items: Vec<Value> = Vec::new();
+        let mut instructions: Option<String> = None;
 
         for msg in &conversation.messages {
             match msg.role {
                 Role::System => {
-                    // System messages go as items with role "system" and input_text content
+                    // System messages become the top-level "instructions" field
                     let text = msg.text_content();
                     if !text.is_empty() {
-                        input_items.push(json!({
-                            "role": "system",
-                            "content": [{"type": "input_text", "text": text}]
-                        }));
+                        match &mut instructions {
+                            Some(existing) => {
+                                existing.push_str("\n\n");
+                                existing.push_str(&text);
+                            }
+                            None => {
+                                instructions = Some(text);
+                            }
+                        }
                     }
                 }
                 Role::User => {
@@ -134,6 +140,7 @@ impl OpenAIResponsesProvider {
         let mut body = json!({
             "model": self.config.model_id,
             "input": input_items,
+            "instructions": instructions.unwrap_or_default(),
             "store": false,
             "stream": true,
         });
@@ -166,10 +173,8 @@ impl OpenAIResponsesProvider {
 
     fn extra_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        if let Some(proxy) = &self.config.dev_proxy
-            && let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", proxy.auth_key))
-        {
-            headers.insert(HeaderName::from_static("helicone-auth"), val);
+        if let Some(proxy) = &self.config.dev_proxy {
+            proxy.apply_headers(&mut headers);
         }
         headers
     }
@@ -445,6 +450,7 @@ impl LlmProvider for OpenAIResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::message::Message;
     use crate::agent::provider::{AuthMethod, FormatFamily};
 
     fn test_provider() -> OpenAIResponsesProvider {
@@ -470,15 +476,15 @@ mod tests {
         assert_eq!(req["store"], false);
         assert_eq!(req["stream"], true);
 
+        // System message becomes top-level instructions
+        assert_eq!(req["instructions"], "You are helpful.");
+
         let input = req["input"].as_array().unwrap();
-        assert_eq!(input.len(), 2);
-        // System message
-        assert_eq!(input[0]["role"], "system");
-        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input.len(), 1);
         // User message
-        assert_eq!(input[1]["role"], "user");
-        assert_eq!(input[1]["content"][0]["type"], "input_text");
-        assert_eq!(input[1]["content"][0]["text"], "Hello");
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][0]["text"], "Hello");
     }
 
     #[test]

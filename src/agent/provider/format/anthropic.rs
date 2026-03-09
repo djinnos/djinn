@@ -108,11 +108,9 @@ impl AnthropicProvider {
             HeaderValue::from_static("2023-06-01"),
         );
 
-        // Dev proxy Helicone auth
-        if let Some(proxy) = &self.config.dev_proxy
-            && let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", proxy.auth_key))
-        {
-            headers.insert(HeaderName::from_static("helicone-auth"), val);
+        // Dev proxy (Helicone) headers
+        if let Some(proxy) = &self.config.dev_proxy {
+            proxy.apply_headers(&mut headers);
         }
 
         headers

@@ -54,6 +54,47 @@ pub struct DevProxy {
     pub url: String,
     /// Auth key sent as `Helicone-Auth: Bearer {key}`.
     pub auth_key: String,
+    /// Task ID for tracing (sent as `Helicone-Property-TaskId`).
+    pub task_id: Option<String>,
+    /// Agent type for tracing (sent as `Helicone-Property-AgentType`).
+    pub agent_type: Option<String>,
+    /// Session ID for tracing (sent as `Helicone-Session-Id`).
+    pub session_id: Option<String>,
+}
+
+impl DevProxy {
+    /// Inject Helicone auth + metadata headers into a `HeaderMap`.
+    pub fn apply_headers(&self, headers: &mut reqwest::header::HeaderMap) {
+        use reqwest::header::{HeaderName, HeaderValue};
+        if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", self.auth_key)) {
+            headers.insert(HeaderName::from_static("helicone-auth"), val);
+        }
+        if let Some(ref tid) = self.task_id {
+            if let Ok(val) = HeaderValue::from_str(tid) {
+                headers.insert(HeaderName::from_static("helicone-property-taskid"), val);
+            }
+        }
+        if let Some(ref at) = self.agent_type {
+            if let Ok(val) = HeaderValue::from_str(at) {
+                headers.insert(HeaderName::from_static("helicone-property-agenttype"), val);
+            }
+        }
+        if let Some(ref sid) = self.session_id {
+            if let Ok(val) = HeaderValue::from_str(sid) {
+                headers.insert(HeaderName::from_static("helicone-session-id"), val);
+            }
+        }
+    }
+}
+
+/// Helicone gateway path segment for a given format family.
+pub fn helicone_gateway_url(base_url: &str, family: FormatFamily) -> String {
+    let gateway = match family {
+        FormatFamily::OpenAI | FormatFamily::OpenAIResponses => "oai/v1",
+        FormatFamily::Anthropic => "anthropic",
+        FormatFamily::Google => "google",
+    };
+    format!("{}/v1/gateway/{}", base_url.trim_end_matches('/'), gateway)
 }
 
 /// Authentication method for provider API requests.

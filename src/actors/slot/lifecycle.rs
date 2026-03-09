@@ -413,22 +413,35 @@ pub async fn run_task_lifecycle(
     let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
 
     // ── Build Djinn-native provider ───────────────────────────────────────────
+    let dev_proxy = build_dev_proxy(&app_state, agent_type, &task_id).await;
+
     let provider_config = match provider_credential {
         ProviderCredential::OAuthConfig(mut cfg) => {
             // OAuth config carries defaults; override model_id and context_window
             // from the dispatch request.
             cfg.model_id = model_name.clone();
             cfg.context_window = context_window.max(0) as u32;
+            cfg.dev_proxy = dev_proxy.map(|mut dp| {
+                // Recompute gateway URL for the OAuth config's format family.
+                dp.url = crate::agent::provider::helicone_gateway_url(&dp.url, cfg.format_family);
+                dp
+            });
             cfg
         }
         ProviderCredential::ApiKey(_key_name, api_key) => {
+            let format_family =
+                format_family_for_provider(&catalog_provider_id, &model_name);
             crate::agent::provider::ProviderConfig {
                 base_url: default_base_url(&catalog_provider_id),
                 auth: auth_method_for_provider(&catalog_provider_id, &api_key),
-                format_family: format_family_for_provider(&catalog_provider_id),
+                format_family,
                 model_id: model_name.clone(),
                 context_window: context_window.max(0) as u32,
-                dev_proxy: None,
+                dev_proxy: dev_proxy.map(|mut dp| {
+                    dp.url =
+                        crate::agent::provider::helicone_gateway_url(&dp.url, format_family);
+                    dp
+                }),
             }
         }
     };

@@ -308,6 +308,7 @@ pub(crate) async fn transition_interrupted(
 
 pub(crate) fn format_family_for_provider(
     provider_id: &str,
+    model_id: &str,
 ) -> crate::agent::provider::FormatFamily {
     use crate::agent::provider::FormatFamily;
     let lower = provider_id.to_lowercase();
@@ -315,7 +316,7 @@ pub(crate) fn format_family_for_provider(
         FormatFamily::Anthropic
     } else if lower.contains("google") || lower.contains("gemini") || lower.contains("vertex") {
         FormatFamily::Google
-    } else if lower.contains("codex") {
+    } else if lower.contains("codex") || model_id.contains("codex") {
         FormatFamily::OpenAIResponses
     } else {
         FormatFamily::OpenAI
@@ -455,5 +456,30 @@ pub(crate) fn parse_model_id(model_id: &str) -> anyhow::Result<(String, String)>
 
 pub(crate) fn agent_type_for_task(task: &Task, has_conflict_context: bool) -> AgentType {
     AgentType::for_task_status(task.status.as_str(), has_conflict_context)
+}
+
+/// Build a `DevProxy` from persisted settings if `dev_proxy_url` is configured.
+/// The returned `url` is the raw Helicone base (e.g. `http://localhost:8585`);
+/// callers must pass it through `helicone_gateway_url()` for the provider's format family.
+pub(crate) async fn build_dev_proxy(
+    app_state: &AppState,
+    agent_type: AgentType,
+    task_id: &str,
+) -> Option<crate::agent::provider::DevProxy> {
+    use crate::db::repositories::settings::SettingsRepository;
+    use crate::models::settings::DjinnSettings;
+
+    let repo = SettingsRepository::new(app_state.db().clone(), app_state.events().clone());
+    let raw = repo.get("settings.raw").await.ok()??.value;
+    let settings = DjinnSettings::from_db_value(&raw);
+    let base_url = settings.dev_proxy_url?;
+
+    Some(crate::agent::provider::DevProxy {
+        url: base_url,
+        auth_key: settings.dev_proxy_key.unwrap_or_default(),
+        task_id: Some(task_id.to_owned()),
+        agent_type: Some(agent_type.as_str().to_owned()),
+        session_id: Some(task_id.to_owned()),
+    })
 }
 

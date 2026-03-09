@@ -1,0 +1,39 @@
+# Local Helicone dev proxy for LLM observability.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.helicone.yml up -d
+#
+# Then configure Djinn to route through it:
+#   settings_set dev_proxy_url="http://localhost:8585" dev_proxy_key="sk-helicone-local"
+#
+# Dashboard: http://localhost:3000
+# Proxy/API: http://localhost:8585
+#
+# First run: sign up at http://localhost:3000, then grab your API key from
+# Settings > API Keys in the dashboard.
+
+services:
+  helicone:
+    image: helicone/helicone-all-in-one:latest
+    ports:
+      - "3000:3000"   # Dashboard UI
+      - "8585:8585"   # Jawn API + LLM proxy
+      - "9080:9080"   # MinIO (presigned URL access for request/response bodies)
+    environment:
+      NEXT_PUBLIC_HELICONE_JAWN_SERVICE: http://localhost:8585
+      S3_ENDPOINT: http://localhost:9080
+      BETTER_AUTH_SECRET: djinn-local-dev-secret-change-in-prod
+      NEXT_PUBLIC_IS_ON_PREM: "true"
+      SITE_URL: http://localhost:3000
+      BETTER_AUTH_URL: http://localhost:3000
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+    volumes:
+      - helicone_data:/var/lib/postgresql/data
+      - helicone_clickhouse:/var/lib/clickhouse
+      - helicone_minio:/data
+    restart: unless-stopped
+
+volumes:
+  helicone_data:
+  helicone_clickhouse:
+  helicone_minio:

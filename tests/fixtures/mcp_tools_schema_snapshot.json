@@ -4449,6 +4449,16 @@
             "additionalProperties": false,
             "description": "Typed settings schema. Unknown fields are rejected at parse time.",
             "properties": {
+              "dev_proxy_key": {
+                "description": "Helicone API key for the dev proxy (sent as `Helicone-Auth: Bearer {key}`).",
+                "nullable": true,
+                "type": "string"
+              },
+              "dev_proxy_url": {
+                "description": "Helicone dev proxy base URL (e.g. `http://localhost:8585`). When set, all\nLLM requests route through the local Helicone gateway for full observability.",
+                "nullable": true,
+                "type": "string"
+              },
               "dispatch_limit": {
                 "description": "Maximum number of tasks to dispatch per cycle (default 50).",
                 "format": "int64",
@@ -4541,6 +4551,16 @@
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "dev_proxy_key": {
+            "description": "Helicone API key for the dev proxy. Set to \"\" to disable. Omit to keep current value.",
+            "nullable": true,
+            "type": "string"
+          },
+          "dev_proxy_url": {
+            "description": "Helicone dev proxy base URL (e.g. \"http://localhost:8585\"). Set to \"\" to disable. Omit to keep current value.",
+            "nullable": true,
+            "type": "string"
+          },
           "dispatch_limit": {
             "description": "Maximum number of tasks to dispatch per cycle. Omit to keep current value.",
             "format": "int64",

@@ -1,6 +1,6 @@
 use async_stream::stream;
 use futures::StreamExt;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::HeaderMap;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::pin::Pin;
@@ -108,13 +108,8 @@ impl OpenAIProvider {
 
     fn extra_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        if let Some(proxy) = &self.config.dev_proxy
-            && let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", proxy.auth_key))
-        {
-            headers.insert(
-                HeaderName::from_static("helicone-auth"),
-                val,
-            );
+        if let Some(proxy) = &self.config.dev_proxy {
+            proxy.apply_headers(&mut headers);
         }
         headers
     }
