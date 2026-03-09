@@ -5,7 +5,7 @@ impl CoordinatorActor {
     /// those that don't already have an active session.
     pub(super) async fn dispatch_ready_tasks(&mut self, project_filter: Option<&str>) {
         let mut role_models: HashMap<&'static str, Vec<String>> = HashMap::new();
-        for role in ["worker", "task_reviewer"] {
+        for role in ["worker", "task_reviewer", "pm"] {
             let model_ids = self.resolve_dispatch_models_for_role(role).await;
             if !model_ids.is_empty() {
                 role_models.insert(role, model_ids);
@@ -32,7 +32,7 @@ impl CoordinatorActor {
             }
         };
 
-        for status in ["needs_task_review"] {
+        for status in ["needs_task_review", "needs_pm_intervention"] {
             match repo.list_by_status(status).await {
                 Ok(mut tasks) => ready.append(&mut tasks),
                 Err(e) => {
@@ -180,6 +180,7 @@ impl CoordinatorActor {
         for (status, action) in [
             ("in_progress", TransitionAction::Release),
             ("in_task_review", TransitionAction::ReleaseTaskReview),
+            ("in_pm_intervention", TransitionAction::PmInterventionRelease),
         ] {
             let tasks = match repo.list_by_status(status).await {
                 Ok(tasks) => tasks,

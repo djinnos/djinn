@@ -539,6 +539,7 @@ impl CoordinatorActor {
     fn role_for_task_status(status: &str) -> &'static str {
         match status {
             "needs_task_review" | "in_task_review" => "task_reviewer",
+            "needs_pm_intervention" | "in_pm_intervention" => "pm",
             _ => "worker",
         }
     }
