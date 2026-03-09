@@ -58,10 +58,10 @@ const STATUS_COLUMNS: Array<{
 const PRIORITIES = [0, 1, 2, 3] as const;
 
 const PRIORITY_ICONS: Record<number, { icon: typeof FullSignalIcon; color: string; activeColor: string }> = {
-  0: { icon: FullSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#D1D5DB]" },
-  1: { icon: MediumSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#9CA3AF]" },
+  0: { icon: FullSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#6B7280]" },
+  1: { icon: MediumSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#6B7280]" },
   2: { icon: LowSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#6B7280]" },
-  3: { icon: NoSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#4B5563]" },
+  3: { icon: NoSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#6B7280]" },
 };
 
 function taskToColumnKey(task: Task): ColumnKey {
