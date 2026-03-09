@@ -9,18 +9,17 @@ import { TaskCard } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 import { GitRemoteSetupBanner, useGitRemoteCheck } from "@/components/GitRemoteSetupBanner";
 import {
-  AlertDiamondIcon,
   ArrowDown01Icon,
   ArrowRight01Icon,
   CheckmarkCircle03Icon,
   CircleIcon,
+  DashedLineCircleIcon,
   FullSignalIcon,
+  Loading03Icon,
   LowSignalIcon,
   MediumSignalIcon,
   NoSignalIcon,
   Progress02Icon,
-  Progress03Icon,
-  Progress04Icon,
   type UnavailableIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -41,7 +40,7 @@ import {
 } from "@/components/ui/input-group";
 import { Search01Icon } from "@hugeicons/core-free-icons";
 
-type ColumnKey = "open" | "intervention" | "in_progress" | "verifying" | "in_review" | "closed";
+type ColumnKey = "backlog" | "open" | "in_flight" | "done";
 
 const STATUS_COLUMNS: Array<{
   key: ColumnKey;
@@ -50,12 +49,10 @@ const STATUS_COLUMNS: Array<{
   glowClass: string;
   icon: typeof UnavailableIcon;
 }> = [
+  { key: "backlog", label: "Backlog", colorClass: "bg-zinc-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-zinc-500/40", icon: DashedLineCircleIcon },
   { key: "open", label: "Open", colorClass: "bg-violet-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-violet-500/40", icon: CircleIcon },
-  { key: "intervention", label: "Agent Intervention", colorClass: "bg-red-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-red-500/40", icon: AlertDiamondIcon },
-  { key: "in_progress", label: "Agent Coding", colorClass: "bg-blue-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-blue-500/40", icon: Progress02Icon },
-  { key: "verifying", label: "Automated Verification", colorClass: "bg-cyan-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-cyan-500/40", icon: Progress03Icon },
-  { key: "in_review", label: "Agent Review", colorClass: "bg-amber-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-amber-500/40", icon: Progress04Icon },
-  { key: "closed", label: "Done", colorClass: "bg-emerald-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-emerald-500/40", icon: CheckmarkCircle03Icon },
+  { key: "in_flight", label: "In Flight", colorClass: "bg-blue-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-blue-500/40", icon: Progress02Icon },
+  { key: "done", label: "Done", colorClass: "bg-emerald-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-emerald-500/40", icon: CheckmarkCircle03Icon },
 ];
 
 const PRIORITIES = [0, 1, 2, 3] as const;
@@ -68,11 +65,18 @@ const PRIORITY_ICONS: Record<number, { icon: typeof FullSignalIcon; color: strin
 };
 
 function taskToColumnKey(task: Task): ColumnKey {
-  if (task.status === "needs_task_review" || task.status === "in_task_review") return "in_review";
-  if (task.status === "verifying") return "verifying";
-  if (task.status === "closed") return "closed";
-  if (task.status === "in_progress") return "in_progress";
-  if (task.status === "needs_pm_intervention" || task.status === "in_pm_intervention") return "intervention";
+  if (task.status === "closed") return "done";
+  if (task.status === "backlog" || task.status === "grooming") return "backlog";
+  if (
+    task.status === "in_progress" ||
+    task.status === "verifying" ||
+    task.status === "needs_task_review" ||
+    task.status === "in_task_review" ||
+    task.status === "needs_pm_intervention" ||
+    task.status === "in_pm_intervention" ||
+    task.status === "conflict_resolution"
+  )
+    return "in_flight";
   return "open";
 }
 
@@ -398,10 +402,17 @@ export function KanbanBoard({
               <div className="flex flex-col">
                 <div className="px-4 pb-2.5 pt-3.5 text-sm font-semibold">
                   <div className="flex items-center gap-2.5">
-                    <HugeiconsIcon
-                      icon={column.icon}
-                      className="size-4 shrink-0 text-muted-foreground"
-                    />
+                    {column.key === "in_flight" && taskCount > 0 ? (
+                      <HugeiconsIcon
+                        icon={Loading03Icon}
+                        className="size-4 shrink-0 animate-spin text-blue-400"
+                      />
+                    ) : (
+                      <HugeiconsIcon
+                        icon={column.icon}
+                        className="size-4 shrink-0 text-muted-foreground"
+                      />
+                    )}
                     <span className="leading-none">{column.label}</span>
                     <span className="text-xs leading-none text-muted-foreground">{taskCount}</span>
                   </div>

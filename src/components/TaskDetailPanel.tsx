@@ -10,13 +10,17 @@ type TaskDetailPanelProps = {
 };
 
 const STATUS_LABELS: Record<string, string> = {
+  backlog: "Backlog",
+  grooming: "Backlog — Grooming",
+  ready: "Backlog — Ready",
   open: "Open",
-  needs_pm_intervention: "Agent Intervention",
-  in_pm_intervention: "Agent Intervention",
-  in_progress: "Agent Coding",
-  verifying: "Automated Verification",
-  needs_task_review: "Agent Review",
-  in_task_review: "Agent Review",
+  in_progress: "In Flight — Coding",
+  verifying: "In Flight — Verification",
+  needs_task_review: "In Flight — Review",
+  in_task_review: "In Flight — Review",
+  conflict_resolution: "In Flight — Conflict Resolution",
+  needs_pm_intervention: "In Flight — PM Intervention",
+  in_pm_intervention: "In Flight — PM Intervention",
   closed: "Done",
 };
 
