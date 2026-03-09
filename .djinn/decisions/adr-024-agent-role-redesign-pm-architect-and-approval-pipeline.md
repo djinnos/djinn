@@ -4,6 +4,7 @@ type: adr
 tags: ["adr","agents","pm","architect","approval"]
 ---
 
+
 # ADR-024: Agent Role Redesign — PM, Architect, and Approval Pipeline
 
 **Status:** Proposed
@@ -164,6 +165,54 @@ Split between PM and Architect based on the nature of the work:
 - Compute co-access associations (ADR-023 §2)
 - Update confidence scores (ADR-023 §3)
 - Flag referenced KB notes for freshness review
+
+### 8. PM Intervention Examples (from Forge project, 2026-03-09)
+
+These real cases from the Forge project demonstrate when and how the PM should intervene. All four tasks ran without a PM, exposing the gaps this ADR addresses.
+
+#### Case A: Worker refuses to scaffold new project types (ofeh, vz71)
+
+**Tasks:** `ofeh` (SvelteKit scaffold + Axum backend + rust-embed) and `vz71` (Go CLI tool for RabbitMQ event type extraction).
+
+**What happened:** Both tasks required creating entirely new project types (npm/SvelteKit, Go module) inside an existing Rust workspace. The worker agent inspected the worktree, saw only Rust code, and repeatedly concluded it was "blocked" — responding with text-only summaries instead of writing code. After 50+ reopens and 100+ sessions, zero commits were produced.
+
+**Why:** The worker was dispatched directly to an ambitious, multi-technology task. No grooming step verified that the task was implementable by the assigned model. The worker prompt said "implement" but the model (Codex) doesn't confidently scaffold unfamiliar ecosystems.
+
+**PM intervention — decompose:**
+1. Detect the pattern: high reopen count (>5), zero diff, worker comments saying "workspace missing X"
+2. Read the worker's comments to understand what's missing
+3. Decompose the task. For `ofeh`, split into:
+   - "Create dashboard/ directory with SvelteKit + adapter-static + Tailwind" (explicit file-by-file scaffold)
+   - "Add Axum SSE endpoint for container health events"
+   - "Integrate rust-embed to serve dashboard SPA from binary"
+4. Each sub-task references only one technology and has concrete file paths in its design
+5. Transition original task to `blocked` with sub-tasks as blockers
+
+**PM intervention — rescope AC:**
+For `vz71` (Go tool), the PM might also recognize this task belongs in a separate Go module repo, not the Rust workspace, and update the task design accordingly.
+
+#### Case B: Worker-reviewer bounce on unverifiable ACs (gp81, tlkt)
+
+**Tasks:** `gp81` (forge db reset — drop/recreate DB, re-run migrations) and `tlkt` (GripMock gRPC mock containers with DNS aliases).
+
+**What happened:** Workers made real progress — `gp81` had 154 insertions with 3/5 ACs met, `tlkt` had 123 insertions with 4/5 ACs met. But specific ACs kept failing review:
+- `gp81`: "Migrations re-run after database recreation" and "--seed default loads seed after reset" — require a running Postgres container
+- `tlkt`: "Proto file loaded and gRPC server responds to defined methods" — requires a running GripMock container
+
+The reviewer correctly marked these unmet (no Docker in the worktree to verify), the task was rejected, the worker tried again, and the cycle repeated 10-13 times.
+
+**Why:** The ACs mix code-verifiable criteria (struct exists, function compiles) with runtime-verifiable criteria (container responds on port). The reviewer can only inspect code and run build commands — it cannot start Docker containers.
+
+**PM intervention — adjust ACs:**
+1. Detect the pattern: high reopen count (>5), partial AC progress (some met, same ones always unmet), worker diffs are stable (no new changes between cycles)
+2. Read the reviewer's rejection comments and the worker's code
+3. Split ACs into **code-verifiable** and **integration-verifiable**:
+   - Code-verifiable: "Function exists that generates the correct psql DROP/CREATE commands" → reviewable
+   - Integration-verifiable: "Migrations re-run after database recreation" → flag as `integration_test`, not blockable by task reviewer
+4. Update the task's ACs via `task_update` so the reviewer only gates on what it can actually verify
+5. Create a separate integration test task that runs after merge with real Docker
+
+**General principle:** The PM should intervene whenever the worker-reviewer cycle exceeds a threshold (proposed: 5 reopens) without the task closing. The PM reads all comments, inspects the diff, and either decomposes, rescopes ACs, changes the task design, or escalates to the human.
 
 ## Consequences
 
