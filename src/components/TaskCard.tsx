@@ -264,3 +264,23 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
     </Card>
   );
 }
+
+export function DoneTaskRow({ task, onClick }: { task: Task; onClick?: () => void }) {
+  const duration = task.duration_seconds ?? 0;
+
+  return (
+    <button
+      type="button"
+      className="flex w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-left text-[11px] text-muted-foreground transition-colors hover:bg-muted/40"
+      onClick={onClick}
+      title={task.title}
+    >
+      <TaskIdLabel taskId={task.id} shortId={task.short_id} />
+      <PriorityBadge priority={task.priority} />
+      <span className="min-w-0 flex-1 truncate">{task.title}</span>
+      {duration > 0 && (
+        <span className="shrink-0 text-[10px]">{formatCompactDuration(duration)}</span>
+      )}
+    </button>
+  );
+}

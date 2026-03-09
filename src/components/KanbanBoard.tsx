@@ -5,7 +5,7 @@ import { useEpicStore } from "@/stores/useEpicStore";
 import { useProjects, useSelectedProjectId, useProjectStore } from "@/stores/useProjectStore";
 import { taskStore } from "@/stores/taskStore";
 import type { Epic, Task } from "@/api/types";
-import { TaskCard } from "@/components/TaskCard";
+import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 import { GitRemoteSetupBanner, useGitRemoteCheck } from "@/components/GitRemoteSetupBanner";
 import {
@@ -445,18 +445,31 @@ export function KanbanBoard({
                           </div>
 
                           {!isCollapsed && (
-                            <ul className="flex flex-col gap-3 pt-2.5" onClick={(e) => e.stopPropagation()}>
-                              {epicTasks.map((task) => (
-                                <li key={task.id}>
-                                  <TaskCard
-                                    task={task}
-                                    epic={task.epic_id ? epics.get(task.epic_id) : undefined}
-                                    moving={!!movingTaskIds[task.id]}
-                                    onClick={() => setSelectedTask(task)}
-                                  />
-                                </li>
-                              ))}
-                            </ul>
+                            column.key === "done" ? (
+                              <ul className="flex flex-col pt-1.5" onClick={(e) => e.stopPropagation()}>
+                                {epicTasks.map((task) => (
+                                  <li key={task.id}>
+                                    <DoneTaskRow
+                                      task={task}
+                                      onClick={() => setSelectedTask(task)}
+                                    />
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <ul className="flex flex-col gap-3 pt-2.5" onClick={(e) => e.stopPropagation()}>
+                                {epicTasks.map((task) => (
+                                  <li key={task.id}>
+                                    <TaskCard
+                                      task={task}
+                                      epic={task.epic_id ? epics.get(task.epic_id) : undefined}
+                                      moving={!!movingTaskIds[task.id]}
+                                      onClick={() => setSelectedTask(task)}
+                                    />
+                                  </li>
+                                ))}
+                              </ul>
+                            )
                           )}
                         </CardContent>
                       </Card>
