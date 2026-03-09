@@ -116,6 +116,17 @@ impl SlotPoolHandle {
         .await
     }
 
+    pub async fn get_goose_session(
+        &self,
+        goose_session_id: &str,
+    ) -> Result<goose::session::Session, PoolError> {
+        self.request(|tx| PoolMessage::GetGooseSession {
+            goose_session_id: goose_session_id.to_owned(),
+            respond_to: tx,
+        })
+        .await
+    }
+
     pub async fn reconfigure(&self, config: SlotPoolConfig) -> Result<(), PoolError> {
         self.request(|tx| PoolMessage::Reconfigure {
             config,

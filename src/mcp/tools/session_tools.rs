@@ -15,6 +15,12 @@ pub struct SessionListParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct SessionActiveParams {
+    /// Absolute project path (required).
+    pub project: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct SessionShowParams {
     /// Session UUID.
     pub id: String,
@@ -23,9 +29,33 @@ pub struct SessionShowParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-pub struct SessionActiveParams {
+pub struct SessionMessagesParams {
+    /// Session UUID.
+    pub id: String,
     /// Absolute project path (required).
     pub project: String,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct SessionMessage {
+    pub role: String,
+    pub content: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct SessionMessagesResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goose_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Vec<SessionMessage>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -250,5 +280,126 @@ impl DjinnMcpServer {
                 error: Some(e.to_string()),
             }),
         }
+    }
+
+    /// Return full conversation messages for a completed session.
+    #[tool(
+        description = "session_messages(id) returns full Goose conversation messages for a session: role + content blocks (text/tool_use/tool_result/thinking)"
+    )]
+    pub async fn session_messages(
+        &self,
+        Parameters(p): Parameters<SessionMessagesParams>,
+    ) -> Json<SessionMessagesResponse> {
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => {
+                return Json(SessionMessagesResponse {
+                    session_id: None,
+                    goose_session_id: None,
+                    agent_type: None,
+                    model_id: None,
+                    messages: None,
+                    error: Some(e),
+                });
+            }
+        };
+
+        let repo = SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+        let session = match repo.get_in_project(&project_id, &p.id).await {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                return Json(SessionMessagesResponse {
+                    session_id: None,
+                    goose_session_id: None,
+                    agent_type: None,
+                    model_id: None,
+                    messages: None,
+                    error: Some(format!("session not found: {}", p.id)),
+                });
+            }
+            Err(e) => {
+                return Json(SessionMessagesResponse {
+                    session_id: None,
+                    goose_session_id: None,
+                    agent_type: None,
+                    model_id: None,
+                    messages: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        };
+
+        let Some(goose_session_id) = session.goose_session_id.clone() else {
+            return Json(SessionMessagesResponse {
+                session_id: Some(session.id),
+                goose_session_id: None,
+                agent_type: Some(session.agent_type),
+                model_id: Some(session.model_id),
+                messages: None,
+                error: Some("session missing goose_session_id".to_string()),
+            });
+        };
+
+        let goose_session = match self.state.pool().await {
+            Some(pool) => match pool.get_goose_session(&goose_session_id).await {
+                Ok(session) => session,
+                Err(e) => {
+                    return Json(SessionMessagesResponse {
+                        session_id: Some(session.id),
+                        goose_session_id: Some(goose_session_id),
+                        agent_type: Some(session.agent_type),
+                        model_id: Some(session.model_id),
+                        messages: None,
+                        error: Some(format!("failed to load Goose session: {}", e)),
+                    });
+                }
+            },
+            None => {
+                return Json(SessionMessagesResponse {
+                    session_id: Some(session.id),
+                    goose_session_id: Some(goose_session_id),
+                    agent_type: Some(session.agent_type),
+                    model_id: Some(session.model_id),
+                    messages: None,
+                    error: Some("slot pool actor not initialized".to_string()),
+                });
+            }
+        };
+
+        let messages = goose_session
+            .conversation
+            .as_ref()
+            .map(|conversation| {
+                conversation
+                    .messages()
+                    .iter()
+                    .map(|msg| SessionMessage {
+                        role: match msg.role {
+                            goose::message::MessageRole::Assistant => "assistant".to_string(),
+                            goose::message::MessageRole::System => "system".to_string(),
+                            goose::message::MessageRole::User => "user".to_string(),
+                        },
+                        content: msg
+                            .content
+                            .iter()
+                            .map(|block| {
+                                serde_json::to_value(block).unwrap_or_else(|_| {
+                                    serde_json::Value::String(format!("{:?}", block))
+                                })
+                            })
+                            .collect(),
+                    })
+                    .collect::<Vec<SessionMessage>>()
+            })
+            .unwrap_or_default();
+
+        Json(SessionMessagesResponse {
+            session_id: Some(session.id),
+            goose_session_id: Some(goose_session_id),
+            agent_type: Some(session.agent_type),
+            model_id: Some(session.model_id),
+            messages: Some(messages),
+            error: None,
+        })
     }
 }
