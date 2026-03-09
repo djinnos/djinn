@@ -575,15 +575,33 @@ impl DjinnMcpServer {
             }
         }
 
+        let mut seen_ids: HashSet<String> = HashSet::new();
         let models: Vec<ProviderModelOutput> = connected_provider_ids
             .iter()
             .flat_map(|pid| {
+                // For merged children, re-tag models with the parent provider ID
+                // so the frontend sees a single provider namespace.
+                let display_pid = builtin::find_builtin_provider(pid)
+                    .and_then(|bp| bp.merge_into)
+                    .unwrap_or(pid.as_str())
+                    .to_string();
                 self.state
                     .catalog()
                     .list_models(pid)
                     .into_iter()
-                    .map(|m| model_to_output(&m))
+                    .map(move |m| {
+                        let mut out = model_to_output(&m);
+                        out.provider_id = display_pid.clone();
+                        // Also update the model ID prefix to match the display provider.
+                        if let Some((_old_provider, model_name)) = m.id.split_once('/') {
+                            out.id = format!("{display_pid}/{model_name}");
+                        }
+                        out
+                    })
             })
+            // Deduplicate: parent models listed first, merged children's models
+            // are only added if not already present from the parent.
+            .filter(|m| seen_ids.insert(m.id.clone()))
             .collect();
         let total = i64::try_from(models.len()).unwrap_or(i64::MAX);
         Json(ProviderModelsConnectedResponse { models, total })

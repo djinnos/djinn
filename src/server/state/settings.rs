@@ -107,6 +107,21 @@ impl AppState {
             }
         }
 
+        // If a merged child is connected, also mark its parent as connected.
+        // E.g. chatgpt_codex (connected via OAuth) → openai (parent) is also connected.
+        for bp in crate::provider::builtin::BUILTIN_PROVIDERS {
+            if let Some(parent_id) = bp.merge_into {
+                let oauth_keys: Vec<String> =
+                    bp.oauth_keys.iter().map(|k| k.to_string()).collect();
+                let credential_connected = connected_provider_ids.contains(bp.id);
+                let oauth_connected = !oauth_keys.is_empty()
+                    && crate::provider::builtin::is_oauth_key_present(&oauth_keys);
+                if credential_connected || oauth_connected {
+                    connected_provider_ids.insert(parent_id.to_string());
+                }
+            }
+        }
+
         let mut missing_provider_ids: Vec<String> = configured_provider_ids
             .difference(&connected_provider_ids)
             .cloned()
