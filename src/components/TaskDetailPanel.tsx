@@ -11,6 +11,8 @@ type TaskDetailPanelProps = {
 
 const STATUS_LABELS: Record<string, string> = {
   open: "Open",
+  needs_pm_intervention: "Agent Intervention",
+  in_pm_intervention: "Agent Intervention",
   in_progress: "Agent Coding",
   verifying: "Automated Verification",
   needs_task_review: "Agent Review",

@@ -9,6 +9,7 @@ import { TaskCard } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 import { GitRemoteSetupBanner, useGitRemoteCheck } from "@/components/GitRemoteSetupBanner";
 import {
+  AlertDiamondIcon,
   ArrowDown01Icon,
   ArrowRight01Icon,
   CheckmarkCircle03Icon,
@@ -40,7 +41,7 @@ import {
 } from "@/components/ui/input-group";
 import { Search01Icon } from "@hugeicons/core-free-icons";
 
-type ColumnKey = "open" | "in_progress" | "verifying" | "in_review" | "closed";
+type ColumnKey = "open" | "intervention" | "in_progress" | "verifying" | "in_review" | "closed";
 
 const STATUS_COLUMNS: Array<{
   key: ColumnKey;
@@ -50,6 +51,7 @@ const STATUS_COLUMNS: Array<{
   icon: typeof UnavailableIcon;
 }> = [
   { key: "open", label: "Open", colorClass: "bg-violet-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-violet-500/40", icon: CircleIcon },
+  { key: "intervention", label: "Agent Intervention", colorClass: "bg-red-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-red-500/40", icon: AlertDiamondIcon },
   { key: "in_progress", label: "Agent Coding", colorClass: "bg-blue-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-blue-500/40", icon: Progress02Icon },
   { key: "verifying", label: "Automated Verification", colorClass: "bg-cyan-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-cyan-500/40", icon: Progress03Icon },
   { key: "in_review", label: "Agent Review", colorClass: "bg-amber-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-amber-500/40", icon: Progress04Icon },
@@ -70,6 +72,7 @@ function taskToColumnKey(task: Task): ColumnKey {
   if (task.status === "verifying") return "verifying";
   if (task.status === "closed") return "closed";
   if (task.status === "in_progress") return "in_progress";
+  if (task.status === "needs_pm_intervention" || task.status === "in_pm_intervention") return "intervention";
   return "open";
 }
 
