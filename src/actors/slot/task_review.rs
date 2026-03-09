@@ -248,9 +248,10 @@ pub(crate) async fn success_transition(
             Some((TransitionAction::SubmitVerification, None))
         }
         AgentType::PM => {
-            // PM agent completed — mark intervention done; task returns to open.
-            tracing::info!(task_id = %task_id, "PM agent: intervention complete → task back to open");
-            Some((TransitionAction::PmInterventionComplete, None))
+            // PM session ended without the agent explicitly calling pm_intervention_complete.
+            // Release back to needs_pm_intervention so it gets re-dispatched.
+            tracing::warn!(task_id = %task_id, "PM agent: session ended without explicit completion → releasing back to needs_pm_intervention");
+            Some((TransitionAction::PmInterventionRelease, None))
         }
         AgentType::TaskReviewer => {
             // Derive verdict from acceptance criteria state on the task.
