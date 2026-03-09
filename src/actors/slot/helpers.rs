@@ -1,10 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-
-use crate::agent::{AgentType, SessionManager};
+use crate::agent::AgentType;
 use crate::db::repositories::credential::CredentialRepository;
 use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::session::SessionRepository;
@@ -12,7 +8,6 @@ use crate::db::repositories::task::TaskRepository;
 use crate::models::session::{SessionRecord, SessionStatus};
 use crate::models::task::{Task, TransitionAction};
 use crate::server::AppState;
-use goose::providers;
 
 use super::*;
 
@@ -100,167 +95,6 @@ pub(crate) fn runtime_env_diagnostics(
     )
 }
 
-// ─── Token helpers ────────────────────────────────────────────────────────────
-
-pub(crate) async fn tokens_for_session(
-    goose_session_id: &str,
-    session_manager: &Arc<SessionManager>,
-) -> (i64, i64) {
-    let session = session_manager.get_session(goose_session_id, false).await;
-    let Ok(session) = session else {
-        if let Some(tokens) = tokens_from_goose_sqlite(goose_session_id).await {
-            return tokens;
-        }
-        return (0, 0);
-    };
-
-    let tokens_in = session
-        .accumulated_input_tokens
-        .or(session.input_tokens)
-        .unwrap_or(0) as i64;
-    let tokens_out = session
-        .accumulated_output_tokens
-        .or(session.output_tokens)
-        .unwrap_or(0) as i64;
-
-    if tokens_in == 0
-        && tokens_out == 0
-        && let Some(tokens) = tokens_from_goose_sqlite(goose_session_id).await
-    {
-        return tokens;
-    }
-
-    (tokens_in, tokens_out)
-}
-
-pub(crate) async fn tokens_from_goose_sqlite(goose_session_id: &str) -> Option<(i64, i64)> {
-    for db_path in goose_session_db_candidates() {
-        let Some(tokens) = tokens_from_goose_sqlite_at(&db_path, goose_session_id).await else {
-            continue;
-        };
-        return Some(tokens);
-    }
-    None
-}
-
-#[allow(dead_code)]
-pub(crate) async fn last_assistant_text_from_goose_sqlite(
-    goose_session_id: &str,
-) -> Option<String> {
-    for db_path in goose_session_db_candidates() {
-        let Some(text) = last_assistant_text_from_goose_sqlite_at(&db_path, goose_session_id).await
-        else {
-            continue;
-        };
-        return Some(text);
-    }
-    None
-}
-
-fn goose_session_db_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-
-    if let Ok(root) = std::env::var("GOOSE_PATH_ROOT") {
-        let root = PathBuf::from(root);
-        candidates.push(root.join("data").join("sessions").join("sessions.db"));
-    }
-
-    if let Some(home) = dirs::home_dir() {
-        candidates.push(home.join(".djinn").join("sessions").join("sessions.db"));
-        candidates.push(
-            home.join(".djinn")
-                .join("sessions")
-                .join("sessions")
-                .join("sessions.db"),
-        );
-    }
-
-    candidates
-}
-
-pub(crate) async fn tokens_from_goose_sqlite_at(
-    db_path: &Path,
-    goose_session_id: &str,
-) -> Option<(i64, i64)> {
-    if !db_path.exists() {
-        return None;
-    }
-
-    let options = SqliteConnectOptions::new()
-        .filename(db_path)
-        .read_only(true)
-        .create_if_missing(false)
-        .busy_timeout(Duration::from_secs(1));
-
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await
-        .ok()?;
-
-    let row = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT COALESCE(accumulated_input_tokens, input_tokens, 0), COALESCE(accumulated_output_tokens, output_tokens, 0) FROM sessions WHERE id = ?1",
-    )
-    .bind(goose_session_id)
-    .fetch_optional(&pool)
-    .await
-    .ok()??;
-
-    Some(row)
-}
-
-#[allow(dead_code)]
-async fn last_assistant_text_from_goose_sqlite_at(
-    db_path: &Path,
-    goose_session_id: &str,
-) -> Option<String> {
-    if !db_path.exists() {
-        return None;
-    }
-
-    let options = SqliteConnectOptions::new()
-        .filename(db_path)
-        .read_only(true)
-        .create_if_missing(false)
-        .busy_timeout(Duration::from_secs(1));
-
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await
-        .ok()?;
-
-    let content_json = sqlx::query_scalar::<_, String>(
-        "SELECT content_json FROM messages WHERE session_id = ?1 AND role = 'assistant' ORDER BY id DESC LIMIT 1",
-    )
-    .bind(goose_session_id)
-    .fetch_optional(&pool)
-    .await
-    .ok()??;
-
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content_json)
-        && let Some(items) = value.as_array()
-    {
-        let mut text_parts = Vec::new();
-        for item in items {
-            let is_text = item
-                .get("type")
-                .and_then(|v| v.as_str())
-                .is_some_and(|t| t == "text");
-            if !is_text {
-                continue;
-            }
-            if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                text_parts.push(text);
-            }
-        }
-        if !text_parts.is_empty() {
-            return Some(text_parts.join("\n"));
-        }
-    }
-
-    Some(content_json)
-}
 
 // ─── Session record helpers ───────────────────────────────────────────────────
 
@@ -323,7 +157,6 @@ pub(crate) async fn project_path_for_id(project_id: &str, app_state: &AppState) 
         .flatten()
 }
 
-#[allow(dead_code)]
 pub(crate) async fn find_paused_session_record(
     task_id: &str,
     app_state: &AppState,
@@ -499,33 +332,44 @@ pub(crate) async fn transition_interrupted(
 
 // ─── Provider helpers ─────────────────────────────────────────────────────────
 
-pub(crate) fn canonical_provider_id(id: &str) -> String {
-    id.chars()
-        .filter(char::is_ascii_alphanumeric)
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-pub(crate) async fn resolve_goose_provider_id(provider_id: &str) -> String {
-    let entries = providers::providers().await;
-    if let Some((meta, _)) = entries.iter().find(|(meta, _)| meta.name == provider_id) {
-        return meta.name.clone();
+pub(crate) fn format_family_for_provider(
+    provider_id: &str,
+) -> crate::agent::provider::FormatFamily {
+    use crate::agent::provider::FormatFamily;
+    let lower = provider_id.to_lowercase();
+    if lower.contains("anthropic") {
+        FormatFamily::Anthropic
+    } else if lower.contains("google") || lower.contains("gemini") || lower.contains("vertex") {
+        FormatFamily::Google
+    } else {
+        FormatFamily::OpenAI
     }
-    let canonical = canonical_provider_id(provider_id);
-    entries
-        .iter()
-        .find(|(meta, _)| canonical_provider_id(&meta.name) == canonical)
-        .map(|(meta, _)| meta.name.clone())
-        .unwrap_or_else(|| provider_id.to_string())
 }
 
-pub(crate) async fn provider_supports_oauth(_provider_id: &str, goose_provider_id: &str) -> bool {
-    let entries = providers::providers().await;
-    entries
-        .iter()
-        .find(|(meta, _)| meta.name == goose_provider_id)
-        .map(|(meta, _)| meta.config_keys.iter().any(|k| k.oauth_flow))
-        .unwrap_or(false)
+pub(crate) fn auth_method_for_provider(
+    provider_id: &str,
+    api_key: &str,
+) -> crate::agent::provider::AuthMethod {
+    use crate::agent::provider::AuthMethod;
+    if provider_id.to_lowercase().contains("anthropic") {
+        AuthMethod::ApiKeyHeader {
+            header: "x-api-key".to_string(),
+            key: api_key.to_string(),
+        }
+    } else {
+        AuthMethod::BearerToken(api_key.to_string())
+    }
+}
+
+pub(crate) fn default_base_url(provider_id: &str) -> String {
+    let lower = provider_id.to_lowercase();
+    if lower.contains("anthropic") {
+        "https://api.anthropic.com".to_string()
+    } else if lower.contains("google") || lower.contains("gemini") {
+        "https://generativelanguage.googleapis.com".to_string()
+    } else {
+        "https://api.openai.com".to_string()
+    }
 }
 
 pub(crate) async fn load_provider_api_key(
@@ -561,65 +405,6 @@ pub(crate) fn parse_model_id(model_id: &str) -> anyhow::Result<(String, String)>
         ));
     };
     Ok((provider_id.to_owned(), model_name.to_owned()))
-}
-
-pub(crate) fn extensions_for(agent_type: AgentType) -> Vec<goose::config::ExtensionConfig> {
-    use goose::config::ExtensionConfig;
-
-    let mut exts = vec![
-        // Djinn frontend extension (task_show, task_update, memory_read, etc.)
-        crate::agent::extension::config(agent_type),
-        // Tree-sitter code analysis (read-only, all agent types)
-        ExtensionConfig::Platform {
-            name: "analyze".to_string(),
-            description: "Analyze code structure with tree-sitter".to_string(),
-            display_name: None,
-            bundled: None,
-            available_tools: vec![],
-        },
-        // Persistent todo list (survives compaction via extension_data, all agent types)
-        ExtensionConfig::Platform {
-            name: "todo".to_string(),
-            description: "Persistent task checklist".to_string(),
-            display_name: None,
-            bundled: None,
-            available_tools: vec![],
-        },
-    ];
-
-    match agent_type {
-        // Workers and conflict resolvers: full developer tools + subagent delegation
-        AgentType::Worker | AgentType::ConflictResolver => {
-            exts.push(ExtensionConfig::Platform {
-                name: "developer".to_string(),
-                description: "Write and edit files, list directory trees".to_string(),
-                display_name: None,
-                bundled: None,
-                available_tools: vec!["write".to_string(), "edit".to_string(), "tree".to_string()],
-            });
-            exts.push(ExtensionConfig::Platform {
-                name: "summon".to_string(),
-                description: "Load knowledge and delegate tasks to subagents".to_string(),
-                display_name: None,
-                bundled: None,
-                available_tools: vec![],
-            });
-        }
-        // Reviewers: read-only developer tools (tree only), no subagents
-        AgentType::TaskReviewer => {
-            exts.push(ExtensionConfig::Platform {
-                name: "developer".to_string(),
-                description: "List directory trees".to_string(),
-                display_name: None,
-                bundled: None,
-                available_tools: vec!["tree".to_string()],
-            });
-        }
-        // PM: no worktree tools — task management only
-        AgentType::PM => {}
-    }
-
-    exts
 }
 
 pub(crate) fn agent_type_for_task(task: &Task, has_conflict_context: bool) -> AgentType {

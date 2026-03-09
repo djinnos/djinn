@@ -14,6 +14,12 @@ const STALE_ESCALATION_THRESHOLD: i64 = 3;
 
 use super::*;
 
+/// Previously read token counts from Goose SQLite; now always returns None
+/// since new sessions use the Djinn-native reply loop (no Goose session ID).
+pub(crate) async fn tokens_from_goose_sqlite(_goose_session_id: &str) -> Option<(i64, i64)> {
+    None
+}
+
 // ─── Epic review helpers ──────────────────────────────────────────────────────
 
 pub(crate) async fn merge_after_task_review(

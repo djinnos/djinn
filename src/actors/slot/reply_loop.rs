@@ -1,7 +1,3 @@
-// The new Djinn-native reply loop is not yet wired into lifecycle.rs (pending
-// task g7qy). Suppress dead-code lint until that wiring is done.
-#![allow(dead_code)]
-
 use std::path::Path;
 
 use futures::StreamExt;
@@ -72,18 +68,19 @@ pub(super) async fn run_reply_loop(
     global_cancel: &CancellationToken,
     app_state: &AppState,
     context_window: i64,
-) -> (anyhow::Result<()>, ParsedAgentOutput) {
+) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64) {
     let mut output = ParsedAgentOutput::new(agent_type);
+
+    // Token counts are declared outside the async block so they survive the
+    // borrow and can be returned alongside the result.
+    let mut total_tokens_in: u32 = 0;
+    let mut total_tokens_out: u32 = 0;
 
     let run_result: anyhow::Result<()> = async {
         let mut saw_any_event = false;
         let mut saw_any_tool_use = false;
         let mut assistant_message_count: usize = 0;
         let mut assistant_fragments: Vec<String> = Vec::new();
-
-        // Accumulated token counts across all turns.
-        let mut total_tokens_in: u32 = 0;
-        let mut total_tokens_out: u32 = 0;
 
         // Track the last assistant text for output parsing.
         let mut last_assistant_text = String::new();
@@ -112,6 +109,7 @@ pub(super) async fn run_reply_loop(
             // ── Start streaming from the provider ────────────────────────────
             let mut stream = provider.stream(conversation, tools).await.map_err(|e| {
                 if is_context_length_error(&e) {
+                    // Bubble up as a distinct sentinel so the caller can compact.
                     return anyhow::anyhow!("context_length_exceeded");
                 }
                 let diag = runtime_fs_diagnostics(project_path, worktree_path);
@@ -272,6 +270,33 @@ pub(super) async fn run_reply_loop(
 
             conversation.push(assistant_msg);
 
+            // ── Compaction threshold check ────────────────────────────────────
+            if crate::agent::compaction::needs_compaction(total_tokens_in, context_window) {
+                tracing::info!(
+                    task_id = %task_id,
+                    usage_pct = total_tokens_in as f64 / context_window as f64,
+                    "ReplyLoop: compaction threshold reached, compacting"
+                );
+                let mut cont_count = 0u32;
+                crate::agent::compaction::compact_conversation(
+                    provider,
+                    conversation,
+                    session_id,
+                    task_id,
+                    app_state,
+                    &mut cont_count,
+                )
+                .await;
+                // If this was a text-only turn, we need another LLM turn to
+                // continue after the compacted context is in place.
+                if turn_tool_calls.is_empty() {
+                    conversation.push(crate::agent::message::Message::user(
+                        "Continue with the task.",
+                    ));
+                    continue;
+                }
+            }
+
             // ── Dispatch tool calls, if any ──────────────────────────────────
             if turn_tool_calls.is_empty() {
                 // No tool calls → text-only response → session complete.
@@ -396,5 +421,5 @@ pub(super) async fn run_reply_loop(
     }
     .await;
 
-    (run_result, output)
+    (run_result, output, total_tokens_in as i64, total_tokens_out as i64)
 }
