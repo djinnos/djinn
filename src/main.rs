@@ -53,8 +53,21 @@ struct Cli {
     db_path: Option<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Disable Goose's system keyring access — Djinn has its own credential vault.
+    // Without this, the `keyring` crate hits org.freedesktop.secrets over D-Bus
+    // and prompts for the user's login password on Linux.
+    // SAFETY: called before the tokio runtime spawns any threads.
+    unsafe { std::env::set_var("GOOSE_DISABLE_KEYRING", "1") };
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime")
+        .block_on(async_main());
+}
+
+async fn async_main() {
     let _log_guards = init_logging();
 
     let cli = Cli::parse();
