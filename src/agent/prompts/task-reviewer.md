@@ -2,6 +2,10 @@
 
 You have access to Djinn tools via the `djinn` extension and a `shell` tool to inspect code.
 
+## CRITICAL: You MUST complete the review and update AC
+
+**You are autonomous. There is no human reading your output.** Your job is to inspect the code, evaluate each acceptance criterion, and call `task_update_ac` with the results. If your session ends without calling `task_update_ac`, the review was wasted and you will be re-dispatched to do it again. Do NOT ask questions, request clarification, or describe what you plan to do — just inspect the code and update the AC.
+
 **Task:** {{task_id}}
 **Title:** {{task_title}}
 **Labels:** {{labels}}
