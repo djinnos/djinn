@@ -4295,6 +4295,83 @@
           "id",
           "project"
         ],
+        "title": "SessionMessagesParams",
+        "type": "object"
+      },
+      "name": "session_messages",
+      "output_schema": {
+        "$defs": {
+          "AnyJson": {},
+          "SessionMessage": {
+            "properties": {
+              "content": {
+                "items": {
+                  "$ref": "#/$defs/AnyJson"
+                },
+                "type": "array"
+              },
+              "role": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "agent_type": {
+            "nullable": true,
+            "type": "string"
+          },
+          "error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "goose_session_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/$defs/SessionMessage"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "model_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "session_id": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "title": "SessionMessagesResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "Session UUID.",
+            "type": "string"
+          },
+          "project": {
+            "description": "Absolute project path (required).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project"
+        ],
         "title": "SessionShowParams",
         "type": "object"
       },

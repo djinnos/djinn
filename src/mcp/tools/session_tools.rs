@@ -39,7 +39,7 @@ pub struct SessionMessagesParams {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SessionMessage {
     pub role: String,
-    pub content: Vec<serde_json::Value>,
+    pub content: Vec<super::json_object::AnyJson>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -375,17 +375,18 @@ impl DjinnMcpServer {
                     .iter()
                     .map(|msg| SessionMessage {
                         role: match msg.role {
-                            goose::message::MessageRole::Assistant => "assistant".to_string(),
-                            goose::message::MessageRole::System => "system".to_string(),
-                            goose::message::MessageRole::User => "user".to_string(),
+                            rmcp::model::Role::Assistant => "assistant".to_string(),
+                            rmcp::model::Role::User => "user".to_string(),
                         },
                         content: msg
                             .content
                             .iter()
                             .map(|block| {
-                                serde_json::to_value(block).unwrap_or_else(|_| {
-                                    serde_json::Value::String(format!("{:?}", block))
-                                })
+                                super::json_object::AnyJson(
+                                    serde_json::to_value(block).unwrap_or_else(|_| {
+                                        serde_json::Value::String(format!("{:?}", block))
+                                    }),
+                                )
                             })
                             .collect(),
                     })

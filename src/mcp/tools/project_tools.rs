@@ -521,6 +521,19 @@ impl DjinnMcpServer {
             }
         };
 
+        // Reject if project has active dispatch (commands could run mid-update).
+        if let Some(coordinator) = self.state.coordinator().await {
+            if let Ok(status) = coordinator.get_project_status(&project.id) {
+                if !status.paused {
+                    return Json(ProjectCommandsSetResponse {
+                        status: "error: project has active dispatch — pause execution first (execution_pause) before updating commands".to_string(),
+                        project: project.path,
+                        validation_errors: vec![],
+                    });
+                }
+            }
+        }
+
         // Merge new with existing (keep existing when not provided).
         let new_setup = input
             .setup_commands
