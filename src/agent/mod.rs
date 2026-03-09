@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod extension;
+pub mod message;
 pub mod output_parser;
 pub mod prompts;
 pub mod sandbox;
