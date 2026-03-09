@@ -81,15 +81,6 @@ pub enum DjinnEvent {
         usage_pct: f64,
     },
 
-    /// Emitted when a session is compacted into a new continuation session.
-    SessionCompacted {
-        old_session_id: String,
-        new_session_id: String,
-        task_id: String,
-        summary_tokens: i64,
-        continuation_of: Option<String>,
-    },
-
     /// Emitted for each agent conversation turn in a live session.
     SessionMessage {
         session_id: String,

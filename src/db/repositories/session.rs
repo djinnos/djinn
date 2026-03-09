@@ -257,17 +257,6 @@ impl SessionRepository {
         .await?)
     }
 
-    /// Number of compacted (continuation) sessions for a task.
-    pub async fn compaction_count(&self, task_id: &str) -> Result<i64> {
-        self.db.ensure_initialized().await?;
-        Ok(sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM sessions WHERE task_id = ?1 AND continuation_of IS NOT NULL",
-        )
-        .bind(task_id)
-        .fetch_one(self.db.pool())
-        .await?)
-    }
-
     /// Set session status to Paused without setting ended_at.
     /// Used when a worker completes (Done) but its worktree is kept alive for the review cycle.
     pub async fn pause(&self, id: &str, tokens_in: i64, tokens_out: i64) -> Result<SessionRecord> {
@@ -469,7 +458,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chain_query_and_compaction_count() {
+    async fn chain_query_with_continuation() {
         let db = test_helpers::create_test_db();
         let (tx, _) = broadcast::channel(1024);
         let (project_id, task_id) = create_task(tx.clone(), db.clone()).await;
@@ -489,7 +478,7 @@ mod tests {
             .await
             .unwrap();
 
-        // B: compacted from A
+        // B: continuation of A
         let b = repo
             .create(
                 &project_id,
@@ -503,7 +492,7 @@ mod tests {
             .await
             .unwrap();
 
-        // C: compacted from B
+        // C: continuation of B
         let c = repo
             .create(
                 &project_id,
@@ -522,8 +511,5 @@ mod tests {
         assert_eq!(chain[0].id, a.id);
         assert_eq!(chain[1].id, b.id);
         assert_eq!(chain[2].id, c.id);
-
-        let count = repo.compaction_count(&task_id).await.unwrap();
-        assert_eq!(count, 2); // B and C have continuation_of set
     }
 }

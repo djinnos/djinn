@@ -201,25 +201,6 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             id: None,
             project_id: None,
         },
-        DjinnEvent::SessionCompacted {
-            old_session_id,
-            new_session_id,
-            task_id,
-            summary_tokens,
-            continuation_of,
-        } => Envelope {
-            entity_type: "session",
-            action: "compacted",
-            data: Some(serde_json::json!({
-                "old_session_id": old_session_id,
-                "new_session_id": new_session_id,
-                "task_id": task_id,
-                "summary_tokens": summary_tokens,
-                "continuation_of": continuation_of,
-            })),
-            id: None,
-            project_id: None,
-        },
         DjinnEvent::SessionMessage {
             session_id,
             task_id,
