@@ -29,38 +29,17 @@ impl DjinnMcpServer {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 impl DjinnMcpServer {
-    /// Resolve a project path **or name** to its DB project_id.
-    pub(crate) async fn project_id_for_path(&self, project_ref: &str) -> Option<String> {
-        let db = self.state.db();
-        db.ensure_initialized().await.ok()?;
-        let normalized = project_ref.trim_end_matches('/');
-        // Try by path first, then by name.
-        sqlx::query_scalar::<_, String>(
-            "SELECT id FROM projects WHERE path = ?1 OR name = ?1 LIMIT 1",
-        )
-        .bind(normalized)
-        .fetch_optional(db.pool())
-        .await
-        .ok()
-        .flatten()
+    /// Resolve a project path to its DB project_id.
+    pub(crate) async fn project_id_for_path(&self, project_path: &str) -> Option<String> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
+        repo.resolve_id_by_path(project_path).await.ok().flatten()
     }
 
     /// Resolve a project path to ID, creating a project entry when missing.
     pub(crate) async fn resolve_project_id(&self, project_path: &str) -> Result<String, String> {
-        if let Some(id) = self.project_id_for_path(project_path).await {
-            return Ok(id);
-        }
-
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
-        let name = Path::new(project_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("project");
-
-        repo.create(name, project_path)
+        repo.resolve_or_create(project_path)
             .await
-            .map(|p| p.id)
             .map_err(|e| e.to_string())
     }
 }
