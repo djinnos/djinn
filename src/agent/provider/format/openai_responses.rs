@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::pin::Pin;
 
-use crate::agent::message::{ContentBlock, Conversation, Message, Role};
+use crate::agent::message::{ContentBlock, Conversation, Role};
 use crate::agent::provider::client::ApiClient;
 use crate::agent::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
 
@@ -179,7 +179,9 @@ impl OpenAIResponsesProvider {
 
 #[derive(Debug, Deserialize)]
 struct ResponseMetadata {
+    #[allow(dead_code)]
     id: String,
+    #[allow(dead_code)]
     model: String,
     output: Vec<OutputItemInfo>,
     usage: Option<ResponseUsage>,
@@ -201,6 +203,7 @@ enum OutputItemInfo {
     Message {
         #[allow(dead_code)]
         id: String,
+        #[allow(dead_code)]
         content: Vec<ContentPart>,
     },
     FunctionCall {
@@ -216,6 +219,7 @@ enum OutputItemInfo {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ContentPart {
     OutputText {
+        #[allow(dead_code)]
         text: String,
     },
     #[serde(other)]
@@ -228,10 +232,12 @@ enum ContentPart {
 enum ResponsesStreamEvent {
     #[serde(rename = "response.created")]
     ResponseCreated {
+        #[allow(dead_code)]
         response: ResponseMetadata,
     },
     #[serde(rename = "response.in_progress")]
     ResponseInProgress {
+        #[allow(dead_code)]
         response: ResponseMetadata,
     },
     #[serde(rename = "response.output_text.delta")]
@@ -302,52 +308,11 @@ fn parse_stream_event(data: &str) -> anyhow::Result<Option<ResponsesStreamEvent>
     Ok(Some(event))
 }
 
-/// Convert output items from a completed response into `StreamEvent`s.
-fn process_output_items(items: &[OutputItemInfo]) -> Vec<StreamEvent> {
-    let mut events = Vec::new();
-
-    for item in items {
-        match item {
-            OutputItemInfo::Reasoning { .. } => {}
-            OutputItemInfo::Message { content, .. } => {
-                for part in content {
-                    if let ContentPart::OutputText { text } = part
-                        && !text.is_empty()
-                    {
-                        events.push(StreamEvent::Delta(ContentBlock::Text {
-                            text: text.clone(),
-                        }));
-                    }
-                }
-            }
-            OutputItemInfo::FunctionCall {
-                call_id,
-                name,
-                arguments,
-                ..
-            } => {
-                let input: Value = if arguments.is_empty() {
-                    json!({})
-                } else {
-                    serde_json::from_str(arguments).unwrap_or(json!({}))
-                };
-                events.push(StreamEvent::Delta(ContentBlock::ToolUse {
-                    id: call_id.clone(),
-                    name: name.clone(),
-                    input,
-                }));
-            }
-        }
-    }
-
-    events
-}
-
 /// Parse a single SSE data line from the OpenAI Responses streaming API.
 ///
 /// `accumulated_items` collects OutputItemDone items across the stream.
 /// Returns zero or more `StreamEvent`s.
-pub fn parse_responses_line(
+fn parse_responses_line(
     line: &str,
     accumulated_items: &mut Vec<OutputItemInfo>,
 ) -> Vec<StreamEvent> {
@@ -383,25 +348,23 @@ pub fn parse_responses_line(
             };
 
             for item in final_items {
-                match item {
-                    OutputItemInfo::FunctionCall {
-                        call_id,
-                        name,
-                        arguments,
-                        ..
-                    } => {
-                        let input: Value = if arguments.is_empty() {
-                            json!({})
-                        } else {
-                            serde_json::from_str(arguments).unwrap_or(json!({}))
-                        };
-                        events.push(StreamEvent::Delta(ContentBlock::ToolUse {
-                            id: call_id.clone(),
-                            name: name.clone(),
-                            input,
-                        }));
-                    }
-                    _ => {} // Text already streamed, reasoning skipped
+                if let OutputItemInfo::FunctionCall {
+                    call_id,
+                    name,
+                    arguments,
+                    ..
+                } = item
+                {
+                    let input: Value = if arguments.is_empty() {
+                        json!({})
+                    } else {
+                        serde_json::from_str(arguments).unwrap_or(json!({}))
+                    };
+                    events.push(StreamEvent::Delta(ContentBlock::ToolUse {
+                        id: call_id.clone(),
+                        name: name.clone(),
+                        input,
+                    }));
                 }
             }
 
