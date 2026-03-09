@@ -36,6 +36,14 @@ pub fn config(agent_type: AgentType) -> ExtensionConfig {
     tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
     available_tools.push("shell".to_string());
 
+    // Worker and ConflictResolver get file write/edit tools (ADR-027).
+    if matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver) {
+        tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
+        available_tools.push("write".to_string());
+        tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
+        available_tools.push("edit".to_string());
+    }
+
     // Only TaskReviewer gets the AC-update tool (ADR-022).
     if matches!(agent_type, AgentType::TaskReviewer) {
         tool_values.push(
@@ -157,6 +165,8 @@ where
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
+        "write" => call_write(&call.arguments, worktree_path).await,
+        "edit" => call_edit(&call.arguments, worktree_path).await,
         other => Err(format!("unknown djinn frontend tool: {other}")),
     }
 }
@@ -227,6 +237,19 @@ struct ShellParams {
     command: String,
     workdir: String,
     timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct WriteParams {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct EditParams {
+    path: String,
+    old_text: String,
+    new_text: String,
 }
 
 async fn call_task_show(
@@ -529,6 +552,73 @@ async fn call_shell(
         "stdout": stdout,
         "stderr": stderr,
         "workdir": workdir,
+    }))
+}
+
+async fn call_write(
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    worktree_path: &Path,
+) -> Result<serde_json::Value, String> {
+    let p: WriteParams = parse_args(arguments)?;
+    let path = resolve_path(&p.path, worktree_path);
+
+    // Ensure path is within worktree
+    if !path.starts_with(worktree_path) {
+        return Err(format!("path is outside worktree: {}", path.display()));
+    }
+
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("create dirs failed: {e}"))?;
+    }
+    tokio::fs::write(&path, &p.content)
+        .await
+        .map_err(|e| format!("write failed: {e}"))?;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "bytes": p.content.len(),
+    }))
+}
+
+async fn call_edit(
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    worktree_path: &Path,
+) -> Result<serde_json::Value, String> {
+    let p: EditParams = parse_args(arguments)?;
+    let path = resolve_path(&p.path, worktree_path);
+
+    // Ensure path is within worktree
+    if !path.starts_with(worktree_path) {
+        return Err(format!("path is outside worktree: {}", path.display()));
+    }
+
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("read failed: {e}"))?;
+
+    let count = content.matches(&p.old_text as &str).count();
+    if count == 0 {
+        return Err(format!("old_text not found in file: {}", path.display()));
+    }
+    if count > 1 {
+        return Err(format!(
+            "old_text appears {} times in file (must be unique): {}",
+            count,
+            path.display()
+        ));
+    }
+
+    let new_content = content.replacen(&p.old_text as &str, &p.new_text, 1);
+    tokio::fs::write(&path, &new_content)
+        .await
+        .map_err(|e| format!("write failed: {e}"))?;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "path": path.display().to_string(),
     }))
 }
 
@@ -939,6 +1029,37 @@ fn tool_shell() -> RmcpTool {
                 "command": {"type": "string"},
                 "workdir": {"type": "string", "description": "Absolute task worktree path"},
                 "timeout_ms": {"type": "integer"}
+            }
+        }),
+    )
+}
+
+fn tool_write() -> RmcpTool {
+    RmcpTool::new(
+        "write".to_string(),
+        "Write content to a file, creating it or overwriting if it exists. Path must be within the task worktree.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["path", "content"],
+            "properties": {
+                "path": {"type": "string", "description": "Absolute or worktree-relative file path"},
+                "content": {"type": "string", "description": "File content to write"}
+            }
+        }),
+    )
+}
+
+fn tool_edit() -> RmcpTool {
+    RmcpTool::new(
+        "edit".to_string(),
+        "Edit a file by replacing exact text. Finds old_text and replaces with new_text. Fails if old_text is not found or is ambiguous (appears multiple times).".to_string(),
+        object!({
+            "type": "object",
+            "required": ["path", "old_text", "new_text"],
+            "properties": {
+                "path": {"type": "string", "description": "Absolute or worktree-relative file path"},
+                "old_text": {"type": "string", "description": "Exact text to find and replace"},
+                "new_text": {"type": "string", "description": "Replacement text"}
             }
         }),
     )
