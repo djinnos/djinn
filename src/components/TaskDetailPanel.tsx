@@ -11,10 +11,11 @@ type TaskDetailPanelProps = {
 
 const STATUS_LABELS: Record<string, string> = {
   open: "Open",
-  in_progress: "In Progress",
-  needs_task_review: "Needs Review",
-  in_task_review: "In Review",
-  closed: "Closed",
+  in_progress: "Agent Coding",
+  verifying: "Automated Verification",
+  needs_task_review: "Agent Review",
+  in_task_review: "Agent Review",
+  closed: "Done",
 };
 
 const PRIORITY_LABELS: Record<number, string> = {

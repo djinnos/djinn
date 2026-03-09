@@ -602,6 +602,12 @@ export namespace ExecutionStatusOutputSchema {
   metrics: ExecutionStatusMetrics
   ok: boolean
   project_id?: string
+  /**
+   * Per-project health issues blocking execution (project_id → error message).
+   */
+  project_issues?: {
+  [k: string]: string
+  }
   running_sessions?: number
   scope?: string
   sessions?: ExecutionStatusSession[]
@@ -1710,10 +1716,11 @@ export namespace ProviderValidateInputSchema {
   api_key: string
   /**
    * Provider API base URL (e.g. https://api.openai.com/v1). The probe appends /models.
+   * When omitted, the server resolves it from the catalog using provider_id.
    */
-  base_url: string
+  base_url?: string
   /**
-   * Optional provider identifier for logging/diagnostics.
+   * Provider identifier. Used for logging and to resolve base_url from the catalog when not supplied.
    */
   provider_id?: string
   [k: string]: any
@@ -1754,7 +1761,6 @@ export namespace SessionActiveOutputSchema {
   }
   export interface SessionToolSession {
   agent_type: string
-  continuation_of?: string
   ended_at?: string
   goose_session_id?: string
   id: string
@@ -1804,12 +1810,6 @@ export type SessionForTaskOutput = SessionForTaskOutputSchema.SessionForTaskOutp
 export namespace SessionListInputSchema {
   export interface SessionListInput {
   /**
-   * When true, return sessions in continuation-chain order (oldest root first, each
-   * subsequent session linked via continuation_of) instead of started_at DESC.
-   * Useful for rendering the session timeline with compaction boundaries.
-   */
-  chain_ordered?: boolean
-  /**
    * Absolute project path (required).
    */
   project: string
@@ -1831,7 +1831,6 @@ export namespace SessionListOutputSchema {
   }
   export interface SessionToolSession {
   agent_type: string
-  continuation_of?: string
   ended_at?: string
   goose_session_id?: string
   id: string
@@ -1848,6 +1847,41 @@ export namespace SessionListOutputSchema {
 
 }
 export type SessionListOutput = SessionListOutputSchema.SessionListOutput;
+export namespace SessionMessagesInputSchema {
+  export interface SessionMessagesInput {
+  /**
+   * Session UUID.
+   */
+  id: string
+  /**
+   * Absolute project path (required).
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type SessionMessagesInput = SessionMessagesInputSchema.SessionMessagesInput;
+export namespace SessionMessagesOutputSchema {
+  export type AnyJson = any
+
+  export interface SessionMessagesOutput {
+  agent_type?: string
+  error?: string
+  goose_session_id?: string
+  messages?: SessionMessage[]
+  model_id?: string
+  session_id?: string
+  [k: string]: any
+  }
+  export interface SessionMessage {
+  content: AnyJson[]
+  role: string
+  [k: string]: any
+  }
+
+}
+export type SessionMessagesOutput = SessionMessagesOutputSchema.SessionMessagesOutput;
 export namespace SessionShowInputSchema {
   export interface SessionShowInput {
   /**
@@ -1866,7 +1900,6 @@ export type SessionShowInput = SessionShowInputSchema.SessionShowInput;
 export namespace SessionShowOutputSchema {
   export interface SessionShowOutput {
   agent_type?: string
-  continuation_of?: string
   ended_at?: string
   error?: string
   goose_session_id?: string
@@ -2390,6 +2423,10 @@ export type TaskShowOutput = TaskShowOutputSchema.TaskShowOutput;
 export namespace TaskSyncDisableInputSchema {
   export interface TaskSyncDisableInput {
   /**
+   * Absolute path to the project git repository.
+   */
+  project: string
+  /**
    * If true, delete the remote `djinn/tasks` branch (team-wide disable).
    * If false or absent, only clear the local enabled flag (machine opt-out).
    */
@@ -2512,7 +2549,10 @@ export namespace TaskSyncStatusOutputSchema {
   last_error?: string
   last_synced_at?: string
   name: string
-  project_path?: string
+  /**
+   * Sync-enabled project paths (SYNC-07).
+   */
+  project_paths: string[]
   [k: string]: any
   }
 
@@ -2521,7 +2561,9 @@ export type TaskSyncStatusOutput = TaskSyncStatusOutputSchema.TaskSyncStatusOutp
 export namespace TaskTransitionInputSchema {
   export interface TaskTransitionInput {
   /**
-   * Transition action: accept, start, submit_task_review, task_review_start,
+   * Transition action: accept, start, submit_verification,
+   * verification_pass, verification_fail, release_verification,
+   * submit_task_review, task_review_start,
    * task_review_reject, task_review_reject_conflict, task_review_approve,
    * reopen, close, release, release_task_review, force_close,
    * user_override.
@@ -2538,13 +2580,14 @@ export namespace TaskTransitionInputSchema {
    */
   project: string
   /**
-   * Required for: task_review_reject, task_review_reject_conflict,
+   * Required for: verification_fail, release_verification,
+   * task_review_reject, task_review_reject_conflict,
    * reopen, release, release_task_review, force_close.
    */
   reason?: string
   /**
-   * Required when action = "user_override". Allowed values: draft, open, needs_task_review,
-   * in_task_review, in_progress, closed.
+   * Required when action = "user_override". Allowed values: draft, open, verifying,
+   * needs_task_review, in_task_review, in_progress, closed.
    */
   target_status?: string
   [k: string]: any
@@ -2626,7 +2669,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_commands_get" | "project_commands_set" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_transition" | "task_update";
+export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_commands_get" | "project_commands_set" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "board_health": { input: BoardHealthInput; output: BoardHealthOutput };
@@ -2685,6 +2728,7 @@ export interface McpToolMap {
   "session_active": { input: SessionActiveInput; output: SessionActiveOutput };
   "session_for_task": { input: SessionForTaskInput; output: SessionForTaskOutput };
   "session_list": { input: SessionListInput; output: SessionListOutput };
+  "session_messages": { input: SessionMessagesInput; output: SessionMessagesOutput };
   "session_show": { input: SessionShowInput; output: SessionShowOutput };
   "settings_get": { input: SettingsGetInput; output: SettingsGetOutput };
   "settings_reset": { input: SettingsResetInput; output: SettingsResetOutput };

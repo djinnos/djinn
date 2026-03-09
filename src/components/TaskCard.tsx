@@ -135,12 +135,15 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
                 className="shrink-0 text-red-500"
                 aria-label="Blocked"
               />
-            ) : isRunning || task.status === "in_task_review" ? (
+            ) : isRunning || task.status === "verifying" || task.status === "in_task_review" ? (
               <HugeiconsIcon
                 icon={Loading03Icon}
                 size={16}
-                className={`shrink-0 animate-spin ${task.status === "in_task_review" ? "text-yellow-400" : "text-blue-500"}`}
-                aria-label={task.status === "in_task_review" ? "In review" : "Task running"}
+                className={cn(
+                  "shrink-0 animate-spin",
+                  task.status === "in_task_review" ? "text-yellow-400" : task.status === "verifying" ? "text-cyan-500" : "text-blue-500"
+                )}
+                aria-label={task.status === "in_task_review" ? "In review" : task.status === "verifying" ? "Verifying" : "Task running"}
               />
             ) : task.status === "needs_task_review" ? (
               <HugeiconsIcon

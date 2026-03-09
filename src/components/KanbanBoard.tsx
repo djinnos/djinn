@@ -18,6 +18,7 @@ import {
   MediumSignalIcon,
   NoSignalIcon,
   Progress02Icon,
+  Progress03Icon,
   Progress04Icon,
   type UnavailableIcon,
 } from "@hugeicons/core-free-icons";
@@ -39,7 +40,7 @@ import {
 } from "@/components/ui/input-group";
 import { Search01Icon } from "@hugeicons/core-free-icons";
 
-type ColumnKey = "open" | "in_progress" | "in_review" | "closed";
+type ColumnKey = "open" | "in_progress" | "verifying" | "in_review" | "closed";
 
 const STATUS_COLUMNS: Array<{
   key: ColumnKey;
@@ -49,9 +50,10 @@ const STATUS_COLUMNS: Array<{
   icon: typeof UnavailableIcon;
 }> = [
   { key: "open", label: "Open", colorClass: "bg-violet-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-violet-500/40", icon: CircleIcon },
-  { key: "in_progress", label: "In Progress", colorClass: "bg-blue-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-blue-500/40", icon: Progress02Icon },
-  { key: "in_review", label: "In Review", colorClass: "bg-amber-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-amber-500/40", icon: Progress04Icon },
-  { key: "closed", label: "Closed", colorClass: "bg-emerald-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-emerald-500/40", icon: CheckmarkCircle03Icon },
+  { key: "in_progress", label: "Agent Coding", colorClass: "bg-blue-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-blue-500/40", icon: Progress02Icon },
+  { key: "verifying", label: "Automated Verification", colorClass: "bg-cyan-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-cyan-500/40", icon: Progress03Icon },
+  { key: "in_review", label: "Agent Review", colorClass: "bg-amber-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-amber-500/40", icon: Progress04Icon },
+  { key: "closed", label: "Done", colorClass: "bg-emerald-500", glowClass: "shadow-[0_1px_6px_-1px] shadow-emerald-500/40", icon: CheckmarkCircle03Icon },
 ];
 
 const PRIORITIES = [0, 1, 2, 3] as const;
@@ -65,6 +67,7 @@ const PRIORITY_ICONS: Record<number, { icon: typeof FullSignalIcon; color: strin
 
 function taskToColumnKey(task: Task): ColumnKey {
   if (task.status === "needs_task_review" || task.status === "in_task_review") return "in_review";
+  if (task.status === "verifying") return "verifying";
   if (task.status === "closed") return "closed";
   if (task.status === "in_progress") return "in_progress";
   return "open";
