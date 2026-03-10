@@ -90,7 +90,7 @@ pub(crate) async fn run_setup_commands_checked(
             );
 
             Some(format!(
-                "Setup command '{}' failed with exit code {}.\n\nYour changes likely broke a setup step (e.g. lockfile out of sync with package.json). Use your shell tools to fix the issue, then signal WORKER_RESULT: DONE.\n\nstdout:\n{}\nstderr:\n{}",
+                "Setup command '{}' failed with exit code {}.\n\nYour changes likely broke a setup step (e.g. lockfile out of sync with package.json). Use your shell tools to fix the issue.\n\nstdout:\n{}\nstderr:\n{}",
                 failed.name,
                 failed.exit_code,
                 truncate_output(&failed.stdout),
@@ -100,7 +100,7 @@ pub(crate) async fn run_setup_commands_checked(
         Err(e) => {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: setup command system error");
             Some(format!(
-                "Setup commands could not run: {e}\n\nFix the issue and signal WORKER_RESULT: DONE when complete."
+                "Setup commands could not run: {e}\n\nFix the issue."
             ))
         }
     }
@@ -130,7 +130,7 @@ pub(crate) async fn run_verification_commands(
             let failed = results.iter().find(|r| r.exit_code != 0)?;
 
             Some(format!(
-                "Verification command '{}' failed with exit code {}.\n\nUse your shell and editor tools to inspect and fix the issue, then signal WORKER_RESULT: DONE.\n\nstdout:\n{}\nstderr:\n{}",
+                "Verification command '{}' failed with exit code {}.\n\nUse your shell and editor tools to inspect and fix the issue.\n\nstdout:\n{}\nstderr:\n{}",
                 failed.name,
                 failed.exit_code,
                 truncate_output(&failed.stdout),
@@ -140,7 +140,7 @@ pub(crate) async fn run_verification_commands(
         Err(e) => {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: verification command system error");
             Some(format!(
-                "Verification commands could not run: {e}\n\nFix the issue and signal WORKER_RESULT: DONE when complete."
+                "Verification commands could not run: {e}\n\nFix the issue."
             ))
         }
     }

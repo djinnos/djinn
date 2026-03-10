@@ -235,7 +235,7 @@ pub(crate) async fn resume_context_for_task(task_id: &str, app_state: &AppState)
             && let Some(body) = payload.get("body").and_then(|v| v.as_str())
         {
             return format!(
-                "Your previous work was reviewed and returned with this feedback:\n\n{body}\n\nAddress this feedback, make the necessary changes, then emit:\nWORKER_RESULT: DONE"
+                "Your previous work was reviewed and returned with this feedback:\n\n{body}\n\nAddress this feedback, make the necessary changes, then stop."
             );
         }
     }
@@ -255,13 +255,13 @@ pub(crate) async fn resume_context_for_task(task_id: &str, app_state: &AppState)
                 .collect::<Vec<_>>()
                 .join("\n");
             return format!(
-                "A merge conflict was detected when merging your branch into `{}`. Resolve the conflicts in these files:\n\n{files}\n\nAfter resolving, commit and emit:\nWORKER_RESULT: DONE",
+                "A merge conflict was detected when merging your branch into `{}`. Resolve the conflicts in these files:\n\n{files}\n\nAfter resolving, commit and stop.",
                 meta.merge_target
             );
         }
     }
 
-    "Your previous submission needs revision. Review your work, address any issues, then emit:\nWORKER_RESULT: DONE".to_string()
+    "Your previous submission needs revision. Review your work, address any issues, then stop.".to_string()
 }
 
 // ─── Transition helpers ───────────────────────────────────────────────────────

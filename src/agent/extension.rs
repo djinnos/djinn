@@ -396,10 +396,7 @@ async fn call_shell(
     let p: ShellParams = parse_args(arguments)?;
     let timeout_ms = p.timeout_ms.unwrap_or(120_000).max(1000);
 
-    let workdir = resolve_path(
-        &p.workdir,
-        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-    );
+    let workdir = resolve_path(&p.workdir, worktree_path);
 
     let mut cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");

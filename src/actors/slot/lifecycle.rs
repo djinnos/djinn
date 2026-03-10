@@ -443,7 +443,12 @@ pub async fn run_task_lifecycle(
 
     // ── Create or resume session record + build conversation ─────────────────
     let tools = extension::tool_schemas(agent_type);
-    let current_session_id = uuid::Uuid::now_v7().to_string();
+    // On resume, reuse the paused session's record ID so OTel/Langfuse traces
+    // group under the same logical session.  Fresh sessions get a new UUID.
+    let current_session_id = resume_record_id
+        .as_deref()
+        .map(String::from)
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
 
     // Try to resume from a paused session's saved conversation.
     let (current_record_id, mut conversation) = if let Some(ref resume_id) = resume_record_id {
