@@ -923,15 +923,15 @@ mod tests {
     use serde_json::json;
 
     use crate::test_helpers::{
-        create_test_app, create_test_epic, create_test_project, create_test_task,
-        initialize_mcp_session, mcp_call_tool,
+        create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
+        create_test_task, initialize_mcp_session, mcp_call_tool,
     };
 
     #[tokio::test]
     async fn epic_create_success_shape() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let result = mcp_call_tool(
@@ -950,26 +950,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn epic_create_error_on_missing_project() {
-        let app = create_test_app();
+    async fn epic_create_auto_creates_unknown_project() {
+        let db = create_test_db();
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
         let result = mcp_call_tool(
             &app,
             &session_id,
             "epic_create",
-            json!({"project": "/missing/project", "title": "X"}),
+            json!({"project": "/tmp/djinn-auto-create-project", "title": "X"}),
         )
         .await;
-        assert!(result["error"].as_str().unwrap_or_default().contains("project"));
+        // resolve_or_create auto-creates unknown projects, so this succeeds.
+        assert!(result.get("error").is_none(), "expected success but got: {result}");
+        assert_eq!(result["title"], "X");
     }
 
     #[tokio::test]
     async fn epic_show_found_shape_with_task_counts() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
         let _task = create_test_task(&db, &project.id, &epic.id).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let result = mcp_call_tool(
@@ -988,9 +991,9 @@ mod tests {
 
     #[tokio::test]
     async fn epic_show_not_found_error() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let result = mcp_call_tool(
@@ -1009,11 +1012,11 @@ mod tests {
 
     #[tokio::test]
     async fn epic_list_default_returns_epics() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
         let _e1 = create_test_epic(&db, &project.id).await;
         let _e2 = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let result = mcp_call_tool(&app, &session_id, "epic_list", json!({"project": project.path})).await;
@@ -1025,11 +1028,11 @@ mod tests {
 
     #[tokio::test]
     async fn epic_list_filter_by_status() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
         let open_epic = create_test_epic(&db, &project.id).await;
         let closed_epic = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let _ = mcp_call_tool(
@@ -1056,10 +1059,10 @@ mod tests {
 
     #[tokio::test]
     async fn epic_update_partial_fields() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let result = mcp_call_tool(
@@ -1071,25 +1074,25 @@ mod tests {
                 "id": epic.id,
                 "title": "Updated Epic",
                 "description": "Updated description",
-                "color": "purple",
+                "color": "#800080",
                 "emoji": "🚀"
             }),
         )
         .await;
 
-        assert!(result.get("error").is_none());
+        assert!(result.get("error").is_none(), "epic_update error: {result}");
         assert_eq!(result["title"], "Updated Epic");
         assert_eq!(result["description"], "Updated description");
-        assert_eq!(result["color"], "purple");
+        assert_eq!(result["color"], "#800080");
         assert_eq!(result["emoji"], "🚀");
     }
 
     #[tokio::test]
     async fn epic_close_success() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let result = mcp_call_tool(
@@ -1106,10 +1109,10 @@ mod tests {
 
     #[tokio::test]
     async fn epic_close_error_when_already_closed() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let _ = mcp_call_tool(
@@ -1136,10 +1139,10 @@ mod tests {
 
     #[tokio::test]
     async fn epic_reopen_success_from_closed() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let _ = mcp_call_tool(
@@ -1164,10 +1167,10 @@ mod tests {
 
     #[tokio::test]
     async fn epic_reopen_error_when_already_open() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let result = mcp_call_tool(
@@ -1181,17 +1184,17 @@ mod tests {
         assert!(result["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("not closed"));
+            .contains("must be closed"));
     }
 
     #[tokio::test]
     async fn epic_delete_success_and_cascade_child_tasks() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
         let _task1 = create_test_task(&db, &project.id, &epic.id).await;
         let _task2 = create_test_task(&db, &project.id, &epic.id).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let result = mcp_call_tool(
@@ -1221,11 +1224,11 @@ mod tests {
 
     #[tokio::test]
     async fn epic_tasks_returns_child_tasks() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
         let _task = create_test_task(&db, &project.id, &epic.id).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let result = mcp_call_tool(
@@ -1243,10 +1246,10 @@ mod tests {
 
     #[tokio::test]
     async fn epic_tasks_empty_when_no_tasks() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let result = mcp_call_tool(
@@ -1264,11 +1267,11 @@ mod tests {
 
     #[tokio::test]
     async fn epic_count_plain_total() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
         let _e1 = create_test_epic(&db, &project.id).await;
         let _e2 = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let result = mcp_call_tool(&app, &session_id, "epic_count", json!({"project": project.path})).await;
@@ -1279,11 +1282,11 @@ mod tests {
 
     #[tokio::test]
     async fn epic_count_grouped_by_status() {
-        let app = create_test_app();
-        let db = crate::server::state_from_app(&app).db().clone();
+        let db = create_test_db();
         let project = create_test_project(&db).await;
         let _open = create_test_epic(&db, &project.id).await;
         let closed = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
         let _ = mcp_call_tool(

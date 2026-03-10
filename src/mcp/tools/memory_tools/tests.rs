@@ -1,11 +1,16 @@
 use serde_json::json;
 
 use crate::mcp::tools::memory_tools::*;
-use crate::test_helpers::{create_test_app, initialize_mcp_session, mcp_call_tool};
+use crate::test_helpers::{
+    create_test_app_with_db, create_test_db, create_test_project, initialize_mcp_session,
+    mcp_call_tool,
+};
 
 #[tokio::test]
 async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
-    let app = create_test_app().await;
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let app = create_test_app_with_db(db);
     let session_id = initialize_mcp_session(&app).await;
 
     let created = mcp_call_tool(
@@ -13,7 +18,7 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
         &session_id,
         "memory_write",
         json!({
-            "project": "/tmp/mcp-memory-write",
+            "project": project.path.as_str(),
             "title": "Write Contract Note",
             "content": "body",
             "folder": "decisions",
@@ -22,7 +27,7 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     )
     .await;
 
-    assert!(created.get("id").and_then(|v| v.as_str()).is_some());
+    assert!(created.get("id").and_then(|v| v.as_str()).is_some(), "memory_write response: {}", serde_json::to_string_pretty(&created).unwrap());
     assert_eq!(created["title"], "Write Contract Note");
     assert_eq!(created["folder"], "decisions");
     assert_eq!(created["note_type"], "adr");
@@ -33,7 +38,7 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
         &session_id,
         "memory_write",
         json!({
-            "project": "/tmp/mcp-memory-write",
+            "project": project.path.as_str(),
             "title": "Write Contract Note",
             "content": "body-2",
             "folder": "decisions",
@@ -48,7 +53,9 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
 
 #[tokio::test]
 async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
-    let app = create_test_app().await;
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let app = create_test_app_with_db(db);
     let session_id = initialize_mcp_session(&app).await;
 
     let created = mcp_call_tool(
@@ -56,7 +63,7 @@ async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
         &session_id,
         "memory_write",
         json!({
-            "project": "/tmp/mcp-memory-read",
+            "project": project.path.as_str(),
             "title": "Read Contract Note",
             "content": "read me",
             "folder": "reference",
@@ -70,7 +77,7 @@ async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
         &session_id,
         "memory_read",
         json!({
-            "project": "/tmp/mcp-memory-read",
+            "project": project.path.as_str(),
             "identifier": created["permalink"]
         }),
     )
@@ -82,7 +89,7 @@ async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
         &session_id,
         "memory_read",
         json!({
-            "project": "/tmp/mcp-memory-read",
+            "project": project.path.as_str(),
             "identifier": "Read Contract Note"
         }),
     )
@@ -94,7 +101,7 @@ async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
         &session_id,
         "memory_read",
         json!({
-            "project": "/tmp/mcp-memory-read",
+            "project": project.path.as_str(),
             "identifier": "does-not-exist"
         }),
     )
@@ -104,9 +111,11 @@ async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
 
 #[tokio::test]
 async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
-    let app = create_test_app().await;
+    let db = create_test_db();
+    let proj = create_test_project(&db).await;
+    let app = create_test_app_with_db(db);
     let session_id = initialize_mcp_session(&app).await;
-    let project = "/tmp/mcp-memory-search";
+    let project = proj.path.as_str();
 
     mcp_call_tool(
         &app,
@@ -167,9 +176,11 @@ async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
 
 #[tokio::test]
 async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
-    let app = create_test_app().await;
+    let db = create_test_db();
+    let proj = create_test_project(&db).await;
+    let app = create_test_app_with_db(db);
     let session_id = initialize_mcp_session(&app).await;
-    let project = "/tmp/mcp-memory-edit";
+    let project = proj.path.as_str();
 
     mcp_call_tool(
         &app,
@@ -224,9 +235,11 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
 
 #[tokio::test]
 async fn mcp_memory_move_changes_folder_title_and_permalink() {
-    let app = create_test_app().await;
+    let db = create_test_db();
+    let proj = create_test_project(&db).await;
+    let app = create_test_app_with_db(db);
     let session_id = initialize_mcp_session(&app).await;
-    let project = "/tmp/mcp-memory-move";
+    let project = proj.path.as_str();
 
     let created = mcp_call_tool(
         &app,
@@ -244,7 +257,7 @@ async fn mcp_memory_move_changes_folder_title_and_permalink() {
             "project": project,
             "identifier": created["permalink"],
             "title": "Moved Title",
-            "folder": "research"
+            "type": "research"
         }),
     )
     .await;
@@ -256,9 +269,11 @@ async fn mcp_memory_move_changes_folder_title_and_permalink() {
 
 #[tokio::test]
 async fn mcp_memory_delete_success_and_missing_note_error() {
-    let app = create_test_app().await;
+    let db = create_test_db();
+    let proj = create_test_project(&db).await;
+    let app = create_test_app_with_db(db);
     let session_id = initialize_mcp_session(&app).await;
-    let project = "/tmp/mcp-memory-delete";
+    let project = proj.path.as_str();
 
     mcp_call_tool(
         &app,
@@ -290,32 +305,35 @@ async fn mcp_memory_delete_success_and_missing_note_error() {
 
 #[tokio::test]
 async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
-    let app = create_test_app().await;
+    let db = create_test_db();
+    let proj = create_test_project(&db).await;
+    let app = create_test_app_with_db(db);
     let session_id = initialize_mcp_session(&app).await;
-    let project = "/tmp/mcp-memory-list";
+    let project = proj.path.as_str();
 
     mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "A", "content": "x", "type": "adr"})).await;
     mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "B", "content": "x", "type": "reference"})).await;
 
-    let all = mcp_call_tool(&app, &session_id, "memory_list", json!({"project": project})).await;
-    assert!(all["notes"].as_array().unwrap().len() >= 2);
-
-    let folder = mcp_call_tool(&app, &session_id, "memory_list", json!({"project": project, "folder": "decisions"})).await;
-    for n in folder["notes"].as_array().unwrap() {
+    // List decisions folder (where ADR notes live).
+    let decisions = mcp_call_tool(&app, &session_id, "memory_list", json!({"project": project, "folder": "decisions"})).await;
+    for n in decisions["notes"].as_array().unwrap() {
         assert_eq!(n["folder"], "decisions");
     }
 
-    let typed = mcp_call_tool(&app, &session_id, "memory_list", json!({"project": project, "type": "reference"})).await;
-    for n in typed["notes"].as_array().unwrap() {
-        assert_eq!(n["note_type"], "reference");
+    // List reference folder.
+    let reference = mcp_call_tool(&app, &session_id, "memory_list", json!({"project": project, "folder": "reference"})).await;
+    for n in reference["notes"].as_array().unwrap() {
+        assert_eq!(n["folder"], "reference");
     }
 }
 
 #[tokio::test]
 async fn mcp_memory_graph_returns_wikilink_edges() {
-    let app = create_test_app().await;
+    let db = create_test_db();
+    let proj = create_test_project(&db).await;
+    let app = create_test_app_with_db(db);
     let session_id = initialize_mcp_session(&app).await;
-    let project = "/tmp/mcp-memory-graph";
+    let project = proj.path.as_str();
 
     mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Node B", "content": "b", "type": "reference"})).await;
     mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Node A", "content": "links [[Node B]]", "type": "reference"})).await;
@@ -327,9 +345,11 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
 
 #[tokio::test]
 async fn mcp_memory_recent_orders_by_last_accessed() {
-    let app = create_test_app().await;
+    let db = create_test_db();
+    let proj = create_test_project(&db).await;
+    let app = create_test_app_with_db(db);
     let session_id = initialize_mcp_session(&app).await;
-    let project = "/tmp/mcp-memory-recent";
+    let project = proj.path.as_str();
 
     mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Older", "content": "o", "type": "reference"})).await;
     mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Newer", "content": "n", "type": "reference"})).await;
@@ -344,9 +364,11 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
 
 #[tokio::test]
 async fn mcp_memory_catalog_returns_structured_catalog() {
-    let app = create_test_app().await;
+    let db = create_test_db();
+    let proj = create_test_project(&db).await;
+    let app = create_test_app_with_db(db);
     let session_id = initialize_mcp_session(&app).await;
-    let project = "/tmp/mcp-memory-catalog";
+    let project = proj.path.as_str();
 
     mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Catalog Item", "content": "c", "type": "reference"})).await;
     let catalog = mcp_call_tool(&app, &session_id, "memory_catalog", json!({"project": project})).await;
@@ -355,9 +377,11 @@ async fn mcp_memory_catalog_returns_structured_catalog() {
 
 #[tokio::test]
 async fn mcp_memory_health_orphans_and_broken_links_shapes() {
-    let app = create_test_app().await;
+    let db = create_test_db();
+    let proj = create_test_project(&db).await;
+    let app = create_test_app_with_db(db);
     let session_id = initialize_mcp_session(&app).await;
-    let project = "/tmp/mcp-memory-health";
+    let project = proj.path.as_str();
 
     mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "type": "reference"})).await;
 
@@ -374,19 +398,18 @@ async fn mcp_memory_health_orphans_and_broken_links_shapes() {
 
 #[test]
 fn memory_write_params_deserialize() {
-    let params: MemoryWriteParams =
-        serde_json::from_value(json!({"project":"/tmp/p","title":"T","content":"C"})).unwrap();
+    let params: WriteParams =
+        serde_json::from_value(json!({"project":"/tmp/p","title":"T","content":"C","type":"reference"})).unwrap();
     assert_eq!(params.project, "/tmp/p");
     assert_eq!(params.title, "T");
     assert_eq!(params.content, "C");
-    assert!(params.permalink.is_none());
-    assert!(params.folder.is_none());
-    assert!(params.note_type.is_none());
+    assert_eq!(params.note_type, "reference");
+    assert!(params.tags.is_none());
 }
 
 #[test]
 fn memory_read_params_deserialize() {
-    let params: MemoryReadParams =
+    let params: ReadParams =
         serde_json::from_value(json!({"project":"/tmp/p","identifier":"abc"})).unwrap();
     assert_eq!(params.project, "/tmp/p");
     assert_eq!(params.identifier, "abc");
@@ -394,7 +417,7 @@ fn memory_read_params_deserialize() {
 
 #[test]
 fn memory_search_params_deserialize() {
-    let params: MemorySearchParams =
+    let params: SearchParams =
         serde_json::from_value(json!({"project":"/tmp/p","query":"rust"})).unwrap();
     assert_eq!(params.project, "/tmp/p");
     assert_eq!(params.query, "rust");
@@ -405,7 +428,7 @@ fn memory_search_params_deserialize() {
 
 #[test]
 fn memory_edit_params_deserialize() {
-    let params: MemoryEditParams = serde_json::from_value(json!({
+    let params: EditParams = serde_json::from_value(json!({
         "project":"/tmp/p",
         "identifier":"a",
         "operation":"append",
@@ -415,27 +438,27 @@ fn memory_edit_params_deserialize() {
     assert_eq!(params.project, "/tmp/p");
     assert_eq!(params.identifier, "a");
     assert_eq!(params.operation, "append");
-    assert_eq!(params.content.as_deref(), Some("x"));
+    assert_eq!(params.content, "x");
 }
 
 #[test]
 fn memory_move_params_deserialize() {
-    let params: MemoryMoveParams = serde_json::from_value(json!({
+    let params: MoveParams = serde_json::from_value(json!({
         "project":"/tmp/p",
         "identifier":"a",
-        "title":"new"
+        "title":"new",
+        "type":"adr"
     }))
     .unwrap();
     assert_eq!(params.project, "/tmp/p");
     assert_eq!(params.identifier, "a");
     assert_eq!(params.title.as_deref(), Some("new"));
-    assert!(params.folder.is_none());
-    assert!(params.note_type.is_none());
+    assert_eq!(params.note_type, "adr");
 }
 
 #[test]
 fn memory_delete_params_deserialize() {
-    let params: MemoryDeleteParams =
+    let params: DeleteParams =
         serde_json::from_value(json!({"project":"/tmp/p","identifier":"a"})).unwrap();
     assert_eq!(params.project, "/tmp/p");
     assert_eq!(params.identifier, "a");
@@ -443,28 +466,26 @@ fn memory_delete_params_deserialize() {
 
 #[test]
 fn memory_list_params_deserialize() {
-    let params: MemoryListParams = serde_json::from_value(json!({
+    let params: ListParams = serde_json::from_value(json!({
         "project":"/tmp/p",
         "folder":"decisions",
-        "type":"adr",
-        "limit":10
+        "depth":2
     }))
     .unwrap();
     assert_eq!(params.project, "/tmp/p");
-    assert_eq!(params.folder.as_deref(), Some("decisions"));
-    assert_eq!(params.note_type.as_deref(), Some("adr"));
-    assert_eq!(params.limit, Some(10));
+    assert_eq!(params.folder, "decisions");
+    assert_eq!(params.depth, Some(2));
 }
 
 #[test]
 fn memory_graph_params_deserialize() {
-    let params: MemoryGraphParams = serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
+    let params: GraphParams = serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(params.project, "/tmp/p");
 }
 
 #[test]
 fn memory_recent_params_deserialize() {
-    let params: MemoryRecentParams = serde_json::from_value(json!({
+    let params: RecentParams = serde_json::from_value(json!({
         "project":"/tmp/p",
         "timeframe":"7d",
         "limit":5
@@ -477,27 +498,26 @@ fn memory_recent_params_deserialize() {
 
 #[test]
 fn memory_catalog_params_deserialize() {
-    let params: MemoryCatalogParams =
-        serde_json::from_value(json!({"project":"/tmp/p","folder":"research"})).unwrap();
+    let params: CatalogParams =
+        serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(params.project, "/tmp/p");
-    assert_eq!(params.folder.as_deref(), Some("research"));
 }
 
 #[test]
 fn memory_health_params_deserialize() {
-    let params: MemoryHealthParams = serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
-    assert_eq!(params.project, "/tmp/p");
+    let params: HealthParams = serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
+    assert_eq!(params.project.as_deref(), Some("/tmp/p"));
 }
 
 #[test]
 fn memory_orphans_params_deserialize() {
-    let params: MemoryOrphansParams = serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
+    let params: OrphansParams = serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(params.project, "/tmp/p");
 }
 
 #[test]
 fn memory_broken_links_params_deserialize() {
-    let params: MemoryBrokenLinksParams =
+    let params: BrokenLinksParams =
         serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(params.project, "/tmp/p");
 }
