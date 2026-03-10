@@ -304,3 +304,6 @@ mod tests {
         assert_schema_has_type::<MoveParams>("MoveParams");
     }
 }
+
+#[cfg(test)]
+mod tests;
