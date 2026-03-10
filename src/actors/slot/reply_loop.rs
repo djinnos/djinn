@@ -73,6 +73,7 @@ pub(super) async fn run_reply_loop(
     app_state: &AppState,
     context_window: i64,
     model_id: &str,
+    is_resumed_session: bool,
 ) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64) {
     let mut output = ParsedAgentOutput::new(agent_type);
 
@@ -82,10 +83,8 @@ pub(super) async fn run_reply_loop(
     let mut total_tokens_out: u32 = 0;
     let mut final_assistant_text = String::new();
 
-    // Resumed sessions must use at least one tool — the whole point of resume
-    // is to address reviewer feedback, so a bare text-only response means the
-    // model is echoing its previous completion pattern rather than working.
-    let is_resumed_session = false;
+    // Resumed sessions may respond text-only if the model determines the
+    // reviewer's concerns are already addressed in the existing code.
 
     // ── Create session-level OTel span (root trace) ──────────────────────────
     let otel_session = if telemetry::is_active() {
@@ -111,10 +110,17 @@ pub(super) async fn run_reply_loop(
                 }
             }
         }
-        // Record the first user message as the trace-level input
+        // Record the user message as the trace-level input
         // (shows in the Langfuse trace list Input column).
-        if let Some(first_user) = conversation.messages.iter().find(|m| m.role == Role::User) {
-            let input_text: String = first_user
+        // For resumed sessions use the *last* user message (reviewer feedback);
+        // for fresh sessions use the first.
+        let input_msg = if is_resumed_session {
+            conversation.messages.iter().rfind(|m| m.role == Role::User)
+        } else {
+            conversation.messages.iter().find(|m| m.role == Role::User)
+        };
+        if let Some(user_msg) = input_msg {
+            let input_text: String = user_msg
                 .content
                 .iter()
                 .filter_map(|b| b.as_text())

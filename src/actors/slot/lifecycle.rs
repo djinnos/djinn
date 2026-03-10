@@ -558,6 +558,7 @@ pub async fn run_task_lifecycle(
         &app_state,
         context_window,
         &model_id,
+        resume_record_id.is_some(),
     )
     .await;
 

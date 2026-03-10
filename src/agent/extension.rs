@@ -157,6 +157,26 @@ async fn call_task_show(
                     "active_session".to_string(),
                     serde_json::json!(active_session),
                 );
+
+                // Include recent activity (comments, transitions) so agents
+                // can see worker notes and review history.
+                let activity = repo.list_activity(&task.id).await.unwrap_or_default();
+                let activity_json: Vec<serde_json::Value> = activity
+                    .iter()
+                    .map(|entry| {
+                        serde_json::json!({
+                            "id": entry.id,
+                            "actor_role": entry.actor_role,
+                            "event_type": entry.event_type,
+                            "payload": serde_json::from_str::<serde_json::Value>(&entry.payload).unwrap_or(serde_json::json!({})),
+                            "created_at": entry.created_at,
+                        })
+                    })
+                    .collect();
+                map.insert(
+                    "activity".to_string(),
+                    serde_json::json!(activity_json),
+                );
             }
             Ok(value)
         }
@@ -282,8 +302,9 @@ async fn call_task_update_ac(
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
 
-    let ac_json = serde_json::to_string(&p.acceptance_criteria)
-        .unwrap_or_else(|_| "[]".to_string());
+    // Merge incoming AC with existing criteria so the `criterion` text is
+    // preserved even when the reviewer only sends `{met: bool}` objects.
+    let ac_json = merge_acceptance_criteria(&task.acceptance_criteria, &p.acceptance_criteria);
 
     let updated = repo
         .update(
@@ -529,6 +550,43 @@ where
 {
     let args = arguments.clone().unwrap_or_default();
     serde_json::from_value(serde_json::Value::Object(args)).map_err(|e| e.to_string())
+}
+
+/// Merge incoming AC objects with existing stored criteria.
+///
+/// If an incoming object has a `criterion` field it is used as-is.  Otherwise
+/// the `criterion` text is copied from the existing array at the same index so
+/// that reviewer payloads like `[{"met": true}]` don't erase the text.
+fn merge_acceptance_criteria(
+    existing_json: &str,
+    incoming: &[serde_json::Value],
+) -> String {
+    let existing: Vec<serde_json::Value> =
+        serde_json::from_str(existing_json).unwrap_or_default();
+
+    let merged: Vec<serde_json::Value> = incoming
+        .iter()
+        .enumerate()
+        .map(|(i, inc)| {
+            let mut obj = inc.as_object().cloned().unwrap_or_default();
+            // If the incoming object is missing `criterion`, copy from existing.
+            if !obj.contains_key("criterion") {
+                if let Some(existing_criterion) = existing
+                    .get(i)
+                    .and_then(|e| e.get("criterion"))
+                    .and_then(|v| v.as_str())
+                {
+                    obj.insert(
+                        "criterion".to_string(),
+                        serde_json::Value::String(existing_criterion.to_string()),
+                    );
+                }
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+
+    serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
 }
 
 async fn project_id_for_path(state: &AppState, project_path: &str) -> Result<String, String> {

@@ -2,6 +2,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 
 use crate::db::repositories::session::SessionRepository;
+use crate::db::repositories::session_message::SessionMessageRepository;
 use crate::db::repositories::task::TaskRepository;
 use crate::mcp::server::DjinnMcpServer;
 use crate::models::session::SessionRecord;
@@ -46,8 +47,6 @@ pub struct SessionMessage {
 pub struct SessionMessagesResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub goose_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -282,116 +281,73 @@ impl DjinnMcpServer {
         }
     }
 
-    /// Return full conversation messages for a completed session.
+    /// Return full conversation messages for a session (from DB).
     #[tool(
-        description = "session_messages(id) returns full Goose conversation messages for a session: role + content blocks (text/tool_use/tool_result/thinking)"
+        description = "session_messages(id) returns conversation messages for a session: role + content blocks (text/tool_use/tool_result/thinking)"
     )]
     pub async fn session_messages(
         &self,
         Parameters(p): Parameters<SessionMessagesParams>,
     ) -> Json<SessionMessagesResponse> {
+        let err = |e: String| {
+            Json(SessionMessagesResponse {
+                session_id: None,
+                agent_type: None,
+                model_id: None,
+                messages: None,
+                error: Some(e),
+            })
+        };
+
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
+            Err(e) => return err(e),
+        };
+
+        let session_repo =
+            SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+        let session = match session_repo.get_in_project(&project_id, &p.id).await {
+            Ok(Some(s)) => s,
+            Ok(None) => return err(format!("session not found: {}", p.id)),
+            Err(e) => return err(e.to_string()),
+        };
+
+        let msg_repo =
+            SessionMessageRepository::new(self.state.db().clone(), self.state.events().clone());
+        let conversation = match msg_repo.load_conversation(&session.id).await {
+            Ok(c) => c,
             Err(e) => {
-                return Json(SessionMessagesResponse {
-                    session_id: None,
-                    goose_session_id: None,
-                    agent_type: None,
-                    model_id: None,
-                    messages: None,
-                    error: Some(e),
-                });
-            }
-        };
-
-        let repo = SessionRepository::new(self.state.db().clone(), self.state.events().clone());
-        let session = match repo.get_in_project(&project_id, &p.id).await {
-            Ok(Some(session)) => session,
-            Ok(None) => {
-                return Json(SessionMessagesResponse {
-                    session_id: None,
-                    goose_session_id: None,
-                    agent_type: None,
-                    model_id: None,
-                    messages: None,
-                    error: Some(format!("session not found: {}", p.id)),
-                });
-            }
-            Err(e) => {
-                return Json(SessionMessagesResponse {
-                    session_id: None,
-                    goose_session_id: None,
-                    agent_type: None,
-                    model_id: None,
-                    messages: None,
-                    error: Some(e.to_string()),
-                });
-            }
-        };
-
-        let Some(goose_session_id) = session.goose_session_id.clone() else {
-            return Json(SessionMessagesResponse {
-                session_id: Some(session.id),
-                goose_session_id: None,
-                agent_type: Some(session.agent_type),
-                model_id: Some(session.model_id),
-                messages: None,
-                error: Some("session missing goose_session_id".to_string()),
-            });
-        };
-
-        let goose_session = match self.state.pool().await {
-            Some(pool) => match pool.get_goose_session(&goose_session_id).await {
-                Ok(session) => session,
-                Err(e) => {
-                    return Json(SessionMessagesResponse {
-                        session_id: Some(session.id),
-                        goose_session_id: Some(goose_session_id),
-                        agent_type: Some(session.agent_type),
-                        model_id: Some(session.model_id),
-                        messages: None,
-                        error: Some(format!("failed to load Goose session: {}", e)),
-                    });
-                }
-            },
-            None => {
                 return Json(SessionMessagesResponse {
                     session_id: Some(session.id),
-                    goose_session_id: Some(goose_session_id),
                     agent_type: Some(session.agent_type),
                     model_id: Some(session.model_id),
                     messages: None,
-                    error: Some("slot pool actor not initialized".to_string()),
-                });
+                    error: Some(format!("failed to load messages: {e}")),
+                })
             }
         };
 
-        let messages: Vec<SessionMessage> = goose_session
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|msg| {
-                        let role = msg.get("role")?.as_str()?.to_string();
-                        let content = msg
-                            .get("content")
-                            .and_then(|c| c.as_array())
-                            .map(|blocks| {
-                                blocks
-                                    .iter()
-                                    .map(|block| super::json_object::AnyJson(block.clone()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        Some(SessionMessage { role, content })
-                    })
-                    .collect()
+        let messages: Vec<SessionMessage> = conversation
+            .messages
+            .into_iter()
+            .map(|msg| {
+                let role = match msg.role {
+                    crate::agent::message::Role::System => "system",
+                    crate::agent::message::Role::User => "user",
+                    crate::agent::message::Role::Assistant => "assistant",
+                }
+                .to_owned();
+                let content = msg
+                    .content
+                    .into_iter()
+                    .map(|block| super::json_object::AnyJson(serde_json::to_value(block).unwrap_or_default()))
+                    .collect();
+                SessionMessage { role, content }
             })
-            .unwrap_or_default();
+            .collect();
 
         Json(SessionMessagesResponse {
             session_id: Some(session.id),
-            goose_session_id: Some(goose_session_id),
             agent_type: Some(session.agent_type),
             model_id: Some(session.model_id),
             messages: Some(messages),
