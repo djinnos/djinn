@@ -164,22 +164,6 @@ pub async fn run_task_lifecycle(
                         return_free!();
                     }
                 }
-            } else if paused.agent_type != agent_type.as_str() {
-                tracing::info!(
-                    task_id = %task_id,
-                    paused_agent_type = %paused.agent_type,
-                    needed_agent_type = %agent_type.as_str(),
-                    "Lifecycle: paused session agent type mismatch; starting fresh session"
-                );
-                match prepare_worktree(&project_dir, &task, &app_state).await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed");
-                        transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state)
-                            .await;
-                        return_free!();
-                    }
-                }
             } else if !paused_worktree_path.exists() || !paused_worktree_path.is_dir() {
                 let session_repo =
                     SessionRepository::new(app_state.db().clone(), app_state.events().clone());
@@ -207,8 +191,8 @@ pub async fn run_task_lifecycle(
                     }
                 }
             } else {
-                // Model + agent type match, worktree intact — resume the
-                // paused session instead of starting fresh.
+                // Model match, worktree intact — resume the paused session
+                // instead of starting fresh (agent_type already filtered by query).
                 tracing::info!(
                     task_id = %task_id,
                     session_record_id = %paused.id,
