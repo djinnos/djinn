@@ -1,9 +1,12 @@
 import { useEffect } from "react";
 import { fetchProjects } from "@/api/server";
 import { projectStore } from "@/stores/projectStore";
+import type { ConnectionStatus } from "@/hooks/useServerHealth";
 
-export function useProjectsBootstrap() {
+export function useProjectsBootstrap(serverStatus: ConnectionStatus = "connected") {
   useEffect(() => {
+    if (serverStatus !== "connected") return;
+
     let cancelled = false;
 
     const loadProjects = async () => {
@@ -22,5 +25,5 @@ export function useProjectsBootstrap() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [serverStatus]);
 }

@@ -328,7 +328,23 @@ export interface KanbanSnapshot {
   epics: Epic[];
 }
 
-export async function fetchKanbanSnapshot(projectPath?: string | null): Promise<KanbanSnapshot> {
+/** Fetch tasks + epics for a single project, or aggregate across all projects. */
+export async function fetchKanbanSnapshot(
+  projectPath?: string | null,
+  allProjectPaths?: string[],
+): Promise<KanbanSnapshot> {
+  // All-projects mode: fetch from every project and merge
+  if (allProjectPaths && allProjectPaths.length > 0) {
+    const snapshots = await Promise.all(
+      allProjectPaths.map((path) => fetchKanbanSnapshot(path))
+    );
+    return {
+      projectPath: null,
+      tasks: snapshots.flatMap((s) => s.tasks),
+      epics: snapshots.flatMap((s) => s.epics),
+    };
+  }
+
   const resolvedProjectPath = projectPath ?? null;
 
   if (!resolvedProjectPath) {

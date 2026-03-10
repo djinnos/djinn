@@ -1,6 +1,11 @@
 import type { Epic, Task, AcceptanceCriterion } from "@/api/types";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useTaskActions } from "@/hooks/useTaskActions";
+import { useExecutionControl } from "@/hooks/useExecutionControl";
+import { useSelectedProject } from "@/stores/useProjectStore";
+import { Button } from "@/components/ui/button";
+import { Play, Square, RotateCcw, X } from "lucide-react";
 
 type TaskDetailPanelProps = {
   task: Task | null;
@@ -60,6 +65,74 @@ function SectionCard({ title, children }: { title: string; children: React.React
   );
 }
 
+function TaskActions({ task }: { task: Task }) {
+  const project = useSelectedProject();
+  const { busy: transitioning, transition } = useTaskActions();
+  const { busy: killing, killTask } = useExecutionControl();
+  const busy = transitioning || killing;
+
+  if (!project?.path) return null;
+  const projectPath = project.path;
+
+  const isOpen = task.status === "open";
+  const isInProgress = task.status === "in_progress";
+  const isClosed = task.status === "closed";
+  const isBlocked = (task.unresolved_blocker_count ?? 0) > 0;
+
+  return (
+    <div className="flex items-center gap-2">
+      {isOpen && !isBlocked && (
+        <Button
+          size="sm"
+          variant="default"
+          disabled={busy}
+          onClick={() => transition(task.id, projectPath, "start")}
+          className="gap-1.5 bg-emerald-600 hover:bg-emerald-700"
+        >
+          <Play className="h-3.5 w-3.5" />
+          Start
+        </Button>
+      )}
+      {isInProgress && (
+        <Button
+          size="sm"
+          variant="destructive"
+          disabled={busy}
+          onClick={() => killTask(task.id)}
+          className="gap-1.5"
+        >
+          <Square className="h-3.5 w-3.5" />
+          Stop
+        </Button>
+      )}
+      {isClosed && (
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          onClick={() => transition(task.id, projectPath, "reopen", "Reopened from desktop")}
+          className="gap-1.5"
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          Reopen
+        </Button>
+      )}
+      {!isClosed && !isInProgress && (
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={busy}
+          onClick={() => transition(task.id, projectPath, "force_close", "Closed from desktop")}
+          className="gap-1.5 text-muted-foreground hover:text-destructive"
+        >
+          <X className="h-3.5 w-3.5" />
+          Close
+        </Button>
+      )}
+    </div>
+  );
+}
+
 export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelProps) {
   if (!open || !task) return null;
 
@@ -87,6 +160,7 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
                 ))}
               </div>
             )}
+            <TaskActions task={task} />
           </div>
           <button type="button" className="rounded border px-2 py-1 text-sm" onClick={onClose}>
             Close

@@ -16,7 +16,7 @@ import { getServerPort } from "../tauri";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
 import { fetchKanbanSnapshot } from "@/api/server";
 import { useSelectedProject } from "@/stores/useProjectStore";
-import { projectStore } from "@/stores/projectStore";
+import { projectStore, ALL_PROJECTS } from "@/stores/projectStore";
 import { taskStore } from "@/stores/taskStore";
 import { epicStore } from "@/stores/epicStore";
 import { resetMcpClient } from "@/api/mcpClient";
@@ -29,7 +29,8 @@ const MAX_RECONNECT_ATTEMPTS = 10;
 
 export function useEventSource(projectId?: string | null) {
   const selectedProject = useSelectedProject();
-  const selectedProjectPath = selectedProject?.path ?? null;
+  const isAll = projectId === ALL_PROJECTS;
+  const selectedProjectPath = isAll ? null : (selectedProject?.path ?? null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cleanupHandlersRef = useRef<(() => void) | null>(null);
@@ -52,6 +53,7 @@ export function useEventSource(projectId?: string | null) {
     ) {
       return "project_changed";
     }
+    if (normalized === "sync_completed") return "sync_completed";
     return null;
   };
 
@@ -64,7 +66,10 @@ export function useEventSource(projectId?: string | null) {
 
     const hydrateSnapshot = async (projectPath: string | null) => {
       try {
-        const snapshot = await fetchKanbanSnapshot(projectPath);
+        const allPaths = isAll
+          ? projectStore.getState().projects.map((p) => p.path).filter(Boolean) as string[]
+          : undefined;
+        const snapshot = await fetchKanbanSnapshot(projectPath, allPaths);
         if (!isActive) return;
         taskStore.getState().setTasks(snapshot.tasks);
         epicStore.getState().setEpics(snapshot.epics);
@@ -101,7 +106,7 @@ export function useEventSource(projectId?: string | null) {
         
         // Build URL with Last-Event-ID if available
         let url = `http://127.0.0.1:${port}/events`;
-        if (projectId) {
+        if (projectId && !isAll) {
           url += `?project_id=${encodeURIComponent(projectId)}`;
         }
         const lastEventId = sseStore.getState().lastEventId;
@@ -147,6 +152,7 @@ export function useEventSource(projectId?: string | null) {
           "project.health_ok",
           "project.health_error",
           "session.message",
+          "sync.completed",
         ] as const;
 
         eventTypes.forEach((eventType) => {

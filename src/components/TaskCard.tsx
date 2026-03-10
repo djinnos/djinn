@@ -2,6 +2,13 @@ import type { Epic, Task } from "@/api/types";
 import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { Card, CardContent } from "@/components/ui/card";
 import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
+import {
   ArrowReloadHorizontalIcon,
   FullSignalIcon,
   LowSignalIcon,
@@ -15,8 +22,13 @@ import {
   UnavailableIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { MoreVertical, Play, Square, RotateCcw, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useState } from "react";
+import { useTaskActions } from "@/hooks/useTaskActions";
+import { useExecutionControl } from "@/hooks/useExecutionControl";
+import { useSelectedProject, useIsAllProjects } from "@/stores/useProjectStore";
+import { projectStore } from "@/stores/projectStore";
 
 type TaskCardProps = {
   task: Task;
@@ -149,6 +161,84 @@ function acProgressIcon(met: number, total: number) {
   return Progress04Icon;
 }
 
+function ownerInitials(owner: string | null | undefined): string {
+  if (!owner) return "?";
+  const parts = owner.trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  return owner.slice(0, 2).toUpperCase();
+}
+
+function TaskCardMenu({ task }: { task: Task }) {
+  const project = useSelectedProject();
+  const { busy: transitioning, transition } = useTaskActions();
+  const { busy: killing, killTask } = useExecutionControl();
+  const busy = transitioning || killing;
+
+  if (!project?.path) return null;
+  const projectPath = project.path;
+
+  const isOpen = task.status === "open";
+  const isInProgress = task.status === "in_progress";
+  const isClosed = task.status === "closed";
+  const isBlocked = (task.unresolved_blocker_count ?? 0) > 0;
+
+  const hasActions = (isOpen && !isBlocked) || isInProgress || isClosed || (!isClosed && !isInProgress);
+  if (!hasActions) return null;
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-white/10 group-hover/card:opacity-100"
+        onClick={(e: React.MouseEvent) => e.stopPropagation()}
+        aria-label="Task actions"
+      >
+        <MoreVertical className="h-3.5 w-3.5" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+        {isOpen && !isBlocked && (
+          <DropdownMenuItem disabled={busy} onClick={() => transition(task.id, projectPath, "start")}>
+            <Play className="mr-2 h-3.5 w-3.5 text-emerald-500" />
+            Start
+          </DropdownMenuItem>
+        )}
+        {isInProgress && (
+          <DropdownMenuItem disabled={busy} onClick={() => killTask(task.id)}>
+            <Square className="mr-2 h-3.5 w-3.5 text-red-500" />
+            Stop
+          </DropdownMenuItem>
+        )}
+        {isClosed && (
+          <DropdownMenuItem disabled={busy} onClick={() => transition(task.id, projectPath, "reopen", "Reopened from desktop")}>
+            <RotateCcw className="mr-2 h-3.5 w-3.5" />
+            Reopen
+          </DropdownMenuItem>
+        )}
+        {!isClosed && !isInProgress && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem disabled={busy} onClick={() => transition(task.id, projectPath, "force_close", "Closed from desktop")}>
+              <X className="mr-2 h-3.5 w-3.5 text-red-500" />
+              Close
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function ProjectBadge({ projectId }: { projectId?: string }) {
+  const isAll = useIsAllProjects();
+  if (!isAll || !projectId) return null;
+  const name = projectStore.getState().projects.find((p) => p.id === projectId)?.name;
+  if (!name) return null;
+  return (
+    <span className="rounded bg-zinc-600/40 px-1 py-px text-[9px] font-medium text-zinc-400">
+      {name}
+    </span>
+  );
+}
+
 export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const [now, setNow] = useState(() => Date.now());
 
@@ -206,7 +296,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
     <Card
       size="sm"
       className={cn(
-        "cursor-pointer py-2 ring-1 transition-all duration-200 ease-in-out",
+        "group/card cursor-pointer py-2 ring-1 transition-all duration-200 ease-in-out",
         cardTint ? `${cardTint.ring} ${cardTint.bg} ${cardTint.hover}` : "bg-zinc-800 ring-white/[0.06] hover:bg-zinc-700/80 hover:ring-white/[0.1]",
         moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"
       )}
@@ -217,6 +307,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
           <TaskIdLabel taskId={task.id} shortId={task.short_id} />
           <PriorityBadge priority={task.priority} />
+          <ProjectBadge projectId={(task as Record<string, unknown>).project_id as string | undefined} />
 
           {/* Acceptance criteria progress */}
           {acTotal > 0 && (
@@ -271,6 +362,17 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
               {task.active_session.model_id}
             </span>
           )}
+
+          <div className="flex items-center gap-1">
+            <div
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold uppercase text-muted-foreground"
+              title={task.owner ?? "Unassigned"}
+              aria-label={`Owner: ${task.owner ?? "Unassigned"}`}
+            >
+              {ownerInitials(task.owner)}
+            </div>
+            <TaskCardMenu task={task} />
+          </div>
         </div>
 
         {/* Row 2: Title */}

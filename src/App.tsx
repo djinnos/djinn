@@ -96,7 +96,7 @@ export default function App() {
   const selectedProjectId = useSelectedProjectId();
   const navigate = useNavigate();
 
-  useProjectsBootstrap();
+  useProjectsBootstrap(status);
   const [showWizard, setShowWizard] = useState(false);
   const [showDoneState, setShowDoneState] = useState(false);
 

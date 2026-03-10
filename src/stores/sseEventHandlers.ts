@@ -120,6 +120,23 @@ export function initSSEEventHandlers(): () => void {
     );
   });
 
+  // Sync events — when an import brings in new tasks, the individual task.updated
+  // SSE events (from_sync=true) will have already updated the stores. This handler
+  // is for visibility — invalidate queries so any list views re-fetch.
+  const syncCompletedUnsub = subscribe("sync_completed", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as {
+      channel?: string;
+      direction?: string;
+      count?: number;
+      error?: string | null;
+    };
+    // Only refresh on successful imports that actually changed data.
+    if (payload.direction === "import" && (payload.count ?? 0) > 0) {
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["epics"] });
+    }
+  });
+
   const invalidateSettingsLikeData = () => {
     queryClient.invalidateQueries({ queryKey: ["providers"] });
     queryClient.invalidateQueries({ queryKey: ["settings"] });
@@ -142,6 +159,7 @@ export function initSSEEventHandlers(): () => void {
     epicUpdatedUnsub?.();
     epicDeletedUnsub?.();
     projectChangedUnsub?.();
+    syncCompletedUnsub?.();
   };
 }
 

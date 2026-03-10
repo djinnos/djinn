@@ -15,7 +15,8 @@ export type SSEEventType =
   | "epic_updated"
   | "epic_deleted"
   | "project_changed"
-  | "session_message";
+  | "session_message"
+  | "sync_completed";
 
 export type ConnectionStatus = "connected" | "reconnecting" | "error";
 
