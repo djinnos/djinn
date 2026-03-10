@@ -900,6 +900,10 @@
               },
               "updated_at": {
                 "type": "string"
+              },
+              "verification_failure_count": {
+                "format": "int64",
+                "type": "integer"
               }
             },
             "required": [
@@ -917,6 +921,7 @@
               "acceptance_criteria",
               "reopen_count",
               "continuation_count",
+              "verification_failure_count",
               "created_at",
               "updated_at"
             ],
@@ -5284,6 +5289,10 @@
               },
               "updated_at": {
                 "type": "string"
+              },
+              "verification_failure_count": {
+                "format": "int64",
+                "type": "integer"
               }
             },
             "required": [
@@ -5301,6 +5310,7 @@
               "acceptance_criteria",
               "reopen_count",
               "continuation_count",
+              "verification_failure_count",
               "created_at",
               "updated_at",
               "unresolved_blocker_count"
@@ -5728,6 +5738,173 @@
           }
         },
         "title": "TaskSyncStatusResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project": {
+            "description": "Absolute project path (required).",
+            "type": "string"
+          },
+          "task_id": {
+            "description": "Task UUID or short_id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "project"
+        ],
+        "title": "TaskTimelineParams",
+        "type": "object"
+      },
+      "name": "task_timeline",
+      "output_schema": {
+        "$defs": {
+          "AnyJson": {},
+          "SessionToolSession": {
+            "properties": {
+              "agent_type": {
+                "type": "string"
+              },
+              "ended_at": {
+                "nullable": true,
+                "type": "string"
+              },
+              "goose_session_id": {
+                "nullable": true,
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "model_id": {
+                "type": "string"
+              },
+              "project_id": {
+                "type": "string"
+              },
+              "started_at": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "task_id": {
+                "type": "string"
+              },
+              "tokens_in": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "tokens_out": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "worktree_path": {
+                "nullable": true,
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "project_id",
+              "task_id",
+              "model_id",
+              "agent_type",
+              "started_at",
+              "status",
+              "tokens_in",
+              "tokens_out"
+            ],
+            "type": "object"
+          },
+          "TimelineActivity": {
+            "properties": {
+              "event_type": {
+                "type": "string"
+              },
+              "payload": {
+                "$ref": "#/$defs/AnyJson"
+              },
+              "timestamp": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "event_type",
+              "payload",
+              "timestamp"
+            ],
+            "type": "object"
+          },
+          "TimelineMessage": {
+            "properties": {
+              "agent_type": {
+                "type": "string"
+              },
+              "content": {
+                "items": {
+                  "$ref": "#/$defs/AnyJson"
+                },
+                "type": "array"
+              },
+              "model_id": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              },
+              "timestamp": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "session_id",
+              "role",
+              "content",
+              "agent_type",
+              "model_id",
+              "timestamp"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "activity": {
+            "items": {
+              "$ref": "#/$defs/TimelineActivity"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/$defs/TimelineMessage"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/$defs/SessionToolSession"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "title": "TaskTimelineResponse",
         "type": "object"
       }
     },

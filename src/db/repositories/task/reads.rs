@@ -173,7 +173,7 @@ impl TaskRepository {
                 close_reason, merge_commit_sha, memory_refs
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
+                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
              )
              ON CONFLICT(id) DO UPDATE SET
                 project_id          = excluded.project_id,
@@ -188,6 +188,7 @@ impl TaskRepository {
                 acceptance_criteria = excluded.acceptance_criteria,
                 reopen_count        = excluded.reopen_count,
                 continuation_count  = excluded.continuation_count,
+                verification_failure_count = excluded.verification_failure_count,
                 updated_at          = excluded.updated_at,
                 closed_at           = excluded.closed_at,
                 close_reason        = excluded.close_reason,
@@ -211,6 +212,7 @@ impl TaskRepository {
         .bind(&task.acceptance_criteria)
         .bind(task.reopen_count)
         .bind(task.continuation_count)
+        .bind(task.verification_failure_count)
         .bind(&task.created_at)
         .bind(&task.updated_at)
         .bind(&task.closed_at)
@@ -263,7 +265,7 @@ impl TaskRepository {
                 close_reason, merge_commit_sha, memory_refs
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
+                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
              )
              ON CONFLICT(id) DO UPDATE SET
                 project_id          = excluded.project_id,
@@ -278,6 +280,7 @@ impl TaskRepository {
                 acceptance_criteria = excluded.acceptance_criteria,
                 reopen_count        = excluded.reopen_count,
                 continuation_count  = excluded.continuation_count,
+                verification_failure_count = excluded.verification_failure_count,
                 updated_at          = excluded.updated_at,
                 closed_at           = excluded.closed_at,
                 close_reason        = excluded.close_reason,
@@ -301,6 +304,7 @@ impl TaskRepository {
         .bind(&task.acceptance_criteria)
         .bind(task.reopen_count)
         .bind(task.continuation_count)
+        .bind(task.verification_failure_count)
         .bind(&task.created_at)
         .bind(&task.updated_at)
         .bind(&task.closed_at)
