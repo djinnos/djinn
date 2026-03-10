@@ -620,6 +620,186 @@ mod tests {
         );
     }
 
+
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_contract_board_health_empty_board_returns_zero_counts() {
+        let app = test_helpers::create_test_app();
+        let session_id = test_helpers::initialize_mcp_session(&app).await;
+
+        let _ = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            serde_json::json!({
+                "name": "contract-board-health-empty",
+                "path": CONTRACT_PROJECT_PATH,
+            }),
+        )
+        .await;
+
+        let health = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "board_health",
+            serde_json::json!({ "project": CONTRACT_PROJECT_PATH }),
+        )
+        .await;
+
+        assert_eq!(health["total_open"], 0);
+        assert_eq!(health["stale_tasks"], 0);
+        assert_eq!(health["stuck_tasks"], 0);
+        assert_eq!(
+            health["stale_tasks"].as_array().map(|v| v.len()).unwrap_or_default(),
+            0
+        );
+        assert_eq!(
+            health["stuck_tasks"].as_array().map(|v| v.len()).unwrap_or_default(),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_contract_board_health_response_shape_has_required_fields() {
+        let app = test_helpers::create_test_app();
+        let session_id = test_helpers::initialize_mcp_session(&app).await;
+
+        let _ = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            serde_json::json!({
+                "name": "contract-board-health-shape",
+                "path": CONTRACT_PROJECT_PATH,
+            }),
+        )
+        .await;
+
+        let health = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "board_health",
+            serde_json::json!({ "project": CONTRACT_PROJECT_PATH }),
+        )
+        .await;
+
+        assert!(health.get("stale_tasks").is_some());
+        assert!(health.get("stuck_tasks").is_some());
+        assert!(health.get("total_open").is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_contract_board_health_detects_stale_in_progress_task() {
+        let db = test_helpers::create_test_db();
+        let cancel = CancellationToken::new();
+        let state = AppState::new(db.clone(), cancel);
+        let app = server::router(state);
+        let session_id = test_helpers::initialize_mcp_session(&app).await;
+
+        let _ = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            serde_json::json!({
+                "name": "contract-board-health-stale",
+                "path": CONTRACT_PROJECT_PATH,
+            }),
+        )
+        .await;
+
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+
+        let repo = crate::db::repositories::task::TaskRepository::new(
+            db.clone(),
+            {
+                let (tx, _rx) = broadcast::channel(256);
+                tx
+            },
+        );
+        repo.set_status(&task.id, "in_progress").await.unwrap();
+        sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1")
+            .bind(&task.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let health = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "board_health",
+            serde_json::json!({ "project": project.path }),
+        )
+        .await;
+
+        assert!(health["stale_tasks"].as_i64().unwrap_or(0) >= 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_contract_board_reconcile_empty_board_is_noop() {
+        let app = test_helpers::create_test_app();
+        let session_id = test_helpers::initialize_mcp_session(&app).await;
+
+        let _ = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            serde_json::json!({
+                "name": "contract-board-reconcile-empty",
+                "path": CONTRACT_PROJECT_PATH,
+            }),
+        )
+        .await;
+
+        let result = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "board_reconcile",
+            serde_json::json!({ "project": CONTRACT_PROJECT_PATH }),
+        )
+        .await;
+
+        assert_eq!(result["healed_count"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_contract_board_reconcile_heals_stuck_tasks() {
+        let db = test_helpers::create_test_db();
+        let cancel = CancellationToken::new();
+        let state = AppState::new(db.clone(), cancel);
+        let app = server::router(state);
+        let session_id = test_helpers::initialize_mcp_session(&app).await;
+
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+
+        let repo = crate::db::repositories::task::TaskRepository::new(
+            db.clone(),
+            {
+                let (tx, _rx) = broadcast::channel(256);
+                tx
+            },
+        );
+        repo.set_status(&task.id, "in_progress").await.unwrap();
+        sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1")
+            .bind(&task.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let result = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "board_reconcile",
+            serde_json::json!({ "project": project.path }),
+        )
+        .await;
+
+        assert!(result["healed_count"].as_i64().unwrap_or(0) >= 1);
+    }
+
     #[test]
     fn mcp_tools_do_not_use_untyped_json_output() {
         // Bare serde_json::Value generates `true` as its JSON Schema, which
