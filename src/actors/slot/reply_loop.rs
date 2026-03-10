@@ -82,10 +82,10 @@ pub(super) async fn run_reply_loop(
     let mut total_tokens_out: u32 = 0;
     let mut final_assistant_text = String::new();
 
-    // A resumed session has more than 2 messages (system + initial user).
-    // In that case a text-only first response is valid (worker may decide the
-    // reviewer's concerns are already addressed).
-    let is_resumed_session = conversation.messages.len() > 2;
+    // Resumed sessions must use at least one tool — the whole point of resume
+    // is to address reviewer feedback, so a bare text-only response means the
+    // model is echoing its previous completion pattern rather than working.
+    let is_resumed_session = false;
 
     // ── Create session-level OTel span (root trace) ──────────────────────────
     let otel_session = if telemetry::is_active() {

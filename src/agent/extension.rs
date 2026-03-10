@@ -42,10 +42,9 @@ where
         "task_update_ac" => call_task_update_ac(state, &call.arguments).await,
         "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
         "task_transition" => call_task_transition(state, &call.arguments).await,
-        "task_pm_reset_branch" => call_task_pm_reset_branch(state, &call.arguments).await,
+        "task_pm_delete_branch" => call_task_pm_delete_branch(state, &call.arguments).await,
         "task_pm_archive_activity" => call_task_pm_archive_activity(state, &call.arguments).await,
         "task_pm_reset_counters" => call_task_pm_reset_counters(state, &call.arguments).await,
-        "task_pm_reset_for_rework" => call_task_pm_reset_for_rework(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
@@ -606,7 +605,7 @@ struct TaskTransitionParams {
 }
 
 #[derive(Deserialize)]
-struct TaskPmResetBranchParams {
+struct TaskPmDeleteBranchParams {
     id: String,
 }
 
@@ -620,10 +619,6 @@ struct TaskPmResetCountersParams {
     id: String,
 }
 
-#[derive(Deserialize)]
-struct TaskPmResetForReworkParams {
-    id: String,
-}
 
 async fn call_task_transition(
     state: &AppState,
@@ -648,11 +643,11 @@ async fn call_task_transition(
     Ok(task_to_value(&updated))
 }
 
-async fn call_task_pm_reset_branch(
+async fn call_task_pm_delete_branch(
     state: &AppState,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let p: TaskPmResetBranchParams = parse_args(arguments)?;
+    let p: TaskPmDeleteBranchParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db().clone(), state.events().clone());
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
@@ -724,38 +719,6 @@ async fn call_task_pm_reset_counters(
     Ok(serde_json::json!({ "ok": true, "task_id": task.short_id, "reopen_count": 0, "continuation_count": 0 }))
 }
 
-async fn call_task_pm_reset_for_rework(
-    state: &AppState,
-    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
-) -> Result<serde_json::Value, String> {
-    let p: TaskPmResetForReworkParams = parse_args(arguments)?;
-    // Archive activity
-    let archive_args = Some({
-        let mut m = serde_json::Map::new();
-        m.insert("id".to_string(), serde_json::json!(p.id));
-        m
-    });
-    call_task_pm_archive_activity(state, &archive_args).await?;
-    // Reset counters
-    let counters_args = Some({
-        let mut m = serde_json::Map::new();
-        m.insert("id".to_string(), serde_json::json!(p.id));
-        m
-    });
-    call_task_pm_reset_counters(state, &counters_args).await?;
-    // Reset branch
-    let branch_args = Some({
-        let mut m = serde_json::Map::new();
-        m.insert("id".to_string(), serde_json::json!(p.id));
-        m
-    });
-    let branch_result = call_task_pm_reset_branch(state, &branch_args).await?;
-    Ok(serde_json::json!({
-        "ok": true,
-        "task_id": p.id,
-        "branch": branch_result,
-    }))
-}
 
 fn tool_task_show() -> RmcpTool {
     RmcpTool::new(
@@ -944,10 +907,10 @@ fn tool_task_transition() -> RmcpTool {
     )
 }
 
-fn tool_task_pm_reset_branch() -> RmcpTool {
+fn tool_task_pm_delete_branch() -> RmcpTool {
     RmcpTool::new(
-        "task_pm_reset_branch".to_string(),
-        "Delete the task's git branch and worktree so the next worker starts with a clean slate. Use after decomposing or rescoping a stuck task.".to_string(),
+        "task_pm_delete_branch".to_string(),
+        "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
@@ -986,19 +949,6 @@ fn tool_task_pm_reset_counters() -> RmcpTool {
     )
 }
 
-fn tool_task_pm_reset_for_rework() -> RmcpTool {
-    RmcpTool::new(
-        "task_pm_reset_for_rework".to_string(),
-        "Full intervention reset: archives all activity, resets counters, and deletes the branch/worktree. Use this after rescoping or decomposing a stuck task so the next worker starts completely fresh.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["id"],
-            "properties": {
-                "id": {"type": "string", "description": "Task UUID or short ID"}
-            }
-        }),
-    )
-}
 
 /// Truncate shell output to prevent blowing the context window.
 /// Hard cap at 50 KB — both line count and byte size are enforced.
@@ -1076,14 +1026,12 @@ pub fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
             serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
             serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
             serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
-            serde_json::to_value(tool_task_pm_reset_branch())
-                .expect("serialize tool_task_pm_reset_branch"),
+            serde_json::to_value(tool_task_pm_delete_branch())
+                .expect("serialize tool_task_pm_delete_branch"),
             serde_json::to_value(tool_task_pm_archive_activity())
                 .expect("serialize tool_task_pm_archive_activity"),
             serde_json::to_value(tool_task_pm_reset_counters())
                 .expect("serialize tool_task_pm_reset_counters"),
-            serde_json::to_value(tool_task_pm_reset_for_rework())
-                .expect("serialize tool_task_pm_reset_for_rework"),
         ] {
             tool_values.push(value);
         }
