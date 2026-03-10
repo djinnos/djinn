@@ -227,12 +227,12 @@ pub fn parse_openai_response(body: &str) -> Vec<StreamEvent> {
             };
 
             // Text content
-            if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
-                if !text.is_empty() {
-                    events.push(StreamEvent::Delta(ContentBlock::Text {
-                        text: text.to_string(),
-                    }));
-                }
+            if let Some(text) = msg.get("content").and_then(|c| c.as_str())
+                && !text.is_empty()
+            {
+                events.push(StreamEvent::Delta(ContentBlock::Text {
+                    text: text.to_string(),
+                }));
             }
 
             // Tool calls
