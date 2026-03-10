@@ -188,7 +188,7 @@ export function AgentConfig({
           {/* Add Model */}
           <ModelPicker
             availableModels={availableModels}
-            onSelect={(m) => onAddModel({ model: m.name, provider: m.provider })}
+            onSelect={(m) => onAddModel({ model: m.id, provider: m.provider })}
           />
 
           {/* Role Legend */}

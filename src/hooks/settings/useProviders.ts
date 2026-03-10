@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSettingsStore } from '@/stores/settingsStore';
 import {
   addCustomProvider,
-  deleteProviderCredentials,
+  removeProviderFull,
   fetchCredentialList,
   fetchProviderCatalog,
   invalidateProviderCatalogCache,
@@ -133,7 +133,7 @@ export function useProviders() {
 
   const removeProvider = useCallback(async (providerId: string) => {
     try {
-      await deleteProviderCredentials(providerId);
+      await removeProviderFull(providerId);
       removeModelsByProvider(providerId);
       await saveAgentSettings();
       await loadData();

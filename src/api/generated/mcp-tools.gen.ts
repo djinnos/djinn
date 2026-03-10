@@ -1708,6 +1708,31 @@ export namespace ProviderOauthStartOutputSchema {
 
 }
 export type ProviderOauthStartOutput = ProviderOauthStartOutputSchema.ProviderOauthStartOutput;
+export namespace ProviderRemoveInputSchema {
+  export interface ProviderRemoveInput {
+  /**
+   * Provider ID to disconnect and remove (e.g. 'anthropic', 'openai', 'my-custom-llm').
+   */
+  provider_id: string
+  [k: string]: any
+  }
+
+}
+export type ProviderRemoveInput = ProviderRemoveInputSchema.ProviderRemoveInput;
+export namespace ProviderRemoveOutputSchema {
+  export interface ProviderRemoveOutput {
+  credentials_deleted: number
+  custom_provider_deleted: boolean
+  error?: string
+  oauth_cleared: boolean
+  ok: boolean
+  provider_id: string
+  success: boolean
+  [k: string]: any
+  }
+
+}
+export type ProviderRemoveOutput = ProviderRemoveOutputSchema.ProviderRemoveOutput;
 export namespace ProviderValidateInputSchema {
   export interface ProviderValidateInput {
   /**
@@ -1942,6 +1967,15 @@ export namespace SettingsGetOutputSchema {
    */
   export interface DjinnSettings {
   /**
+   * Helicone API key for the dev proxy (sent as `Helicone-Auth: Bearer {key}`).
+   */
+  dev_proxy_key?: string
+  /**
+   * Helicone dev proxy base URL (e.g. `http://localhost:8585`). When set, all
+   * LLM requests route through the local Helicone gateway for full observability.
+   */
+  dev_proxy_url?: string
+  /**
    * Maximum number of tasks to dispatch per cycle (default 50).
    */
   dispatch_limit?: number
@@ -1981,6 +2015,14 @@ export type SettingsResetOutput = SettingsResetOutputSchema.SettingsResetOutput;
 export namespace SettingsSetInputSchema {
   export interface SettingsSetInput {
   /**
+   * Helicone API key for the dev proxy. Set to "" to disable. Omit to keep current value.
+   */
+  dev_proxy_key?: string
+  /**
+   * Helicone dev proxy base URL (e.g. "http://localhost:8585"). Set to "" to disable. Omit to keep current value.
+   */
+  dev_proxy_url?: string
+  /**
    * Maximum number of tasks to dispatch per cycle. Omit to keep current value.
    */
   dispatch_limit?: number
@@ -1994,6 +2036,10 @@ export namespace SettingsSetInputSchema {
    * Ordered model list for the 'conflict_resolver' role. Omit to keep current value.
    */
   model_priority_conflict_resolver?: string[]
+  /**
+   * Ordered model list for the 'pm' role. Omit to keep current value.
+   */
+  model_priority_pm?: string[]
   /**
    * Ordered model list for the 'task_reviewer' role. Omit to keep current value.
    */
@@ -2669,7 +2715,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_commands_get" | "project_commands_set" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_transition" | "task_update";
+export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_commands_get" | "project_commands_set" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "board_health": { input: BoardHealthInput; output: BoardHealthOutput };
@@ -2724,6 +2770,7 @@ export interface McpToolMap {
   "provider_models": { input: ProviderModelsInput; output: ProviderModelsOutput };
   "provider_models_connected": { input: ProviderModelsConnectedInput; output: ProviderModelsConnectedOutput };
   "provider_oauth_start": { input: ProviderOauthStartInput; output: ProviderOauthStartOutput };
+  "provider_remove": { input: ProviderRemoveInput; output: ProviderRemoveOutput };
   "provider_validate": { input: ProviderValidateInput; output: ProviderValidateOutput };
   "session_active": { input: SessionActiveInput; output: SessionActiveOutput };
   "session_for_task": { input: SessionForTaskInput; output: SessionForTaskOutput };

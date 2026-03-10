@@ -28,9 +28,7 @@ export function useAgentConfig() {
   }, [loadSettings, loadProviderModels]);
 
   const handleResetWizard = () => {
-    if (confirm('Are you sure you want to reset the wizard? This will show the setup wizard on next launch.')) {
-      resetWizard();
-    }
+    resetWizard();
   };
 
   return {

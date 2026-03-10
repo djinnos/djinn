@@ -70,12 +70,14 @@ function statusToPipelineStage(status: string): PipelineStage | null {
   return null;
 }
 
+const ACTIVELY_WORKING = new Set(["in_progress", "in_task_review", "verifying"]);
+
 function getStatusOverlay(status: string): { label: string; className: string } | null {
   if (status === "conflict_resolution") {
-    return { label: "resolving…", className: "text-orange-400 animate-pulse" };
+    return { label: "resolving…", className: "text-orange-400" };
   }
   if (status === "needs_pm_intervention" || status === "in_pm_intervention") {
-    return { label: "intervening…", className: "text-red-400 animate-pulse" };
+    return { label: "intervening…", className: "text-red-400" };
   }
   return null;
 }
@@ -94,6 +96,7 @@ function PipelineIndicator({ status }: { status: string }) {
   if (!activeStage) return null;
 
   const activeIdx = PIPELINE_STAGES.indexOf(activeStage);
+  const isActive = ACTIVELY_WORKING.has(status);
 
   return (
     <span className="text-[10px] tracking-tight" aria-label={`Pipeline: ${activeStage}`}>
@@ -103,7 +106,7 @@ function PipelineIndicator({ status }: { status: string }) {
           className={cn(
             idx < activeIdx
               ? "text-[#34D399]"
-              : idx === activeIdx
+              : idx === activeIdx && isActive
                 ? "text-[#10B981] animate-pulse"
                 : "text-[#374151]"
           )}

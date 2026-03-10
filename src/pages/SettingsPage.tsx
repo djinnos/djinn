@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { InlineError } from '@/components/InlineError';
 import { EmptyState } from '@/components/EmptyState';
 import { AgentConfig } from '@/components/AgentConfig';
+import { ConfirmButton } from '@/components/ConfirmButton';
 import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
 import { selectDirectory } from '@/tauri/commands';
@@ -193,13 +194,15 @@ function ProvidersSettings() {
               <p className="font-medium">{provider.name}</p>
               <p className="text-xs text-muted-foreground">Configured</p>
             </div>
-            <Button
-              variant="destructive"
+            <ConfirmButton
+              title="Remove provider"
+              description={`Remove "${provider.name}" and its credentials?`}
+              confirmLabel="Remove"
+              onConfirm={() => removeProvider(provider.id)}
               size="sm"
-              onClick={async () => { if (await confirm(`Remove provider "${provider.name}" and its credentials?`)) await removeProvider(provider.id); }}
             >
               Remove
-            </Button>
+            </ConfirmButton>
           </div>
         ))}
         {configuredProviders.length === 0 && <p className="text-sm text-muted-foreground">No providers configured yet.</p>}
@@ -260,8 +263,6 @@ function ProjectsSettings() {
   };
 
   const handleRemoveProject = async (project: Project) => {
-    if (!confirm(`Remove project "${project.name}"?`)) return;
-
     setBusyProjectId(project.id);
     setError(null);
     try {
@@ -325,14 +326,16 @@ function ProjectsSettings() {
                       </div>
                       <p className="truncate text-xs text-muted-foreground">{project.path}</p>
                     </button>
-                    <Button
-                      variant="destructive"
+                    <ConfirmButton
+                      title="Remove project"
+                      description={`Remove project "${project.name}"?`}
+                      confirmLabel="Remove"
+                      onConfirm={() => handleRemoveProject(project)}
                       size="sm"
-                      onClick={() => void handleRemoveProject(project)}
                       disabled={busyProjectId === project.id}
                     >
                       {busyProjectId === project.id ? 'Removing...' : 'Remove'}
-                    </Button>
+                    </ConfirmButton>
                   </div>
                   {expanded && (
                     <div className="grid gap-3 pt-2 border-t border-border">

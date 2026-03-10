@@ -206,6 +206,7 @@ export async function fetchCredentialList(): Promise<ProviderCredential[]> {
   const connectedProviders = new Set(connected.providers.map((provider) => provider.id));
 
   const byProvider = new Map<string, ProviderCredential>();
+
   for (const credential of credentials.credentials) {
     byProvider.set(credential.provider_id, {
       provider_id: credential.provider_id,
@@ -228,27 +229,10 @@ export async function fetchCredentialList(): Promise<ProviderCredential[]> {
 }
 
 
-export async function deleteProviderCredentials(providerId: string): Promise<void> {
-  const credentials = await callMcpTool("credential_list");
-  const keys = credentials.credentials
-    .filter((credential) => credential.provider_id === providerId)
-    .map((credential) => credential.key_name);
-
-  if (keys.length === 0) {
-    return;
-  }
-
-  const results = await Promise.all(
-    keys.map((keyName) =>
-      callMcpTool("credential_delete", {
-        key_name: keyName,
-      })
-    )
-  );
-
-  const failed = results.find((result) => !result.success || !result.deleted);
-  if (failed) {
-    throw new Error(failed.error ?? "Failed to delete credentials");
+export async function removeProviderFull(providerId: string): Promise<void> {
+  const result = await callMcpTool("provider_remove", { provider_id: providerId });
+  if (!result.ok || !result.success) {
+    throw new Error(result.error ?? "Failed to remove provider");
   }
 }
 

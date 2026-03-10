@@ -46,8 +46,6 @@ export function useProjects() {
   }, [loadProjects]);
 
   const handleRemoveProject = useCallback(async (project: Project) => {
-    if (!confirm(`Remove project "${project.name}"?`)) return;
-
     setBusyProjectId(project.id);
     setError(null);
     try {
