@@ -29,6 +29,27 @@ pub enum StreamEvent {
     Done,
 }
 
+// ─── Provider capabilities ───────────────────────────────────────────────────
+
+/// Provider-level capabilities that affect request building and response parsing.
+#[derive(Clone, Debug)]
+pub struct ProviderCapabilities {
+    /// Whether the provider supports SSE streaming. When `false`, the provider
+    /// performs a single POST and parses the complete JSON response.
+    pub streaming: bool,
+    /// Default max_tokens to send in the request (e.g. Anthropic requires this).
+    pub max_tokens_default: Option<u32>,
+}
+
+impl Default for ProviderCapabilities {
+    fn default() -> Self {
+        Self {
+            streaming: true,
+            max_tokens_default: None,
+        }
+    }
+}
+
 // ─── Provider configuration ───────────────────────────────────────────────────
 
 /// Configuration for a single provider instance.
@@ -48,6 +69,8 @@ pub struct ProviderConfig {
     pub telemetry: Option<TelemetryMeta>,
     /// Extra headers to include on every request (e.g. `chatgpt-account-id` for Codex).
     pub provider_headers: std::collections::HashMap<String, String>,
+    /// Provider-level capabilities.
+    pub capabilities: ProviderCapabilities,
 }
 
 /// Metadata attached to each provider call for OTel tracing.

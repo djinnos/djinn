@@ -166,6 +166,78 @@ impl ApiClient {
             }
         })
     }
+
+    /// POST to `url` with `body`, return the complete JSON response body.
+    ///
+    /// Used for non-streaming provider requests. Applies the same retry logic
+    /// as `stream_sse` for transient errors.
+    pub async fn post_json(
+        &self,
+        url: &str,
+        body: serde_json::Value,
+        auth: &AuthMethod,
+        extra_headers: HeaderMap,
+    ) -> anyhow::Result<String> {
+        let mut attempt = 0u32;
+        loop {
+            let mut req = self.inner.post(url).json(&body);
+
+            req = match auth {
+                AuthMethod::BearerToken(token) => {
+                    req.header("Authorization", format!("Bearer {}", token))
+                }
+                AuthMethod::ApiKeyHeader { header, key } => {
+                    req.header(header.as_str(), key.as_str())
+                }
+                AuthMethod::NoAuth => req,
+            };
+
+            for (name, value) in &extra_headers {
+                req = req.header(name, value);
+            }
+
+            match req.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        return resp.text().await.map_err(|e| anyhow!("failed to read response body: {e}"));
+                    }
+
+                    let is_retryable = status.as_u16() == 429 || status.is_server_error();
+                    if is_retryable && attempt < MAX_RETRIES {
+                        let retry_after_ms = resp
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .map(|secs| secs * 1000);
+
+                        let body_text = resp.text().await.unwrap_or_default();
+                        attempt += 1;
+                        let delay_ms = retry_after_ms.unwrap_or_else(|| backoff_delay_ms(attempt));
+                        tracing::warn!(attempt, status = %status, delay_ms, "POST request failed; retrying");
+                        tracing::debug!(body = %body_text, "retryable error body");
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        continue;
+                    }
+
+                    let body_text = resp.text().await.unwrap_or_default();
+                    return Err(anyhow!("provider API error {}: {}", status, body_text));
+                }
+                Err(e) => {
+                    let is_retryable = e.is_connect() || e.is_timeout() || e.is_request();
+                    if is_retryable && attempt < MAX_RETRIES {
+                        attempt += 1;
+                        let delay_ms = backoff_delay_ms(attempt);
+                        tracing::warn!(attempt, error = %e, delay_ms, "POST request failed; retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        continue;
+                    }
+                    return Err(anyhow!("failed to send POST after {} attempts: {}", attempt + 1, e));
+                }
+            }
+        }
+    }
 }
 
 /// Calculate exponential backoff delay with jitter for a given attempt (1-based).

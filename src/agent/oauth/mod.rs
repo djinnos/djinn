@@ -1,7 +1,7 @@
 pub mod codex;
 pub mod copilot;
 
-use crate::agent::provider::{AuthMethod, FormatFamily, ProviderConfig};
+use crate::agent::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
 
 /// Which OAuth flow to run, determined by provider ID.
 pub enum OAuthFlowKind {
@@ -34,6 +34,7 @@ pub fn codex_provider_config(tokens: &codex::CodexTokens) -> ProviderConfig {
         context_window: 128_000,
         telemetry: None,
         provider_headers,
+        capabilities: ProviderCapabilities::default(),
     }
 }
 
@@ -47,5 +48,6 @@ pub fn copilot_provider_config(tokens: &copilot::CopilotTokens) -> ProviderConfi
         context_window: 128_000,
         telemetry: None,
         provider_headers: Default::default(),
+        capabilities: ProviderCapabilities::default(),
     }
 }

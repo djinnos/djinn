@@ -4,7 +4,7 @@ use reqwest::header::HeaderMap;
 use serde_json::{json, Value};
 use std::pin::Pin;
 
-use crate::agent::message::{ContentBlock, Conversation, Role};
+use crate::agent::message::{ContentBlock, Conversation};
 use crate::agent::provider::{
     LlmProvider, ProviderConfig, StreamEvent, TokenUsage,
 };
@@ -24,56 +24,11 @@ impl GoogleProvider {
     }
 
     fn build_request(&self, conversation: &Conversation, tools: &[Value]) -> Value {
-        // Google uses "contents" with "parts", and role is "user"/"model"
-        let contents: Vec<Value> = conversation
-            .user_messages()
-            .map(|msg| {
-                let role = match msg.role {
-                    Role::User => "user",
-                    Role::Assistant => "model",
-                    Role::System => "user",
-                };
+        let (system, contents) = conversation.to_google_contents();
 
-                let parts: Vec<Value> = msg
-                    .content
-                    .iter()
-                    .flat_map(|block| match block {
-                        ContentBlock::Text { text } => {
-                            vec![json!({"text": text})]
-                        }
-                        ContentBlock::ToolUse { name, input, .. } => {
-                            vec![json!({
-                                "functionCall": {
-                                    "name": name,
-                                    "args": input
-                                }
-                            })]
-                        }
-                        ContentBlock::ToolResult {
-                            tool_use_id: _,
-                            content,
-                            is_error: _,
-                        } => content
-                            .iter()
-                            .filter_map(|c| {
-                                if let ContentBlock::Text { text } = c {
-                                    Some(json!({"text": text}))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect(),
-                    })
-                    .collect();
-
-                json!({"role": role, "parts": parts})
-            })
-            .collect();
-
-        // System instruction as a separate field
         let mut body = json!({"contents": contents});
 
-        if let Some(sys) = conversation.system_prompt() {
+        if let Some(sys) = system {
             body["systemInstruction"] = json!({
                 "parts": [{"text": sys}]
             });

@@ -476,6 +476,7 @@ pub async fn run_task_lifecycle(
                 context_window: context_window.max(0) as u32,
                 telemetry: Some(telemetry_meta),
                 provider_headers: Default::default(),
+                capabilities: capabilities_for_provider(&catalog_provider_id),
             }
         }
     };

@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::pin::Pin;
 
-use crate::agent::message::{ContentBlock, Conversation, Role};
+use crate::agent::message::{ContentBlock, Conversation};
 use crate::agent::provider::client::ApiClient;
 use crate::agent::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
 
@@ -25,132 +25,23 @@ impl OpenAIResponsesProvider {
     }
 
     fn build_request(&self, conversation: &Conversation, tools: &[Value]) -> Value {
-        let mut input_items: Vec<Value> = Vec::new();
-        let mut instructions: Option<String> = None;
-
-        for msg in &conversation.messages {
-            match msg.role {
-                Role::System => {
-                    // System messages become the top-level "instructions" field
-                    let text = msg.text_content();
-                    if !text.is_empty() {
-                        match &mut instructions {
-                            Some(existing) => {
-                                existing.push_str("\n\n");
-                                existing.push_str(&text);
-                            }
-                            None => {
-                                instructions = Some(text);
-                            }
-                        }
-                    }
-                }
-                Role::User => {
-                    let mut text_items: Vec<Value> = Vec::new();
-
-                    for block in &msg.content {
-                        match block {
-                            ContentBlock::Text { text } if !text.is_empty() => {
-                                text_items.push(json!({"type": "input_text", "text": text}));
-                            }
-                            ContentBlock::ToolResult {
-                                tool_use_id,
-                                content,
-                                is_error,
-                            } => {
-                                // Flush pending text
-                                if !text_items.is_empty() {
-                                    input_items.push(json!({
-                                        "role": "user",
-                                        "content": std::mem::take(&mut text_items)
-                                    }));
-                                }
-
-                                let result_text: String = content
-                                    .iter()
-                                    .filter_map(|c| c.as_text())
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-
-                                let output = if *is_error {
-                                    format!("Error: {}", result_text)
-                                } else {
-                                    result_text
-                                };
-
-                                input_items.push(json!({
-                                    "type": "function_call_output",
-                                    "call_id": tool_use_id,
-                                    "output": output
-                                }));
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    if !text_items.is_empty() {
-                        input_items.push(json!({
-                            "role": "user",
-                            "content": text_items
-                        }));
-                    }
-                }
-                Role::Assistant => {
-                    let mut text_items: Vec<Value> = Vec::new();
-
-                    for block in &msg.content {
-                        match block {
-                            ContentBlock::Text { text } if !text.is_empty() => {
-                                text_items
-                                    .push(json!({"type": "output_text", "text": text}));
-                            }
-                            ContentBlock::ToolUse { id, name, input } => {
-                                // Flush pending text
-                                if !text_items.is_empty() {
-                                    input_items.push(json!({
-                                        "role": "assistant",
-                                        "content": std::mem::take(&mut text_items)
-                                    }));
-                                }
-
-                                let arguments_str = serde_json::to_string(input)
-                                    .unwrap_or_else(|_| "{}".to_string());
-
-                                input_items.push(json!({
-                                    "type": "function_call",
-                                    "call_id": id,
-                                    "name": name,
-                                    "arguments": arguments_str
-                                }));
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    if !text_items.is_empty() {
-                        input_items.push(json!({
-                            "role": "assistant",
-                            "content": text_items
-                        }));
-                    }
-                }
-            }
-        }
+        let (instructions, input_items) = conversation.to_openai_responses_input();
 
         let mut body = json!({
             "model": self.config.model_id,
             "input": input_items,
             "instructions": instructions.unwrap_or_default(),
             "store": false,
-            "stream": true,
         });
+
+        if self.config.capabilities.streaming {
+            body["stream"] = json!(true);
+        }
 
         if !tools.is_empty() {
             let tools_spec: Vec<Value> = tools
                 .iter()
                 .map(|tool| {
-                    // Tools come as rmcp::model::Tool with top-level name/description/inputSchema.
-                    // The Responses API expects {type, name, description, parameters}.
                     let name = tool.get("name")
                         .or_else(|| tool.get("function").and_then(|f| f.get("name")));
                     let description = tool.get("description")
@@ -460,8 +351,8 @@ impl LlmProvider for OpenAIResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::message::Message;
-    use crate::agent::provider::{AuthMethod, FormatFamily};
+    use crate::agent::message::{Message, Role};
+    use crate::agent::provider::{AuthMethod, FormatFamily, ProviderCapabilities};
 
     fn test_provider() -> OpenAIResponsesProvider {
         OpenAIResponsesProvider::new(ProviderConfig {
@@ -472,6 +363,7 @@ mod tests {
             context_window: 128000,
             telemetry: None,
             provider_headers: Default::default(),
+            capabilities: ProviderCapabilities::default(),
         })
     }
 

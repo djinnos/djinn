@@ -364,6 +364,26 @@ pub(crate) fn format_family_for_provider(
     }
 }
 
+pub(crate) fn capabilities_for_provider(
+    provider_id: &str,
+) -> crate::agent::provider::ProviderCapabilities {
+    use crate::agent::provider::ProviderCapabilities;
+    let lower = provider_id.to_lowercase();
+    if lower.contains("synthetic") || lower.contains("local") {
+        ProviderCapabilities {
+            streaming: false,
+            max_tokens_default: None,
+        }
+    } else if lower.contains("anthropic") {
+        ProviderCapabilities {
+            streaming: true,
+            max_tokens_default: Some(8192),
+        }
+    } else {
+        ProviderCapabilities::default()
+    }
+}
+
 pub(crate) fn auth_method_for_provider(
     provider_id: &str,
     api_key: &str,

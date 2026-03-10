@@ -374,6 +374,183 @@ impl Conversation {
 
         (system, msgs)
     }
+
+    // ─── Google serialization ────────────────────────────────────────────────
+
+    /// Serialize to Google AI Studio / Vertex AI `contents` format.
+    ///
+    /// Returns `(system_instruction, contents_array)`. The system instruction
+    /// is extracted from the first `System` message; non-system messages use
+    /// Google's `parts` format with `user` / `model` roles.
+    pub fn to_google_contents(&self) -> (Option<String>, Vec<serde_json::Value>) {
+        use serde_json::json;
+        let mut system: Option<String> = None;
+        let mut contents: Vec<serde_json::Value> = Vec::new();
+
+        for msg in &self.messages {
+            match &msg.role {
+                Role::System => {
+                    if system.is_none() {
+                        system = Some(msg.text_content());
+                    }
+                }
+                role => {
+                    let google_role = match role {
+                        Role::User => "user",
+                        Role::Assistant => "model",
+                        Role::System => unreachable!(),
+                    };
+
+                    let parts: Vec<serde_json::Value> = msg
+                        .content
+                        .iter()
+                        .flat_map(|block| match block {
+                            ContentBlock::Text { text } => {
+                                vec![json!({"text": text})]
+                            }
+                            ContentBlock::ToolUse { name, input, .. } => {
+                                vec![json!({"functionCall": {"name": name, "args": input}})]
+                            }
+                            ContentBlock::ToolResult { content, .. } => content
+                                .iter()
+                                .filter_map(|c| {
+                                    if let ContentBlock::Text { text } = c {
+                                        Some(json!({"text": text}))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect(),
+                        })
+                        .collect();
+
+                    contents.push(json!({"role": google_role, "parts": parts}));
+                }
+            }
+        }
+
+        (system, contents)
+    }
+
+    // ─── OpenAI Responses serialization ──────────────────────────────────────
+
+    /// Serialize to OpenAI Responses API `input` format.
+    ///
+    /// Returns `(instructions, input_items)`. System messages are merged into
+    /// a single `instructions` string; tool calls become `function_call` items
+    /// and tool results become `function_call_output` items.
+    pub fn to_openai_responses_input(&self) -> (Option<String>, Vec<serde_json::Value>) {
+        use serde_json::json;
+        let mut input_items: Vec<serde_json::Value> = Vec::new();
+        let mut instructions: Option<String> = None;
+
+        for msg in &self.messages {
+            match msg.role {
+                Role::System => {
+                    let text = msg.text_content();
+                    if !text.is_empty() {
+                        match &mut instructions {
+                            Some(existing) => {
+                                existing.push_str("\n\n");
+                                existing.push_str(&text);
+                            }
+                            None => {
+                                instructions = Some(text);
+                            }
+                        }
+                    }
+                }
+                Role::User => {
+                    let mut text_items: Vec<serde_json::Value> = Vec::new();
+
+                    for block in &msg.content {
+                        match block {
+                            ContentBlock::Text { text } if !text.is_empty() => {
+                                text_items.push(json!({"type": "input_text", "text": text}));
+                            }
+                            ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } => {
+                                if !text_items.is_empty() {
+                                    input_items.push(json!({
+                                        "role": "user",
+                                        "content": std::mem::take(&mut text_items)
+                                    }));
+                                }
+
+                                let result_text: String = content
+                                    .iter()
+                                    .filter_map(|c| c.as_text())
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+
+                                let output = if *is_error {
+                                    format!("Error: {}", result_text)
+                                } else {
+                                    result_text
+                                };
+
+                                input_items.push(json!({
+                                    "type": "function_call_output",
+                                    "call_id": tool_use_id,
+                                    "output": output
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if !text_items.is_empty() {
+                        input_items.push(json!({
+                            "role": "user",
+                            "content": text_items
+                        }));
+                    }
+                }
+                Role::Assistant => {
+                    let mut text_items: Vec<serde_json::Value> = Vec::new();
+
+                    for block in &msg.content {
+                        match block {
+                            ContentBlock::Text { text } if !text.is_empty() => {
+                                text_items.push(json!({"type": "output_text", "text": text}));
+                            }
+                            ContentBlock::ToolUse { id, name, input } => {
+                                if !text_items.is_empty() {
+                                    input_items.push(json!({
+                                        "role": "assistant",
+                                        "content": std::mem::take(&mut text_items)
+                                    }));
+                                }
+
+                                let arguments_str = serde_json::to_string(input)
+                                    .unwrap_or_else(|_| "{}".to_string());
+
+                                input_items.push(json!({
+                                    "type": "function_call",
+                                    "call_id": id,
+                                    "name": name,
+                                    "arguments": arguments_str
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if !text_items.is_empty() {
+                        input_items.push(json!({
+                            "role": "assistant",
+                            "content": text_items
+                        }));
+                    }
+                }
+            }
+        }
+
+        (instructions, input_items)
+    }
 }
 
 // ─── Anthropic content-block helpers ─────────────────────────────────────────

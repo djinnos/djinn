@@ -4,7 +4,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{json, Value};
 use std::pin::Pin;
 
-use crate::agent::message::{ContentBlock, Conversation, Role};
+use crate::agent::message::{ContentBlock, Conversation};
 use crate::agent::provider::{
     LlmProvider, ProviderConfig, StreamEvent, TokenUsage,
 };
@@ -24,64 +24,24 @@ impl AnthropicProvider {
     }
 
     fn build_request(&self, conversation: &Conversation, tools: &[Value]) -> Value {
-        let system = conversation.system_prompt().unwrap_or("").to_string();
+        let (system, messages) = conversation.to_anthropic_messages();
 
-        let messages: Vec<Value> = conversation
-            .user_messages()
-            .map(|msg| {
-                let role = match msg.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                    Role::System => "user", // shouldn't appear here
-                };
-
-                let content: Vec<Value> = msg
-                    .content
-                    .iter()
-                    .map(|block| match block {
-                        ContentBlock::Text { text } => json!({"type": "text", "text": text}),
-                        ContentBlock::ToolUse { id, name, input } => json!({
-                            "type": "tool_use",
-                            "id": id,
-                            "name": name,
-                            "input": input
-                        }),
-                        ContentBlock::ToolResult {
-                            tool_use_id,
-                            content: inner,
-                            is_error,
-                        } => {
-                            let inner_content: Vec<Value> = inner
-                                .iter()
-                                .filter_map(|c| {
-                                    if let ContentBlock::Text { text } = c {
-                                        Some(json!({"type": "text", "text": text}))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect();
-                            json!({
-                                "type": "tool_result",
-                                "tool_use_id": tool_use_id,
-                                "content": inner_content,
-                                "is_error": is_error
-                            })
-                        }
-                    })
-                    .collect();
-
-                json!({"role": role, "content": content})
-            })
-            .collect();
+        let max_tokens = self
+            .config
+            .capabilities
+            .max_tokens_default
+            .unwrap_or(8192);
 
         let mut body = json!({
             "model": self.config.model_id,
-            "system": system,
+            "system": system.unwrap_or_default(),
             "messages": messages,
-            "stream": true,
-            "max_tokens": 8192
+            "max_tokens": max_tokens
         });
+
+        if self.config.capabilities.streaming {
+            body["stream"] = json!(true);
+        }
 
         if !tools.is_empty() {
             body["tools"] = json!(tools);
