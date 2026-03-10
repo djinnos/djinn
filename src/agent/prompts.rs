@@ -1,8 +1,9 @@
-// Embedded prompt templates for Goose agent types.
+// Embedded prompt templates for Djinn agent types.
 //
 // Templates are compiled into the binary via include_str!() and rendered with
-// simple {{variable}} string substitution. The output is passed directly to
-// Goose's set_system_prompt_override().
+// simple {{variable}} string substitution. A shared base template provides
+// system identity, task context, workspace config, and common tools. Each role
+// template appends role-specific mission, instructions, and rules.
 
 use serde::Deserialize;
 
@@ -11,6 +12,7 @@ use crate::models::task::Task;
 
 // ─── Embedded templates ────────────────────────────────────────────────────────
 
+const BASE_TEMPLATE: &str = include_str!("prompts/base.md");
 const DEV_TEMPLATE: &str = include_str!("prompts/dev.md");
 const CONFLICT_RESOLVER_TEMPLATE: &str = include_str!("prompts/conflict-resolver.md");
 const TASK_REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.md");
@@ -58,17 +60,19 @@ pub struct TaskContext {
 ///
 /// Returns a plain `String` ready for `agent.set_system_prompt_override()`.
 pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> String {
-    let template = match agent_type {
-        AgentType::Worker => DEV_TEMPLATE,
-        AgentType::ConflictResolver => CONFLICT_RESOLVER_TEMPLATE,
-        AgentType::TaskReviewer => TASK_REVIEWER_TEMPLATE,
-        AgentType::PM => PM_TEMPLATE,
+    let (role_name, role_template) = match agent_type {
+        AgentType::Worker => ("Developer", DEV_TEMPLATE),
+        AgentType::ConflictResolver => ("Conflict Resolver", CONFLICT_RESOLVER_TEMPLATE),
+        AgentType::TaskReviewer => ("Task Reviewer", TASK_REVIEWER_TEMPLATE),
+        AgentType::PM => ("PM Intervention", PM_TEMPLATE),
     };
 
     let ac = format_acceptance_criteria(&task.acceptance_criteria);
     let labels = format_labels(&task.labels);
 
-    let mut out = template.to_string();
+    // Compose: base template + role-specific template
+    let mut out = format!("{BASE_TEMPLATE}\n{role_template}");
+    out = out.replace("{{role_name}}", role_name);
 
     // Task fields
     out = out.replace("{{task_id}}", &task.id);

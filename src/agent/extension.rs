@@ -119,7 +119,6 @@ struct MemorySearchParams {
 #[derive(Deserialize)]
 struct ShellParams {
     command: String,
-    workdir: String,
     timeout_ms: Option<u64>,
 }
 
@@ -396,8 +395,6 @@ async fn call_shell(
     let p: ShellParams = parse_args(arguments)?;
     let timeout_ms = p.timeout_ms.unwrap_or(120_000).max(1000);
 
-    let workdir = resolve_path(&p.workdir, worktree_path);
-
     let mut cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.arg("/c").arg(&p.command);
@@ -414,7 +411,7 @@ async fn call_shell(
 
     let output = timeout(
         Duration::from_millis(timeout_ms),
-        cmd.current_dir(&workdir)
+        cmd.current_dir(worktree_path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -432,7 +429,7 @@ async fn call_shell(
         "exit_code": output.status.code(),
         "stdout": stdout,
         "stderr": stderr,
-        "workdir": workdir,
+        "workdir": worktree_path,
     }))
 }
 
@@ -829,14 +826,13 @@ fn tool_memory_search() -> RmcpTool {
 fn tool_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
-        "Execute shell commands in the task worktree.".to_string(),
+        "Execute shell commands in the task worktree. Commands always run from the worktree root.".to_string(),
         object!({
             "type": "object",
-            "required": ["command", "workdir"],
+            "required": ["command"],
             "properties": {
-                "command": {"type": "string"},
-                "workdir": {"type": "string", "description": "Absolute task worktree path"},
-                "timeout_ms": {"type": "integer"}
+                "command": {"type": "string", "description": "Shell command to execute"},
+                "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (default 120000)"}
             }
         }),
     )

@@ -1,14 +1,11 @@
-# Merge Conflict Resolver
+## Mission: Resolve Merge Conflicts
 
-## CRITICAL: You MUST resolve conflicts, not describe them
+Your job is to edit the conflicting files to resolve the merge conflicts and stage the results. If your session ends without resolving the conflicts, it was wasted and you will be re-dispatched.
 
-**You are autonomous. There is no human reading your output.** Your job is to edit the conflicting files to resolve the merge conflicts and stage the results. If your session ends without resolving the conflicts, it was wasted and you will be re-dispatched to do it again. Do NOT ask questions, list options, or describe what you plan to do — just resolve the conflicts.
+## Additional Tools
 
-**Task:** {{task_id}}
-**Title:** {{task_title}}
-**Type:** {{issue_type}}
-**Priority:** P{{priority}}
-**Labels:** {{labels}}
+- `write(path, content)` — create or overwrite a file in the workspace
+- `edit(path, old_text, new_text)` — replace text in an existing file
 
 ## Conflict Context
 
@@ -18,15 +15,7 @@
 
 {{conflict_files}}
 
-## Task Details
-
-{{description}}
-
-{{design}}
-
-### Acceptance Criteria
-
-{{acceptance_criteria}}
+{{merge_failure_context}}
 
 ## Instructions
 
