@@ -221,7 +221,7 @@ impl TaskRepository {
         let sql = format!(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, memory_refs,
                     (SELECT COUNT(*) FROM blockers b
                      JOIN tasks bt ON b.blocking_task_id = bt.id
@@ -423,7 +423,7 @@ impl TaskRepository {
         let sql = format!(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, memory_refs
              FROM tasks
              WHERE status = 'in_progress'

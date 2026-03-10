@@ -6,7 +6,7 @@ impl TaskRepository {
         Ok(sqlx::query_as::<_, Task>(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE epic_id = ?1 ORDER BY priority, created_at",
         )
@@ -20,7 +20,7 @@ impl TaskRepository {
         Ok(sqlx::query_as::<_, Task>(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE status = ?1 ORDER BY priority, created_at",
         )
@@ -42,7 +42,7 @@ impl TaskRepository {
         Ok(sqlx::query_as::<_, Task>(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE short_id = ?1",
         )
@@ -57,7 +57,7 @@ impl TaskRepository {
         Ok(sqlx::query_as::<_, Task>(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE id = ?1 OR short_id = ?1",
         )
@@ -75,7 +75,7 @@ impl TaskRepository {
         Ok(sqlx::query_as::<_, Task>(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE project_id = ?1 AND (id = ?2 OR short_id = ?2)",
         )
@@ -95,7 +95,7 @@ impl TaskRepository {
         Ok(sqlx::query_as::<_, Task>(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, memory_refs
              FROM tasks WHERE memory_refs LIKE ?1
              ORDER BY priority, created_at",
@@ -115,7 +115,7 @@ impl TaskRepository {
         let sql = if project_id.is_some() {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, memory_refs
              FROM tasks
              WHERE project_id = ?1
@@ -124,7 +124,7 @@ impl TaskRepository {
         } else {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, memory_refs
              FROM tasks
              WHERE (status != 'closed' OR closed_at > datetime('now', '-1 hour'))
@@ -168,7 +168,7 @@ impl TaskRepository {
             "INSERT INTO tasks (
                 id, project_id, short_id, epic_id, title, description, design,
                 issue_type, status, priority, owner, labels,
-                acceptance_criteria, reopen_count, continuation_count,
+                acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
                 created_at, updated_at, closed_at,
                 close_reason, merge_commit_sha, memory_refs
              ) VALUES (
@@ -258,7 +258,7 @@ impl TaskRepository {
             "INSERT INTO tasks (
                 id, project_id, short_id, epic_id, title, description, design,
                 issue_type, status, priority, owner, labels,
-                acceptance_criteria, reopen_count, continuation_count,
+                acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
                 created_at, updated_at, closed_at,
                 close_reason, merge_commit_sha, memory_refs
              ) VALUES (
