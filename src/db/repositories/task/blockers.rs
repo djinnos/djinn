@@ -102,6 +102,7 @@ impl TaskRepository {
             "SELECT t.id, t.project_id, t.short_id, t.epic_id, t.title, t.description, t.design,
                     t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
+                    t.verification_failure_count,
                     t.created_at, t.updated_at, t.closed_at,
                     t.close_reason, t.merge_commit_sha, t.memory_refs
              FROM blockers b
