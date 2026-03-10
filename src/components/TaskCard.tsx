@@ -73,10 +73,10 @@ function statusToPipelineStage(status: string): PipelineStage | null {
 const ACTIVELY_WORKING = new Set(["in_progress", "in_task_review", "verifying"]);
 
 function getStatusOverlay(status: string): { label: string; className: string } | null {
-  if (status === "conflict_resolution") {
-    return { label: "resolving…", className: "text-orange-400" };
+  if (status === "in_pm_intervention") {
+    return { label: "intervening…", className: "text-red-400 animate-pulse" };
   }
-  if (status === "needs_pm_intervention" || status === "in_pm_intervention") {
+  if (status === "needs_pm_intervention") {
     return { label: "intervening…", className: "text-red-400" };
   }
   return null;
@@ -122,9 +122,6 @@ function PipelineIndicator({ status }: { status: string }) {
 // --- Card tint based on status ---
 
 function getCardTint(task: Task): { ring: string; bg: string; hover: string } | null {
-  if (task.status === "conflict_resolution") {
-    return { ring: "ring-orange-500/40", bg: "bg-orange-500/5", hover: "hover:bg-orange-500/10 hover:ring-orange-500/60" };
-  }
   if (task.status === "needs_pm_intervention" || task.status === "in_pm_intervention") {
     return { ring: "ring-red-500/40", bg: "bg-red-500/5", hover: "hover:bg-red-500/10 hover:ring-red-500/60" };
   }
@@ -196,8 +193,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
     task.status === "needs_task_review" ||
     task.status === "in_task_review" ||
     task.status === "needs_pm_intervention" ||
-    task.status === "in_pm_intervention" ||
-    task.status === "conflict_resolution";
+    task.status === "in_pm_intervention";
   const isDone = task.status === "closed";
   const hasBlockers = (task.unresolved_blocker_count ?? 0) > 0;
   const ac = task.acceptance_criteria ?? [];

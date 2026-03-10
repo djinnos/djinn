@@ -18,7 +18,6 @@ const STATUS_LABELS: Record<string, string> = {
   verifying: "In Flight — Verification",
   needs_task_review: "In Flight — Review",
   in_task_review: "In Flight — Review",
-  conflict_resolution: "In Flight — Conflict Resolution",
   needs_pm_intervention: "In Flight — PM Intervention",
   in_pm_intervention: "In Flight — PM Intervention",
   closed: "Done",

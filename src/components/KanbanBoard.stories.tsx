@@ -94,11 +94,6 @@ const tasksFixture: Task[] = [
     duration_seconds: 1860,
   }),
 
-  // In Flight — conflict resolution (orange tint)
-  makeTask("t-16", "Theme system conflicts", "conflict_resolution", 1, "Alex", "epic-ux", [], "2026-03-01T11:25:00.000Z", {
-    duration_seconds: 240,
-  }),
-
   // In Flight — PM intervention (red tint)
   makeTask("t-17", "Credential validation flow", "in_pm_intervention", 0, "Priya", "epic-auth", [], "2026-03-01T11:30:00.000Z", {
     duration_seconds: 360,

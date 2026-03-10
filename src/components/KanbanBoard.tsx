@@ -73,8 +73,7 @@ function taskToColumnKey(task: Task): ColumnKey {
     task.status === "needs_task_review" ||
     task.status === "in_task_review" ||
     task.status === "needs_pm_intervention" ||
-    task.status === "in_pm_intervention" ||
-    task.status === "conflict_resolution"
+    task.status === "in_pm_intervention"
   )
     return "in_flight";
   return "open";
