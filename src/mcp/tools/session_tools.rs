@@ -454,11 +454,8 @@ impl DjinnMcpServer {
             .filter(|(_, role, _, _)| role != "system") // skip system prompts
             .map(|(session_id, role, content_json, created_at)| {
                 let content: Vec<super::json_object::AnyJson> =
-                    serde_json::from_str::<Vec<serde_json::Value>>(&content_json)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(super::json_object::AnyJson)
-                        .collect();
+                    serde_json::from_str::<Vec<super::json_object::AnyJson>>(&content_json)
+                        .unwrap_or_default();
                 let (agent_type, model_id) = session_info
                     .get(&session_id)
                     .copied()
