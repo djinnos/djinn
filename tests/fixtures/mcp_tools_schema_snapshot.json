@@ -4386,10 +4386,6 @@
             "nullable": true,
             "type": "string"
           },
-          "goose_session_id": {
-            "nullable": true,
-            "type": "string"
-          },
           "messages": {
             "items": {
               "$ref": "#/$defs/SessionMessage"

@@ -36,8 +36,6 @@ pub enum PoolError {
     SlotNotFound { slot_id: usize },
     #[error("slot error: {0}")]
     Slot(#[from] super::super::SlotError),
-    #[error("failed to load Goose session: {0}")]
-    LoadSession(String),
 }
 
 #[derive(Debug, Clone)]
@@ -90,10 +88,6 @@ pub enum PoolMessage {
     GetSessionForTask {
         task_id: String,
         respond_to: Reply<Option<RunningTaskInfo>>,
-    },
-    GetGooseSession {
-        goose_session_id: String,
-        respond_to: Reply<serde_json::Value>,
     },
     Reconfigure {
         config: SlotPoolConfig,

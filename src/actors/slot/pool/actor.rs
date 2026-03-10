@@ -178,14 +178,6 @@ impl SlotPool {
             } => {
                 let _ = respond_to.send(Ok(self.session_for_task(&task_id)));
             }
-            PoolMessage::GetGooseSession {
-                goose_session_id: _,
-                respond_to,
-            } => {
-                let _ = respond_to.send(Err(PoolError::LoadSession(
-                    "goose session loading removed; use session_messages DB tool".to_string(),
-                )));
-            }
             PoolMessage::Reconfigure { config, respond_to } => {
                 let _ = respond_to.send(self.reconfigure(config).await);
             }
