@@ -489,7 +489,6 @@ mod tests {
         let _ = test_helpers::mcp_call_tool(
             &app,
             &session_id,
-            3,
             "project_add",
             serde_json::json!({
                 "name": "contract-shape-project",
@@ -501,7 +500,6 @@ mod tests {
         let provider_catalog = test_helpers::mcp_call_tool(
             &app,
             &session_id,
-            4,
             "provider_catalog",
             serde_json::json!({}),
         )
@@ -523,7 +521,6 @@ mod tests {
         let credential_list = test_helpers::mcp_call_tool(
             &app,
             &session_id,
-            5,
             "credential_list",
             serde_json::json!({}),
         )
