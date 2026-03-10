@@ -473,6 +473,7 @@ pub fn compute_transition(
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
                 reset_continuation: true,
+                reset_verification_failure: true,
                 ..Default::default()
             }
         }
