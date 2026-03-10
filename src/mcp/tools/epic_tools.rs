@@ -916,3 +916,395 @@ impl DjinnMcpServer {
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::test_helpers::{
+        create_test_app, create_test_epic, create_test_project, create_test_task,
+        initialize_mcp_session, mcp_call_tool,
+    };
+
+    #[tokio::test]
+    async fn epic_create_success_shape() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_create",
+            json!({"project": project.path, "title": "New Epic"}),
+        )
+        .await;
+
+        assert!(result.get("error").is_none());
+        assert!(result["id"].as_str().is_some());
+        assert!(result["short_id"].as_str().is_some());
+        assert_eq!(result["status"], "open");
+        assert_eq!(result["title"], "New Epic");
+    }
+
+    #[tokio::test]
+    async fn epic_create_error_on_missing_project() {
+        let app = create_test_app();
+        let session_id = initialize_mcp_session(&app).await;
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_create",
+            json!({"project": "/missing/project", "title": "X"}),
+        )
+        .await;
+        assert!(result["error"].as_str().unwrap_or_default().contains("project"));
+    }
+
+    #[tokio::test]
+    async fn epic_show_found_shape_with_task_counts() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let _task = create_test_task(&db, &project.id, &epic.id).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_show",
+            json!({"project": project.path, "id": epic.short_id}),
+        )
+        .await;
+
+        assert!(result.get("error").is_none());
+        assert_eq!(result["id"], epic.id);
+        assert_eq!(result["task_count"], 1);
+        assert_eq!(result["open_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn epic_show_not_found_error() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_show",
+            json!({"project": project.path, "id": "does-not-exist"}),
+        )
+        .await;
+
+        assert!(result["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("epic not found"));
+    }
+
+    #[tokio::test]
+    async fn epic_list_default_returns_epics() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let _e1 = create_test_epic(&db, &project.id).await;
+        let _e2 = create_test_epic(&db, &project.id).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let result = mcp_call_tool(&app, &session_id, "epic_list", json!({"project": project.path})).await;
+
+        assert!(result.get("error").is_none());
+        assert!(result["epics"].as_array().is_some());
+        assert!(result["total_count"].as_i64().unwrap_or_default() >= 2);
+    }
+
+    #[tokio::test]
+    async fn epic_list_filter_by_status() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let open_epic = create_test_epic(&db, &project.id).await;
+        let closed_epic = create_test_epic(&db, &project.id).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let _ = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_close",
+            json!({"project": project.path, "id": closed_epic.id}),
+        )
+        .await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_list",
+            json!({"project": project.path, "status": "open"}),
+        )
+        .await;
+
+        let epics = result["epics"].as_array().cloned().unwrap_or_default();
+        assert!(epics.iter().all(|e| e["status"] == "open"));
+        assert!(epics.iter().any(|e| e["id"] == open_epic.id));
+        assert!(!epics.iter().any(|e| e["id"] == closed_epic.id));
+    }
+
+    #[tokio::test]
+    async fn epic_update_partial_fields() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_update",
+            json!({
+                "project": project.path,
+                "id": epic.id,
+                "title": "Updated Epic",
+                "description": "Updated description",
+                "color": "purple",
+                "emoji": "🚀"
+            }),
+        )
+        .await;
+
+        assert!(result.get("error").is_none());
+        assert_eq!(result["title"], "Updated Epic");
+        assert_eq!(result["description"], "Updated description");
+        assert_eq!(result["color"], "purple");
+        assert_eq!(result["emoji"], "🚀");
+    }
+
+    #[tokio::test]
+    async fn epic_close_success() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_close",
+            json!({"project": project.path, "id": epic.short_id}),
+        )
+        .await;
+
+        assert!(result.get("error").is_none());
+        assert_eq!(result["status"], "closed");
+    }
+
+    #[tokio::test]
+    async fn epic_close_error_when_already_closed() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let _ = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_close",
+            json!({"project": project.path, "id": epic.id}),
+        )
+        .await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_close",
+            json!({"project": project.path, "id": epic.id}),
+        )
+        .await;
+
+        assert!(result["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("must be open"));
+    }
+
+    #[tokio::test]
+    async fn epic_reopen_success_from_closed() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let _ = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_close",
+            json!({"project": project.path, "id": epic.id}),
+        )
+        .await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_reopen",
+            json!({"project": project.path, "id": epic.short_id}),
+        )
+        .await;
+
+        assert!(result.get("error").is_none());
+        assert_eq!(result["status"], "open");
+    }
+
+    #[tokio::test]
+    async fn epic_reopen_error_when_already_open() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_reopen",
+            json!({"project": project.path, "id": epic.id}),
+        )
+        .await;
+
+        assert!(result["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not closed"));
+    }
+
+    #[tokio::test]
+    async fn epic_delete_success_and_cascade_child_tasks() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let _task1 = create_test_task(&db, &project.id, &epic.id).await;
+        let _task2 = create_test_task(&db, &project.id, &epic.id).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_delete",
+            json!({"project": project.path, "id": epic.short_id}),
+        )
+        .await;
+
+        assert!(result.get("error").is_none());
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["deleted_task_count"], 2);
+
+        let tasks_result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_tasks",
+            json!({"project": project.path, "epic_id": epic.id}),
+        )
+        .await;
+        assert!(tasks_result["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("epic not found"));
+    }
+
+    #[tokio::test]
+    async fn epic_tasks_returns_child_tasks() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let _task = create_test_task(&db, &project.id, &epic.id).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_tasks",
+            json!({"project": project.path, "epic_id": epic.short_id}),
+        )
+        .await;
+
+        assert!(result.get("error").is_none());
+        assert_eq!(result["total_count"], 1);
+        assert_eq!(result["tasks"].as_array().map(|a| a.len()).unwrap_or_default(), 1);
+    }
+
+    #[tokio::test]
+    async fn epic_tasks_empty_when_no_tasks() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_tasks",
+            json!({"project": project.path, "epic_id": epic.id}),
+        )
+        .await;
+
+        assert!(result.get("error").is_none());
+        assert_eq!(result["total_count"], 0);
+        assert_eq!(result["tasks"].as_array().map(|a| a.len()).unwrap_or_default(), 0);
+    }
+
+    #[tokio::test]
+    async fn epic_count_plain_total() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let _e1 = create_test_epic(&db, &project.id).await;
+        let _e2 = create_test_epic(&db, &project.id).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let result = mcp_call_tool(&app, &session_id, "epic_count", json!({"project": project.path})).await;
+
+        assert!(result.get("error").is_none());
+        assert!(result["total_count"].as_i64().unwrap_or_default() >= 2);
+    }
+
+    #[tokio::test]
+    async fn epic_count_grouped_by_status() {
+        let app = create_test_app();
+        let db = crate::server::state_from_app(&app).db().clone();
+        let project = create_test_project(&db).await;
+        let _open = create_test_epic(&db, &project.id).await;
+        let closed = create_test_epic(&db, &project.id).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let _ = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_close",
+            json!({"project": project.path, "id": closed.id}),
+        )
+        .await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_count",
+            json!({"project": project.path, "group_by": "status"}),
+        )
+        .await;
+
+        assert!(result.get("error").is_none());
+        let groups = result["groups"].as_array().cloned().unwrap_or_default();
+        assert!(groups.iter().any(|g| g["key"] == "open"));
+        assert!(groups.iter().any(|g| g["key"] == "closed"));
+    }
+}

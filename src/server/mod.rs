@@ -539,7 +539,6 @@ mod tests {
         let task_list = test_helpers::mcp_call_tool(
             &app,
             &session_id,
-            6,
             "task_list",
             serde_json::json!({ "project": CONTRACT_PROJECT_PATH }),
         )
@@ -558,7 +557,6 @@ mod tests {
         let epic_list = test_helpers::mcp_call_tool(
             &app,
             &session_id,
-            7,
             "epic_list",
             serde_json::json!({ "project": CONTRACT_PROJECT_PATH }),
         )
@@ -583,7 +581,6 @@ mod tests {
         let _ = test_helpers::mcp_call_tool(
             &app,
             &session_id,
-            8,
             "project_add",
             serde_json::json!({
                 "name": "contract-not-found-project",
@@ -595,7 +592,6 @@ mod tests {
         let task_show = test_helpers::mcp_call_tool(
             &app,
             &session_id,
-            9,
             "task_show",
             serde_json::json!({
                 "project": CONTRACT_PROJECT_PATH,
@@ -611,7 +607,6 @@ mod tests {
         let epic_show = test_helpers::mcp_call_tool(
             &app,
             &session_id,
-            10,
             "epic_show",
             serde_json::json!({
                 "project": CONTRACT_PROJECT_PATH,
