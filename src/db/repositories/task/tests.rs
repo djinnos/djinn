@@ -91,6 +91,128 @@ async fn create_emits_event() {
     }
 }
 
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_emits_event() {
+    let db = test_helpers::create_test_db();
+    let (tx, mut rx) = broadcast::channel(256);
+    let epic = make_epic(&db, tx.clone()).await;
+    let _ = rx.recv().await.unwrap();
+    let repo = TaskRepository::new(db, tx);
+
+    let task = repo
+        .create(&epic.id, "Old", "", "", "task", 0, "")
+        .await
+        .unwrap();
+    let _ = rx.recv().await.unwrap();
+
+    let updated = repo
+        .update(&task.id, "New", "desc", "details", 1, "task", "", "")
+        .await
+        .unwrap();
+    assert_eq!(updated.title, "New");
+
+    match rx.recv().await.unwrap() {
+        DjinnEvent::TaskUpdated { task: t, from_sync: false } => {
+            assert_eq!(t.id, task.id);
+            assert_eq!(t.title, "New");
+        }
+        _ => panic!("expected TaskUpdated"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transition_emits_event_start() {
+    let db = test_helpers::create_test_db();
+    let (tx, mut rx) = broadcast::channel(256);
+    let epic = make_epic(&db, tx.clone()).await;
+    let _ = rx.recv().await.unwrap();
+    let repo = TaskRepository::new(db, tx);
+
+    let task = repo
+        .create(&epic.id, "T", "", "", "task", 0, "")
+        .await
+        .unwrap();
+    let _ = rx.recv().await.unwrap();
+
+    repo.transition(&task.id, TransitionAction::Start, "", "system", None, None)
+        .await
+        .unwrap();
+
+    match rx.recv().await.unwrap() {
+        DjinnEvent::TaskUpdated { task: t, from_sync: false } => {
+            assert_eq!(t.id, task.id);
+            assert_eq!(t.status, "in_progress");
+        }
+        _ => panic!("expected TaskUpdated"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transition_emits_event_close_with_closed_at() {
+    let db = test_helpers::create_test_db();
+    let (tx, mut rx) = broadcast::channel(256);
+    let epic = make_epic(&db, tx.clone()).await;
+    let _ = rx.recv().await.unwrap();
+    let repo = TaskRepository::new(db, tx);
+
+    let task = repo
+        .create(&epic.id, "T", "", "", "task", 0, "")
+        .await
+        .unwrap();
+    let _ = rx.recv().await.unwrap();
+
+    repo.transition(&task.id, TransitionAction::Close, "", "system", None, None)
+        .await
+        .unwrap();
+
+    match rx.recv().await.unwrap() {
+        DjinnEvent::TaskUpdated { task: t, from_sync: false } => {
+            assert_eq!(t.id, task.id);
+            assert_eq!(t.status, "closed");
+            assert!(t.closed_at.is_some());
+        }
+        _ => panic!("expected TaskUpdated"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transition_emits_event_reopen() {
+    let db = test_helpers::create_test_db();
+    let (tx, mut rx) = broadcast::channel(256);
+    let epic = make_epic(&db, tx.clone()).await;
+    let _ = rx.recv().await.unwrap();
+    let repo = TaskRepository::new(db, tx);
+
+    let task = repo
+        .create(&epic.id, "T", "", "", "task", 0, "")
+        .await
+        .unwrap();
+    let _ = rx.recv().await.unwrap();
+
+    repo.set_status(&task.id, "closed").await.unwrap();
+    let _ = rx.recv().await.unwrap();
+
+    repo.transition(
+        &task.id,
+        TransitionAction::Reopen,
+        "system",
+        "system",
+        Some("reopening after verification"),
+        None,
+    )
+        .await
+        .unwrap();
+
+    match rx.recv().await.unwrap() {
+        DjinnEvent::TaskUpdated { task: t, from_sync: false } => {
+            assert_eq!(t.id, task.id);
+            assert_eq!(t.status, "open");
+            assert!(t.closed_at.is_none());
+        }
+        _ => panic!("expected TaskUpdated"),
+    }
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn set_status_transitions() {
     let db = test_helpers::create_test_db();

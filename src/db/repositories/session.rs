@@ -301,7 +301,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn create_and_update_emit_events() {
+    async fn complete_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
         let (project_id, task_id) = create_task(tx.clone(), db.clone()).await;

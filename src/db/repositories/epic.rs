@@ -589,7 +589,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn update_epic() {
+    async fn update_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
@@ -610,19 +610,54 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn close_epic() {
+    async fn close_emits_event() {
         let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
+        let (tx, mut rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
         let epic = repo.create("Closeable", "", "", "", "").await.unwrap();
+        let _ = rx.recv().await.unwrap();
         let closed = repo.close(&epic.id).await.unwrap();
         assert_eq!(closed.status, "closed");
         assert!(closed.closed_at.is_some());
+
+        match rx.recv().await.unwrap() {
+            DjinnEvent::EpicUpdated(e) => {
+                assert_eq!(e.id, epic.id);
+                assert_eq!(e.status, "closed");
+                assert!(e.closed_at.is_some());
+            }
+            _ => panic!("expected EpicUpdated"),
+        }
+    }
+
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopen_emits_event() {
+        let db = test_helpers::create_test_db();
+        let (tx, mut rx) = broadcast::channel(256);
+        let repo = EpicRepository::new(db, tx);
+
+        let epic = repo.create("Reopen", "", "", "", "").await.unwrap();
+        let _ = rx.recv().await.unwrap();
+        repo.close(&epic.id).await.unwrap();
+        let _ = rx.recv().await.unwrap();
+
+        let reopened = repo.reopen(&epic.id).await.unwrap();
+        assert_eq!(reopened.status, "open");
+
+        match rx.recv().await.unwrap() {
+            DjinnEvent::EpicUpdated(e) => {
+                assert_eq!(e.id, epic.id);
+                assert_eq!(e.status, "open");
+                assert!(e.closed_at.is_none());
+            }
+            _ => panic!("expected EpicUpdated"),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn delete_epic() {
+    async fn delete_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
