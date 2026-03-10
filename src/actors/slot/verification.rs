@@ -158,8 +158,9 @@ async fn handle_verification_failure(
         .await;
 
     // Check if we've hit the escalation threshold.
-    if let Ok(task) = updated {
-        if task.verification_failure_count >= VERIFICATION_ESCALATION_THRESHOLD {
+    if let Ok(task) = updated
+        && task.verification_failure_count >= VERIFICATION_ESCALATION_THRESHOLD
+    {
             tracing::warn!(
                 task_id = %task_id,
                 verification_failure_count = task.verification_failure_count,
@@ -180,6 +181,5 @@ async fn handle_verification_failure(
                     None,
                 )
                 .await;
-        }
     }
 }

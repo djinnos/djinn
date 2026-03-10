@@ -15,6 +15,8 @@ use crate::server::AppState;
 use super::*;
 
 const MAX_TURNS: u32 = 1000;
+/// Maximum retries for empty assistant turns before treating as a hard failure.
+const MAX_EMPTY_TURN_RETRIES: u32 = 2;
 
 fn is_context_length_error(e: &anyhow::Error) -> bool {
     let msg = e.to_string().to_lowercase();
@@ -141,6 +143,7 @@ pub(super) async fn run_reply_loop(
         let mut assistant_message_count: usize = 0;
         let mut assistant_fragments: Vec<String> = Vec::new();
         let mut compaction_attempts: u32 = 0;
+        let mut empty_turn_retries: u32 = 0;
 
         // Track the last assistant text for output parsing.
         let mut last_assistant_text = String::new();
@@ -387,10 +390,19 @@ pub(super) async fn run_reply_loop(
             }
 
             if !saw_round_event {
+                if empty_turn_retries < MAX_EMPTY_TURN_RETRIES {
+                    empty_turn_retries += 1;
+                    tracing::warn!(
+                        task_id = %task_id,
+                        retry = empty_turn_retries,
+                        "ReplyLoop: provider stream ended without events; retrying"
+                    );
+                    continue;
+                }
                 let diag = runtime_fs_diagnostics(project_path, worktree_path);
                 return Err(anyhow::anyhow!(
-                    "provider stream ended without any events; {}",
-                    diag
+                    "provider stream ended without any events (after {} retries); {}",
+                    empty_turn_retries, diag
                 ));
             }
 
@@ -411,13 +423,23 @@ pub(super) async fn run_reply_loop(
             }
 
             if assistant_content.is_empty() {
-                // No content at all — treat as a provider error.
+                if empty_turn_retries < MAX_EMPTY_TURN_RETRIES {
+                    empty_turn_retries += 1;
+                    tracing::warn!(
+                        task_id = %task_id,
+                        retry = empty_turn_retries,
+                        "ReplyLoop: provider returned empty assistant turn; retrying"
+                    );
+                    continue;
+                }
                 let diag = runtime_fs_diagnostics(project_path, worktree_path);
                 return Err(anyhow::anyhow!(
-                    "provider returned empty assistant turn; {}",
-                    diag
+                    "provider returned empty assistant turn (after {} retries); {}",
+                    empty_turn_retries, diag
                 ));
             }
+            // Reset retry counter on successful content.
+            empty_turn_retries = 0;
 
             let assistant_msg = Message {
                 role: Role::Assistant,
