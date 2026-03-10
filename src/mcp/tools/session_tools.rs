@@ -504,3 +504,4 @@ impl DjinnMcpServer {
         })
     }
 }
+#[cfg(test)] mod tests;
