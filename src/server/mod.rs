@@ -380,7 +380,7 @@ mod tests {
         }
 
         let app = test_helpers::create_test_app();
-        let session_id = initialize_mcp_session(&app).await;
+        let session_id = test_helpers::initialize_mcp_session(&app).await;
         let list_event =
             mcp_jsonrpc(&app, &session_id, 2, "tools/list", serde_json::json!({})).await;
         let result = list_event.get("result").expect("tools/list result missing");
@@ -428,7 +428,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_tools_list_schema_snapshot_matches_repo_file() {
         let app = test_helpers::create_test_app();
-        let session_id = initialize_mcp_session(&app).await;
+        let session_id = test_helpers::initialize_mcp_session(&app).await;
 
         let list_event =
             mcp_jsonrpc(&app, &session_id, 2, "tools/list", serde_json::json!({})).await;
@@ -484,9 +484,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_contract_desktop_critical_tools_success_shapes() {
         let app = test_helpers::create_test_app();
-        let session_id = initialize_mcp_session(&app).await;
+        let session_id = test_helpers::initialize_mcp_session(&app).await;
 
-        let _ = mcp_call_tool(
+        let _ = test_helpers::mcp_call_tool(
             &app,
             &session_id,
             3,
@@ -498,7 +498,7 @@ mod tests {
         )
         .await;
 
-        let provider_catalog = mcp_call_tool(
+        let provider_catalog = test_helpers::mcp_call_tool(
             &app,
             &session_id,
             4,
@@ -520,7 +520,7 @@ mod tests {
             assert!(provider.get("connected").and_then(Value::as_bool).is_some());
         }
 
-        let credential_list = mcp_call_tool(
+        let credential_list = test_helpers::mcp_call_tool(
             &app,
             &session_id,
             5,
@@ -536,7 +536,7 @@ mod tests {
             "credential_list must return credentials array"
         );
 
-        let task_list = mcp_call_tool(
+        let task_list = test_helpers::mcp_call_tool(
             &app,
             &session_id,
             6,
@@ -555,7 +555,7 @@ mod tests {
         assert!(task_list.get("offset").and_then(Value::as_i64).is_some());
         assert!(task_list.get("has_more").and_then(Value::as_bool).is_some());
 
-        let epic_list = mcp_call_tool(
+        let epic_list = test_helpers::mcp_call_tool(
             &app,
             &session_id,
             7,
@@ -578,9 +578,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_contract_not_found_shapes_include_error_field() {
         let app = test_helpers::create_test_app();
-        let session_id = initialize_mcp_session(&app).await;
+        let session_id = test_helpers::initialize_mcp_session(&app).await;
 
-        let _ = mcp_call_tool(
+        let _ = test_helpers::mcp_call_tool(
             &app,
             &session_id,
             8,
@@ -592,7 +592,7 @@ mod tests {
         )
         .await;
 
-        let task_show = mcp_call_tool(
+        let task_show = test_helpers::mcp_call_tool(
             &app,
             &session_id,
             9,
@@ -608,7 +608,7 @@ mod tests {
             "task_show not-found response must include error"
         );
 
-        let epic_show = mcp_call_tool(
+        let epic_show = test_helpers::mcp_call_tool(
             &app,
             &session_id,
             10,
