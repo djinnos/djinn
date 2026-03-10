@@ -252,6 +252,45 @@ export async function updateProject(projectId: string, updates: { branch?: strin
   });
 }
 
+// Project commands
+
+export interface ProjectCommandSpec {
+  name: string;
+  command: string;
+  timeout_secs?: number;
+}
+
+export interface ProjectCommands {
+  setup_commands: ProjectCommandSpec[];
+  verification_commands: ProjectCommandSpec[];
+}
+
+export interface CommandValidationError {
+  command_name: string;
+  exit_code: number;
+  stderr: string;
+  stdout: string;
+}
+
+export async function fetchProjectCommands(projectPath: string): Promise<ProjectCommands> {
+  const data = await callMcpTool("project_commands_get", { project: projectPath });
+  return {
+    setup_commands: data.setup_commands,
+    verification_commands: data.verification_commands,
+  };
+}
+
+export async function saveProjectCommands(
+  projectPath: string,
+  commands: { setup_commands?: ProjectCommandSpec[]; verification_commands?: ProjectCommandSpec[] },
+): Promise<CommandValidationError[]> {
+  const result = await callMcpTool("project_commands_set", {
+    project: projectPath,
+    ...commands,
+  });
+  return result.validation_errors;
+}
+
 export async function removeProject(projectId: string): Promise<void> {
   const projects = await callMcpTool("project_list");
   const project = projects.projects.find((entry) => entry.id === projectId);

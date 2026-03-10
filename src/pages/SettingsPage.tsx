@@ -2,7 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { NavLink, Navigate, useParams } from 'react-router-dom';
-import { fetchProjects, addProject, removeProject, updateProject, type Project } from '@/api/server';
+import {
+  fetchProjects, addProject, removeProject, updateProject,
+  fetchProjectCommands, saveProjectCommands,
+  type Project, type ProjectCommandSpec, type CommandValidationError,
+} from '@/api/server';
 import { Input } from '@/components/ui/input';
 import { InlineError } from '@/components/InlineError';
 import { EmptyState } from '@/components/EmptyState';
@@ -211,6 +215,175 @@ function ProvidersSettings() {
   );
 }
 
+function CommandRow({
+  cmd,
+  onChange,
+  onRemove,
+}: {
+  cmd: ProjectCommandSpec;
+  onChange: (next: ProjectCommandSpec) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="space-y-1.5 rounded-md border border-border bg-background p-3">
+      <div className="flex items-center gap-2">
+        <Input
+          className="flex-1"
+          placeholder="Name"
+          value={cmd.name}
+          onChange={(e) => onChange({ ...cmd, name: e.target.value })}
+        />
+        <Input
+          className="w-20"
+          type="number"
+          placeholder="300"
+          value={cmd.timeout_secs ?? ''}
+          onChange={(e) => onChange({ ...cmd, timeout_secs: e.target.value ? Number(e.target.value) : undefined })}
+          title="Timeout (seconds)"
+        />
+        <Button variant="ghost" size="sm" onClick={onRemove} className="shrink-0 text-muted-foreground hover:text-destructive">
+          Remove
+        </Button>
+      </div>
+      <Input
+        className="font-mono text-xs"
+        placeholder="Shell command"
+        value={cmd.command}
+        onChange={(e) => onChange({ ...cmd, command: e.target.value })}
+      />
+    </div>
+  );
+}
+
+function ProjectCommandsEditor({ projectPath }: { projectPath: string }) {
+  const [setup, setSetup] = useState<ProjectCommandSpec[]>([]);
+  const [verification, setVerification] = useState<ProjectCommandSpec[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [errors, setErrors] = useState<CommandValidationError[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
+    fetchProjectCommands(projectPath)
+      .then((data) => {
+        if (cancelled) return;
+        setSetup(data.setup_commands);
+        setVerification(data.verification_commands);
+        setDirty(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setLoadError(err instanceof Error ? err.message : 'Failed to load commands');
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [projectPath]);
+
+  const updateSetup = (index: number, cmd: ProjectCommandSpec) => {
+    setSetup((prev) => prev.map((c, i) => (i === index ? cmd : c)));
+    setDirty(true);
+  };
+
+  const updateVerification = (index: number, cmd: ProjectCommandSpec) => {
+    setVerification((prev) => prev.map((c, i) => (i === index ? cmd : c)));
+    setDirty(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setErrors([]);
+    try {
+      const validationErrors = await saveProjectCommands(projectPath, {
+        setup_commands: setup,
+        verification_commands: verification,
+      });
+      if (validationErrors.length > 0) {
+        setErrors(validationErrors);
+        toast.error('Some commands failed validation');
+      } else {
+        setDirty(false);
+        toast.success('Commands saved');
+      }
+    } catch (err) {
+      toast.error('Failed to save commands', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) return <p className="text-xs text-muted-foreground py-2">Loading commands...</p>;
+  if (loadError) return <InlineError message={loadError} onRetry={() => { setLoadError(null); setLoading(true); fetchProjectCommands(projectPath).then((data) => { setSetup(data.setup_commands); setVerification(data.verification_commands); setDirty(false); }).catch((err) => setLoadError(err instanceof Error ? err.message : 'Failed')).finally(() => setLoading(false)); }} />;
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-medium">Setup commands</p>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => { setSetup((prev) => [...prev, { name: '', command: '' }]); setDirty(true); }}
+          >
+            + Add
+          </Button>
+        </div>
+        {setup.length === 0 && <p className="text-xs text-muted-foreground">No setup commands configured.</p>}
+        {setup.map((cmd, i) => (
+          <CommandRow
+            key={i}
+            cmd={cmd}
+            onChange={(next) => updateSetup(i, next)}
+            onRemove={() => { setSetup((prev) => prev.filter((_, j) => j !== i)); setDirty(true); }}
+          />
+        ))}
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-medium">Verification commands</p>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => { setVerification((prev) => [...prev, { name: '', command: '' }]); setDirty(true); }}
+          >
+            + Add
+          </Button>
+        </div>
+        {verification.length === 0 && <p className="text-xs text-muted-foreground">No verification commands configured.</p>}
+        {verification.map((cmd, i) => (
+          <CommandRow
+            key={i}
+            cmd={cmd}
+            onChange={(next) => updateVerification(i, next)}
+            onRemove={() => { setVerification((prev) => prev.filter((_, j) => j !== i)); setDirty(true); }}
+          />
+        ))}
+      </div>
+
+      {errors.length > 0 && (
+        <div className="space-y-1">
+          {errors.map((err, i) => (
+            <div key={i} className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs">
+              <p className="font-medium text-destructive">{err.command_name} (exit {err.exit_code})</p>
+              {err.stderr && <pre className="mt-1 whitespace-pre-wrap text-muted-foreground">{err.stderr}</pre>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <Button size="sm" disabled={!dirty || saving} onClick={() => void handleSave()}>
+        {saving ? 'Saving...' : 'Save Commands'}
+      </Button>
+    </div>
+  );
+}
+
 function ProjectsSettings() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
@@ -355,6 +528,9 @@ function ProjectsSettings() {
                           checked={draft.auto_merge}
                           onChange={(e) => triggerSave({ ...draft, auto_merge: e.target.checked })}
                         />
+                      </div>
+                      <div className="border-t border-border pt-3">
+                        <ProjectCommandsEditor projectPath={project.path} />
                       </div>
                     </div>
                   )}
