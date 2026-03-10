@@ -116,7 +116,7 @@ impl Database {
 
 async fn apply_pragmas(conn: &mut sqlx::sqlite::SqliteConnection) -> sqlx::Result<()> {
     conn.execute("PRAGMA journal_mode = WAL;").await?;
-    conn.execute("PRAGMA busy_timeout = 5000;").await?;
+    conn.execute("PRAGMA busy_timeout = 30000;").await?;
     conn.execute("PRAGMA synchronous = NORMAL;").await?;
     conn.execute("PRAGMA foreign_keys = ON;").await?;
     conn.execute("PRAGMA cache_size = -64000;").await?;
@@ -125,7 +125,7 @@ async fn apply_pragmas(conn: &mut sqlx::sqlite::SqliteConnection) -> sqlx::Resul
 
 /// Read-only connections skip journal_mode and synchronous.
 async fn apply_pragmas_readonly(conn: &mut sqlx::sqlite::SqliteConnection) -> sqlx::Result<()> {
-    conn.execute("PRAGMA busy_timeout = 5000;").await?;
+    conn.execute("PRAGMA busy_timeout = 30000;").await?;
     conn.execute("PRAGMA foreign_keys = ON;").await?;
     conn.execute("PRAGMA cache_size = -64000;").await?;
     Ok(())
@@ -155,7 +155,7 @@ mod tests {
             .fetch_one(db.pool())
             .await
             .unwrap();
-        assert_eq!(timeout, 5000);
+        assert_eq!(timeout, 30000);
 
         let sync: i64 = sqlx::query_scalar("PRAGMA synchronous")
             .fetch_one(db.pool())

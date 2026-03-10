@@ -25,6 +25,26 @@ impl From<sqlx::Error> for Error {
 }
 
 impl Error {
+    pub fn is_database_locked(&self) -> bool {
+        let Self::Database(err) = self else {
+            return false;
+        };
+
+        if let Some(db_err) = err.as_database_error() {
+            let code_match = db_err
+                .code()
+                .map(|code| matches!(code.as_ref(), "5" | "6"))
+                .unwrap_or(false);
+            if code_match {
+                return true;
+            }
+        }
+
+        // Fallback: check the error message for SQLite lock indicators.
+        let msg = err.to_string().to_ascii_lowercase();
+        msg.contains("database is locked") || msg.contains("database table is locked")
+    }
+
     pub fn is_sqlx_constraint_violation(&self) -> bool {
         let Self::Database(err) = self else {
             return false;

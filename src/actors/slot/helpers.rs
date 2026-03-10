@@ -264,6 +264,37 @@ pub(crate) async fn resume_context_for_task(task_id: &str, app_state: &AppState)
     "Your previous submission needs revision. Review your work, address any issues, then stop.".to_string()
 }
 
+// ─── Retry helper for SQLite lock contention ─────────────────────────────────
+
+/// Retry an async database operation up to 5 times with exponential backoff
+/// when SQLite returns "database is locked" errors.
+async fn retry_on_locked<F, Fut, T>(mut f: F) -> crate::error::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = crate::error::Result<T>>,
+{
+    const MAX_RETRIES: u32 = 5;
+    const BASE_DELAY_MS: u64 = 200;
+
+    let mut attempt = 0;
+    loop {
+        match f().await {
+            Ok(val) => return Ok(val),
+            Err(e) if e.is_database_locked() && attempt < MAX_RETRIES => {
+                attempt += 1;
+                let delay = BASE_DELAY_MS * 2u64.pow(attempt - 1);
+                tracing::debug!(
+                    attempt,
+                    delay_ms = delay,
+                    "database locked, retrying after backoff"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 // ─── Transition helpers ───────────────────────────────────────────────────────
 
 pub(crate) async fn transition_start(
@@ -273,9 +304,12 @@ pub(crate) async fn transition_start(
 ) -> anyhow::Result<()> {
     if let Some(action) = agent_type.start_action(task.status.as_str()) {
         let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
-        repo.transition(&task.id, action, "agent-supervisor", "system", None, None)
-            .await
-            .map_err(|e| anyhow::anyhow!("task transition failed for {}: {e}", task.id))?;
+        retry_on_locked(|| async {
+            repo.transition(&task.id, action.clone(), "agent-supervisor", "system", None, None)
+                .await
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("task transition failed for {}: {e}", task.id))?;
     }
     Ok(())
 }
@@ -289,16 +323,19 @@ pub(crate) async fn transition_interrupted(
     let action = agent_type.release_action();
 
     let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
-    if let Err(e) = repo
-        .transition(
+    let reason = reason.to_owned();
+    if let Err(e) = retry_on_locked(|| async {
+        repo.transition(
             task_id,
-            action,
+            action.clone(),
             "agent-supervisor",
             "system",
-            Some(reason),
+            Some(&reason),
             None,
         )
         .await
+    })
+    .await
     {
         tracing::warn!(task_id = %task_id, error = %e, "failed to transition interrupted task");
     }
