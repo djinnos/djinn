@@ -42,9 +42,10 @@ where
         "task_update_ac" => call_task_update_ac(state, &call.arguments).await,
         "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
         "task_transition" => call_task_transition(state, &call.arguments).await,
-        "task_pm_delete_branch" => call_task_pm_delete_branch(state, &call.arguments).await,
-        "task_pm_archive_activity" => call_task_pm_archive_activity(state, &call.arguments).await,
-        "task_pm_reset_counters" => call_task_pm_reset_counters(state, &call.arguments).await,
+        "task_delete_branch" => call_task_delete_branch(state, &call.arguments).await,
+        "task_archive_activity" => call_task_archive_activity(state, &call.arguments).await,
+        "task_reset_counters" => call_task_reset_counters(state, &call.arguments).await,
+        "task_kill_session" => call_task_kill_session(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
@@ -605,17 +606,17 @@ struct TaskTransitionParams {
 }
 
 #[derive(Deserialize)]
-struct TaskPmDeleteBranchParams {
+struct TaskDeleteBranchParams {
     id: String,
 }
 
 #[derive(Deserialize)]
-struct TaskPmArchiveActivityParams {
+struct TaskArchiveActivityParams {
     id: String,
 }
 
 #[derive(Deserialize)]
-struct TaskPmResetCountersParams {
+struct TaskResetCountersParams {
     id: String,
 }
 
@@ -643,11 +644,11 @@ async fn call_task_transition(
     Ok(task_to_value(&updated))
 }
 
-async fn call_task_pm_delete_branch(
+async fn call_task_delete_branch(
     state: &AppState,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let p: TaskPmDeleteBranchParams = parse_args(arguments)?;
+    let p: TaskDeleteBranchParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db().clone(), state.events().clone());
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
@@ -682,11 +683,11 @@ async fn call_task_pm_delete_branch(
     }))
 }
 
-async fn call_task_pm_archive_activity(
+async fn call_task_archive_activity(
     state: &AppState,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let p: TaskPmArchiveActivityParams = parse_args(arguments)?;
+    let p: TaskArchiveActivityParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db().clone(), state.events().clone());
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
@@ -695,11 +696,11 @@ async fn call_task_pm_archive_activity(
     Ok(serde_json::json!({ "ok": true, "task_id": task.short_id, "archived_count": count }))
 }
 
-async fn call_task_pm_reset_counters(
+async fn call_task_reset_counters(
     state: &AppState,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let p: TaskPmResetCountersParams = parse_args(arguments)?;
+    let p: TaskResetCountersParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db().clone(), state.events().clone());
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
@@ -719,6 +720,32 @@ async fn call_task_pm_reset_counters(
     Ok(serde_json::json!({ "ok": true, "task_id": task.short_id, "reopen_count": 0, "continuation_count": 0 }))
 }
 
+#[derive(Deserialize)]
+struct TaskKillSessionParams {
+    id: String,
+}
+
+async fn call_task_kill_session(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: TaskKillSessionParams = parse_args(arguments)?;
+    let repo = TaskRepository::new(state.db().clone(), state.events().clone());
+    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
+    };
+
+    // Interrupt the paused session and delete saved conversation.
+    // This forces a fresh session on next dispatch without deleting the branch.
+    crate::actors::slot::interrupt_paused_worker_session(&task.id, state).await;
+    crate::actors::slot::cleanup_paused_worker_session(&task.id, state).await;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "task_id": task.short_id,
+        "message": "Paused session interrupted and conversation deleted. Next dispatch will start a fresh session."
+    }))
+}
 
 fn tool_task_show() -> RmcpTool {
     RmcpTool::new(
@@ -907,9 +934,9 @@ fn tool_task_transition() -> RmcpTool {
     )
 }
 
-fn tool_task_pm_delete_branch() -> RmcpTool {
+fn tool_task_delete_branch() -> RmcpTool {
     RmcpTool::new(
-        "task_pm_delete_branch".to_string(),
+        "task_delete_branch".to_string(),
         "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.".to_string(),
         object!({
             "type": "object",
@@ -921,9 +948,9 @@ fn tool_task_pm_delete_branch() -> RmcpTool {
     )
 }
 
-fn tool_task_pm_archive_activity() -> RmcpTool {
+fn tool_task_archive_activity() -> RmcpTool {
     RmcpTool::new(
-        "task_pm_archive_activity".to_string(),
+        "task_archive_activity".to_string(),
         "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.".to_string(),
         object!({
             "type": "object",
@@ -935,9 +962,9 @@ fn tool_task_pm_archive_activity() -> RmcpTool {
     )
 }
 
-fn tool_task_pm_reset_counters() -> RmcpTool {
+fn tool_task_reset_counters() -> RmcpTool {
     RmcpTool::new(
-        "task_pm_reset_counters".to_string(),
+        "task_reset_counters".to_string(),
         "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.".to_string(),
         object!({
             "type": "object",
@@ -949,6 +976,19 @@ fn tool_task_pm_reset_counters() -> RmcpTool {
     )
 }
 
+fn tool_task_kill_session() -> RmcpTool {
+    RmcpTool::new(
+        "task_kill_session".to_string(),
+        "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"}
+            }
+        }),
+    )
+}
 
 /// Truncate shell output to prevent blowing the context window.
 /// Hard cap at 50 KB — both line count and byte size are enforced.
@@ -1026,12 +1066,14 @@ pub fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
             serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
             serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
             serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
-            serde_json::to_value(tool_task_pm_delete_branch())
-                .expect("serialize tool_task_pm_delete_branch"),
-            serde_json::to_value(tool_task_pm_archive_activity())
-                .expect("serialize tool_task_pm_archive_activity"),
-            serde_json::to_value(tool_task_pm_reset_counters())
-                .expect("serialize tool_task_pm_reset_counters"),
+            serde_json::to_value(tool_task_delete_branch())
+                .expect("serialize tool_task_delete_branch"),
+            serde_json::to_value(tool_task_archive_activity())
+                .expect("serialize tool_task_archive_activity"),
+            serde_json::to_value(tool_task_reset_counters())
+                .expect("serialize tool_task_reset_counters"),
+            serde_json::to_value(tool_task_kill_session())
+                .expect("serialize tool_task_kill_session"),
         ] {
             tool_values.push(value);
         }
