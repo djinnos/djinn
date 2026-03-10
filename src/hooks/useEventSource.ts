@@ -41,6 +41,7 @@ export function useEventSource(projectId?: string | null) {
     if (normalized === "epic_created") return "epic_created";
     if (normalized === "epic_updated") return "epic_updated";
     if (normalized === "epic_deleted") return "epic_deleted";
+    if (normalized === "session_message") return "session_message";
     if (
       normalized === "project_changed" ||
       normalized === "project_created" ||
@@ -145,6 +146,7 @@ export function useEventSource(projectId?: string | null) {
           "project.deleted",
           "project.health_ok",
           "project.health_error",
+          "session.message",
         ] as const;
 
         eventTypes.forEach((eventType) => {

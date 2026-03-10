@@ -3,6 +3,7 @@
  */
 
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { EpicCard } from "./EpicCard";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { useAllEpics } from "@/stores/useEpicStore";
@@ -27,7 +28,18 @@ export function RoadmapView({ mockEpics, mockTasks }: RoadmapViewProps = {}) {
   const sortedEpics = useMemo(() => sortEpics(epics), [epics]);
   const [expandAllSignal, setExpandAllSignal] = useState(0);
   const [collapseAllSignal, setCollapseAllSignal] = useState(0);
+  const navigate = useNavigate();
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+
+  const IN_FLIGHT = new Set(["in_progress", "verifying", "needs_task_review", "in_task_review", "needs_pm_intervention", "in_pm_intervention"]);
+
+  const handleTaskClick = (task: Task) => {
+    if (IN_FLIGHT.has(task.status) || (task.session_count ?? 0) > 0 || task.active_session) {
+      navigate(`/task/${task.id}`);
+    } else {
+      setSelectedTask(task);
+    }
+  };
 
   if (epics.length === 0) {
     return <div className="flex flex-col items-center justify-center p-8 text-center">No Epics Yet</div>;
@@ -51,7 +63,7 @@ export function RoadmapView({ mockEpics, mockTasks }: RoadmapViewProps = {}) {
             emoji={epic.emoji}
             expandAllSignal={expandAllSignal}
             collapseAllSignal={collapseAllSignal}
-            onTaskClick={setSelectedTask}
+            onTaskClick={handleTaskClick}
             mockTasks={mockTasks?.filter((task) => task.epic_id === epic.id)}
           />
         ))}

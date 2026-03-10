@@ -7,14 +7,15 @@
 
 import { createStore } from "zustand/vanilla";
 
-export type SSEEventType = 
+export type SSEEventType =
   | "task_created"
   | "task_updated"
   | "task_deleted"
   | "epic_created"
   | "epic_updated"
   | "epic_deleted"
-  | "project_changed";
+  | "project_changed"
+  | "session_message";
 
 export type ConnectionStatus = "connected" | "reconnecting" | "error";
 

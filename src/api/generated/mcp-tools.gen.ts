@@ -2099,6 +2099,67 @@ export namespace SystemPingOutputSchema {
 
 }
 export type SystemPingOutput = SystemPingOutputSchema.SystemPingOutput;
+export namespace TaskTimelineInputSchema {
+  export interface TaskTimelineInput {
+  /**
+   * Absolute project path (required).
+   */
+  project: string
+  /**
+   * Task UUID or short_id.
+   */
+  task_id: string
+  [k: string]: any
+  }
+
+}
+export type TaskTimelineInput = TaskTimelineInputSchema.TaskTimelineInput;
+export namespace TaskTimelineOutputSchema {
+  export type AnyJson = any
+
+  export interface TimelineMessage {
+  session_id: string
+  role: string
+  content: AnyJson[]
+  agent_type: string
+  model_id: string
+  timestamp: string
+  [k: string]: any
+  }
+
+  export interface TimelineActivity {
+  event_type: string
+  payload: AnyJson
+  timestamp: string
+  [k: string]: any
+  }
+
+  export interface SessionToolSession {
+  agent_type: string
+  ended_at?: string
+  goose_session_id?: string
+  id: string
+  model_id: string
+  project_id: string
+  started_at: string
+  status: string
+  task_id: string
+  tokens_in: number
+  tokens_out: number
+  worktree_path?: string
+  [k: string]: any
+  }
+
+  export interface TaskTimelineOutput {
+  sessions?: SessionToolSession[]
+  messages?: TimelineMessage[]
+  activity?: TimelineActivity[]
+  error?: string
+  [k: string]: any
+  }
+
+}
+export type TaskTimelineOutput = TaskTimelineOutputSchema.TaskTimelineOutput;
 export namespace TaskActivityListInputSchema {
   export interface TaskActivityListInput {
   /**
@@ -2715,7 +2776,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_commands_get" | "project_commands_set" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_transition" | "task_update";
+export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_commands_get" | "project_commands_set" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_timeline" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "board_health": { input: BoardHealthInput; output: BoardHealthOutput };
@@ -2783,6 +2844,7 @@ export interface McpToolMap {
   "system_logs": { input: SystemLogsInput; output: SystemLogsOutput };
   "system_ping": { input: SystemPingInput; output: SystemPingOutput };
   "task_activity_list": { input: TaskActivityListInput; output: TaskActivityListOutput };
+  "task_timeline": { input: TaskTimelineInput; output: TaskTimelineOutput };
   "task_blocked_list": { input: TaskBlockedListInput; output: TaskBlockedListOutput };
   "task_blockers_list": { input: TaskBlockersListInput; output: TaskBlockersListOutput };
   "task_claim": { input: TaskClaimInput; output: TaskClaimOutput };

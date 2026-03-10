@@ -107,9 +107,14 @@ const MAX_RETRIES = 3;
 const INITIAL_BACKOFF_MS = 500;
 const REQUEST_TIMEOUT_MS = 30_000;
 
-function isTimeoutError(error: unknown): boolean {
+function isRetryableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  return error.message.includes("timed out") || error.message.includes("-32001");
+  return (
+    error.message.includes("timed out") ||
+    error.message.includes("-32001") ||
+    error.message.includes("Session not found") ||
+    error.message.includes("Unauthorized")
+  );
 }
 
 export async function callMcpTool<TName extends McpToolName>(
@@ -134,7 +139,7 @@ export async function callMcpTool<TName extends McpToolName>(
       return await invoke(attempt > 0);
     } catch (error) {
       lastError = error;
-      if (!isTimeoutError(error) || attempt === MAX_RETRIES) break;
+      if (!isRetryableError(error) || attempt === MAX_RETRIES) break;
       await new Promise((r) => setTimeout(r, INITIAL_BACKOFF_MS * 2 ** attempt));
     }
   }

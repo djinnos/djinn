@@ -27,3 +27,6 @@ dist-ssr
 # Local cache for sidecar source clone
 .cache/
 .npm-cache/
+
+# Claude Code
+.claude/

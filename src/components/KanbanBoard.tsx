@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
 import { useProjects, useSelectedProjectId, useProjectStore } from "@/stores/useProjectStore";
@@ -101,6 +101,7 @@ export function KanbanBoard({
   initialCollapsedEpics,
   disableSearchParamSync,
 }: KanbanBoardProps = {}) {
+  const navigate = useNavigate();
   const storeTasks = useTaskStore((state) => Array.from(state.tasks.values()));
   const storeEpics = useEpicStore((state) => state.epics);
   const projects = useProjects();
@@ -178,6 +179,16 @@ export function KanbanBoard({
   const [searchInput, setSearchInput] = useState<string>(searchParams.get("q") ?? "");
   const [textFilter, setTextFilter] = useState<string>(searchParams.get("q") ?? "");
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+
+  const IN_FLIGHT = new Set(["in_progress", "verifying", "needs_task_review", "in_task_review", "needs_pm_intervention", "in_pm_intervention"]);
+
+  const handleTaskClick = (task: Task) => {
+    if (IN_FLIGHT.has(task.status) || (task.session_count ?? 0) > 0 || task.active_session) {
+      navigate(`/task/${task.id}`);
+    } else {
+      setSelectedTask(task);
+    }
+  };
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId);
   const { hasRemote, check: checkRemote, setHasRemote } = useGitRemoteCheck(selectedProject?.path);
@@ -454,7 +465,7 @@ export function KanbanBoard({
                                   <li key={task.id}>
                                     <DoneTaskRow
                                       task={task}
-                                      onClick={() => setSelectedTask(task)}
+                                      onClick={() => handleTaskClick(task)}
                                     />
                                   </li>
                                 ))}
@@ -467,7 +478,7 @@ export function KanbanBoard({
                                       task={task}
                                       epic={task.epic_id ? epics.get(task.epic_id) : undefined}
                                       moving={!!movingTaskIds[task.id]}
-                                      onClick={() => setSelectedTask(task)}
+                                      onClick={() => handleTaskClick(task)}
                                     />
                                   </li>
                                 ))}

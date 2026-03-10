@@ -12,6 +12,7 @@ import { Titlebar } from "@/components/Titlebar";
 import { KanbanPage } from "@/pages/KanbanPage";
 import { RoadmapPage } from "@/pages/RoadmapPage";
 import { SettingsPage } from "@/pages/SettingsPage";
+import { TaskSessionPage } from "@/pages/TaskSessionPage";
 import { useWizardStore } from "@/stores/wizardStore";
 import { useSidebarStore } from "@/stores/sidebarStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -76,6 +77,7 @@ function MainLayout() {
         <div className="flex min-h-0 flex-1 flex-col">
           <Routes>
             <Route path="/" element={<KanbanPage />} />
+            <Route path="/task/:taskId" element={<TaskSessionPage />} />
             <Route path="/roadmap" element={<RoadmapPage />} />
             <Route path="/settings" element={<Navigate to="/settings/providers" replace />} />
             <Route path="/settings/:category" element={<SettingsPage />} />
