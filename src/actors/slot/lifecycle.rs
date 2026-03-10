@@ -385,6 +385,33 @@ pub async fn run_task_lifecycle(
             .collect::<Vec<_>>()
             .join("\n")
     });
+
+    // Fetch activity log for the prompt so agents see comments/transitions
+    // without needing to call task_show.
+    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let activity_text = match task_repo.list_activity(&task.id).await {
+        Ok(entries) if !entries.is_empty() => {
+            let lines: Vec<String> = entries
+                .iter()
+                .filter(|e| e.event_type == "comment" || e.event_type == "transition")
+                .map(|e| {
+                    let payload_preview = serde_json::from_str::<serde_json::Value>(&e.payload)
+                        .ok()
+                        .and_then(|v| {
+                            // For comments show the body, for transitions show to_status
+                            v.get("body")
+                                .or_else(|| v.get("to_status"))
+                                .and_then(|s| s.as_str().map(String::from))
+                        })
+                        .unwrap_or_default();
+                    format!("- **{}** ({}): {}", e.event_type, e.actor_role, payload_preview)
+                })
+                .collect();
+            if lines.is_empty() { None } else { Some(lines.join("\n")) }
+        }
+        _ => None,
+    };
+
     let system_prompt = render_prompt(
         agent_type,
         &task,
@@ -401,6 +428,7 @@ pub async fn run_task_lifecycle(
             merge_failure_context: merge_validation_ctx,
             setup_commands: prompt_setup_commands,
             verification_commands: prompt_verification_commands,
+            activity: activity_text,
         },
     );
 

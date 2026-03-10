@@ -680,6 +680,7 @@ async fn call_task_transition(
     state: &AppState,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
+    use crate::actors::slot::task_review::{merge_and_transition, PM_MERGE_ACTIONS};
     use crate::models::task::{TaskStatus, TransitionAction};
     let p: TaskTransitionParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db().clone(), state.events().clone());
@@ -687,6 +688,25 @@ async fn call_task_transition(
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
     let action = TransitionAction::parse(&p.action).map_err(|e| e.to_string())?;
+
+    // PM approve: run squash merge first, then apply the resulting transition.
+    if action == TransitionAction::PmApprove {
+        if task.status != TaskStatus::InPmIntervention.as_str() {
+            return Ok(serde_json::json!({ "error": "pm_approve is only valid from in_pm_intervention" }));
+        }
+        let (merge_action, reason) = merge_and_transition(&task.id, state, &PM_MERGE_ACTIONS)
+            .await
+            .unwrap_or((
+                TransitionAction::PmInterventionRelease,
+                Some("merge_and_transition returned None".to_string()),
+            ));
+        let updated = repo
+            .transition(&task.id, merge_action, "pm-agent", "pm", reason.as_deref(), None)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(task_to_value(&updated));
+    }
+
     let target = p.target_status
         .as_deref()
         .map(TaskStatus::parse)
@@ -974,7 +994,7 @@ fn tool_task_update() -> RmcpTool {
 fn tool_task_transition() -> RmcpTool {
     RmcpTool::new(
         "task_transition".to_string(),
-        "Execute a state machine transition on a task. PM can use: pm_intervention_start, pm_intervention_release, pm_intervention_complete, escalate, force_close.".to_string(),
+        "Execute a state machine transition on a task. PM can use: pm_intervention_complete (rescope and reopen for worker), pm_approve (approve implementation and merge), force_close, escalate.".to_string(),
         object!({
             "type": "object",
             "required": ["id", "action"],

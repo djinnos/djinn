@@ -52,6 +52,10 @@ pub struct TaskContext {
     pub setup_commands: Option<String>,
     /// Newline-separated list of verification command names, or None if none configured.
     pub verification_commands: Option<String>,
+
+    // ── Activity log ─────────────────────────────────────────────────────
+    /// Pre-formatted activity log (comments, transitions) for the task.
+    pub activity: Option<String>,
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -127,6 +131,14 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
     };
     out = out.replace("{{setup_commands_section}}", &setup_section);
     out = out.replace("{{verification_section}}", &verification_section);
+
+    let activity_section = match &ctx.activity {
+        Some(log) if !log.trim().is_empty() => format!(
+            "### Activity Log\n\nComments and events from previous agent sessions on this task. You do not need to call `task_show` — this context is already complete.\n\n{log}\n"
+        ),
+        _ => String::new(),
+    };
+    out = out.replace("{{activity_section}}", &activity_section);
 
     out
 }
@@ -214,6 +226,7 @@ mod tests {
             merge_failure_context: None,
             setup_commands: None,
             verification_commands: None,
+            activity: None,
         }
     }
 
