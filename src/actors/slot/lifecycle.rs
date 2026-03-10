@@ -107,13 +107,17 @@ pub async fn run_task_lifecycle(
     // ── Parse model ID and load credentials ───────────────────────────────────
     let (catalog_provider_id, model_name) = match parse_model_id(&model_id) {
         Ok((provider_id, name)) => {
-            // Settings may store display names (e.g. "GPT-5.3 Codex") — resolve
-            // to the actual model ID (e.g. "gpt-5.3-codex") for the API.
+            // Settings may store display names (e.g. "GPT-5.3 Codex") or
+            // bare suffixes (e.g. "GLM-4.7" for internal "hf:zai-org/GLM-4.7").
+            // Resolve to the actual model ID for the provider API.
             let resolved = app_state
                 .catalog()
                 .list_models(&provider_id)
                 .iter()
-                .find(|m| m.id == name || m.name == name)
+                .find(|m| {
+                    let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
+                    m.id == name || m.name == name || bare == name
+                })
                 .map(|m| m.id.clone())
                 .unwrap_or(name);
             (provider_id, resolved)
@@ -158,9 +162,21 @@ pub async fn run_task_lifecycle(
                 match prepare_worktree(&project_dir, &task, &app_state).await {
                     Ok(p) => p,
                     Err(e) => {
-                        tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed");
-                        transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state)
-                            .await;
+                        tracing::error!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed; leaving task in_progress for stuck-detector recovery");
+                        return_free!();
+                    }
+                }
+            } else if paused.agent_type != agent_type.as_str() {
+                tracing::info!(
+                    task_id = %task_id,
+                    paused_agent_type = %paused.agent_type,
+                    needed_agent_type = %agent_type.as_str(),
+                    "Lifecycle: paused session agent type mismatch; starting fresh session"
+                );
+                match prepare_worktree(&project_dir, &task, &app_state).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed; leaving task in_progress for stuck-detector recovery");
                         return_free!();
                     }
                 }
@@ -184,9 +200,7 @@ pub async fn run_task_lifecycle(
                 match prepare_worktree(&project_dir, &task, &app_state).await {
                     Ok(p) => p,
                     Err(e) => {
-                        tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed");
-                        transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state)
-                            .await;
+                        tracing::error!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed; leaving task in_progress for stuck-detector recovery");
                         return_free!();
                     }
                 }
@@ -206,8 +220,7 @@ pub async fn run_task_lifecycle(
             match prepare_worktree(&project_dir, &task, &app_state).await {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed");
-                    transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+                    tracing::error!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed; leaving task in_progress for stuck-detector recovery");
                     return_free!();
                 }
             }
@@ -216,8 +229,13 @@ pub async fn run_task_lifecycle(
         match prepare_worktree(&project_dir, &task, &app_state).await {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed");
-                transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+                // Do NOT call transition_interrupted here — that would release
+                // the task back to "open" immediately, and return_free!() would
+                // trigger redispatch, creating a tight infinite loop when
+                // prepare_worktree keeps failing (e.g. concurrent git ops racing).
+                // Instead, leave the task in "in_progress" so the coordinator's
+                // 30-second stuck-task detector releases it with natural backoff.
+                tracing::error!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed; leaving task in_progress for stuck-detector recovery");
                 return_free!();
             }
         }
@@ -439,7 +457,17 @@ pub async fn run_task_lifecycle(
         ProviderCredential::ApiKey(_key_name, api_key) => {
             let format_family =
                 format_family_for_provider(&catalog_provider_id, &model_name);
-            let base_url = default_base_url(&catalog_provider_id);
+            // Prefer the catalog's base_url (handles custom providers like
+            // "synthetic"); fall back to the hardcoded defaults for well-known
+            // providers that may not carry a base_url in the catalog.
+            let base_url = app_state
+                .catalog()
+                .list_providers()
+                .iter()
+                .find(|p| p.id == catalog_provider_id)
+                .map(|p| p.base_url.clone())
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| default_base_url(&catalog_provider_id));
             crate::agent::provider::ProviderConfig {
                 base_url,
                 auth: auth_method_for_provider(&catalog_provider_id, &api_key),

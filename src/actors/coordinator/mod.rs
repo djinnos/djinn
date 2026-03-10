@@ -297,12 +297,17 @@ impl CoordinatorActor {
     async fn handle_message(&mut self, msg: CoordinatorMessage) {
         match msg {
             CoordinatorMessage::TriggerDispatch => {
-                self.detect_and_recover_stuck_filtered(None).await;
+                // Do NOT run stuck detection here — TriggerDispatch fires on
+                // every slot-free event (via trigger_redispatch).  Running the
+                // stuck detector each time creates a tight loop when
+                // prepare_worktree keeps failing: the detector immediately
+                // releases the in_progress task back to open, which gets
+                // re-dispatched, fails again, frees the slot, triggers
+                // dispatch, etc.  The 30-second tick is sufficient for stuck
+                // recovery.
                 self.dispatch_ready_tasks(None).await;
             }
             CoordinatorMessage::TriggerProjectDispatch { project_id } => {
-                self.detect_and_recover_stuck_filtered(Some(&project_id))
-                    .await;
                 self.dispatch_ready_tasks(Some(&project_id)).await;
             }
             CoordinatorMessage::Pause {
@@ -508,12 +513,21 @@ impl CoordinatorActor {
                         if !credential_provider_ids.contains(provider_id) {
                             continue;
                         }
-                        // Match by model ID or display name (settings may store either).
+                        // Match by model ID, bare name (after last '/'), display
+                        // name, or full configured ID.  Internal IDs may be in
+                        // HuggingFace form (e.g. "hf:zai-org/GLM-4.7") while
+                        // settings store the API form ("synthetic/GLM-4.7").
                         let exists = self
                             .catalog
                             .list_models(provider_id)
                             .iter()
-                            .any(|m| m.id == model_name || m.name == model_name);
+                            .any(|m| {
+                                let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
+                                bare == model_name
+                                    || m.id == model_name
+                                    || m.name == model_name
+                                    || m.id == *configured
+                            });
                         if exists && seen.insert(configured.clone()) {
                             selected.push(configured.clone());
                         }

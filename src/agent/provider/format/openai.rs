@@ -92,7 +92,28 @@ impl OpenAIProvider {
         });
 
         if !tools.is_empty() {
-            body["tools"] = json!(tools);
+            // Convert RMCP tool format to OpenAI function-calling format.
+            // RMCP: {"name", "description", "inputSchema"}
+            // OpenAI: {"type": "function", "function": {"name", "description", "parameters"}}
+            let openai_tools: Vec<Value> = tools
+                .iter()
+                .map(|t| {
+                    if t.get("type").is_some() && t.get("function").is_some() {
+                        // Already in OpenAI format.
+                        t.clone()
+                    } else {
+                        json!({
+                            "type": "function",
+                            "function": {
+                                "name": t.get("name").cloned().unwrap_or(json!("")),
+                                "description": t.get("description").cloned().unwrap_or(json!("")),
+                                "parameters": t.get("inputSchema").cloned().unwrap_or(json!({"type": "object"})),
+                            }
+                        })
+                    }
+                })
+                .collect();
+            body["tools"] = json!(openai_tools);
         }
 
         body

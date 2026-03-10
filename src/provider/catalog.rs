@@ -180,7 +180,10 @@ impl CatalogService {
         let (provider_id, model_id) = full_model_id.split_once('/')?;
         self.list_models(provider_id)
             .into_iter()
-            .find(|m| m.id == model_id)
+            .find(|m| {
+                let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
+                bare == model_id || m.id == model_id || m.id == full_model_id
+            })
     }
 
     // ── Write accessors ───────────────────────────────────────────────────────
@@ -312,7 +315,19 @@ impl CatalogService {
         data.providers.sort_by(|a, b| a.id.cmp(&b.id));
 
         if !seed_models.is_empty() {
-            data.models_idx.insert(provider.id, seed_models);
+            // Strip provider prefix from model IDs (some sources store the full
+            // "provider/model" form; internal IDs should be the bare model name).
+            let prefix = format!("{}/", provider.id);
+            let normalized: Vec<Model> = seed_models
+                .into_iter()
+                .map(|mut m| {
+                    if let Some(bare) = m.id.strip_prefix(&prefix) {
+                        m.id = bare.to_string();
+                    }
+                    m
+                })
+                .collect();
+            data.models_idx.insert(provider.id, normalized);
         }
     }
 }
@@ -347,21 +362,31 @@ fn normalize(raw: HashMap<String, RawProvider>) -> (Vec<Provider>, HashMap<Strin
             .models
             .into_values()
             .filter(|rm| !rm.id.is_empty())
-            .map(|rm| Model {
-                id: rm.id,
-                provider_id: rp.id.clone(),
-                name: rm.name,
-                tool_call: rm.tool_call,
-                reasoning: rm.reasoning,
-                attachment: rm.attachment,
-                context_window: rm.limit.context,
-                output_limit: rm.limit.output,
-                pricing: Pricing {
-                    input_per_million: rm.cost.input,
-                    output_per_million: rm.cost.output,
-                    cache_read_per_million: rm.cost.cache_read,
-                    cache_write_per_million: rm.cost.cache_write,
-                },
+            .map(|rm| {
+                // Some providers (e.g. synthetic) include the provider prefix in
+                // model IDs ("synthetic/GLM-4.7").  Strip it so internal IDs are
+                // always the bare model name.
+                let bare_id = rm
+                    .id
+                    .strip_prefix(&format!("{}/", rp.id))
+                    .map(|s| s.to_string())
+                    .unwrap_or(rm.id);
+                Model {
+                    id: bare_id,
+                    provider_id: rp.id.clone(),
+                    name: rm.name,
+                    tool_call: rm.tool_call,
+                    reasoning: rm.reasoning,
+                    attachment: rm.attachment,
+                    context_window: rm.limit.context,
+                    output_limit: rm.limit.output,
+                    pricing: Pricing {
+                        input_per_million: rm.cost.input,
+                        output_per_million: rm.cost.output,
+                        cache_read_per_million: rm.cost.cache_read,
+                        cache_write_per_million: rm.cost.cache_write,
+                    },
+                }
             })
             .collect();
 

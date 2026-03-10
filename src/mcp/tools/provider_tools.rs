@@ -14,8 +14,15 @@ use crate::provider::validate::{self, ValidationRequest};
 // ── Shared response helpers ───────────────────────────────────────────────────
 
 fn model_to_output(m: &Model) -> ProviderModelOutput {
+    // Always return the full "provider/model" form for API consumers.
+    // Internal IDs may be bare after normalization.
+    let full_id = if m.id.contains('/') {
+        m.id.clone()
+    } else {
+        format!("{}/{}", m.provider_id, m.id)
+    };
     ProviderModelOutput {
-        id: m.id.clone(),
+        id: full_id,
         provider_id: m.provider_id.clone(),
         name: m.name.clone(),
         tool_call: m.tool_call,
@@ -591,10 +598,14 @@ impl DjinnMcpServer {
                     .map(move |m| {
                         let mut out = model_to_output(&m);
                         out.provider_id = display_pid.clone();
-                        // Also update the model ID prefix to match the display provider.
-                        if let Some((_old_provider, model_name)) = m.id.split_once('/') {
-                            out.id = format!("{display_pid}/{model_name}");
-                        }
+                        // Re-tag the full ID to use the display provider
+                        // (for merged children → parent namespace).
+                        let bare = m
+                            .id
+                            .split_once('/')
+                            .map(|(_, name)| name)
+                            .unwrap_or(&m.id);
+                        out.id = format!("{display_pid}/{bare}");
                         out
                     })
             })
