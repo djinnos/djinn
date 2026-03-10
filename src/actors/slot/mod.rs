@@ -133,7 +133,7 @@ impl MergeValidationFailureMetadata {
 mod actor;
 mod commands;
 mod conversation_store;
-mod task_review;
+pub(crate) mod task_review;
 mod helpers;
 mod lifecycle;
 mod pool;

@@ -135,6 +135,10 @@ pub enum TransitionAction {
     PmInterventionRelease,
     /// PM agent finishes intervention; task ready for worker again.
     PmInterventionComplete,
+    /// PM agent approves implementation directly — triggers merge.
+    PmApprove,
+    /// Merge conflict discovered during PM approval — reopen for conflict resolver.
+    PmApproveConflict,
 }
 
 impl TransitionAction {
@@ -181,6 +185,8 @@ impl TransitionAction {
             "pm_intervention_start" => Ok(Self::PmInterventionStart),
             "pm_intervention_release" => Ok(Self::PmInterventionRelease),
             "pm_intervention_complete" => Ok(Self::PmInterventionComplete),
+            "pm_approve" => Ok(Self::PmApprove),
+            "pm_approve_conflict" => Ok(Self::PmApproveConflict),
             other => Err(Error::Internal(format!(
                 "unknown transition action: {other}"
             ))),
@@ -448,6 +454,29 @@ pub fn compute_transition(
         TransitionAction::PmInterventionComplete => {
             if *from != TaskStatus::InPmIntervention {
                 return bad("pm_intervention_complete is only valid from in_pm_intervention");
+            }
+            TransitionApply {
+                to_status: Some(TaskStatus::Open),
+                reset_continuation: true,
+                ..Default::default()
+            }
+        }
+
+        TransitionAction::PmApprove => {
+            if *from != TaskStatus::InPmIntervention {
+                return bad("pm_approve is only valid from in_pm_intervention");
+            }
+            TransitionApply {
+                to_status: Some(TaskStatus::Closed),
+                set_closed_at: true,
+                close_reason: Some("completed"),
+                ..Default::default()
+            }
+        }
+
+        TransitionAction::PmApproveConflict => {
+            if *from != TaskStatus::InPmIntervention {
+                return bad("pm_approve_conflict is only valid from in_pm_intervention");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::Open),

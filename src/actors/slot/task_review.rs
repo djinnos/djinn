@@ -20,24 +20,54 @@ pub(crate) async fn tokens_from_goose_sqlite(_goose_session_id: &str) -> Option<
     None
 }
 
-// ─── Epic review helpers ──────────────────────────────────────────────────────
+// ─── Merge helpers ───────────────────────────────────────────────────────────
+
+/// Transition actions to use for each merge outcome.
+/// Allows both the reviewer and PM approval paths to reuse the same merge logic.
+pub(crate) struct MergeActions {
+    pub approve: TransitionAction,
+    pub conflict: TransitionAction,
+    pub release: TransitionAction,
+}
+
+/// Standard actions used by the task reviewer path.
+pub(crate) const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
+    approve: TransitionAction::TaskReviewApprove,
+    conflict: TransitionAction::TaskReviewRejectConflict,
+    release: TransitionAction::ReleaseTaskReview,
+};
+
+/// Actions used when PM approves directly from intervention.
+pub(crate) const PM_MERGE_ACTIONS: MergeActions = MergeActions {
+    approve: TransitionAction::PmApprove,
+    conflict: TransitionAction::PmApproveConflict,
+    release: TransitionAction::PmInterventionRelease,
+};
 
 pub(crate) async fn merge_after_task_review(
     task_id: &str,
     app_state: &AppState,
+) -> Option<(TransitionAction, Option<String>)> {
+    merge_and_transition(task_id, app_state, &REVIEWER_MERGE_ACTIONS).await
+}
+
+pub(crate) async fn merge_and_transition(
+    task_id: &str,
+    app_state: &AppState,
+    actions: &MergeActions,
 ) -> Option<(TransitionAction, Option<String>)> {
     let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     let task = match repo.get(task_id).await {
         Ok(Some(task)) => task,
         Ok(None) => {
             return Some((
-                TransitionAction::ReleaseTaskReview,
+                actions.release.clone(),
                 Some("task missing during post-review merge".to_string()),
             ));
         }
         Err(e) => {
             return Some((
-                TransitionAction::ReleaseTaskReview,
+                actions.release.clone(),
                 Some(format!("failed to load task for merge: {e}")),
             ));
         }
@@ -51,7 +81,7 @@ pub(crate) async fn merge_after_task_review(
         Ok(git) => git,
         Err(e) => {
             return Some((
-                TransitionAction::ReleaseTaskReview,
+                actions.release.clone(),
                 Some(format!("failed to open git actor for merge: {e}")),
             ));
         }
@@ -89,12 +119,12 @@ pub(crate) async fn merge_after_task_review(
             }
             if let Err(e) = repo.set_merge_commit_sha(task_id, &result.commit_sha).await {
                 return Some((
-                    TransitionAction::ReleaseTaskReview,
+                    actions.release.clone(),
                     Some(format!("merged but failed to store merge SHA: {e}")),
                 ));
             }
             cleanup_paused_worker_session(task_id, app_state).await;
-            Some((TransitionAction::TaskReviewApprove, None))
+            Some((actions.approve.clone(), None))
         }
         Err(GitError::MergeConflict { files, .. }) => {
             tracing::warn!(
@@ -123,7 +153,7 @@ pub(crate) async fn merge_after_task_review(
                     &payload,
                 )
                 .await;
-            Some((TransitionAction::TaskReviewRejectConflict, Some(reason)))
+            Some((actions.conflict.clone(), Some(reason)))
         }
         Err(GitError::CommitRejected {
             code,
@@ -159,7 +189,7 @@ pub(crate) async fn merge_after_task_review(
                     &reason_payload,
                 )
                 .await;
-            Some((TransitionAction::TaskReviewRejectConflict, Some(reason)))
+            Some((actions.conflict.clone(), Some(reason)))
         }
         Err(e) => {
             tracing::warn!(
@@ -168,7 +198,7 @@ pub(crate) async fn merge_after_task_review(
                 "Lifecycle: post-review squash merge failed"
             );
             Some((
-                TransitionAction::ReleaseTaskReview,
+                actions.release.clone(),
                 Some(format!("post-review squash merge failed: {e} ({e:?})")),
             ))
         }
