@@ -97,17 +97,17 @@ pub(super) async fn run_reply_loop(
             session_id,
         });
         // Record system prompt from the first message.
-        if let Some(sys_msg) = conversation.messages.first() {
-            if sys_msg.role == Role::System {
-                let sys_text: String = sys_msg
-                    .content
-                    .iter()
-                    .filter_map(|b| b.as_text())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !sys_text.is_empty() {
-                    session.record_system_prompt(&sys_text);
-                }
+        if let Some(sys_msg) = conversation.messages.first()
+            && sys_msg.role == Role::System
+        {
+            let sys_text: String = sys_msg
+                .content
+                .iter()
+                .filter_map(|b| b.as_text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !sys_text.is_empty() {
+                session.record_system_prompt(&sys_text);
             }
         }
         // Record the user message as the trace-level input

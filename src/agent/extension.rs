@@ -570,17 +570,16 @@ fn merge_acceptance_criteria(
         .map(|(i, inc)| {
             let mut obj = inc.as_object().cloned().unwrap_or_default();
             // If the incoming object is missing `criterion`, copy from existing.
-            if !obj.contains_key("criterion") {
-                if let Some(existing_criterion) = existing
+            if !obj.contains_key("criterion")
+                && let Some(existing_criterion) = existing
                     .get(i)
                     .and_then(|e| e.get("criterion"))
                     .and_then(|v| v.as_str())
-                {
-                    obj.insert(
-                        "criterion".to_string(),
-                        serde_json::Value::String(existing_criterion.to_string()),
-                    );
-                }
+            {
+                obj.insert(
+                    "criterion".to_string(),
+                    serde_json::Value::String(existing_criterion.to_string()),
+                );
             }
             serde_json::Value::Object(obj)
         })
