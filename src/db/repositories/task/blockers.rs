@@ -30,11 +30,26 @@ impl TaskRepository {
                 "would create circular blocker dependency".into(),
             ));
         }
-        sqlx::query("INSERT OR IGNORE INTO blockers (task_id, blocking_task_id) VALUES (?1, ?2)")
-            .bind(task_id)
-            .bind(blocking_id)
-            .execute(&mut *tx)
-            .await?;
+        let result = sqlx::query(
+            "INSERT INTO blockers (task_id, blocking_task_id) VALUES (?1, ?2)",
+        )
+        .bind(task_id)
+        .bind(blocking_id)
+        .execute(&mut *tx)
+        .await;
+        match result {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(ref e))
+                if e.message().contains("UNIQUE constraint failed") =>
+            {
+                // Duplicate blocker — idempotent, silently skip.
+            }
+            Err(e) => {
+                return Err(Error::Internal(format!(
+                    "failed to add blocker {blocking_id} → {task_id}: {e}"
+                )));
+            }
+        }
         tx.commit().await?;
         Ok(())
     }
