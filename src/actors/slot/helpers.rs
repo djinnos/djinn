@@ -458,29 +458,15 @@ pub(crate) fn agent_type_for_task(task: &Task, has_conflict_context: bool) -> Ag
     AgentType::for_task_status(task.status.as_str(), has_conflict_context)
 }
 
-/// Build a `DevProxy` from persisted settings if `dev_proxy_url` is configured.
-/// The returned `url` is the raw Helicone base (e.g. `http://localhost:8585`);
-/// callers must pass it through `helicone_gateway_url()` for the provider's format family.
-pub(crate) async fn build_dev_proxy(
-    app_state: &AppState,
+/// Build telemetry metadata for OTel span instrumentation.
+pub(crate) fn build_telemetry_meta(
     agent_type: AgentType,
     task_id: &str,
-) -> Option<crate::agent::provider::DevProxy> {
-    use crate::db::repositories::settings::SettingsRepository;
-    use crate::models::settings::DjinnSettings;
-
-    let repo = SettingsRepository::new(app_state.db().clone(), app_state.events().clone());
-    let raw = repo.get("settings.raw").await.ok()??.value;
-    let settings = DjinnSettings::from_db_value(&raw);
-    let base_url = settings.dev_proxy_url?;
-
-    Some(crate::agent::provider::DevProxy {
-        url: base_url,
-        target_url: String::new(), // Set by caller with the provider's real base URL.
-        auth_key: settings.dev_proxy_key.unwrap_or_default(),
+) -> crate::agent::provider::TelemetryMeta {
+    crate::agent::provider::TelemetryMeta {
         task_id: Some(task_id.to_owned()),
         agent_type: Some(agent_type.as_str().to_owned()),
         session_id: Some(task_id.to_owned()),
-    })
+    }
 }
 

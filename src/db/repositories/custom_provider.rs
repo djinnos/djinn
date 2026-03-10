@@ -68,6 +68,16 @@ impl CustomProviderRepository {
         Ok(())
     }
 
+    /// Delete a custom provider by ID. Returns true if a row was removed.
+    pub async fn delete(&self, id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query("DELETE FROM custom_providers WHERE id = ?1")
+            .bind(id)
+            .execute(self.db.pool())
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Return a single provider by ID, or `None`.
     pub async fn get(&self, id: &str) -> Result<Option<CustomProvider>> {
         self.db.ensure_initialized().await?;

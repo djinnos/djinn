@@ -293,6 +293,14 @@ impl CatalogService {
         connected
     }
 
+    /// Remove a custom provider and its models from the in-memory catalog.
+    /// Persisting to DB is the caller's responsibility.
+    pub fn remove_custom_provider(&self, provider_id: &str) {
+        let mut data = self.inner.write().unwrap();
+        data.providers.retain(|p| p.id != provider_id);
+        data.models_idx.remove(provider_id);
+    }
+
     /// Add or replace a custom provider and its seed models in the in-memory catalog.
     /// Persisting to DB is the caller's responsibility.
     pub fn add_custom_provider(&self, provider: Provider, seed_models: Vec<Model>) {

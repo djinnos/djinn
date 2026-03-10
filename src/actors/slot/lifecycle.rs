@@ -413,7 +413,7 @@ pub async fn run_task_lifecycle(
     let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
 
     // ── Build Djinn-native provider ───────────────────────────────────────────
-    let dev_proxy = build_dev_proxy(&app_state, agent_type, &task_id).await;
+    let telemetry_meta = build_telemetry_meta(agent_type, &task_id);
 
     let provider_config = match provider_credential {
         ProviderCredential::OAuthConfig(mut cfg) => {
@@ -421,10 +421,7 @@ pub async fn run_task_lifecycle(
             // from the dispatch request.
             cfg.model_id = model_name.clone();
             cfg.context_window = context_window.max(0) as u32;
-            cfg.dev_proxy = dev_proxy.map(|mut dp| {
-                dp.target_url = cfg.base_url.clone();
-                dp
-            });
+            cfg.telemetry = Some(telemetry_meta);
             cfg
         }
         ProviderCredential::ApiKey(_key_name, api_key) => {
@@ -432,15 +429,13 @@ pub async fn run_task_lifecycle(
                 format_family_for_provider(&catalog_provider_id, &model_name);
             let base_url = default_base_url(&catalog_provider_id);
             crate::agent::provider::ProviderConfig {
-                base_url: base_url.clone(),
+                base_url,
                 auth: auth_method_for_provider(&catalog_provider_id, &api_key),
                 format_family,
                 model_id: model_name.clone(),
                 context_window: context_window.max(0) as u32,
-                dev_proxy: dev_proxy.map(|mut dp| {
-                    dp.target_url = base_url;
-                    dp
-                }),
+                telemetry: Some(telemetry_meta),
+                provider_headers: Default::default(),
             }
         }
     };
@@ -548,6 +543,7 @@ pub async fn run_task_lifecycle(
         &mut conversation,
         &tools,
         &task.id,
+        &task.short_id,
         &current_session_id,
         &project_path,
         &worktree_path,
@@ -556,6 +552,7 @@ pub async fn run_task_lifecycle(
         &pause,
         &app_state,
         context_window,
+        &model_id,
     )
     .await;
 

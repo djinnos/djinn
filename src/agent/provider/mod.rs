@@ -1,5 +1,6 @@
 pub mod client;
 pub mod format;
+pub mod telemetry;
 
 use std::pin::Pin;
 
@@ -43,55 +44,21 @@ pub struct ProviderConfig {
     pub model_id: String,
     /// Context window size in tokens (informational, used for compaction checks).
     pub context_window: u32,
-    /// Optional development proxy (Helicone, etc.).
-    pub dev_proxy: Option<DevProxy>,
+    /// Telemetry metadata for OTel span instrumentation.
+    pub telemetry: Option<TelemetryMeta>,
+    /// Extra headers to include on every request (e.g. `chatgpt-account-id` for Codex).
+    pub provider_headers: std::collections::HashMap<String, String>,
 }
 
-/// Development proxy configuration — routes all requests through a proxy URL.
+/// Metadata attached to each provider call for OTel tracing.
 #[derive(Clone)]
-pub struct DevProxy {
-    /// Proxy base URL (replaces provider base URL).
-    pub url: String,
-    /// The real provider base URL (sent as `Helicone-Target-Url` so the proxy
-    /// knows where to forward). This lets any provider work without needing
-    /// provider-specific gateway paths.
-    pub target_url: String,
-    /// Auth key sent as `Helicone-Auth: Bearer {key}`.
-    pub auth_key: String,
-    /// Task ID for tracing (sent as `Helicone-Property-TaskId`).
+pub struct TelemetryMeta {
+    /// Task ID for correlation.
     pub task_id: Option<String>,
-    /// Agent type for tracing (sent as `Helicone-Property-AgentType`).
+    /// Agent type (e.g. "worker", "task_reviewer").
     pub agent_type: Option<String>,
-    /// Session ID for tracing (sent as `Helicone-Session-Id`).
+    /// Session ID for grouping.
     pub session_id: Option<String>,
-}
-
-impl DevProxy {
-    /// Inject Helicone auth + metadata headers into a `HeaderMap`.
-    pub fn apply_headers(&self, headers: &mut reqwest::header::HeaderMap) {
-        use reqwest::header::{HeaderName, HeaderValue};
-        if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", self.auth_key)) {
-            headers.insert(HeaderName::from_static("helicone-auth"), val);
-        }
-        if let Ok(val) = HeaderValue::from_str(&self.target_url) {
-            headers.insert(HeaderName::from_static("helicone-target-url"), val);
-        }
-        if let Some(ref tid) = self.task_id {
-            if let Ok(val) = HeaderValue::from_str(tid) {
-                headers.insert(HeaderName::from_static("helicone-property-taskid"), val);
-            }
-        }
-        if let Some(ref at) = self.agent_type {
-            if let Ok(val) = HeaderValue::from_str(at) {
-                headers.insert(HeaderName::from_static("helicone-property-agenttype"), val);
-            }
-        }
-        if let Some(ref sid) = self.session_id {
-            if let Ok(val) = HeaderValue::from_str(sid) {
-                headers.insert(HeaderName::from_static("helicone-session-id"), val);
-            }
-        }
-    }
 }
 
 /// Authentication method for provider API requests.

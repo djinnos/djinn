@@ -246,6 +246,25 @@ pub struct ProviderValidateResponse {
     pub http_status: i64,
 }
 
+// ── provider_remove ───────────────────────────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ProviderRemoveInput {
+    /// Provider ID to disconnect and remove (e.g. 'anthropic', 'openai', 'my-custom-llm').
+    pub provider_id: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProviderRemoveResponse {
+    pub ok: bool,
+    pub success: bool,
+    pub provider_id: String,
+    pub credentials_deleted: i64,
+    pub custom_provider_deleted: bool,
+    pub oauth_cleared: bool,
+    pub error: Option<String>,
+}
+
 // ── provider_add_custom ───────────────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema)]
@@ -845,6 +864,78 @@ impl DjinnMcpServer {
             ok: true,
             success: true,
             id: input.id,
+            error: None,
+        })
+    }
+
+    /// Fully disconnect a provider: delete all stored credentials, remove OAuth
+    /// tokens, and delete custom provider entry if applicable. Single endpoint
+    /// for the desktop to call when the user clicks "Remove".
+    #[tool(
+        description = "Fully disconnect a provider by ID. Deletes stored credentials, removes OAuth tokens, and deletes the custom provider entry if applicable."
+    )]
+    pub async fn provider_remove(
+        &self,
+        Parameters(input): Parameters<ProviderRemoveInput>,
+    ) -> Json<ProviderRemoveResponse> {
+        let provider_id = &input.provider_id;
+
+        // 1. Delete all credentials for this provider.
+        let credential_repo =
+            CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
+        let credentials_deleted = match credential_repo.delete_by_provider(provider_id).await {
+            Ok(n) => i64::try_from(n).unwrap_or(i64::MAX),
+            Err(e) => {
+                tracing::warn!(provider_id = %provider_id, error = %e, "provider_remove: credential delete failed");
+                return Json(ProviderRemoveResponse {
+                    ok: false,
+                    success: false,
+                    provider_id: input.provider_id,
+                    credentials_deleted: 0,
+                    custom_provider_deleted: false,
+                    oauth_cleared: false,
+                    error: Some(format!("failed to delete credentials: {e}")),
+                });
+            }
+        };
+
+        // 2. Clear OAuth tokens (if this provider uses OAuth).
+        let oauth_keys = builtin::all_oauth_keys_for_provider(provider_id);
+        let oauth_cleared = !oauth_keys.is_empty();
+        if oauth_cleared {
+            builtin::clear_oauth_tokens(&oauth_keys);
+        }
+
+        // 3. Delete custom provider entry (no-op for built-in providers).
+        let custom_repo = CustomProviderRepository::new(self.state.db().clone());
+        let custom_provider_deleted = match custom_repo.delete(provider_id).await {
+            Ok(deleted) => deleted,
+            Err(e) => {
+                tracing::warn!(provider_id = %provider_id, error = %e, "provider_remove: custom provider delete failed");
+                false
+            }
+        };
+
+        // 4. Remove from in-memory catalog (custom providers only).
+        if custom_provider_deleted {
+            self.state.catalog().remove_custom_provider(provider_id);
+        }
+
+        tracing::info!(
+            provider_id = %provider_id,
+            credentials_deleted,
+            custom_provider_deleted,
+            oauth_cleared,
+            "provider removed"
+        );
+
+        Json(ProviderRemoveResponse {
+            ok: true,
+            success: true,
+            provider_id: input.provider_id,
+            credentials_deleted,
+            custom_provider_deleted,
+            oauth_cleared,
             error: None,
         })
     }

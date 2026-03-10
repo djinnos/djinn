@@ -87,24 +87,16 @@ impl GoogleProvider {
     }
 
     fn effective_url(&self) -> String {
-        let base = if let Some(proxy) = &self.config.dev_proxy {
-            proxy.url.trim_end_matches('/').to_string()
-        } else {
-            self.config.base_url.trim_end_matches('/').to_string()
-        };
         // Google AI Studio endpoint for streaming
         format!(
             "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
-            base, self.config.model_id
+            self.config.base_url.trim_end_matches('/'),
+            self.config.model_id
         )
     }
 
     fn extra_headers(&self) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        if let Some(proxy) = &self.config.dev_proxy {
-            proxy.apply_headers(&mut headers);
-        }
-        headers
+        HeaderMap::new()
     }
 }
 

@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::extension;
 use crate::agent::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use crate::agent::output_parser::ParsedAgentOutput;
+use crate::agent::provider::telemetry;
 use crate::agent::provider::{LlmProvider, StreamEvent};
 use crate::agent::AgentType;
 use crate::events::DjinnEvent;
@@ -62,6 +63,7 @@ pub(super) async fn run_reply_loop(
     conversation: &mut Conversation,
     tools: &[serde_json::Value],
     task_id: &str,
+    task_short_id: &str,
     session_id: &str,
     project_path: &str,
     worktree_path: &Path,
@@ -70,6 +72,7 @@ pub(super) async fn run_reply_loop(
     global_cancel: &CancellationToken,
     app_state: &AppState,
     context_window: i64,
+    model_id: &str,
 ) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64) {
     let mut output = ParsedAgentOutput::new(agent_type);
 
@@ -82,6 +85,35 @@ pub(super) async fn run_reply_loop(
     // In that case a text-only first response is valid (worker may decide the
     // reviewer's concerns are already addressed).
     let is_resumed_session = conversation.messages.len() > 2;
+
+    // ── Create session-level OTel span (root trace) ──────────────────────────
+    let otel_session = if telemetry::is_active() {
+        let session = telemetry::SessionSpan::start(&telemetry::SessionSpanAttributes {
+            provider: provider.name(),
+            model: model_id,
+            task_short_id,
+            task_id,
+            agent_type: agent_type.as_str(),
+            session_id,
+        });
+        // Record system prompt from the first message.
+        if let Some(sys_msg) = conversation.messages.first() {
+            if sys_msg.role == Role::System {
+                let sys_text: String = sys_msg
+                    .content
+                    .iter()
+                    .filter_map(|b| b.as_text())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !sys_text.is_empty() {
+                    session.record_system_prompt(&sys_text);
+                }
+            }
+        }
+        Some(session)
+    } else {
+        None
+    };
 
     let run_result: anyhow::Result<()> = async {
         let mut saw_any_event = false;
@@ -114,6 +146,40 @@ pub(super) async fn run_reply_loop(
                 env_diag
             );
 
+            // ── Start OTel generation span for this turn ─────────────────────
+            let otel_llm = otel_session.as_ref().map(|session| {
+                let llm = telemetry::LlmSpan::start(
+                    session.context(),
+                    provider.name(),
+                    model_id,
+                    turns,
+                );
+                // Record the last user message as input.
+                if let Some(last_user) = conversation
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == Role::User)
+                {
+                    let input_text = last_user
+                        .content
+                        .iter()
+                        .filter_map(|b| {
+                            if let ContentBlock::Text { text } = b {
+                                Some(text.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !input_text.is_empty() {
+                        llm.record_input(&input_text);
+                    }
+                }
+                llm
+            });
+
             // ── Start streaming from the provider ────────────────────────────
             let stream_result = provider.stream(conversation, tools).await;
             let mut stream = match stream_result {
@@ -125,6 +191,9 @@ pub(super) async fn run_reply_loop(
                         compaction_attempts,
                         "ReplyLoop: context_length_exceeded on stream init; compacting reactively"
                     );
+                    if let Some(llm) = otel_llm {
+                        llm.end_error("context_length_exceeded");
+                    }
                     let compacted = crate::agent::compaction::compact_conversation(
                         provider, conversation, session_id, task_id, app_state,
                     ).await;
@@ -142,6 +211,9 @@ pub(super) async fn run_reply_loop(
                     ));
                 }
                 Err(e) => {
+                    if let Some(llm) = otel_llm {
+                        llm.end_error(&e.to_string());
+                    }
                     let diag = runtime_fs_diagnostics(project_path, worktree_path);
                     let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);
                     return Err(anyhow::anyhow!(
@@ -237,6 +309,32 @@ pub(super) async fn run_reply_loop(
                             }
                         }
                     }
+                }
+            }
+
+            // ── End OTel generation span for this turn ───────────────────────
+            if let Some(llm) = otel_llm {
+                if interrupted.is_some() {
+                    llm.end_error("interrupted");
+                } else {
+                    llm.record_usage(turn_tokens_in, turn_tokens_out);
+                    // Record assistant output text (current turn, not stale).
+                    if !turn_text.is_empty() {
+                        llm.record_output(&turn_text);
+                    }
+                    // Record tool call names on the generation span.
+                    let tool_names: Vec<String> = turn_tool_calls
+                        .iter()
+                        .filter_map(|tc| {
+                            if let ContentBlock::ToolUse { name, .. } = tc {
+                                Some(name.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    llm.record_tool_calls(&tool_names);
+                    llm.end_ok();
                 }
             }
 
@@ -368,6 +466,7 @@ pub(super) async fn run_reply_loop(
             }
 
             // Dispatch tool calls concurrently and collect results.
+            // Each tool call gets its own OTel span as a child of the session.
             let tool_futures: Vec<_> = turn_tool_calls
                 .iter()
                 .filter_map(|tool_call| {
@@ -382,10 +481,19 @@ pub(super) async fn run_reply_loop(
                     );
                     let id = id.clone();
                     let name = name.clone();
+                    let input_json = input.clone();
                     let args = match input {
                         serde_json::Value::Object(map) => Some(map.clone()),
                         _ => None,
                     };
+
+                    // Start tool span before the async block so it parents correctly.
+                    let tool_span = otel_session.as_ref().map(|session| {
+                        let ts = telemetry::ToolSpan::start(session.context(), &name, &id);
+                        ts.record_input(&input_json.to_string());
+                        ts
+                    });
+
                     Some(async move {
                         let (content, is_error) =
                             match extension::call_tool(app_state, &name, args, worktree_path).await {
@@ -395,6 +503,9 @@ pub(super) async fn run_reply_loop(
                                     } else {
                                         value.to_string()
                                     };
+                                    if let Some(ts) = &tool_span {
+                                        ts.record_output(&text, false);
+                                    }
                                     (vec![ContentBlock::Text { text }], false)
                                 }
                                 Err(err) => {
@@ -404,14 +515,26 @@ pub(super) async fn run_reply_loop(
                                         error = %err,
                                         "ReplyLoop: tool call returned error"
                                     );
+                                    let err_text = format!("error: {err}");
+                                    if let Some(ts) = &tool_span {
+                                        ts.record_output(&err_text, true);
+                                    }
                                     (
                                         vec![ContentBlock::Text {
-                                            text: format!("error: {err}"),
+                                            text: err_text,
                                         }],
                                         true,
                                     )
                                 }
                             };
+                        // End tool span.
+                        if let Some(ts) = tool_span {
+                            if is_error {
+                                ts.end_error("tool returned error");
+                            } else {
+                                ts.end_ok();
+                            }
+                        }
                         ContentBlock::ToolResult {
                             tool_use_id: id,
                             content,
@@ -490,6 +613,15 @@ pub(super) async fn run_reply_loop(
         Ok(())
     }
     .await;
+
+    // ── End session-level OTel span ──────────────────────────────────────────
+    if let Some(session) = otel_session {
+        session.record_usage(total_tokens_in, total_tokens_out);
+        match &run_result {
+            Ok(()) => session.end_ok(),
+            Err(e) => session.end_error(&e.to_string()),
+        }
+    }
 
     (run_result, output, total_tokens_in as i64, total_tokens_out as i64)
 }

@@ -108,6 +108,9 @@ async fn async_main() {
     let router = server::router(state);
 
     server::run(router, cli.port, cancel).await;
+
+    // Flush any pending OTel spans before exit.
+    djinn_server::agent::provider::telemetry::shutdown();
 }
 
 #[derive(Clone)]

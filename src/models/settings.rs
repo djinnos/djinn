@@ -22,11 +22,12 @@ pub struct DjinnSettings {
     /// Per-model concurrent session caps, e.g. `{"openai/gpt-4o": 4}`.
     #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
-    /// Helicone dev proxy base URL (e.g. `http://localhost:8585`). When set, all
-    /// LLM requests route through the local Helicone gateway for full observability.
-    pub dev_proxy_url: Option<String>,
-    /// Helicone API key for the dev proxy (sent as `Helicone-Auth: Bearer {key}`).
-    pub dev_proxy_key: Option<String>,
+    /// Langfuse public key for OTLP trace export (e.g. `pk-lf-...`).
+    pub langfuse_public_key: Option<String>,
+    /// Langfuse secret key for OTLP trace export (e.g. `sk-lf-...`).
+    pub langfuse_secret_key: Option<String>,
+    /// Langfuse OTLP endpoint URL (defaults to `http://localhost:3000/api/public/otel`).
+    pub langfuse_endpoint: Option<String>,
 }
 
 impl DjinnSettings {
@@ -70,8 +71,9 @@ impl DjinnSettings {
             dispatch_limit,
             model_priority,
             max_sessions,
-            dev_proxy_url: None,
-            dev_proxy_key: None,
+            langfuse_public_key: None,
+            langfuse_secret_key: None,
+            langfuse_endpoint: None,
         }
     }
 

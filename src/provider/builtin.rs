@@ -180,6 +180,19 @@ pub fn resolve_oauth_provider(provider_id: &str) -> Option<&'static str> {
         .map(|p| p.id)
 }
 
+/// Remove cached OAuth token files for the given keys.
+pub fn clear_oauth_tokens(oauth_keys: &[String]) {
+    use crate::agent::oauth::{codex::CodexTokens, copilot::CopilotTokens};
+
+    for key in oauth_keys {
+        match key.as_str() {
+            "CHATGPT_CODEX_TOKEN" => CodexTokens::clear(),
+            "GITHUB_COPILOT_TOKEN" => CopilotTokens::clear(),
+            _ => {}
+        }
+    }
+}
+
 /// Check whether any of the given OAuth keys have a stored token on disk.
 ///
 /// Looks in `~/.djinn/oauth/` for token files written by

@@ -22,13 +22,18 @@ impl OAuthFlowKind {
 
 /// Build a `ProviderConfig` for the Codex provider using the stored tokens.
 pub fn codex_provider_config(tokens: &codex::CodexTokens) -> ProviderConfig {
+    let mut provider_headers = std::collections::HashMap::new();
+    if let Some(account_id) = &tokens.account_id {
+        provider_headers.insert("chatgpt-account-id".to_string(), account_id.clone());
+    }
     ProviderConfig {
         base_url: codex::CODEX_API_BASE.to_string(),
         auth: AuthMethod::BearerToken(tokens.access_token.clone()),
         format_family: FormatFamily::OpenAIResponses,
         model_id: codex::CODEX_DEFAULT_MODEL.to_string(),
         context_window: 128_000,
-        dev_proxy: None,
+        telemetry: None,
+        provider_headers,
     }
 }
 
@@ -40,6 +45,7 @@ pub fn copilot_provider_config(tokens: &copilot::CopilotTokens) -> ProviderConfi
         format_family: FormatFamily::OpenAI,
         model_id: copilot::COPILOT_DEFAULT_MODEL.to_string(),
         context_window: 128_000,
-        dev_proxy: None,
+        telemetry: None,
+        provider_headers: Default::default(),
     }
 }

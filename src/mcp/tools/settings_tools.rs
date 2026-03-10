@@ -42,10 +42,12 @@ pub struct SettingsSetParams {
     /// Per-model concurrent session caps (e.g. {"chatgpt_codex/gpt-5.3-codex": 4}). Omit to keep current value.
     #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
-    /// Helicone dev proxy base URL (e.g. "http://localhost:8585"). Set to "" to disable. Omit to keep current value.
-    pub dev_proxy_url: Option<String>,
-    /// Helicone API key for the dev proxy. Set to "" to disable. Omit to keep current value.
-    pub dev_proxy_key: Option<String>,
+    /// Langfuse public key for LLM observability (e.g. "pk-lf-..."). Set to "" to disable. Omit to keep current value.
+    pub langfuse_public_key: Option<String>,
+    /// Langfuse secret key for LLM observability (e.g. "sk-lf-..."). Set to "" to disable. Omit to keep current value.
+    pub langfuse_secret_key: Option<String>,
+    /// Langfuse OTLP endpoint URL (defaults to "http://localhost:3000/api/public/otel"). Set to "" to disable. Omit to keep current value.
+    pub langfuse_endpoint: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -158,11 +160,14 @@ impl DjinnMcpServer {
                 .get_or_insert_with(HashMap::new)
                 .insert("pm".to_string(), v);
         }
-        if let Some(v) = p.dev_proxy_url {
-            settings.dev_proxy_url = if v.is_empty() { None } else { Some(v) };
+        if let Some(v) = p.langfuse_public_key {
+            settings.langfuse_public_key = if v.is_empty() { None } else { Some(v) };
         }
-        if let Some(v) = p.dev_proxy_key {
-            settings.dev_proxy_key = if v.is_empty() { None } else { Some(v) };
+        if let Some(v) = p.langfuse_secret_key {
+            settings.langfuse_secret_key = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Some(v) = p.langfuse_endpoint {
+            settings.langfuse_endpoint = if v.is_empty() { None } else { Some(v) };
         }
 
         match self.state.apply_settings(&settings).await {

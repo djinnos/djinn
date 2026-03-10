@@ -114,6 +114,33 @@ impl CredentialRepository {
         }
     }
 
+    /// Delete all credentials for a given `provider_id`.
+    /// Returns the number of rows deleted. Emits `CredentialDeleted` for each.
+    pub async fn delete_by_provider(&self, provider_id: &str) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+        let ids: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM credentials WHERE provider_id = ?1")
+                .bind(provider_id)
+                .fetch_all(self.db.pool())
+                .await?;
+
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let result =
+            sqlx::query("DELETE FROM credentials WHERE provider_id = ?1")
+                .bind(provider_id)
+                .execute(self.db.pool())
+                .await?;
+
+        for id in ids {
+            let _ = self.events.send(DjinnEvent::CredentialDeleted { id });
+        }
+
+        Ok(result.rows_affected())
+    }
+
     /// Decrypt and return the raw API key for `key_name`.
     ///
     /// Called by `AgentSupervisor` at dispatch time to obtain the key for

@@ -99,19 +99,11 @@ impl OpenAIProvider {
     }
 
     fn effective_url(&self) -> String {
-        if let Some(proxy) = &self.config.dev_proxy {
-            format!("{}/chat/completions", proxy.url.trim_end_matches('/'))
-        } else {
-            format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'))
-        }
+        format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'))
     }
 
     fn extra_headers(&self) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        if let Some(proxy) = &self.config.dev_proxy {
-            proxy.apply_headers(&mut headers);
-        }
-        headers
+        HeaderMap::new()
     }
 }
 

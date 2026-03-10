@@ -149,11 +149,20 @@ impl OpenAIResponsesProvider {
             let tools_spec: Vec<Value> = tools
                 .iter()
                 .map(|tool| {
+                    // Tools come as rmcp::model::Tool with top-level name/description/inputSchema.
+                    // The Responses API expects {type, name, description, parameters}.
+                    let name = tool.get("name")
+                        .or_else(|| tool.get("function").and_then(|f| f.get("name")));
+                    let description = tool.get("description")
+                        .or_else(|| tool.get("function").and_then(|f| f.get("description")));
+                    let parameters = tool.get("inputSchema")
+                        .or_else(|| tool.get("input_schema"))
+                        .or_else(|| tool.get("function").and_then(|f| f.get("parameters")));
                     json!({
                         "type": "function",
-                        "name": tool["function"]["name"],
-                        "description": tool["function"]["description"],
-                        "parameters": tool["function"]["parameters"],
+                        "name": name,
+                        "description": description,
+                        "parameters": parameters,
                     })
                 })
                 .collect();
@@ -164,17 +173,18 @@ impl OpenAIResponsesProvider {
     }
 
     fn effective_url(&self) -> String {
-        if let Some(proxy) = &self.config.dev_proxy {
-            format!("{}/responses", proxy.url.trim_end_matches('/'))
-        } else {
-            format!("{}/responses", self.config.base_url.trim_end_matches('/'))
-        }
+        format!("{}/responses", self.config.base_url.trim_end_matches('/'))
     }
 
     fn extra_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        if let Some(proxy) = &self.config.dev_proxy {
-            proxy.apply_headers(&mut headers);
+        for (name, value) in &self.config.provider_headers {
+            if let (Ok(n), Ok(v)) = (
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                reqwest::header::HeaderValue::from_str(value),
+            ) {
+                headers.insert(n, v);
+            }
         }
         headers
     }
@@ -460,7 +470,8 @@ mod tests {
             format_family: FormatFamily::OpenAIResponses,
             model_id: "gpt-5.1-codex".to_string(),
             context_window: 128000,
-            dev_proxy: None,
+            telemetry: None,
+            provider_headers: Default::default(),
         })
     }
 
@@ -618,11 +629,34 @@ mod tests {
     }
 
     #[test]
-    fn test_build_request_with_tools() {
+    fn test_build_request_with_tools_rmcp_format() {
         let provider = test_provider();
         let mut conv = Conversation::new();
         conv.push(Message::user("list files"));
 
+        // rmcp::model::Tool format (name/description/inputSchema at top level)
+        let tools = vec![json!({
+            "name": "bash",
+            "description": "Run a shell command",
+            "inputSchema": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+        })];
+
+        let req = provider.build_request(&conv, &tools);
+        let tools_arr = req["tools"].as_array().unwrap();
+        assert_eq!(tools_arr.len(), 1);
+        assert_eq!(tools_arr[0]["type"], "function");
+        assert_eq!(tools_arr[0]["name"], "bash");
+        assert_eq!(tools_arr[0]["description"], "Run a shell command");
+        assert!(tools_arr[0]["parameters"]["properties"]["cmd"].is_object());
+    }
+
+    #[test]
+    fn test_build_request_with_tools_openai_function_format() {
+        let provider = test_provider();
+        let mut conv = Conversation::new();
+        conv.push(Message::user("list files"));
+
+        // OpenAI function-wrapped format (fallback)
         let tools = vec![json!({
             "type": "function",
             "function": {

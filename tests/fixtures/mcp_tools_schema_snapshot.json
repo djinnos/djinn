@@ -3950,6 +3950,61 @@
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "provider_id": {
+            "description": "Provider ID to disconnect and remove (e.g. 'anthropic', 'openai', 'my-custom-llm').",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_id"
+        ],
+        "title": "ProviderRemoveInput",
+        "type": "object"
+      },
+      "name": "provider_remove",
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "credentials_deleted": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "custom_provider_deleted": {
+            "type": "boolean"
+          },
+          "error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "oauth_cleared": {
+            "type": "boolean"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "success": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "success",
+          "provider_id",
+          "credentials_deleted",
+          "custom_provider_deleted",
+          "oauth_cleared"
+        ],
+        "title": "ProviderRemoveResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
           "api_key": {
             "description": "API key to validate.",
             "type": "string"
@@ -4449,21 +4504,26 @@
             "additionalProperties": false,
             "description": "Typed settings schema. Unknown fields are rejected at parse time.",
             "properties": {
-              "dev_proxy_key": {
-                "description": "Helicone API key for the dev proxy (sent as `Helicone-Auth: Bearer {key}`).",
-                "nullable": true,
-                "type": "string"
-              },
-              "dev_proxy_url": {
-                "description": "Helicone dev proxy base URL (e.g. `http://localhost:8585`). When set, all\nLLM requests route through the local Helicone gateway for full observability.",
-                "nullable": true,
-                "type": "string"
-              },
               "dispatch_limit": {
                 "description": "Maximum number of tasks to dispatch per cycle (default 50).",
                 "format": "int64",
                 "nullable": true,
                 "type": "integer"
+              },
+              "langfuse_endpoint": {
+                "description": "Langfuse OTLP endpoint URL (defaults to `http://localhost:3000/api/public/otel`).",
+                "nullable": true,
+                "type": "string"
+              },
+              "langfuse_public_key": {
+                "description": "Langfuse public key for OTLP trace export (e.g. `pk-lf-...`).",
+                "nullable": true,
+                "type": "string"
+              },
+              "langfuse_secret_key": {
+                "description": "Langfuse secret key for OTLP trace export (e.g. `sk-lf-...`).",
+                "nullable": true,
+                "type": "string"
               },
               "max_sessions": {
                 "additionalProperties": {
@@ -4551,21 +4611,26 @@
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
-          "dev_proxy_key": {
-            "description": "Helicone API key for the dev proxy. Set to \"\" to disable. Omit to keep current value.",
-            "nullable": true,
-            "type": "string"
-          },
-          "dev_proxy_url": {
-            "description": "Helicone dev proxy base URL (e.g. \"http://localhost:8585\"). Set to \"\" to disable. Omit to keep current value.",
-            "nullable": true,
-            "type": "string"
-          },
           "dispatch_limit": {
             "description": "Maximum number of tasks to dispatch per cycle. Omit to keep current value.",
             "format": "int64",
             "nullable": true,
             "type": "integer"
+          },
+          "langfuse_endpoint": {
+            "description": "Langfuse OTLP endpoint URL (defaults to \"http://localhost:3000/api/public/otel\"). Set to \"\" to disable. Omit to keep current value.",
+            "nullable": true,
+            "type": "string"
+          },
+          "langfuse_public_key": {
+            "description": "Langfuse public key for LLM observability (e.g. \"pk-lf-...\"). Set to \"\" to disable. Omit to keep current value.",
+            "nullable": true,
+            "type": "string"
+          },
+          "langfuse_secret_key": {
+            "description": "Langfuse secret key for LLM observability (e.g. \"sk-lf-...\"). Set to \"\" to disable. Omit to keep current value.",
+            "nullable": true,
+            "type": "string"
           },
           "max_sessions": {
             "additionalProperties": {

@@ -91,12 +91,7 @@ impl AnthropicProvider {
     }
 
     fn effective_url(&self) -> String {
-        let base = if let Some(proxy) = &self.config.dev_proxy {
-            proxy.url.trim_end_matches('/').to_string()
-        } else {
-            self.config.base_url.trim_end_matches('/').to_string()
-        };
-        format!("{}/v1/messages", base)
+        format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'))
     }
 
     fn extra_headers(&self) -> HeaderMap {
@@ -107,11 +102,6 @@ impl AnthropicProvider {
             HeaderName::from_static("anthropic-version"),
             HeaderValue::from_static("2023-06-01"),
         );
-
-        // Dev proxy (Helicone) headers
-        if let Some(proxy) = &self.config.dev_proxy {
-            proxy.apply_headers(&mut headers);
-        }
 
         headers
     }
