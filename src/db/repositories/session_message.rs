@@ -129,6 +129,36 @@ impl SessionMessageRepository {
         Ok(conv)
     }
 
+    /// Load messages for multiple sessions at once, returning (session_id, role, content_json, created_at) tuples.
+    pub async fn load_for_sessions(
+        &self,
+        session_ids: &[String],
+    ) -> Result<Vec<(String, String, String, String)>> {
+        if session_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.db.ensure_initialized().await?;
+
+        // Build placeholders: (?1, ?2, ?3, ...)
+        let placeholders: Vec<String> = (1..=session_ids.len())
+            .map(|i| format!("?{i}"))
+            .collect();
+        let sql = format!(
+            "SELECT session_id, role, content_json, created_at \
+             FROM session_messages \
+             WHERE session_id IN ({}) \
+             ORDER BY created_at ASC",
+            placeholders.join(", ")
+        );
+
+        let mut query = sqlx::query_as::<_, (String, String, String, String)>(&sql);
+        for id in session_ids {
+            query = query.bind(id);
+        }
+
+        Ok(query.fetch_all(self.db.pool()).await?)
+    }
+
     /// Delete all messages for a session (used by compaction to replace with summary).
     pub async fn delete_conversation(&self, session_id: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;

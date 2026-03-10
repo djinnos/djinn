@@ -590,6 +590,27 @@ pub async fn run_task_lifecycle(
     )
     .await;
 
+    // Persist conversation messages to session_messages table for timeline display.
+    // Compaction already saves pre-compaction messages; this saves whatever remains
+    // (post-compaction turns, or the full conversation if no compaction occurred).
+    {
+        let msg_repo = crate::db::repositories::session_message::SessionMessageRepository::new(
+            app_state.db().clone(),
+            app_state.events().clone(),
+        );
+        if let Err(e) = msg_repo
+            .insert_messages_batch(&current_session_id, &task.id, &conversation.messages)
+            .await
+        {
+            tracing::warn!(
+                task_id = %task_id,
+                session_id = %current_session_id,
+                error = %e,
+                "Lifecycle: failed to persist conversation messages to DB"
+            );
+        }
+    }
+
     // Always commit whatever the agent wrote before verification or cleanup.
     commit_wip_if_needed(&task_id, &worktree_path, &app_state).await;
 

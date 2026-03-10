@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::session_message::SessionMessageRepository;
 use crate::db::repositories::task::TaskRepository;
+use crate::db::repositories::task::ActivityQuery;
 use crate::mcp::server::DjinnMcpServer;
 use crate::models::session::SessionRecord;
 
@@ -118,6 +119,45 @@ pub struct SessionActiveResponse {
 pub struct SessionShowResponse {
     #[serde(flatten)]
     pub session: Option<SessionToolSession>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ── Task timeline (single-call) ──────────────────────────────────────────────
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TaskTimelineParams {
+    /// Task UUID or short_id.
+    pub task_id: String,
+    /// Absolute project path (required).
+    pub project: String,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct TimelineMessage {
+    pub session_id: String,
+    pub role: String,
+    pub content: Vec<super::json_object::AnyJson>,
+    pub agent_type: String,
+    pub model_id: String,
+    pub timestamp: String,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct TimelineActivity {
+    pub event_type: String,
+    pub payload: super::json_object::AnyJson,
+    pub timestamp: String,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct TaskTimelineResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<Vec<SessionToolSession>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Vec<TimelineMessage>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Vec<TimelineActivity>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -351,6 +391,118 @@ impl DjinnMcpServer {
             agent_type: Some(session.agent_type),
             model_id: Some(session.model_id),
             messages: Some(messages),
+            error: None,
+        })
+    }
+
+    /// Return the full timeline for a task: sessions, messages, and activity — in one call.
+    #[tool(
+        description = "task_timeline(task_id) returns sessions, all conversation messages (with timestamps), and activity log entries for a task in a single call."
+    )]
+    pub async fn task_timeline(
+        &self,
+        Parameters(p): Parameters<TaskTimelineParams>,
+    ) -> Json<TaskTimelineResponse> {
+        let err = |e: String| {
+            Json(TaskTimelineResponse {
+                sessions: None,
+                messages: None,
+                activity: None,
+                error: Some(e),
+            })
+        };
+
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => return err(e),
+        };
+
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let task = match task_repo.resolve_in_project(&project_id, &p.task_id).await {
+            Ok(Some(t)) => t,
+            Ok(None) => return err(format!("task not found: {}", p.task_id)),
+            Err(e) => return err(e.to_string()),
+        };
+
+        let session_repo =
+            SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+        let msg_repo =
+            SessionMessageRepository::new(self.state.db().clone(), self.state.events().clone());
+
+        // 1. Get sessions
+        let sessions = match session_repo.list_for_task_in_project(&project_id, &task.id).await {
+            Ok(s) => s,
+            Err(e) => return err(e.to_string()),
+        };
+
+        let session_ids: Vec<String> = sessions.iter().map(|s| s.id.clone()).collect();
+
+        // Build a lookup map: session_id → (agent_type, model_id)
+        let session_info: std::collections::HashMap<String, (&str, &str)> = sessions
+            .iter()
+            .map(|s| (s.id.clone(), (s.agent_type.as_str(), s.model_id.as_str())))
+            .collect();
+
+        // 2. Bulk-load messages for all sessions (1 query)
+        let raw_messages = match msg_repo.load_for_sessions(&session_ids).await {
+            Ok(m) => m,
+            Err(e) => return err(e.to_string()),
+        };
+
+        let messages: Vec<TimelineMessage> = raw_messages
+            .into_iter()
+            .filter(|(_, role, _, _)| role != "system") // skip system prompts
+            .map(|(session_id, role, content_json, created_at)| {
+                let content: Vec<super::json_object::AnyJson> =
+                    serde_json::from_str::<Vec<serde_json::Value>>(&content_json)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(super::json_object::AnyJson)
+                        .collect();
+                let (agent_type, model_id) = session_info
+                    .get(&session_id)
+                    .copied()
+                    .unwrap_or(("unknown", "unknown"));
+                TimelineMessage {
+                    session_id,
+                    role,
+                    content,
+                    agent_type: agent_type.to_owned(),
+                    model_id: model_id.to_owned(),
+                    timestamp: created_at,
+                }
+            })
+            .collect();
+
+        // 3. Get activity log entries
+        let q = ActivityQuery {
+            project_id: Some(project_id),
+            task_id: Some(task.id),
+            event_type: None,
+            from_time: None,
+            to_time: None,
+            limit: 500,
+            offset: 0,
+        };
+        let activity = match task_repo.query_activity(q).await {
+            Ok(entries) => entries
+                .iter()
+                .map(|e| TimelineActivity {
+                    event_type: e.event_type.clone(),
+                    payload: super::json_object::AnyJson(
+                        serde_json::from_str(&e.payload)
+                            .unwrap_or_else(|_| serde_json::json!({})),
+                    ),
+                    timestamp: e.created_at.clone(),
+                })
+                .collect(),
+            Err(e) => return err(e.to_string()),
+        };
+
+        Json(TaskTimelineResponse {
+            sessions: Some(sessions.into_iter().map(Into::into).collect()),
+            messages: Some(messages),
+            activity: Some(activity),
             error: None,
         })
     }
