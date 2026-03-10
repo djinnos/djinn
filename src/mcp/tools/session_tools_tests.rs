@@ -5,8 +5,8 @@ mod tests {
     use crate::db::repositories::session_message::SessionMessageRepository;
     use crate::db::repositories::task::TaskRepository;
     use crate::test_helpers::{
-        create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
-        create_test_session, create_test_task, initialize_mcp_session, mcp_call_tool,
+        create_test_app, create_test_db, create_test_epic, create_test_project, create_test_session,
+        create_test_task, mcp_call_tool,
     };
 
     #[tokio::test]
@@ -15,12 +15,11 @@ mod tests {
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
         let task = create_test_task(&db, &project.id, &epic.id).await;
-        let app = create_test_app_with_db(db);
-        let session_id = initialize_mcp_session(&app).await;
+        let app = create_test_app();
 
         let payload = mcp_call_tool(
             &app,
-            &session_id,
+            "session-tools-tests",
             "session_list",
             json!({"task_id": task.id, "project": project.path}),
         )
@@ -44,12 +43,11 @@ mod tests {
         let epic = create_test_epic(&db, &project.id).await;
         let task = create_test_task(&db, &project.id, &epic.id).await;
         let session = create_test_session(&db, &project.id, &task.id).await;
-        let app = create_test_app_with_db(db);
-        let mcp_session_id = initialize_mcp_session(&app).await;
+        let app = create_test_app();
 
         let payload = mcp_call_tool(
             &app,
-            &mcp_session_id,
+            "session-tools-tests",
             "session_list",
             json!({"task_id": task.id, "project": project.path}),
         )
@@ -72,22 +70,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_active_requires_pool_actor() {
+    async fn session_active_returns_empty_arrays_when_no_running_sessions() {
         let db = create_test_db();
         let project = create_test_project(&db).await;
-        let app = create_test_app_with_db(db);
-        let session_id = initialize_mcp_session(&app).await;
+        let app = create_test_app();
 
         let payload = mcp_call_tool(
             &app,
-            &session_id,
+            "session-tools-tests",
             "session_active",
             json!({"project": project.path}),
         )
         .await;
 
-        // session_active requires the slot pool actor, which is not started in tests.
-        assert!(payload.get("error").and_then(|v| v.as_str()).is_some());
+        assert_eq!(payload.get("error").and_then(|v| v.as_str()), None);
+        assert_eq!(
+            payload
+                .get("sessions")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len()),
+            Some(0)
+        );
     }
 
     #[tokio::test]
@@ -97,12 +100,11 @@ mod tests {
         let epic = create_test_epic(&db, &project.id).await;
         let task = create_test_task(&db, &project.id, &epic.id).await;
         let session = create_test_session(&db, &project.id, &task.id).await;
-        let app = create_test_app_with_db(db);
-        let mcp_session_id = initialize_mcp_session(&app).await;
+        let app = create_test_app();
 
         let payload = mcp_call_tool(
             &app,
-            &mcp_session_id,
+            "session-tools-tests",
             "session_show",
             json!({"id": session.id, "project": project.path}),
         )
@@ -121,12 +123,11 @@ mod tests {
     async fn session_show_returns_error_for_unknown_id() {
         let db = create_test_db();
         let project = create_test_project(&db).await;
-        let app = create_test_app_with_db(db);
-        let session_id = initialize_mcp_session(&app).await;
+        let app = create_test_app();
 
         let payload = mcp_call_tool(
             &app,
-            &session_id,
+            "session-tools-tests",
             "session_show",
             json!({"id": "00000000-0000-0000-0000-000000000000", "project": project.path}),
         )
@@ -139,25 +140,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_for_task_requires_pool_actor() {
+    async fn session_for_task_returns_empty_when_no_running_session() {
         let db = create_test_db();
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
         let task = create_test_task(&db, &project.id, &epic.id).await;
-        let _session = create_test_session(&db, &project.id, &task.id).await;
-        let app = create_test_app_with_db(db);
-        let session_id = initialize_mcp_session(&app).await;
+        let app = create_test_app();
 
         let payload = mcp_call_tool(
             &app,
-            &session_id,
+            "session-tools-tests",
             "session_for_task",
             json!({"task_id": task.id, "project": project.path}),
         )
         .await;
 
-        // session_for_task requires the slot pool actor, which is not started in tests.
-        assert!(payload.get("error").and_then(|v| v.as_str()).is_some());
+        assert_eq!(payload.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(payload.get("task_id").and_then(|v| v.as_str()), Some(task.id.as_str()));
+        assert_eq!(payload.get("session_id"), Some(&serde_json::Value::Null));
+    }
+
+    #[tokio::test]
+    async fn session_for_task_returns_session_for_running_task() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let task = create_test_task(&db, &project.id, &epic.id).await;
+        let session = create_test_session(&db, &project.id, &task.id).await;
+        let app = create_test_app();
+
+        let payload = mcp_call_tool(
+            &app,
+            "session-tools-tests",
+            "session_for_task",
+            json!({"task_id": task.id, "project": project.path}),
+        )
+        .await;
+
+        assert_eq!(payload.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(payload.get("task_id").and_then(|v| v.as_str()), Some(task.id.as_str()));
+        assert_eq!(payload.get("session_id").and_then(|v| v.as_str()), Some(session.id.as_str()));
     }
 
     #[tokio::test]
@@ -171,25 +193,23 @@ mod tests {
 
         let msg_repo = SessionMessageRepository::new(db.clone(), tokio::sync::broadcast::channel(8).0);
         msg_repo
-            .insert_message(
+            .append_message(
                 &session_a.id,
-                &task.id,
                 "assistant",
-                r#"[{"type":"text","text":"a1"}]"#,
-                None,
+                r#"[{\"type\":\"text\",\"text\":\"a1\"}]"#,
+                Some("2026-01-01T00:00:01Z"),
             )
             .await
-            .expect("insert a1");
+            .expect("append a1");
         msg_repo
-            .insert_message(
+            .append_message(
                 &session_b.id,
-                &task.id,
                 "assistant",
-                r#"[{"type":"text","text":"b1"}]"#,
-                None,
+                r#"[{\"type\":\"text\",\"text\":\"b1\"}]"#,
+                Some("2026-01-01T00:00:02Z"),
             )
             .await
-            .expect("insert b1");
+            .expect("append b1");
 
         let task_repo = TaskRepository::new(db.clone(), tokio::sync::broadcast::channel(8).0);
         task_repo
@@ -203,11 +223,10 @@ mod tests {
             .await
             .expect("add activity");
 
-        let app = create_test_app_with_db(db);
-        let session_id = initialize_mcp_session(&app).await;
+        let app = create_test_app();
         let payload = mcp_call_tool(
             &app,
-            &session_id,
+            "session-tools-tests",
             "task_timeline",
             json!({"task_id": task.id, "project": project.path}),
         )

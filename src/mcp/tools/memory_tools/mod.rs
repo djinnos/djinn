@@ -306,5 +306,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "tests.rs"]
-mod memory_tool_tests;
+mod tests;
