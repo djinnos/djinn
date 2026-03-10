@@ -155,10 +155,14 @@ pub(crate) async fn project_path_for_id(project_id: &str, app_state: &AppState) 
 
 pub(crate) async fn find_paused_session_record(
     task_id: &str,
+    agent_type: AgentType,
     app_state: &AppState,
 ) -> Option<SessionRecord> {
     let repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
-    repo.paused_for_task(task_id).await.ok().flatten()
+    repo.paused_for_task_by_type(task_id, agent_type.as_str())
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Extract the `reason` field from the last `status_changed` activity entry

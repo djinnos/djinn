@@ -256,6 +256,26 @@ impl SessionRepository {
         .fetch_optional(self.db.pool())
         .await?)
     }
+
+    /// Find the most recent paused session for a task that matches the given
+    /// agent type.  Used during dispatch so that e.g. a PM session never
+    /// accidentally resumes a worker's paused conversation.
+    pub async fn paused_for_task_by_type(
+        &self,
+        task_id: &str,
+        agent_type: &str,
+    ) -> Result<Option<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
+            "SELECT {SESSION_COLS} FROM sessions \
+             WHERE task_id = ?1 AND status = 'paused' AND agent_type = ?2 \
+             ORDER BY started_at DESC LIMIT 1"
+        ))
+        .bind(task_id)
+        .bind(agent_type)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
 }
 
 #[cfg(test)]

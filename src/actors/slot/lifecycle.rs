@@ -137,7 +137,7 @@ pub async fn run_task_lifecycle(
     // ── Prepare worktree / paused-session resume context ──────────────────────
     let project_dir = PathBuf::from(&project_path);
 
-    let paused = find_paused_session_record(&task_id, &app_state).await;
+    let paused = find_paused_session_record(&task_id, agent_type, &app_state).await;
 
     // `resume_record_id` is set when we can resume a paused worker session
     // (same model, same agent type, worktree intact, conversation file present).
