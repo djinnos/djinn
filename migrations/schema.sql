@@ -63,6 +63,7 @@ CREATE TABLE tasks (
     acceptance_criteria TEXT NOT NULL DEFAULT '[]',
     reopen_count        INTEGER NOT NULL DEFAULT 0,
     continuation_count  INTEGER NOT NULL DEFAULT 0,
+    verification_failure_count INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     closed_at           TEXT,

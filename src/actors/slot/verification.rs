@@ -8,6 +8,9 @@ use crate::server::AppState;
 
 use super::*;
 
+/// After this many consecutive verification failures, escalate to PM.
+const VERIFICATION_ESCALATION_THRESHOLD: i64 = 3;
+
 /// Spawn a background verification pipeline for a completed worker task.
 ///
 /// The task should already be in `verifying` status.  This function:
@@ -94,26 +97,7 @@ async fn run_verification_pipeline(
     // Run setup commands (e.g. npm install, cargo fetch).
     if let Some(feedback) = run_setup_commands_checked(task_id, &worktree_path, app_state).await {
         tracing::info!(task_id = %task_id, "Verification: setup commands failed");
-        let payload = serde_json::json!({ "body": feedback }).to_string();
-        let _ = task_repo
-            .log_activity(
-                Some(task_id),
-                "agent-supervisor",
-                "verification",
-                "comment",
-                &payload,
-            )
-            .await;
-        let _ = task_repo
-            .transition(
-                task_id,
-                TransitionAction::VerificationFail,
-                "agent-supervisor",
-                "system",
-                Some(&feedback),
-                None,
-            )
-            .await;
+        handle_verification_failure(task_id, &feedback, &task_repo, app_state).await;
         cleanup_worktree(task_id, &worktree_path, app_state).await;
         return Ok(());
     }
@@ -121,26 +105,7 @@ async fn run_verification_pipeline(
     // Run verification commands (e.g. cargo check, cargo test).
     if let Some(feedback) = run_verification_commands(task_id, &worktree_path, app_state).await {
         tracing::info!(task_id = %task_id, "Verification: verification commands failed");
-        let payload = serde_json::json!({ "body": feedback }).to_string();
-        let _ = task_repo
-            .log_activity(
-                Some(task_id),
-                "agent-supervisor",
-                "verification",
-                "comment",
-                &payload,
-            )
-            .await;
-        let _ = task_repo
-            .transition(
-                task_id,
-                TransitionAction::VerificationFail,
-                "agent-supervisor",
-                "system",
-                Some(&feedback),
-                None,
-            )
-            .await;
+        handle_verification_failure(task_id, &feedback, &task_repo, app_state).await;
         cleanup_worktree(task_id, &worktree_path, app_state).await;
         return Ok(());
     }
@@ -159,4 +124,62 @@ async fn run_verification_pipeline(
         .await;
     cleanup_worktree(task_id, &worktree_path, app_state).await;
     Ok(())
+}
+
+/// Log verification failure, transition to open, and escalate to PM if the
+/// consecutive failure count has reached the threshold.
+async fn handle_verification_failure(
+    task_id: &str,
+    feedback: &str,
+    task_repo: &TaskRepository,
+    _app_state: &AppState,
+) {
+    let payload = serde_json::json!({ "body": feedback }).to_string();
+    let _ = task_repo
+        .log_activity(
+            Some(task_id),
+            "agent-supervisor",
+            "verification",
+            "comment",
+            &payload,
+        )
+        .await;
+
+    // Transition to open (increments verification_failure_count).
+    let updated = task_repo
+        .transition(
+            task_id,
+            TransitionAction::VerificationFail,
+            "agent-supervisor",
+            "system",
+            Some(feedback),
+            None,
+        )
+        .await;
+
+    // Check if we've hit the escalation threshold.
+    if let Ok(task) = updated {
+        if task.verification_failure_count >= VERIFICATION_ESCALATION_THRESHOLD {
+            tracing::warn!(
+                task_id = %task_id,
+                verification_failure_count = task.verification_failure_count,
+                "Verification: escalating to PM after {} consecutive failures",
+                task.verification_failure_count,
+            );
+            let reason = format!(
+                "verification failed {} consecutive times; last failure:\n{}",
+                task.verification_failure_count, feedback
+            );
+            let _ = task_repo
+                .transition(
+                    task_id,
+                    TransitionAction::Escalate,
+                    "agent-supervisor",
+                    "system",
+                    Some(&reason),
+                    None,
+                )
+                .await;
+        }
+    }
 }

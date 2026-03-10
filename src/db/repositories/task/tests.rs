@@ -924,6 +924,7 @@ fn make_peer_task(id: &str, project_id: &str, epic_id: &str, status: &str, updat
         acceptance_criteria: "[]".to_string(),
         reopen_count: 0,
         continuation_count: 0,
+        verification_failure_count: 0,
         created_at: "2026-01-01T00:00:00.000Z".to_string(),
         updated_at: updated_at.to_string(),
         closed_at: if status == "closed" { Some(updated_at.to_string()) } else { None },

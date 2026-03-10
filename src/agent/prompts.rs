@@ -202,6 +202,7 @@ mod tests {
             acceptance_criteria: r#"[{"criterion":"Widget exists","met":false},{"criterion":"Tests pass","met":true}]"#.into(),
             reopen_count: 0,
             continuation_count: 0,
+            verification_failure_count: 0,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
             closed_at: None,

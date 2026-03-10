@@ -74,6 +74,7 @@ impl TaskRepository {
                 status = ?2,
                 reopen_count = reopen_count + ?3,
                 continuation_count = CASE WHEN ?4 THEN 0 WHEN ?5 THEN continuation_count + 1 ELSE continuation_count END,
+                verification_failure_count = CASE WHEN ?10 THEN 0 WHEN ?11 THEN verification_failure_count + 1 ELSE verification_failure_count END,
                 closed_at = CASE
                     WHEN ?6 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                     WHEN ?7 THEN NULL
@@ -96,6 +97,8 @@ impl TaskRepository {
         .bind(apply.clear_closed_at)
         .bind(apply.close_reason)
         .bind(apply.clear_close_reason)
+        .bind(apply.reset_verification_failure)
+        .bind(apply.increment_verification_failure)
         .execute(&mut *tx)
         .await?;
 

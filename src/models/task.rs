@@ -22,6 +22,7 @@ pub struct Task {
     pub acceptance_criteria: String,
     pub reopen_count: i64,
     pub continuation_count: i64,
+    pub verification_failure_count: i64,
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
@@ -206,6 +207,10 @@ pub struct TransitionApply {
     pub reset_continuation: bool,
     /// Increment `continuation_count` by 1 (for stale reopen detection).
     pub increment_continuation: bool,
+    /// Increment `verification_failure_count` by 1.
+    pub increment_verification_failure: bool,
+    /// Reset `verification_failure_count` to 0.
+    pub reset_verification_failure: bool,
     /// Set `closed_at` to the current timestamp.
     pub set_closed_at: bool,
     /// Set `closed_at` to NULL.
@@ -225,6 +230,8 @@ impl Default for TransitionApply {
             increment_reopen: false,
             reset_continuation: false,
             increment_continuation: false,
+            increment_verification_failure: false,
+            reset_verification_failure: false,
             set_closed_at: false,
             clear_closed_at: false,
             close_reason: None,
@@ -280,14 +287,22 @@ pub fn compute_transition(
             if *from != TaskStatus::Verifying {
                 return bad("verification_pass is only valid from verifying");
             }
-            TransitionApply::simple(TaskStatus::NeedsTaskReview)
+            TransitionApply {
+                to_status: Some(TaskStatus::NeedsTaskReview),
+                reset_verification_failure: true,
+                ..Default::default()
+            }
         }
 
         TransitionAction::VerificationFail => {
             if *from != TaskStatus::Verifying {
                 return bad("verification_fail is only valid from verifying");
             }
-            TransitionApply::simple(TaskStatus::Open)
+            TransitionApply {
+                to_status: Some(TaskStatus::Open),
+                increment_verification_failure: true,
+                ..Default::default()
+            }
         }
 
         TransitionAction::ReleaseVerification => {
