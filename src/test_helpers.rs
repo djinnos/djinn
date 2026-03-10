@@ -30,6 +30,11 @@ pub fn create_test_db() -> Database {
 /// Create an Axum router wired to a fresh in-memory database.
 pub fn create_test_app() -> axum::Router {
     let db = create_test_db();
+    create_test_app_with_db(db)
+}
+
+/// Create an Axum router wired to the given database (for tests that seed data externally).
+pub fn create_test_app_with_db(db: Database) -> axum::Router {
     let cancel = CancellationToken::new();
     let state = AppState::new(db, cancel);
     server::router(state)
@@ -44,7 +49,8 @@ pub async fn create_test_project(db: &Database) -> Project {
     let repo = ProjectRepository::new(db.clone(), test_events());
     let id = uuid::Uuid::now_v7();
     let path = format!("/tmp/djinn-test-project-{id}");
-    repo.create("test-project", &path)
+    let name = format!("test-project-{id}");
+    repo.create(&name, &path)
         .await
         .expect("failed to create test project")
 }
