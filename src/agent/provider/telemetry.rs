@@ -8,6 +8,10 @@
 //!   SessionSpan (root trace — one per reply loop)
 //!     └─ LlmSpan (generation — one per LLM turn)
 //!     └─ ToolSpan (tool call — one per tool invocation)
+//!
+//! Langfuse attribute mapping (highest priority):
+//!   - Trace list Input/Output: `langfuse.trace.input` / `langfuse.trace.output`
+//!   - Observation Input/Output: `langfuse.observation.input` / `langfuse.observation.output`
 
 use opentelemetry::trace::{SpanKind, Status, TraceContextExt, Tracer};
 use opentelemetry::{Context, KeyValue, global};
@@ -166,7 +170,23 @@ impl SessionSpan {
         Self { cx }
     }
 
-    /// Record the system prompt on the session trace.
+    /// Record the initial input on the trace (shows in Langfuse trace list Input column).
+    pub fn record_trace_input(&self, input: &str) {
+        self.cx.span().set_attribute(KeyValue::new(
+            "langfuse.trace.input",
+            truncate(input, 20_000),
+        ));
+    }
+
+    /// Record the final output on the trace (shows in Langfuse trace list Output column).
+    pub fn record_trace_output(&self, output: &str) {
+        self.cx.span().set_attribute(KeyValue::new(
+            "langfuse.trace.output",
+            truncate(output, 20_000),
+        ));
+    }
+
+    /// Record the system prompt as metadata on the session trace.
     pub fn record_system_prompt(&self, prompt: &str) {
         self.cx.span().set_attribute(KeyValue::new(
             "gen_ai.system_prompt",
@@ -238,18 +258,20 @@ impl LlmSpan {
         Self { cx }
     }
 
-    /// Record the input prompt (last user message) on the span.
+    /// Record the input prompt on the observation.
     pub fn record_input(&self, input: &str) {
-        self.cx
-            .span()
-            .set_attribute(KeyValue::new("gen_ai.prompt", truncate(input, 10_000)));
+        self.cx.span().set_attribute(KeyValue::new(
+            "langfuse.observation.input",
+            truncate(input, 10_000),
+        ));
     }
 
-    /// Record the LLM completion output on the span.
+    /// Record the LLM completion output on the observation.
     pub fn record_output(&self, output: &str) {
-        self.cx
-            .span()
-            .set_attribute(KeyValue::new("gen_ai.completion", truncate(output, 10_000)));
+        self.cx.span().set_attribute(KeyValue::new(
+            "langfuse.observation.output",
+            truncate(output, 10_000),
+        ));
     }
 
     /// Record token usage on the span.
@@ -323,16 +345,18 @@ impl ToolSpan {
 
     /// Record the tool call input arguments.
     pub fn record_input(&self, input: &str) {
-        self.cx
-            .span()
-            .set_attribute(KeyValue::new("tool.input", truncate(input, 10_000)));
+        self.cx.span().set_attribute(KeyValue::new(
+            "langfuse.observation.input",
+            truncate(input, 10_000),
+        ));
     }
 
     /// Record the tool call result.
     pub fn record_output(&self, output: &str, is_error: bool) {
-        self.cx
-            .span()
-            .set_attribute(KeyValue::new("tool.output", truncate(output, 10_000)));
+        self.cx.span().set_attribute(KeyValue::new(
+            "langfuse.observation.output",
+            truncate(output, 10_000),
+        ));
         if is_error {
             self.cx
                 .span()

@@ -76,10 +76,11 @@ pub(super) async fn run_reply_loop(
 ) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64) {
     let mut output = ParsedAgentOutput::new(agent_type);
 
-    // Token counts are declared outside the async block so they survive the
-    // borrow and can be returned alongside the result.
+    // Token counts and last assistant text are declared outside the async block
+    // so they survive the borrow and can be used for telemetry/return values.
     let mut total_tokens_in: u32 = 0;
     let mut total_tokens_out: u32 = 0;
+    let mut final_assistant_text = String::new();
 
     // A resumed session has more than 2 messages (system + initial user).
     // In that case a text-only first response is valid (worker may decide the
@@ -108,6 +109,19 @@ pub(super) async fn run_reply_loop(
                 if !sys_text.is_empty() {
                     session.record_system_prompt(&sys_text);
                 }
+            }
+        }
+        // Record the first user message as the trace-level input
+        // (shows in the Langfuse trace list Input column).
+        if let Some(first_user) = conversation.messages.iter().find(|m| m.role == Role::User) {
+            let input_text: String = first_user
+                .content
+                .iter()
+                .filter_map(|b| b.as_text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !input_text.is_empty() {
+                session.record_trace_input(&input_text);
             }
         }
         Some(session)
@@ -379,6 +393,7 @@ pub(super) async fn run_reply_loop(
             if !turn_text.is_empty() {
                 push_fragment(&mut assistant_fragments, format!("text:{}", turn_text));
                 last_assistant_text = turn_text.clone();
+                final_assistant_text = turn_text.clone();
                 assistant_content.push(ContentBlock::Text { text: turn_text.clone() });
             }
             for tool_call in &turn_tool_calls {
@@ -617,6 +632,11 @@ pub(super) async fn run_reply_loop(
     // ── End session-level OTel span ──────────────────────────────────────────
     if let Some(session) = otel_session {
         session.record_usage(total_tokens_in, total_tokens_out);
+        // Record the last assistant text as the trace-level output
+        // (shows in the Langfuse trace list Output column).
+        if !final_assistant_text.is_empty() {
+            session.record_trace_output(&final_assistant_text);
+        }
         match &run_result {
             Ok(()) => session.end_ok(),
             Err(e) => session.end_error(&e.to_string()),
