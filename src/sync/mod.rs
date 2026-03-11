@@ -475,7 +475,7 @@ fn project_repo(inner: &Inner) -> ProjectRepository {
 }
 
 /// Current UTC time as an ISO-8601 string (second precision).
-fn now_utc() -> String {
+pub fn now_utc() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)

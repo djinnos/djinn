@@ -360,8 +360,7 @@ pub async fn import(
         if task_ids.is_empty() {
             continue;
         }
-        let task_ids_vec: Vec<String> = task_ids.iter().cloned().collect();
-        match TaskRepository::reconcile_peer_in_tx(&mut tx, peer_user_id, task_ids_vec.as_slice()).await {
+        match TaskRepository::reconcile_peer_in_tx(&mut tx, peer_user_id, task_ids).await {
             Ok(count) => {
                 tracing::debug!(
                     peer = %peer_user_id,

@@ -3,6 +3,21 @@ use super::*;
 use tracing::warn;
 
 impl TaskRepository {
+    /// List all tasks in a project (for peer reconciliation - SYNC-14).
+    pub async fn list_by_project(&self, project_id: &str) -> Result<Vec<Task>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Task>(
+            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels, acceptance_criteria,
+                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
+                    close_reason, merge_commit_sha, memory_refs
+             FROM tasks WHERE project_id = ?1 ORDER BY priority, created_at",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     pub async fn list_by_epic(&self, epic_id: &str) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Task>(
@@ -441,48 +456,58 @@ impl TaskRepository {
 
     /// Reconciles tasks for a specific peer within a transaction.
     ///
-    /// Closes local tasks where:
-    /// - owned by the given peer (peer_user_id)
-    /// - NOT in the provided set of task IDs (present_task_ids)
-    /// - NOT already in terminal state (status != 'closed')
-    ///
-    /// Returns the number of tasks closed.
-    /// Safety guard: if present_task_ids is empty, returns 0 without executing.
+    /// - Finds tasks where owner = peer_user_id
+    /// - Skips already-closed tasks (terminal state protection - SYNC-11)
+    /// - Skips tasks whose IDs are in peer_task_ids
+    /// - Closes remaining tasks with close_reason = 'peer_reconciled'
+    /// 
+    /// Returns the count of tasks that were reconciled (closed).
     pub async fn reconcile_peer_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         peer_user_id: &str,
-        present_task_ids: &std::collections::HashSet<String>,
+        peer_task_ids: &[String],
     ) -> Result<usize> {
-        // Safety guard: skip reconciliation if peer file has 0 tasks
-        if present_task_ids.is_empty() {
+        // Safety guard: if peer export is empty, skip reconciliation
+        if peer_task_ids.is_empty() {
             return Ok(0);
         }
 
-        // Build the NOT IN clause with bound parameters
-        // SQLite has a limit on the number of parameters, but for typical peer files
-        // this should be fine. If needed, can chunk in the future.
-        let placeholders: Vec<String> = (1..=present_task_ids.len())
-            .map(|i| format!("?{}", i + 1)) // ?2, ?3, ... (after ?1=owner)
-            .collect();
-
-        let sql = format!(
-            "UPDATE tasks
-             SET status = 'closed',
-                 close_reason = 'peer_reconciled',
-                 closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE owner = ?1
-               AND status != 'closed'
-               AND id NOT IN ({})",
-            placeholders.join(", ")
+        // Build placeholders for the NOT IN clause
+        let placeholders: String = peer_task_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        
+        // Find tasks owned by peer that are not in their export and not already closed
+        let sql_select = format!(
+            "SELECT id FROM tasks WHERE owner = ? AND status != 'closed' AND id NOT IN ({})",
+            placeholders
         );
-
-        let mut query = sqlx::query(&sql).bind(peer_user_id);
-        for task_id in present_task_ids {
-            query = query.bind(task_id);
+        
+        let mut query = sqlx::query_scalar::<_, String>(&sql_select).bind(peer_user_id);
+        for id in peer_task_ids {
+            query = query.bind(id);
         }
-
-        let result = query.execute(&mut **tx).await?;
+        
+        let tasks_to_close: Vec<String> = query.fetch_all(&mut **tx).await?;
+        
+        if tasks_to_close.is_empty() {
+            return Ok(0);
+        }
+        
+        // Close the tasks with peer_reconciled reason
+        let now = crate::sync::now_utc();
+        let placeholders: String = tasks_to_close.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        
+        let sql_update = format!(
+            "UPDATE tasks SET status = 'closed', close_reason = 'peer_reconciled', closed_at = ? WHERE id IN ({})",
+            placeholders
+        );
+        
+        let mut update_query = sqlx::query(&sql_update).bind(&now);
+        for id in &tasks_to_close {
+            update_query = update_query.bind(id);
+        }
+        
+        let result = update_query.execute(&mut **tx).await?;
+        
         Ok(result.rows_affected() as usize)
     }
 }
