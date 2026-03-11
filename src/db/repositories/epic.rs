@@ -724,15 +724,15 @@ mod tests {
 
         let epic = epic_repo.create("Counts", "", "", "", "").await.unwrap();
         task_repo
-            .create(&epic.id, "T1", "", "", "task", 0, "")
+            .create(&epic.id, "T1", "", "", "task", 0, "", None)
             .await
             .unwrap();
         task_repo
-            .create(&epic.id, "T2", "", "", "task", 0, "")
+            .create(&epic.id, "T2", "", "", "task", 0, "", None)
             .await
             .unwrap();
         let t3 = task_repo
-            .create(&epic.id, "T3", "", "", "task", 0, "")
+            .create(&epic.id, "T3", "", "", "task", 0, "", None)
             .await
             .unwrap();
         task_repo.set_status(&t3.id, "closed").await.unwrap();
@@ -752,11 +752,11 @@ mod tests {
 
         let epic = epic_repo.create("Delete", "", "", "", "").await.unwrap();
         task_repo
-            .create(&epic.id, "T1", "", "", "task", 0, "")
+            .create(&epic.id, "T1", "", "", "task", 0, "", None)
             .await
             .unwrap();
         task_repo
-            .create(&epic.id, "T2", "", "", "task", 0, "")
+            .create(&epic.id, "T2", "", "", "task", 0, "", None)
             .await
             .unwrap();
 

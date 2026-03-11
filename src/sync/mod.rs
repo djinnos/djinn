@@ -660,9 +660,9 @@ mod tests {
         // Reassign e1's project to p1 (epic auto-creates a default project).
         // For simplicity, create tasks directly in each project.
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
-        let _t1 = task_repo.create_in_project(&p1.id, Some(&e1.id), "Task in A", "", "", "task", 0, "")
+        let _t1 = task_repo.create_in_project(&p1.id, Some(&e1.id), "Task in A", "", "", "task", 0 , "", Some("open"))
             .await.unwrap();
-        let _t2 = task_repo.create_in_project(&p2.id, Some(&e1.id), "Task in B", "", "", "task", 0, "")
+        let _t2 = task_repo.create_in_project(&p2.id, Some(&e1.id), "Task in B", "", "", "task", 0 , "", Some("open"))
             .await.unwrap();
 
         // list_for_export with project_id should only return that project's tasks.

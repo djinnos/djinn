@@ -357,6 +357,7 @@ async fn call_task_create(
             issue_type,
             priority,
             owner,
+            None,
         )
         .await
         .map_err(|e| e.to_string())?;

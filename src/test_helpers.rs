@@ -81,6 +81,7 @@ pub async fn create_test_task(db: &Database, project_id: &str, epic_id: &str) ->
             "task",
             2,
             "test-owner",
+            None,
         )
         .await
         .expect("failed to create test task");

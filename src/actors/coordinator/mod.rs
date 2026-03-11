@@ -907,7 +907,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let epic = make_epic(&db, tx.clone()).await;
         let repo = TaskRepository::new(db.clone(), tx.clone());
-        repo.create(&epic.id, "T1", "", "", "task", 0, "")
+        repo.create(&epic.id, "T1", "", "", "task", 0 , "", Some("open"))
             .await
             .unwrap();
 
@@ -932,7 +932,7 @@ mod tests {
         let repo = TaskRepository::new(db.clone(), tx.clone());
 
         // Create a ready task (open, no blockers).
-        repo.create(&epic.id, "T1", "", "", "task", 0, "")
+        repo.create(&epic.id, "T1", "", "", "task", 0 , "", Some("open"))
             .await
             .unwrap();
 
@@ -955,7 +955,7 @@ mod tests {
         let repo = TaskRepository::new(db.clone(), tx.clone());
 
         let task = repo
-            .create(&epic.id, "Review me", "", "", "task", 0, "")
+            .create(&epic.id, "Review me", "", "", "task", 0 , "", Some("open"))
             .await
             .unwrap();
         repo.transition(
@@ -1002,7 +1002,7 @@ mod tests {
 
         // Manually put a task in_progress (simulating an orphaned session).
         let task = repo
-            .create(&epic.id, "Stuck", "", "", "task", 0, "")
+            .create(&epic.id, "Stuck", "", "", "task", 0 , "", Some("open"))
             .await
             .unwrap();
         repo.set_status(&task.id, "in_progress").await.unwrap();
