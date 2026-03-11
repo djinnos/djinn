@@ -62,7 +62,11 @@ function formatCompactDuration(totalSeconds: number): string {
     return `${hours}h ${minutes}m`;
   }
 
-  return `${minutes}m`;
+  if (totalMinutes > 0) {
+    return `${minutes}m`;
+  }
+
+  return `${safeSeconds}s`;
 }
 
 // --- Pipeline dots for in-flight cards ---
