@@ -10,6 +10,7 @@ use futures::StreamExt;
 
 use crate::agent::message::{Conversation, Message, Role};
 use crate::agent::provider::{LlmProvider, StreamEvent};
+use crate::agent::AgentType;
 use crate::db::repositories::session_message::SessionMessageRepository;
 use crate::server::AppState;
 
@@ -18,9 +19,132 @@ use crate::server::AppState;
 /// Fraction of the context window at which compaction is triggered.
 pub const COMPACTION_THRESHOLD: f64 = 0.8;
 
-// ─── Prompt ───────────────────────────────────────────────────────────────────
+// ─── Compaction context ──────────────────────────────────────────────────────
 
-const COMPACTION_PROMPT: &str = r#"## Task Context
+/// Describes *why* compaction is happening, so the prompt can be tailored.
+#[derive(Debug, Clone, Copy)]
+pub enum CompactionContext {
+    /// Mid-session compaction: context window threshold reached while working.
+    MidSession(AgentType),
+    /// Pre-resume compaction: compacting before re-prompting with reviewer feedback.
+    PreResume(AgentType),
+}
+
+// ─── Prompts ─────────────────────────────────────────────────────────────────
+
+/// Build the compaction prompt based on context.
+fn compaction_prompt(ctx: CompactionContext) -> &'static str {
+    match ctx {
+        CompactionContext::PreResume(AgentType::Worker) => PRE_RESUME_WORKER_PROMPT,
+        CompactionContext::MidSession(AgentType::Worker) => MID_SESSION_WORKER_PROMPT,
+        CompactionContext::MidSession(AgentType::TaskReviewer) | CompactionContext::PreResume(AgentType::TaskReviewer) => REVIEWER_PROMPT,
+        CompactionContext::MidSession(AgentType::ConflictResolver) | CompactionContext::PreResume(AgentType::ConflictResolver) => CONFLICT_RESOLVER_PROMPT,
+        _ => GENERIC_PROMPT,
+    }
+}
+
+/// Build the system instruction for the summariser based on context.
+fn summariser_system(ctx: CompactionContext) -> &'static str {
+    match ctx {
+        CompactionContext::PreResume(AgentType::Worker) => {
+            "You are summarising a coding agent's work session that is about to receive reviewer feedback. \
+             Produce a dense, faithful summary focused on what was implemented, what files were changed, \
+             and what the current state of the code is. Do NOT include any statements about work being \
+             complete or done — the reviewer has determined it is not."
+        }
+        CompactionContext::MidSession(AgentType::Worker) => {
+            "You are summarising a coding agent's in-progress work session. \
+             Produce a dense, faithful summary that preserves all implementation context \
+             so the agent can continue working without re-reading files."
+        }
+        CompactionContext::MidSession(AgentType::TaskReviewer) | CompactionContext::PreResume(AgentType::TaskReviewer) => {
+            "You are summarising a code review session. Produce a dense, faithful summary \
+             that preserves the review findings, issues identified, and assessment progress."
+        }
+        _ => "You are a conversation summariser. Produce a dense, faithful summary.",
+    }
+}
+
+const PRE_RESUME_WORKER_PROMPT: &str = r#"## Compaction Context
+A coding agent's session is being compacted before re-prompting with reviewer feedback.
+The agent's previous work was rejected or needs fixes. Summarise what happened so the
+agent can efficiently address the feedback without re-doing research.
+
+**Conversation History:**
+{messages}
+
+Wrap reasoning in `<analysis>` tags.
+
+### Include These Sections (in order of importance):
+1. **Files Changed** – Every file path that was read, created, or edited, with a brief description of changes made
+2. **Implementation State** – What was actually implemented vs. what was planned but not done
+3. **Code Decisions** – Key architectural or design decisions made and why
+4. **Errors Encountered** – Compile errors, test failures, and how they were (or weren't) resolved
+5. **Codebase Context** – Important patterns, types, or structures discovered during research that are needed for implementation
+6. **Outstanding Issues** – Known problems, incomplete work, or things the agent said it would do but didn't
+
+### IMPORTANT:
+- Do NOT include any claims that the work is "done", "complete", or "implemented successfully"
+- Do NOT include the agent's final sign-off or completion messages
+- Focus on FACTS: what files exist, what code was written, what errors remain
+- Preserve exact file paths, function names, and type names"#;
+
+const MID_SESSION_WORKER_PROMPT: &str = r#"## Compaction Context
+A coding agent's context window is full and needs compaction to continue working.
+
+**Conversation History:**
+{messages}
+
+Wrap reasoning in `<analysis>` tags.
+
+### Include These Sections:
+1. **Task Goal** – What the agent is trying to accomplish
+2. **Files Changed** – Every file path read, created, or edited, with description of changes
+3. **Implementation Progress** – What's done vs. what remains
+4. **Code Decisions** – Key architectural decisions and reasoning
+5. **Errors + Fixes** – Bugs encountered and resolutions (or outstanding)
+6. **Codebase Context** – Important types, patterns, file locations discovered
+7. **Current Work** – What the agent was actively working on when compaction triggered
+8. **Next Steps** – Concrete remaining work items
+
+> Preserve exact file paths, function names, type names, and error messages"#;
+
+const REVIEWER_PROMPT: &str = r#"## Compaction Context
+A code review agent's session needs compaction.
+
+**Conversation History:**
+{messages}
+
+Wrap reasoning in `<analysis>` tags.
+
+### Include These Sections:
+1. **Review Scope** – What task/PR is being reviewed and what the acceptance criteria are
+2. **Files Reviewed** – Every file examined with key observations
+3. **Issues Found** – All problems identified (compile errors, logic bugs, missing functionality, style)
+4. **Positive Findings** – What was implemented correctly
+5. **Assessment Progress** – Which acceptance criteria have been checked and their pass/fail status
+6. **Remaining Checks** – What still needs to be reviewed
+
+> Preserve exact file paths, line numbers, error messages, and acceptance criteria text"#;
+
+const CONFLICT_RESOLVER_PROMPT: &str = r#"## Compaction Context
+A merge conflict resolution agent's session needs compaction.
+
+**Conversation History:**
+{messages}
+
+Wrap reasoning in `<analysis>` tags.
+
+### Include These Sections:
+1. **Conflict Context** – What branches are being merged and why conflicts arose
+2. **Files With Conflicts** – Every conflicted file and the nature of the conflict
+3. **Resolution Decisions** – How each conflict was resolved and why
+4. **Remaining Conflicts** – Any unresolved conflicts
+5. **Build/Test Status** – Whether the resolution compiles and passes tests
+
+> Preserve exact file paths, branch names, and conflict markers"#;
+
+const GENERIC_PROMPT: &str = r#"## Task Context
 - An llm context limit was reached when a user was in a working session with an agent (you)
 - Generate a version of the below messages with only the most verbose parts removed
 - Include user requests, your responses, all technical content, and as much of the original context as possible
@@ -65,7 +189,6 @@ pub fn needs_compaction(total_tokens_in: u32, context_window: i64) -> bool {
 /// 1. Persist all current messages to `session_messages`.
 /// 2. Call `do_compact` to obtain a summary string.
 /// 3. Replace `conversation` with `[system, user(summary), assistant(continuation), last_user]`.
-/// 4. Increment `continuation_count` in the database.
 ///
 /// Returns `true` if compaction was performed, `false` if `do_compact` failed.
 pub async fn compact_conversation(
@@ -74,6 +197,7 @@ pub async fn compact_conversation(
     session_id: &str,
     task_id: &str,
     app_state: &AppState,
+    ctx: CompactionContext,
 ) -> bool {
     // 1. Persist current messages before replacing them.
     let repo = SessionMessageRepository::new(app_state.db().clone(), app_state.events().clone());
@@ -107,7 +231,7 @@ pub async fn compact_conversation(
         });
 
     // 3. Ask the LLM to summarise.
-    match do_compact(provider, &conversation.messages).await {
+    match do_compact(provider, &conversation.messages, ctx).await {
         Ok(summary) => {
             // 4. Replace conversation.
             let mut new_messages: Vec<Message> = Vec::new();
@@ -117,13 +241,27 @@ pub async fn compact_conversation(
             }
 
             new_messages.push(Message::user(summary));
-            new_messages.push(Message::assistant(
-                "Your context was compacted. The previous message contains a summary of the \
-                 conversation so far. Continue calling tools as necessary to complete the task.",
-            ));
 
-            if let Some(last_user) = last_user_text {
-                // Only re-append if it's not already the last non-system message.
+            let continuation_msg = match ctx {
+                CompactionContext::PreResume(_) => {
+                    "Your context was compacted before receiving reviewer feedback. \
+                     The previous message contains a summary of your prior work session. \
+                     You will receive feedback in the next message — read it carefully and \
+                     use your tools to make the necessary changes."
+                }
+                _ => {
+                    "Your context was compacted. The previous message contains a summary of the \
+                     conversation so far. Continue calling tools as necessary to complete the task."
+                }
+            };
+            new_messages.push(Message::assistant(continuation_msg));
+
+            // For mid-session compaction, re-append the last user message so the
+            // agent knows what it was working on. For pre-resume, skip this —
+            // the feedback will be appended by the caller.
+            if matches!(ctx, CompactionContext::MidSession(_))
+                && let Some(last_user) = last_user_text
+            {
                 let already_appended = new_messages
                     .last()
                     .map(|m| m.role == Role::User && m.text_content() == last_user)
@@ -143,6 +281,7 @@ pub async fn compact_conversation(
             tracing::info!(
                 task_id = %task_id,
                 session_id = %session_id,
+                context = ?ctx,
                 "compaction: conversation compacted successfully"
             );
             true
@@ -166,20 +305,22 @@ pub async fn compact_conversation(
 async fn do_compact(
     provider: &dyn LlmProvider,
     messages: &[Message],
+    ctx: CompactionContext,
 ) -> anyhow::Result<String> {
     // Progressive removal percentages (middle-out).
     const REMOVAL_PERCENTAGES: &[u32] = &[0, 10, 20, 50, 100];
 
+    let prompt_template = compaction_prompt(ctx);
+    let system_instruction = summariser_system(ctx);
+
     for &pct in REMOVAL_PERCENTAGES {
         let filtered = filter_tool_responses_middle_out(messages, pct);
         let formatted = format_messages_as_text(&filtered);
-        let prompt_text = COMPACTION_PROMPT.replace("{messages}", &formatted);
+        let prompt_text = prompt_template.replace("{messages}", &formatted);
 
         // Build a minimal conversation: system instruction + user request.
         let mut compact_conv = Conversation::new();
-        compact_conv.push(Message::system(
-            "You are a conversation summariser. Produce a dense, faithful summary.",
-        ));
+        compact_conv.push(Message::system(system_instruction));
         compact_conv.push(Message::user(prompt_text));
 
         match call_llm_for_summary(provider, &compact_conv).await {
@@ -397,5 +538,22 @@ mod tests {
         assert!(text.contains("[system]: You are helpful."));
         assert!(text.contains("[user]: What is 2+2?"));
         assert!(text.contains("[assistant]: 4"));
+    }
+
+    #[test]
+    fn compaction_prompt_varies_by_context() {
+        let worker_resume = compaction_prompt(CompactionContext::PreResume(AgentType::Worker));
+        let worker_mid = compaction_prompt(CompactionContext::MidSession(AgentType::Worker));
+        let reviewer = compaction_prompt(CompactionContext::MidSession(AgentType::TaskReviewer));
+
+        // Each context gets a different prompt
+        assert!(worker_resume.contains("rejected or needs fixes"));
+        assert!(worker_mid.contains("context window is full"));
+        assert!(reviewer.contains("code review"));
+
+        // All contain the messages placeholder
+        assert!(worker_resume.contains("{messages}"));
+        assert!(worker_mid.contains("{messages}"));
+        assert!(reviewer.contains("{messages}"));
     }
 }

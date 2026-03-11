@@ -498,7 +498,30 @@ pub async fn run_task_lifecycle(
                 {
                     saved_conv.messages[0] = Message::system(system_prompt.clone());
                 }
-                // Append reviewer feedback as a user message.
+
+                // Compact the prior conversation before appending feedback.
+                // This strips the model's "I'm done" messages and frees context
+                // window for actual work, while preserving research/context.
+                let pre_compact_len = saved_conv.messages.len();
+                let compacted = crate::agent::compaction::compact_conversation(
+                    provider.as_ref(),
+                    &mut saved_conv,
+                    resume_id,
+                    &task_id,
+                    &app_state,
+                    crate::agent::compaction::CompactionContext::PreResume(agent_type),
+                )
+                .await;
+                tracing::info!(
+                    task_id = %task_id,
+                    session_record_id = %resume_id,
+                    pre_compact_len,
+                    post_compact_len = saved_conv.messages.len(),
+                    compacted,
+                    "Lifecycle: compacted conversation before resume"
+                );
+
+                // Append reviewer feedback as the fresh user message.
                 let feedback = resume_context_for_task(&task_id, &app_state).await;
                 saved_conv.push(Message::user(feedback));
 
