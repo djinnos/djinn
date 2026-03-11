@@ -400,7 +400,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           src={ownerAvatarUrl(task.owner)}
           alt={task.owner ?? "Unassigned"}
           title={task.owner ?? "Unassigned"}
-          className="pointer-events-none absolute bottom-0 right-1 h-6 w-6"
+          className="pointer-events-none absolute bottom-0 right-1 h-6 w-6 transition-opacity duration-150 group-hover/taskcard:opacity-0"
         />
 
         {/* Row 2: Title */}
