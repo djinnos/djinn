@@ -174,3 +174,135 @@ fn percent_decode(s: &str) -> String {
     result
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_handle_callback_url_extracts_code_and_state() {
+        let manager = AuthCallbackManager::new();
+        let url = "djinn://auth/callback?code=abc123&state=xyz789";
+
+        let result = manager.handle_callback_url(url);
+        assert!(result.is_ok(), "Should successfully extract callback data");
+
+        let data = result.unwrap();
+        assert_eq!(data.code, "abc123", "Should extract correct code");
+        assert_eq!(data.state, "xyz789", "Should extract correct state");
+    }
+
+    #[test]
+    fn test_handle_callback_url_rejects_missing_code() {
+        let manager = AuthCallbackManager::new();
+        // URL with state but no code
+        let url = "djinn://auth/callback?state=xyz789";
+
+        let result = manager.handle_callback_url(url);
+        assert!(result.is_err(), "Should reject URL without code");
+        assert!(
+            result.unwrap_err().contains("No authorization code"),
+            "Error should mention missing code"
+        );
+    }
+
+    #[test]
+    fn test_handle_callback_url_rejects_error_responses() {
+        let manager = AuthCallbackManager::new();
+        // OAuth error response
+        let url = "djinn://auth/callback?error=access_denied&error_description=user+denied+access&state=xyz789";
+
+        let result = manager.handle_callback_url(url);
+        assert!(result.is_err(), "Should reject OAuth error responses");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("OAuth error"),
+            "Error should indicate OAuth error"
+        );
+        assert!(
+            err.contains("access_denied"),
+            "Error should contain the error code"
+        );
+    }
+
+    #[test]
+    fn test_validate_state_and_get_verifier_matches_correct_state() {
+        let manager = AuthCallbackManager::new();
+        let state = "valid_state_123";
+        let verifier = "my_code_verifier_abc";
+
+        // Set pending state
+        manager.set_pending_state(state.to_string(), verifier.to_string());
+
+        // Validate with correct state
+        let result = manager.validate_state_and_get_verifier(state);
+        assert!(result.is_some(), "Should return verifier for correct state");
+        assert_eq!(result.unwrap(), verifier, "Should return the correct verifier");
+    }
+
+    #[test]
+    fn test_validate_state_and_get_verifier_rejects_wrong_state() {
+        let manager = AuthCallbackManager::new();
+        let state = "valid_state_123";
+        let wrong_state = "wrong_state_456";
+        let verifier = "my_code_verifier_abc";
+
+        // Set pending state
+        manager.set_pending_state(state.to_string(), verifier.to_string());
+
+        // Validate with wrong state (CSRF attempt)
+        let result = manager.validate_state_and_get_verifier(wrong_state);
+        assert!(result.is_none(), "Should reject wrong state (CSRF protection)");
+    }
+
+    #[test]
+    fn test_validate_state_when_no_pending_state() {
+        let manager = AuthCallbackManager::new();
+
+        // No pending state set
+        let result = manager.validate_state_and_get_verifier("any_state");
+        assert!(result.is_none(), "Should return None when no pending state");
+    }
+
+    #[test]
+    fn test_clear_pending_state() {
+        let manager = AuthCallbackManager::new();
+        let state = "state_123";
+        let verifier = "verifier_abc";
+
+        // Set pending state
+        manager.set_pending_state(state.to_string(), verifier.to_string());
+        assert!(manager.validate_state_and_get_verifier(state).is_some(), "State should be set");
+
+        // Clear pending state
+        manager.clear_pending_state();
+        assert!(manager.validate_state_and_get_verifier(state).is_none(), "State should be cleared");
+    }
+
+    #[test]
+    fn test_handle_callback_url_with_url_encoded_values() {
+        let manager = AuthCallbackManager::new();
+        // URL with encoded values (space becomes +, special chars become %XX)
+        let url = "djinn://auth/callback?code=code%20with%20spaces&state=state%2Bplus";
+
+        let result = manager.handle_callback_url(url);
+        assert!(result.is_ok(), "Should handle URL-encoded values");
+
+        let data = result.unwrap();
+        assert_eq!(data.code, "code with spaces", "Should decode URL-encoded code");
+        assert_eq!(data.state, "state+plus", "Should decode URL-encoded state");
+    }
+
+    #[test]
+    fn test_handle_callback_url_no_query_string() {
+        let manager = AuthCallbackManager::new();
+        let url = "djinn://auth/callback";
+
+        let result = manager.handle_callback_url(url);
+        assert!(result.is_err(), "Should reject URL without query string");
+        assert!(
+            result.unwrap_err().contains("No query string"),
+            "Error should mention missing query string"
+        );
+    }
+}
+

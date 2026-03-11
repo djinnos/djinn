@@ -9,11 +9,12 @@ import {
   Pause,
   Loader2,
   ChevronDown,
+  ChevronRight,
   Layers,
   FolderOpen,
   Plus,
 } from 'lucide-react';
-import { KanbanIcon } from '@hugeicons/core-free-icons';
+import { Flag02Icon, KanbanIcon } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
 import logoSvg from '@/assets/logo.svg';
 import { useEffect, useCallback, useState } from 'react';
@@ -33,6 +34,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
+
 
 interface NavItemProps {
   icon: React.ReactNode;
@@ -361,109 +363,122 @@ export function Sidebar() {
               <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono">
                 <Command className="h-2.5 w-2.5" />
               </kbd>
-              <span>/</span>
               <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono">
-                <span>/</span>
+                /
               </kbd>
-              <span>collapse</span>
             </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={toggleCollapse}
+              className="h-8 w-8 shrink-0"
+              title="Collapse sidebar (Cmd+/)"
+            >
+              <PanelLeft className="h-4 w-4 transition-transform duration-200" />
+            </Button>
           </>
         )}
-        <button
-          type="button"
-          onClick={toggleCollapse}
-          className={cn(
-            "flex h-6 w-6 items-center justify-center rounded-md transition-colors",
-            "hover:bg-white/10 text-sidebar-foreground/70 hover:text-sidebar-foreground"
-          )}
-          title={isCollapsed ? "Expand" : "Collapse"}
-        >
-          <PanelLeft className={cn("h-4 w-4 transition-transform", isCollapsed && "rotate-180 scale-90")} />
-        </button>
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 p-2 space-y-1 overflow-y-auto">
-        <NavItem
-          icon={<HugeiconsIcon icon={KanbanIcon} className="h-4 w-4" />}
-          label="Kanban"
-          hotkey="K"
-          isActive={activeSection === 'kanban'}
-          isCollapsed={isCollapsed}
-          onClick={() => navigateToView('kanban')}
-        />
-        <NavItem
-          icon={<Layers className="h-4 w-4" />}
-          label="Epics"
-          hotkey="E"
-          isActive={activeSection === 'epics'}
-          isCollapsed={isCollapsed}
-          onClick={() => navigateToView('epics')}
-        />
-        <NavItem
-          icon={<Settings className="h-4 w-4" />}
-          label="Settings"
-          hotkey="S"
-          isActive={activeSection === 'settings'}
-          isCollapsed={isCollapsed}
-          onClick={() => navigate('/settings')}
-        />
-
+      <nav className="flex-1 overflow-y-auto p-2 space-y-4">
         {/* Projects Section */}
-        <div className="pt-2">
-          <button
-            type="button"
-            onClick={() => setProjectsExpanded(!projectsExpanded)}
-            className={cn(
-              "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors text-muted-foreground hover:bg-white/[0.04]",
-              isCollapsed && "justify-center px-0"
-            )}
-          >
-            <ChevronDown className={cn("h-3 w-3 shrink-0 transition-transform", !projectsExpanded && "-rotate-90")} />
-            {!isCollapsed && <span className="font-medium">Projects</span>}
-          </button>
+        <div className="space-y-1">
+          {!isCollapsed && (
+            <button
+              type="button"
+              onClick={() => setProjectsExpanded(!projectsExpanded)}
+              className="flex w-full items-center gap-1.5 px-2 py-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/60 hover:text-muted-foreground transition-colors"
+            >
+              {projectsExpanded ? (
+                <ChevronDown className="h-3 w-3" />
+              ) : (
+                <ChevronRight className="h-3 w-3" />
+              )}
+              Projects
+            </button>
+          )}
 
-          {projectsExpanded && (
-            <div className="mt-1 space-y-0.5">
-              {/* All Projects row */}
+          {(isCollapsed || projectsExpanded) && (
+            <div className="space-y-0.5">
+              {/* All Projects */}
               <ProjectRow
                 projectPath={null}
                 label="All Projects"
-                icon={<FolderOpen className="h-3.5 w-3.5" />}
+                icon={<Layers className="h-3.5 w-3.5 shrink-0" />}
                 isSelected={isAll}
                 isCollapsed={isCollapsed}
                 onClick={() => navigateToProject(ALL_PROJECTS)}
               />
 
-              {/* Individual project rows */}
+              {/* Individual projects */}
               {projects.map((project) => (
                 <ProjectRow
                   key={project.id}
                   projectPath={project.path ?? null}
                   label={project.name}
-                  icon={<FolderOpen className="h-3.5 w-3.5" />}
-                  isSelected={selectedProjectId === project.id}
+                  isSelected={!isAll && selectedProjectId === project.id}
                   isCollapsed={isCollapsed}
                   onClick={() => navigateToProject(project.id)}
                 />
               ))}
+
+              {/* Add project */}
+              {!isCollapsed && (
+                <button
+                  type="button"
+                  onClick={() => navigate('/settings/projects')}
+                  className="flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-sm text-muted-foreground/50 transition-colors hover:bg-white/[0.04] hover:text-muted-foreground"
+                >
+                  <Plus className="h-3.5 w-3.5 shrink-0" />
+                  <span>New Project</span>
+                </button>
+              )}
             </div>
           )}
         </div>
-      </nav>
 
-      {/* Footer */}
-      {!isCollapsed && (
-        <div className="border-t p-3">
-          <button
-            type="button"
-            className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm transition-colors text-muted-foreground hover:bg-white/[0.04] hover:text-foreground"
-          >
-            <Plus className="h-4 w-4" />
-            <span>New Project</span>
-          </button>
+        {/* Separator */}
+        <div className="mx-2 h-px bg-sidebar-border" />
+
+        {/* Views Section */}
+        <div className="space-y-1">
+          {!isCollapsed && (
+            <div className="px-2 py-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/60">
+              Views
+            </div>
+          )}
+          <NavItem
+            icon={<HugeiconsIcon icon={KanbanIcon} size={16} />}
+            label="Kanban"
+            hotkey="k"
+            isActive={activeSection === 'kanban'}
+            isCollapsed={isCollapsed}
+            onClick={() => navigateToView('kanban')}
+          />
+          <NavItem
+            icon={<HugeiconsIcon icon={Flag02Icon} size={16} />}
+            label="Epics"
+            hotkey="e"
+            isActive={activeSection === 'epics'}
+            isCollapsed={isCollapsed}
+            onClick={() => navigateToView('epics')}
+          />
         </div>
-      )}
+
+        {/* Separator */}
+        <div className="mx-2 h-px bg-sidebar-border" />
+
+        {/* Settings */}
+        <NavItem
+          icon={<Settings className="h-4 w-4" />}
+          label="Settings"
+          hotkey="s"
+          isActive={activeSection === 'settings'}
+          isCollapsed={isCollapsed}
+          onClick={() => navigate('/settings')}
+        />
+      </nav>
     </aside>
   );
 }

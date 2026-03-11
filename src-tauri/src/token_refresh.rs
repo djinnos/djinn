@@ -248,3 +248,179 @@ pub async fn logout() -> Result<(), String> {
     log::info!("User logged out, all tokens cleared");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_token_state(expires_in_seconds: u64) -> TokenState {
+        TokenState {
+            access_token: "test_access_token".to_string(),
+            refresh_token: "test_refresh_token".to_string(),
+            expires_at_unix: now_unix() + expires_in_seconds,
+            user_id: Some("user_123".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_is_token_expired_or_stale_returns_true_when_no_token() {
+        // Clear any existing token state
+        clear_token_state();
+
+        assert!(
+            is_token_expired_or_stale(),
+            "Should return true when no token state exists"
+        );
+    }
+
+    #[test]
+    fn test_is_token_expired_or_stale_returns_false_for_future_token() {
+        // Token expires in 1 hour (well beyond the 30-second buffer)
+        let state = create_token_state(3600);
+        set_token_state(state);
+
+        assert!(
+            !is_token_expired_or_stale(),
+            "Should return false for token expiring in the future"
+        );
+    }
+
+    #[test]
+    fn test_is_token_expired_or_stale_returns_true_for_past_token() {
+        // Token expired 1 hour ago
+        let state = TokenState {
+            access_token: "test_access_token".to_string(),
+            refresh_token: "test_refresh_token".to_string(),
+            expires_at_unix: now_unix().saturating_sub(3600),
+            user_id: Some("user_123".to_string()),
+        };
+        set_token_state(state);
+
+        assert!(
+            is_token_expired_or_stale(),
+            "Should return true for already expired token"
+        );
+    }
+
+    #[test]
+    fn test_is_token_expired_or_stale_returns_true_at_buffer_edge() {
+        // Token expires in exactly EXPIRY_BUFFER_SECONDS - 1 seconds
+        // This should trigger staleness because we add buffer to current time
+        let state = create_token_state(EXPIRY_BUFFER_SECONDS - 1);
+        set_token_state(state);
+
+        assert!(
+            is_token_expired_or_stale(),
+            "Should return true when token is within the expiry buffer"
+        );
+    }
+
+    #[test]
+    fn test_is_token_expired_or_stale_returns_false_just_outside_buffer() {
+        // Token expires in EXPIRY_BUFFER_SECONDS + 5 seconds
+        // This should be fresh
+        let state = create_token_state(EXPIRY_BUFFER_SECONDS + 5);
+        set_token_state(state);
+
+        assert!(
+            !is_token_expired_or_stale(),
+            "Should return false when token is outside the expiry buffer"
+        );
+    }
+
+    #[test]
+    fn test_set_and_get_token_state() {
+        clear_token_state();
+
+        let state = create_token_state(3600);
+        set_token_state(state.clone());
+
+        let retrieved = get_token_state();
+        assert!(retrieved.is_some(), "Should retrieve token state");
+
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.access_token, state.access_token);
+        assert_eq!(retrieved.refresh_token, state.refresh_token);
+        assert_eq!(retrieved.expires_at_unix, state.expires_at_unix);
+        assert_eq!(retrieved.user_id, state.user_id);
+    }
+
+    #[test]
+    fn test_get_token_state_returns_none_when_empty() {
+        clear_token_state();
+
+        let retrieved = get_token_state();
+        assert!(retrieved.is_none(), "Should return None when no token state set");
+    }
+
+    #[test]
+    fn test_clear_token_state() {
+        let state = create_token_state(3600);
+        set_token_state(state);
+
+        assert!(get_token_state().is_some(), "Token state should exist");
+
+        clear_token_state();
+
+        assert!(get_token_state().is_none(), "Token state should be cleared");
+    }
+
+    #[test]
+    fn test_get_valid_access_token_returns_token_when_valid() {
+        // Token expires in 1 hour
+        let state = create_token_state(3600);
+        set_token_state(state.clone());
+
+        let token = get_valid_access_token();
+        assert!(token.is_some(), "Should return access token when valid");
+        assert_eq!(token.unwrap(), state.access_token);
+    }
+
+    #[test]
+    fn test_get_valid_access_token_returns_none_when_expired() {
+        // Token expired 1 hour ago
+        let state = TokenState {
+            access_token: "test_access_token".to_string(),
+            refresh_token: "test_refresh_token".to_string(),
+            expires_at_unix: now_unix().saturating_sub(3600),
+            user_id: Some("user_123".to_string()),
+        };
+        set_token_state(state);
+
+        let token = get_valid_access_token();
+        assert!(token.is_none(), "Should return None when token is expired");
+    }
+
+    #[test]
+    fn test_get_valid_access_token_returns_none_within_buffer() {
+        // Token expires in 15 seconds (within 30-second buffer)
+        let state = create_token_state(15);
+        set_token_state(state);
+
+        let token = get_valid_access_token();
+        assert!(
+            token.is_none(),
+            "Should return None when token is within expiry buffer"
+        );
+    }
+
+    #[test]
+    fn test_token_state_overwrite() {
+        clear_token_state();
+
+        let state1 = create_token_state(3600);
+        set_token_state(state1.clone());
+
+        let state2 = TokenState {
+            access_token: "new_access_token".to_string(),
+            refresh_token: "new_refresh_token".to_string(),
+            expires_at_unix: now_unix() + 7200,
+            user_id: Some("user_456".to_string()),
+        };
+        set_token_state(state2.clone());
+
+        let retrieved = get_token_state().unwrap();
+        assert_eq!(retrieved.access_token, "new_access_token");
+        assert_eq!(retrieved.refresh_token, "new_refresh_token");
+    }
+}

@@ -157,3 +157,116 @@ pub async fn clear_token() -> Result<(), String> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_pkce_produces_valid_length_and_chars() {
+        let pkce = generate_pkce();
+
+        // code_verifier should be 128 characters long
+        assert_eq!(pkce.code_verifier.len(), 128, "code_verifier should be 128 characters");
+
+        // code_verifier should only contain valid characters: A-Z, a-z, 0-9, -_
+        let valid_chars: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".chars().collect();
+        for c in pkce.code_verifier.chars() {
+            assert!(
+                valid_chars.contains(&c),
+                "code_verifier contains invalid character: {}",
+                c
+            );
+        }
+
+        // code_challenge should be valid base64url (no padding)
+        // SHA256 produces 32 bytes, base64url encodes to ~43 chars
+        assert!(
+            pkce.code_challenge.len() >= 43,
+            "code_challenge should be at least 43 characters"
+        );
+
+        // state should be present and non-empty
+        assert!(!pkce.state.is_empty(), "state should not be empty");
+    }
+
+    #[test]
+    fn test_code_challenge_is_sha256_of_verifier() {
+        let pkce = generate_pkce();
+
+        // Manually compute SHA256 hash of code_verifier
+        let mut hasher = Sha256::new();
+        hasher.update(pkce.code_verifier.as_bytes());
+        let expected_hash = hasher.finalize();
+        let expected_challenge = URL_SAFE_NO_PAD.encode(expected_hash);
+
+        assert_eq!(
+            pkce.code_challenge, expected_challenge,
+            "code_challenge should be SHA256 of code_verifier"
+        );
+    }
+
+    #[test]
+    fn test_build_authorize_url_contains_all_required_params() {
+        let pkce = generate_pkce();
+        let url = build_authorize_url(&pkce);
+
+        // Check that URL starts with https://
+        assert!(url.starts_with("https://"), "URL should start with https://");
+
+        // Check domain
+        assert!(
+            url.contains(&format!("https://{}", CLERK_DOMAIN)),
+            "URL should contain the Clerk domain"
+        );
+
+        // Check path
+        assert!(
+            url.contains(OAUTH_AUTHORIZE_PATH),
+            "URL should contain the authorize path"
+        );
+
+        // Check required parameters
+        assert!(url.contains("client_id="), "URL should contain client_id");
+        assert!(url.contains(CLIENT_ID), "URL should contain the correct client_id");
+        assert!(url.contains("redirect_uri="), "URL should contain redirect_uri");
+        assert!(url.contains("response_type=code"), "URL should contain response_type=code");
+        assert!(url.contains("scope="), "URL should contain scope");
+        assert!(url.contains("state="), "URL should contain state");
+        assert!(url.contains(&pkce.state), "URL should contain the correct state");
+        assert!(url.contains("code_challenge="), "URL should contain code_challenge");
+        assert!(
+            url.contains(&pkce.code_challenge),
+            "URL should contain the correct code_challenge"
+        );
+        assert!(
+            url.contains("code_challenge_method=S256"),
+            "URL should contain code_challenge_method=S256"
+        );
+        assert!(url.contains("prompt=login"), "URL should contain prompt=login");
+    }
+
+    #[test]
+    fn test_build_authorize_url_contains_correct_redirect_uri() {
+        let pkce = generate_pkce();
+        let url = build_authorize_url(&pkce);
+
+        // The redirect_uri should be URL-encoded in the query string
+        let encoded_redirect =
+            url::form_urlencoded::byte_serialize(REDIRECT_URI.as_bytes()).collect::<String>();
+        assert!(
+            url.contains(&format!("redirect_uri={}", encoded_redirect)),
+            "URL should contain the correct encoded redirect_uri"
+        );
+    }
+
+    #[test]
+    fn test_redirect_uri_starts_with_scheme_from_tauri_conf() {
+        // From tauri.conf.json, the scheme is "djinn"
+        // REDIRECT_URI should start with djinn://
+        assert!(
+            REDIRECT_URI.starts_with("djinn://"),
+            "REDIRECT_URI should start with djinn:// scheme from tauri.conf.json"
+        );
+    }
+}
+
