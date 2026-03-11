@@ -514,6 +514,10 @@ pub(super) async fn run_reply_loop(
                 break;
             }
 
+            // Maximum characters per tool result to prevent context overflow.
+            // ~30k chars ≈ 7.5k tokens — enough for diagnosis, safe with multiple calls.
+            const MAX_TOOL_RESULT_CHARS: usize = 30_000;
+
             // Dispatch tool calls concurrently and collect results.
             // Each tool call gets its own OTel span as a child of the session.
             let tool_futures: Vec<_> = turn_tool_calls
@@ -547,11 +551,22 @@ pub(super) async fn run_reply_loop(
                         let (content, is_error) =
                             match extension::call_tool(app_state, &name, args, worktree_path).await {
                                 Ok(value) => {
-                                    let text = if value.is_string() {
+                                    let mut text = if value.is_string() {
                                         value.as_str().unwrap_or("").to_string()
                                     } else {
                                         value.to_string()
                                     };
+                                    if text.len() > MAX_TOOL_RESULT_CHARS {
+                                        let truncated_len = text.len();
+                                        text.truncate(MAX_TOOL_RESULT_CHARS);
+                                        // Find a clean UTF-8 boundary.
+                                        while !text.is_char_boundary(text.len()) {
+                                            text.pop();
+                                        }
+                                        text.push_str(&format!(
+                                            "\n\n[OUTPUT TRUNCATED — showing {MAX_TOOL_RESULT_CHARS} of {truncated_len} chars. Narrow your query for full results.]"
+                                        ));
+                                    }
                                     if let Some(ts) = &tool_span {
                                         ts.record_output(&text, false);
                                     }
