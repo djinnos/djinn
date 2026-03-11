@@ -179,6 +179,18 @@ pub fn validate_ac_count(n: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate initial task status for task_create: only "backlog" or "open".
+pub fn validate_task_create_status(status: Option<&str>) -> Result<Option<&str>, String> {
+    match status {
+        None => Ok(None),
+        Some("backlog") => Ok(Some("backlog")),
+        Some("open") => Ok(Some("open")),
+        Some(other) => Err(format!(
+            "invalid status: {other:?} (expected backlog or open)"
+        )),
+    }
+}
+
 // ── Emoji helpers ────────────────────────────────────────────────────────────
 
 /// Heuristic: is this char in a common emoji range?

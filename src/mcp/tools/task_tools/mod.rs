@@ -17,7 +17,7 @@ use crate::mcp::tools::validation::{
     validate_ac_count, validate_actor_id, validate_actor_role, validate_body, validate_description,
     validate_design, validate_issue_type, validate_label, validate_labels_count, validate_limit,
     validate_offset, validate_owner, validate_priority, validate_reason, validate_sort,
-    validate_title,
+    validate_task_create_status, validate_title,
 };
 use crate::models::session::SessionStatus;
 use crate::models::task::{Task, TaskStatus, TransitionAction};
@@ -64,6 +64,10 @@ impl DjinnMcpServer {
         }
         let owner = match validate_owner(p.owner.as_deref().unwrap_or("")) {
             Ok(o) => o,
+            Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e))),
+        };
+        let status = match validate_task_create_status(p.status.as_deref()) {
+            Ok(s) => s,
             Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e))),
         };
         if let Some(ref labels) = p.labels
@@ -113,7 +117,7 @@ impl DjinnMcpServer {
                 issue_type,
                 priority,
                 &owner,
-                None,
+                status,
             )
             .await
         {

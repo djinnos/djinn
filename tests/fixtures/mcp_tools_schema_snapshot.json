@@ -1356,7 +1356,7 @@
             "additionalProperties": {
               "type": "string"
             },
-            "description": "Per-project health issues blocking execution (project_id → error message).",
+            "description": "Per-project health issues blocking execution (project_id \u2192 error message).",
             "nullable": true,
             "type": "object"
           },
@@ -4799,7 +4799,7 @@
             "type": "string"
           },
           "id": {
-            "description": "Task UUID or short_id (optional — omit to query all tasks).",
+            "description": "Task UUID or short_id (optional \u2014 omit to query all tasks).",
             "nullable": true,
             "type": "string"
           },
@@ -4846,7 +4846,7 @@
             "type": "string"
           },
           "project": {
-            "description": "Absolute project path. Optional — task IDs are globally unique.",
+            "description": "Absolute project path. Optional \u2014 task IDs are globally unique.",
             "nullable": true,
             "type": "string"
           }
@@ -5082,7 +5082,7 @@
             "type": "string"
           },
           "epic_id": {
-            "description": "Parent epic ID — UUID or short_id (required).",
+            "description": "Parent epic ID \u2014 UUID or short_id (required).",
             "nullable": true,
             "type": "string"
           },
@@ -5120,6 +5120,11 @@
             "type": "string"
           },
           "title": {
+            "type": "string"
+          },
+          "status": {
+            "description": "Optional initial status. Allowed values: \"backlog\" or \"open\".",
+            "nullable": true,
             "type": "string"
           }
         },
@@ -5481,7 +5486,7 @@
             "type": "string"
           },
           "project": {
-            "description": "Absolute project path. Optional — task IDs are globally unique.",
+            "description": "Absolute project path. Optional \u2014 task IDs are globally unique.",
             "nullable": true,
             "type": "string"
           }

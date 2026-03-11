@@ -21,6 +21,8 @@ pub struct TaskCreateParams {
     pub memory_refs: Option<Vec<String>>,
     /// Task IDs (UUID or short_id) that block this task. Blockers are set atomically at creation.
     pub blocked_by: Option<Vec<String>>,
+    /// Optional initial status. Allowed values: "backlog" or "open".
+    pub status: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
