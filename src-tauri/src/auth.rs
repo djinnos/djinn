@@ -18,7 +18,7 @@ pub struct PkceParams {
 pub const CLERK_DOMAIN: &str = "clerk.djinnai.io";
 pub const OAUTH_AUTHORIZE_PATH: &str = "/oauth/authorize";
 pub const CLIENT_ID: &str = "djinnos-desktop";
-pub const REDIRECT_URI: &str = "djinnos://auth/callback";
+pub const REDIRECT_URI: &str = "djinn://auth/callback";
 const KEYRING_SERVICE: &str = "djinnos-desktop";
 const KEYRING_USERNAME: &str = "refresh_token";
 
