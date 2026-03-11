@@ -442,8 +442,13 @@ pub fn compute_transition(
         }
 
         TransitionAction::Escalate => {
-            if !matches!(from, TaskStatus::Open | TaskStatus::InTaskReview) {
-                return bad("escalate is only valid from open or in_task_review");
+            if !matches!(
+                from,
+                TaskStatus::Open | TaskStatus::InTaskReview | TaskStatus::Verifying
+            ) {
+                return bad(
+                    "escalate is only valid from open, in_task_review, or verifying",
+                );
             }
             TransitionApply {
                 to_status: Some(TaskStatus::NeedsPmIntervention),
@@ -501,4 +506,29 @@ pub fn compute_transition(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escalate_from_verifying_goes_to_pm() {
+        let result = compute_transition(&TransitionAction::Escalate, &TaskStatus::Verifying, None);
+        let apply = result.expect("escalate from verifying should be valid");
+        assert_eq!(apply.to_status, Some(TaskStatus::NeedsPmIntervention));
+    }
+
+    #[test]
+    fn escalate_from_open_goes_to_pm() {
+        let result = compute_transition(&TransitionAction::Escalate, &TaskStatus::Open, None);
+        let apply = result.expect("escalate from open should be valid");
+        assert_eq!(apply.to_status, Some(TaskStatus::NeedsPmIntervention));
+    }
+
+    #[test]
+    fn escalate_from_in_progress_is_invalid() {
+        let result = compute_transition(&TransitionAction::Escalate, &TaskStatus::InProgress, None);
+        assert!(result.is_err());
+    }
 }

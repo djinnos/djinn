@@ -512,7 +512,14 @@ fn estimate_message_chars(msg: &Message) -> usize {
 /// Deterministic compaction: keep the system prompt (first message) and as many
 /// recent messages as fit within `max_chars`. Older messages in the middle are
 /// dropped. A notice message is inserted where the cut happened.
+///
+/// Tool call/result pairs are kept together: if a user message with ToolResult
+/// blocks is kept, the preceding assistant message with the corresponding
+/// ToolUse blocks is also kept (and vice-versa). This prevents the "No tool
+/// call found for function call output" error from the Responses API.
 pub(crate) fn deterministic_compact(messages: &[Message], max_chars: usize) -> Vec<Message> {
+    use crate::agent::message::ContentBlock;
+
     if messages.is_empty() {
         return vec![];
     }
@@ -527,7 +534,7 @@ pub(crate) fn deterministic_compact(messages: &[Message], max_chars: usize) -> V
 
     // Walk from the end backwards, keeping recent messages until budget is exhausted.
     let rest = &messages[1..];
-    let mut kept_indices: Vec<usize> = Vec::new();
+    let mut kept_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut accumulated = 0usize;
 
     for (i, msg) in rest.iter().enumerate().rev() {
@@ -536,9 +543,89 @@ pub(crate) fn deterministic_compact(messages: &[Message], max_chars: usize) -> V
             break;
         }
         accumulated += msg_chars;
-        kept_indices.push(i);
+        kept_set.insert(i);
     }
-    kept_indices.reverse();
+
+    // Ensure tool call/result pairs stay together.
+    // If we kept a user message with ToolResult, ensure the preceding assistant
+    // message with the matching ToolUse is also kept (and vice-versa).
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let snapshot: Vec<usize> = kept_set.iter().copied().collect();
+        for &i in &snapshot {
+            let msg = &rest[i];
+            if msg.role == Role::User
+                && msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            {
+                // Find preceding assistant message with ToolUse.
+                if i > 0 && !kept_set.contains(&(i - 1)) {
+                    let prev = &rest[i - 1];
+                    if prev.role == Role::Assistant
+                        && prev
+                            .content
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                    {
+                        accumulated += estimate_message_chars(prev);
+                        kept_set.insert(i - 1);
+                        changed = true;
+                    }
+                }
+            } else if msg.role == Role::Assistant
+                && msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+            {
+                // Find following user message with ToolResult.
+                if i + 1 < rest.len() && !kept_set.contains(&(i + 1)) {
+                    let next = &rest[i + 1];
+                    if next.role == Role::User
+                        && next
+                            .content
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                    {
+                        accumulated += estimate_message_chars(next);
+                        kept_set.insert(i + 1);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // If pulling in pairs exceeded budget, drop the oldest pairs until we fit.
+    if accumulated > available {
+        let mut sorted: Vec<usize> = kept_set.iter().copied().collect();
+        sorted.sort();
+        while accumulated > available && sorted.len() > 2 {
+            let oldest = sorted.remove(0);
+            accumulated = accumulated.saturating_sub(estimate_message_chars(&rest[oldest]));
+            kept_set.remove(&oldest);
+            // If removing one half of a pair, remove the other too.
+            if !sorted.is_empty() {
+                let partner = sorted[0];
+                let is_pair = (rest[oldest].role == Role::Assistant
+                    && rest[partner].role == Role::User)
+                    || (rest[oldest].role == Role::User
+                        && rest[partner].role == Role::Assistant);
+                if is_pair {
+                    accumulated =
+                        accumulated.saturating_sub(estimate_message_chars(&rest[partner]));
+                    kept_set.remove(&partner);
+                    sorted.remove(0);
+                }
+            }
+        }
+    }
+
+    let mut kept_indices: Vec<usize> = kept_set.into_iter().collect();
+    kept_indices.sort();
 
     let mut result = vec![system_msg];
 
@@ -696,6 +783,69 @@ mod tests {
     fn estimate_char_budget_80_percent() {
         // 10000 tokens * 0.8 * 3 chars/token = 24000
         assert_eq!(estimate_char_budget(10000), 24000);
+    }
+
+    #[test]
+    fn deterministic_compact_keeps_tool_pairs_together() {
+        // Simulate: system, old text, assistant(tool_use), user(tool_result), recent text
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("old message"),
+            Message::assistant("old response"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "foo.rs"}),
+                }],
+                metadata: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: vec![ContentBlock::text("file contents")],
+                    is_error: false,
+                }],
+                metadata: None,
+            },
+            Message::assistant("done"),
+        ];
+
+        // Budget that can fit system + last 3 messages but not all 5.
+        // The tool pair (indices 2,3 in rest) should be kept together.
+        let budget = estimate_message_chars(&messages[0])
+            + estimate_message_chars(&messages[3])
+            + estimate_message_chars(&messages[4])
+            + estimate_message_chars(&messages[5])
+            + 300;
+        let result = deterministic_compact(&messages, budget);
+
+        // Verify no orphaned tool results: every ToolResult must be preceded
+        // by a ToolUse from the assistant.
+        for (i, msg) in result.iter().enumerate() {
+            if msg.role == Role::User
+                && msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            {
+                assert!(
+                    i > 0,
+                    "ToolResult at index 0 has no preceding ToolUse"
+                );
+                let prev = &result[i - 1];
+                assert!(
+                    prev.role == Role::Assistant
+                        && prev
+                            .content
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::ToolUse { .. })),
+                    "ToolResult at index {i} is not preceded by an assistant ToolUse message"
+                );
+            }
+        }
     }
 
     #[test]
