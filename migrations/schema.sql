@@ -79,7 +79,7 @@ CREATE INDEX tasks_status   ON tasks(status);
 CREATE INDEX tasks_priority ON tasks(priority, created_at);
 
 CREATE TABLE blockers (
-    task_id          TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    task_id          TEXT REFERENCES tasks(id) ON DELETE CASCADE,
     blocking_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     PRIMARY KEY (task_id, blocking_task_id)
 );
@@ -100,7 +100,7 @@ CREATE INDEX activity_log_task_id ON activity_log(task_id);
 CREATE TABLE sessions (
     id               TEXT NOT NULL PRIMARY KEY,
     project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    task_id          TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    task_id          TEXT REFERENCES tasks(id) ON DELETE CASCADE,
     model_id         TEXT NOT NULL,
     agent_type       TEXT NOT NULL,
     started_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -115,3 +115,4 @@ CREATE TABLE sessions (
 CREATE INDEX sessions_project_id ON sessions(project_id);
 CREATE INDEX sessions_task_id ON sessions(task_id);
 CREATE INDEX sessions_status ON sessions(status);
+CREATE INDEX sessions_project_agent_status ON sessions(project_id, agent_type, status);

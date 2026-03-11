@@ -203,7 +203,7 @@ mod tests {
 
         let session_repo = SessionRepository::new(db, tx);
         let session = session_repo
-            .create(&task.project_id, &task.id, "test-model", "worker", None, None)
+            .create(&task.project_id, Some(&task.id), "test-model", "worker", None, None)
             .await
             .unwrap();
 

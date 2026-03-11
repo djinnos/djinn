@@ -11,7 +11,7 @@ use crate::models::session::SessionRecord;
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct SessionListParams {
     /// Task UUID or short_id.
-    pub task_id: String,
+    pub task_id: Option<String>,
     /// Absolute project path (required).
     pub project: String,
 }
@@ -62,7 +62,7 @@ pub struct SessionMessagesResponse {
 pub struct SessionToolSession {
     pub id: String,
     pub project_id: String,
-    pub task_id: String,
+    pub task_id: Option<String>,
     pub model_id: String,
     pub agent_type: String,
     pub started_at: String,
@@ -128,7 +128,7 @@ pub struct SessionShowResponse {
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskTimelineParams {
     /// Task UUID or short_id.
-    pub task_id: String,
+    pub task_id: Option<String>,
     /// Absolute project path (required).
     pub project: String,
 }
@@ -183,8 +183,18 @@ impl DjinnMcpServer {
                 });
             }
         };
+        let task_id = match p.task_id.as_deref() {
+            Some(id) => id,
+            None => {
+                return Json(SessionListResponse {
+                    task_id: None,
+                    sessions: None,
+                    error: Some("task_id is required".to_string()),
+                });
+            }
+        };
         let Some(task) = task_repo
-            .resolve_in_project(&project_id, &p.task_id)
+            .resolve_in_project(&project_id, task_id)
             .await
             .ok()
             .flatten()
@@ -192,7 +202,7 @@ impl DjinnMcpServer {
             return Json(SessionListResponse {
                 task_id: None,
                 sessions: None,
-                error: Some(format!("task not found: {}", p.task_id)),
+                error: Some(format!("task not found: {}", task_id)),
             });
         };
 
@@ -244,17 +254,21 @@ impl DjinnMcpServer {
                 let mut stale_sessions = Vec::new();
 
                 for session in sessions {
-                    match pool.has_session(&session.task_id).await {
-                        Ok(true) => runtime_sessions.push(session),
-                        Ok(false) => stale_sessions.push(session),
-                        Err(e) => {
-                            return Json(SessionActiveResponse {
-                                sessions: None,
-                                stale_sessions: None,
-                                recovery_triggered: None,
-                                error: Some(e.to_string()),
-                            });
+                    if let Some(task_id) = session.task_id.as_deref() {
+                        match pool.has_session(task_id).await {
+                            Ok(true) => runtime_sessions.push(session),
+                            Ok(false) => stale_sessions.push(session),
+                            Err(e) => {
+                                return Json(SessionActiveResponse {
+                                    sessions: None,
+                                    stale_sessions: None,
+                                    recovery_triggered: None,
+                                    error: Some(e.to_string()),
+                                });
+                            }
                         }
+                    } else {
+                        runtime_sessions.push(session);
                     }
                 }
 
@@ -418,9 +432,13 @@ impl DjinnMcpServer {
         };
 
         let task_repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
-        let task = match task_repo.resolve_in_project(&project_id, &p.task_id).await {
+        let task_id = match p.task_id.as_deref() {
+            Some(id) => id,
+            None => return err("task_id is required".to_string()),
+        };
+        let task = match task_repo.resolve_in_project(&project_id, task_id).await {
             Ok(Some(t)) => t,
-            Ok(None) => return err(format!("task not found: {}", p.task_id)),
+            Ok(None) => return err(format!("task not found: {}", task_id)),
             Err(e) => return err(e.to_string()),
         };
 

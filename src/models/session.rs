@@ -27,7 +27,7 @@ impl SessionStatus {
 pub struct SessionRecord {
     pub id: String,
     pub project_id: String,
-    pub task_id: String,
+    pub task_id: Option<String>,
     pub model_id: String,
     pub agent_type: String,
     pub started_at: String,

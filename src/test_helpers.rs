@@ -92,7 +92,7 @@ pub async fn create_test_session(db: &Database, project_id: &str, task_id: &str)
     let repo = SessionRepository::new(db.clone(), test_events());
     repo.create(
         project_id,
-        task_id,
+        Some(task_id),
         "test-model",
         "worker",
         Some("/tmp/djinn-test-worktree"),

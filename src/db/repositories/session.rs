@@ -38,7 +38,7 @@ impl SessionRepository {
     pub async fn create(
         &self,
         project_id: &str,
-        task_id: &str,
+        task_id: Option<&str>,
         model_id: &str,
         agent_type: &str,
         worktree_path: Option<&str>,
@@ -310,7 +310,7 @@ mod tests {
         let created = repo
             .create(
                 &project_id,
-                &task_id,
+                Some(&task_id),
                 "openai/gpt-5",
                 "worker",
                 Some("/tmp/djinn-worktree-task"),
@@ -360,7 +360,7 @@ mod tests {
         let first = repo
             .create(
                 &project_id,
-                &task_id,
+                Some(&task_id),
                 "openai/gpt-5",
                 "worker",
                 None,
@@ -372,7 +372,7 @@ mod tests {
         let second = repo
             .create(
                 &project_id,
-                &task_id,
+                Some(&task_id),
                 "openai/gpt-5",
                 "worker",
                 None,

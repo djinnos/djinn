@@ -59,11 +59,15 @@ pub(super) async fn board_reconcile_impl(
             let mut finalized_stale_session_ids = Vec::new();
             let mut active_worktree_paths = std::collections::HashSet::new();
             for session in &running_sessions {
-                let has_runtime_session = match pool.has_session(&session.task_id).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
+                let has_runtime_session = if let Some(task_id) = session.task_id.as_deref() {
+                    match pool.has_session(task_id).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
+                        }
                     }
+                } else {
+                    true
                 };
                 if has_runtime_session {
                     if let Some(path) = &session.worktree_path {

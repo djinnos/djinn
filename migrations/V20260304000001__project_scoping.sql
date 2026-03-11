@@ -146,7 +146,7 @@ DROP TABLE IF EXISTS sessions_new;
 CREATE TABLE sessions_new (
     id            TEXT NOT NULL PRIMARY KEY,
     project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    task_id       TEXT REFERENCES tasks(id) ON DELETE CASCADE,
     model_id      TEXT NOT NULL,
     agent_type    TEXT NOT NULL,
     started_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -182,6 +182,7 @@ ALTER TABLE sessions_new RENAME TO sessions;
 CREATE INDEX sessions_project_id ON sessions(project_id);
 CREATE INDEX sessions_task_id ON sessions(task_id);
 CREATE INDEX sessions_status ON sessions(status);
+CREATE INDEX sessions_project_agent_status ON sessions(project_id, agent_type, status);
 
 DROP TABLE _migration_project;
 

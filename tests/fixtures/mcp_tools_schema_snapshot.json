@@ -4119,6 +4119,7 @@
                 "type": "string"
               },
               "task_id": {
+                "nullable": true,
                 "type": "string"
               },
               "tokens_in": {
@@ -4137,7 +4138,6 @@
             "required": [
               "id",
               "project_id",
-              "task_id",
               "model_id",
               "agent_type",
               "started_at",
@@ -4251,11 +4251,11 @@
           },
           "task_id": {
             "description": "Task UUID or short_id.",
+            "nullable": true,
             "type": "string"
           }
         },
         "required": [
-          "task_id",
           "project"
         ],
         "title": "SessionListParams",
@@ -4293,6 +4293,7 @@
                 "type": "string"
               },
               "task_id": {
+                "nullable": true,
                 "type": "string"
               },
               "tokens_in": {
@@ -4311,7 +4312,6 @@
             "required": [
               "id",
               "project_id",
-              "task_id",
               "model_id",
               "agent_type",
               "started_at",
@@ -4472,6 +4472,7 @@
             "type": "string"
           },
           "task_id": {
+            "nullable": true,
             "type": "string"
           },
           "tokens_in": {
@@ -5757,11 +5758,11 @@
           },
           "task_id": {
             "description": "Task UUID or short_id.",
+            "nullable": true,
             "type": "string"
           }
         },
         "required": [
-          "task_id",
           "project"
         ],
         "title": "TaskTimelineParams",
@@ -5800,6 +5801,7 @@
                 "type": "string"
               },
               "task_id": {
+                "nullable": true,
                 "type": "string"
               },
               "tokens_in": {
@@ -5818,7 +5820,6 @@
             "required": [
               "id",
               "project_id",
-              "task_id",
               "model_id",
               "agent_type",
               "started_at",

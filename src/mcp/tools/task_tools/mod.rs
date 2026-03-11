@@ -411,7 +411,7 @@ impl DjinnMcpServer {
                     .map(|s| SessionRecordResponse {
                         id: s.id,
                         project_id: s.project_id,
-                        task_id: s.task_id,
+                        task_id: s.task_id.unwrap_or_default(),
                         model_id: s.model_id,
                         agent_type: s.agent_type,
                         started_at: s.started_at,

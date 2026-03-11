@@ -563,7 +563,7 @@ pub async fn run_task_lifecycle(
                 let record_id = match session_repo
                     .create(
                         &task.project_id,
-                        &task.id,
+                        Some(&task.id),
                         &model_id,
                         agent_type.as_str(),
                         worktree_path.to_str(),
@@ -593,7 +593,7 @@ pub async fn run_task_lifecycle(
         let record_id = match session_repo
             .create(
                 &task.project_id,
-                &task.id,
+                Some(&task.id),
                 &model_id,
                 agent_type.as_str(),
                 worktree_path.to_str(),
