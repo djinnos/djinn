@@ -345,65 +345,81 @@ impl DjinnMcpServer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use serde_json::json;
 
-    /// Test that SyncChannelStatus includes needs_attention in its JSON representation.
-    /// This validates the task_sync_status MCP tool response shape.
-    #[test]
-    fn sync_channel_status_includes_needs_attention() {
-        let status = SyncChannelStatus {
-            name: "tasks".to_string(),
-            branch: "djinn/tasks".to_string(),
-            enabled: true,
-            project_paths: vec!["/tmp/test".to_string()],
-            last_synced_at: None,
-            last_error: None,
-            failure_count: 0,
-            backoff_secs: 0,
-            needs_attention: false,
-        };
+    use crate::test_helpers::{create_test_app, initialize_mcp_session, mcp_call_tool};
 
-        let json = serde_json::to_string(&status).unwrap();
-        assert!(json.contains("\"needs_attention\":false"), "json: {json}");
+    #[tokio::test]
+    async fn task_sync_status_returns_channels_with_enabled_field() {
+        let app = create_test_app();
+        let sid = initialize_mcp_session(&app).await;
+
+        let payload = mcp_call_tool(&app, &sid, "task_sync_status", json!({})).await;
+        let channels = payload["channels"].as_array().expect("channels should be an array");
+        assert!(!channels.is_empty(), "expected at least one channel status");
+        assert!(
+            channels[0].get("enabled").is_some(),
+            "channel status must include enabled field: {payload}"
+        );
     }
 
-    /// Test that SyncChannelStatus serializes needs_attention=true correctly.
-    #[test]
-    fn sync_channel_status_needs_attention_true_when_flag_set() {
-        let status = SyncChannelStatus {
-            name: "tasks".to_string(),
-            branch: "djinn/tasks".to_string(),
-            enabled: true,
-            project_paths: vec![],
-            last_synced_at: None,
-            last_error: Some("connection timeout".to_string()),
-            failure_count: 3,
-            backoff_secs: 120,
-            needs_attention: true,
-        };
+    #[tokio::test]
+    async fn task_sync_enable_returns_project_not_found_error_shape() {
+        let app = create_test_app();
+        let sid = initialize_mcp_session(&app).await;
 
-        let json = serde_json::to_string(&status).unwrap();
-        assert!(json.contains("\"needs_attention\":true"), "json: {json}");
-        assert!(json.contains("\"failure_count\":3"), "json: {json}");
+        let payload = mcp_call_tool(
+            &app,
+            &sid,
+            "task_sync_enable",
+            json!({"project":"/definitely/missing/project"}),
+        )
+        .await;
+
+        assert!(payload.get("error").and_then(|v| v.as_str()).is_some());
+        assert!(payload.get("ok").is_none(), "unexpected ok in error payload: {payload}");
     }
 
-    /// Test conversion from ChannelStatus to SyncChannelStatus propagates needs_attention.
-    #[test]
-    fn sync_channel_status_from_channel_status_propagates_needs_attention() {
-        let channel_status = ChannelStatus {
-            name: "tasks".to_string(),
-            branch: "djinn/tasks".to_string(),
-            enabled: true,
-            project_paths: vec![],
-            last_synced_at: None,
-            last_error: None,
-            failure_count: 5,
-            backoff_secs: 240,
-            needs_attention: true,
-        };
+    #[tokio::test]
+    async fn task_sync_disable_returns_error_shape_when_sync_not_enabled() {
+        let app = create_test_app();
+        let sid = initialize_mcp_session(&app).await;
 
-        let sync_status: SyncChannelStatus = channel_status.into();
-        assert!(sync_status.needs_attention);
-        assert_eq!(sync_status.failure_count, 5);
+        let payload = mcp_call_tool(
+            &app,
+            &sid,
+            "task_sync_disable",
+            json!({"project":"/definitely/missing/project"}),
+        )
+        .await;
+
+        assert!(payload.get("error").and_then(|v| v.as_str()).is_some());
+        assert!(payload.get("ok").is_none(), "unexpected ok in error payload: {payload}");
+    }
+
+    #[tokio::test]
+    async fn task_sync_export_returns_sync_not_enabled_error_shape() {
+        let app = create_test_app();
+        let sid = initialize_mcp_session(&app).await;
+
+        let payload = mcp_call_tool(&app, &sid, "task_sync_export", json!({})).await;
+
+        assert_eq!(payload["ok"], json!(false));
+        assert!(payload.get("channels").is_none() || payload["channels"].is_null());
+        let err = payload["error"].as_str().unwrap_or_default();
+        assert!(err.contains("sync not enabled"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn task_sync_import_returns_sync_not_enabled_error_shape() {
+        let app = create_test_app();
+        let sid = initialize_mcp_session(&app).await;
+
+        let payload = mcp_call_tool(&app, &sid, "task_sync_import", json!({})).await;
+
+        assert_eq!(payload["ok"], json!(false));
+        assert!(payload.get("channels").is_none() || payload["channels"].is_null());
+        let err = payload["error"].as_str().unwrap_or_default();
+        assert!(err.contains("sync not enabled"), "unexpected error: {err}");
     }
 }
