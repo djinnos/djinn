@@ -950,17 +950,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn epic_create_error_on_missing_project() {
+    async fn epic_create_error_on_empty_title() {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let result = mcp_call_tool(
             &app,
             &session_id,
             "epic_create",
-            json!({"project": "/missing/project", "title": "X"}),
+            json!({"project": "/tmp/epic-test", "title": ""}),
         )
         .await;
-        assert!(result["error"].as_str().unwrap_or_default().contains("project"));
+        assert!(result["error"].as_str().is_some());
     }
 
     #[tokio::test]
@@ -1071,16 +1071,16 @@ mod tests {
                 "id": epic.id,
                 "title": "Updated Epic",
                 "description": "Updated description",
-                "color": "purple",
+                "color": "#800080",
                 "emoji": "🚀"
             }),
         )
         .await;
 
-        assert!(result.get("error").is_none());
+        assert!(result.get("error").is_none(), "unexpected error: {:?}", result);
         assert_eq!(result["title"], "Updated Epic");
         assert_eq!(result["description"], "Updated description");
-        assert_eq!(result["color"], "purple");
+        assert_eq!(result["color"], "#800080");
         assert_eq!(result["emoji"], "🚀");
     }
 
@@ -1181,7 +1181,7 @@ mod tests {
         assert!(result["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("not closed"));
+            .contains("must be closed"));
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 use serde_json::json;
 
+use crate::mcp::tools::memory_tools::types::*;
 use crate::test_helpers::{create_test_app, initialize_mcp_session, mcp_call_tool};
 
 #[tokio::test]
@@ -15,7 +16,6 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
             "project": "/tmp/mcp-memory-write",
             "title": "Write Contract Note",
             "content": "body",
-            "folder": "decisions",
             "type": "adr"
         }),
     )
@@ -23,7 +23,6 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
 
     assert!(created.get("id").and_then(|v| v.as_str()).is_some());
     assert_eq!(created["title"], "Write Contract Note");
-    assert_eq!(created["folder"], "decisions");
     assert_eq!(created["note_type"], "adr");
     assert!(created.get("permalink").and_then(|v| v.as_str()).is_some());
 
@@ -35,9 +34,7 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
             "project": "/tmp/mcp-memory-write",
             "title": "Write Contract Note",
             "content": "body-2",
-            "folder": "decisions",
-            "type": "adr",
-            "permalink": created["permalink"]
+            "type": "adr"
         }),
     )
     .await;
@@ -58,7 +55,6 @@ async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
             "project": "/tmp/mcp-memory-read",
             "title": "Read Contract Note",
             "content": "read me",
-            "folder": "reference",
             "type": "reference"
         }),
     )
@@ -243,7 +239,7 @@ async fn mcp_memory_move_changes_folder_title_and_permalink() {
             "project": project,
             "identifier": created["permalink"],
             "title": "Moved Title",
-            "folder": "research"
+            "type": "research"
         }),
     )
     .await;
@@ -371,3 +367,143 @@ async fn mcp_memory_health_orphans_and_broken_links_shapes() {
     assert!(broken["broken_links"].is_array());
 }
 
+// ── Param deserialization unit tests ─────────────────────────────────────────
+
+#[test]
+fn write_params_deserialize() {
+    let params: WriteParams =
+        serde_json::from_value(json!({"project":"/tmp/p","title":"T","content":"C","type":"adr"}))
+            .unwrap();
+    assert_eq!(params.project, "/tmp/p");
+    assert_eq!(params.title, "T");
+    assert_eq!(params.content, "C");
+    assert_eq!(params.note_type, "adr");
+    assert!(params.tags.is_none());
+}
+
+#[test]
+fn read_params_deserialize() {
+    let params: ReadParams =
+        serde_json::from_value(json!({"project":"/tmp/p","identifier":"abc"})).unwrap();
+    assert_eq!(params.project, "/tmp/p");
+    assert_eq!(params.identifier, "abc");
+}
+
+#[test]
+fn search_params_deserialize() {
+    let params: SearchParams =
+        serde_json::from_value(json!({"project":"/tmp/p","query":"rust"})).unwrap();
+    assert_eq!(params.project, "/tmp/p");
+    assert_eq!(params.query, "rust");
+    assert!(params.limit.is_none());
+    assert!(params.folder.is_none());
+    assert!(params.note_type.is_none());
+}
+
+#[test]
+fn edit_params_deserialize() {
+    let params: EditParams = serde_json::from_value(json!({
+        "project":"/tmp/p",
+        "identifier":"a",
+        "operation":"append",
+        "content":"x"
+    }))
+    .unwrap();
+    assert_eq!(params.project, "/tmp/p");
+    assert_eq!(params.identifier, "a");
+    assert_eq!(params.operation, "append");
+    assert_eq!(params.content, "x");
+}
+
+#[test]
+fn move_params_deserialize() {
+    let params: MoveParams = serde_json::from_value(json!({
+        "project":"/tmp/p",
+        "identifier":"a",
+        "type":"adr",
+        "title":"new"
+    }))
+    .unwrap();
+    assert_eq!(params.project, "/tmp/p");
+    assert_eq!(params.identifier, "a");
+    assert_eq!(params.title.as_deref(), Some("new"));
+    assert_eq!(params.note_type, "adr");
+}
+
+#[test]
+fn delete_params_deserialize() {
+    let params: DeleteParams =
+        serde_json::from_value(json!({"project":"/tmp/p","identifier":"a"})).unwrap();
+    assert_eq!(params.project, "/tmp/p");
+    assert_eq!(params.identifier, "a");
+}
+
+#[test]
+fn list_params_deserialize() {
+    let params: ListParams = serde_json::from_value(json!({
+        "project":"/tmp/p",
+        "folder":"decisions",
+        "type":"adr",
+        "depth":2
+    }))
+    .unwrap();
+    assert_eq!(params.project, "/tmp/p");
+    assert_eq!(params.folder.as_deref(), Some("decisions"));
+    assert_eq!(params.note_type.as_deref(), Some("adr"));
+    assert_eq!(params.depth, Some(2));
+}
+
+#[test]
+fn list_params_deserialize_minimal() {
+    let params: ListParams =
+        serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
+    assert_eq!(params.project, "/tmp/p");
+    assert!(params.folder.is_none());
+    assert!(params.note_type.is_none());
+    assert!(params.depth.is_none());
+}
+
+#[test]
+fn graph_params_deserialize() {
+    let params: GraphParams = serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
+    assert_eq!(params.project, "/tmp/p");
+}
+
+#[test]
+fn recent_params_deserialize() {
+    let params: RecentParams = serde_json::from_value(json!({
+        "project":"/tmp/p",
+        "timeframe":"7d",
+        "limit":5
+    }))
+    .unwrap();
+    assert_eq!(params.project, "/tmp/p");
+    assert_eq!(params.timeframe.as_deref(), Some("7d"));
+    assert_eq!(params.limit, Some(5));
+}
+
+#[test]
+fn catalog_params_deserialize() {
+    let params: CatalogParams =
+        serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
+    assert_eq!(params.project, "/tmp/p");
+}
+
+#[test]
+fn health_params_deserialize() {
+    let params: HealthParams = serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
+    assert_eq!(params.project.as_deref(), Some("/tmp/p"));
+}
+
+#[test]
+fn orphans_params_deserialize() {
+    let params: OrphansParams = serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
+    assert_eq!(params.project, "/tmp/p");
+}
+
+#[test]
+fn broken_links_params_deserialize() {
+    let params: BrokenLinksParams =
+        serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
+    assert_eq!(params.project, "/tmp/p");
+}

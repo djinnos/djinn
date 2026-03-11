@@ -70,7 +70,7 @@ impl DjinnMcpServer {
         let depth = p.depth.unwrap_or(1);
 
         let notes = repo
-            .list_compact(&project_id, &p.folder, depth)
+            .list_compact(&project_id, p.folder.as_deref(), p.note_type.as_deref(), depth)
             .await
             .unwrap_or_default();
 

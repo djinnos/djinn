@@ -11,7 +11,7 @@ use crate::db::repositories::project::ProjectRepository;
 use crate::mcp::server::DjinnMcpServer;
 use crate::models::note::{GitLogEntry, Note, ReindexSummary};
 
-mod types;
+pub(crate) mod types;
 pub use types::*;
 
 mod reads;

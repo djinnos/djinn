@@ -11,11 +11,9 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<WriteParams>,
     ) -> Json<MemoryNoteResponse> {
-        let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(MemoryNoteResponse::error(format!(
-                "project not found: {}",
-                p.project
-            )));
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => return Json(MemoryNoteResponse::error(e)),
         };
 
         let tags_json = p

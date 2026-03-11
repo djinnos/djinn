@@ -121,57 +121,6 @@ mod tests {
         events
     }
 
-    async fn initialize_mcp_session(app: &axum::Router) -> String {
-        let initialize_payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "schema-test-client",
-                    "version": "0.0.0"
-                }
-            }
-        });
-
-        let init_req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/mcp")
-            .header(CONTENT_TYPE, "application/json")
-            .header(ACCEPT, "application/json, text/event-stream")
-            .body(Body::from(initialize_payload.to_string()))
-            .unwrap();
-        let init_resp = app.clone().oneshot(init_req).await.unwrap();
-        assert_eq!(init_resp.status(), 200);
-
-        let session_id = init_resp
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|v| v.to_str().ok())
-            .expect("missing mcp-session-id header on initialize response")
-            .to_string();
-
-        let init_notify_payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {}
-        });
-        let init_notify_req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/mcp")
-            .header(CONTENT_TYPE, "application/json")
-            .header(ACCEPT, "application/json, text/event-stream")
-            .header("mcp-session-id", session_id.clone())
-            .body(Body::from(init_notify_payload.to_string()))
-            .unwrap();
-        let init_notify_resp = app.clone().oneshot(init_notify_req).await.unwrap();
-        assert_eq!(init_notify_resp.status(), 202);
-
-        session_id
-    }
-
     async fn mcp_jsonrpc(
         app: &axum::Router,
         session_id: &str,
@@ -211,49 +160,6 @@ mod tests {
             .into_iter()
             .find(|event| event.get("id") == Some(&Value::from(id)))
             .expect("missing JSON-RPC event with requested id")
-    }
-
-    fn extract_tool_result_payload(result: &Value) -> Value {
-        if let Some(structured) = result.get("structuredContent") {
-            return structured.clone();
-        }
-
-        if let Some(content) = result.get("content").and_then(Value::as_array) {
-            for item in content {
-                if let Some(text) = item.get("text").and_then(Value::as_str)
-                    && let Ok(parsed) = serde_json::from_str::<Value>(text)
-                {
-                    return parsed;
-                }
-            }
-        }
-
-        result.clone()
-    }
-
-    async fn mcp_call_tool(
-        app: &axum::Router,
-        session_id: &str,
-        id: i64,
-        name: &str,
-        arguments: Value,
-    ) -> Value {
-        let event = mcp_jsonrpc(
-            app,
-            session_id,
-            id,
-            "tools/call",
-            serde_json::json!({
-                "name": name,
-                "arguments": arguments,
-            }),
-        )
-        .await;
-
-        let result = event
-            .get("result")
-            .expect("tools/call missing result payload");
-        extract_tool_result_payload(result)
     }
 
     fn canonicalize_json(value: &Value) -> Value {

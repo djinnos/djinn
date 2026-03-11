@@ -57,7 +57,12 @@ pub struct SearchParams {
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ListParams {
     pub project: String,
-    pub folder: String,
+    /// Filter by folder. Omit to list all notes.
+    pub folder: Option<String>,
+    /// Filter by note type (e.g. "adr", "reference", "research").
+    #[serde(rename = "type")]
+    #[schemars(rename = "type")]
+    pub note_type: Option<String>,
     /// Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels.
     pub depth: Option<i64>,
 }

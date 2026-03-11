@@ -140,30 +140,42 @@ impl NoteRepository {
     pub async fn list_compact(
         &self,
         project_id: &str,
-        folder: &str,
+        folder: Option<&str>,
+        note_type: Option<&str>,
         depth: i64,
     ) -> Result<Vec<NoteCompact>> {
         self.db.ensure_initialized().await?;
 
-        let sql = if depth == 1 {
-            "SELECT id, permalink, title, note_type, folder, updated_at
-             FROM notes WHERE project_id = ?1 AND folder = ?2
-             ORDER BY folder, title"
-                .to_owned()
-        } else {
-            // depth=0 or depth>1: return all descendants
-            "SELECT id, permalink, title, note_type, folder, updated_at
-             FROM notes WHERE project_id = ?1
-               AND (folder = ?2 OR folder LIKE ?2 || '/%')
-             ORDER BY folder, title"
-                .to_owned()
-        };
+        let mut sql = "SELECT id, permalink, title, note_type, folder, updated_at
+             FROM notes WHERE project_id = ?1"
+            .to_owned();
 
-        Ok(sqlx::query_as::<_, NoteCompact>(&sql)
-            .bind(project_id)
-            .bind(folder)
-            .fetch_all(self.db.pool())
-            .await?)
+        let mut binds: Vec<String> = vec![project_id.to_string()];
+
+        if let Some(f) = folder {
+            let idx = binds.len() + 1;
+            if depth == 1 {
+                sql.push_str(&format!(" AND folder = ?{idx}"));
+            } else {
+                sql.push_str(&format!(" AND (folder = ?{idx} OR folder LIKE ?{idx} || '/%')"));
+            }
+            binds.push(f.to_string());
+        }
+
+        if let Some(t) = note_type {
+            let idx = binds.len() + 1;
+            sql.push_str(&format!(" AND note_type = ?{idx}"));
+            binds.push(t.to_string());
+        }
+
+        sql.push_str(" ORDER BY folder, title");
+
+        let mut query = sqlx::query_as::<_, NoteCompact>(&sql);
+        for b in &binds {
+            query = query.bind(b);
+        }
+
+        Ok(query.fetch_all(self.db.pool()).await?)
     }
 
     /// Find tasks whose `memory_refs` JSON array contains `permalink`.

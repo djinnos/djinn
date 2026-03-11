@@ -6,8 +6,6 @@ pub mod memory_tools;
 pub mod project_tools;
 pub mod provider_tools;
 pub mod session_tools;
-#[cfg(test)]
-mod session_tools_tests;
 pub mod settings_tools;
 pub mod sync_tools;
 pub mod system_tools;

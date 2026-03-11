@@ -2074,15 +2074,21 @@
             "type": "integer"
           },
           "folder": {
+            "description": "Filter by folder. Omit to list all notes.",
+            "nullable": true,
             "type": "string"
           },
           "project": {
             "type": "string"
+          },
+          "type": {
+            "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\").",
+            "nullable": true,
+            "type": "string"
           }
         },
         "required": [
-          "project",
-          "folder"
+          "project"
         ],
         "title": "ListParams",
         "type": "object"
