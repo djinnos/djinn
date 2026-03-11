@@ -39,3 +39,4 @@ This task has been escalated because the worker agent made multiple unsuccessful
 - Your changes should make the task clearly achievable for the next worker.
 - If you decompose a task, close the original with `force_close` and open subtasks.
 - The minimum viable intervention is: diagnose → `task_comment_add` with guidance → `task_transition` with `pm_intervention_complete`.
+- **Build ownership:** Workers are responsible for leaving the codebase in a green state — builds must compile and tests must pass, even if pre-existing breakage came from parallel merges. If the worker is repeatedly rejecting or ignoring broken builds/tests that aren't "their code", make this clear in your guidance: **fixing the build is part of the task requirements.** If the branch state is corrupt or non-passing, use `task_delete_branch` to give the worker a clean slate and explicitly instruct them to fix any compilation or test failures they encounter.
