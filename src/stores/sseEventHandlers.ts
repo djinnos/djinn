@@ -78,10 +78,19 @@ export function initSSEEventHandlers(): () => void {
 
     // SSE task.updated payloads don't include active_session or session_count
     // (those are only added by MCP task_list/task_show). Preserve the values
-    // that the session_started handler already set on the store.
+    // that the session_started handler already set on the store — but only
+    // for in-flight statuses. If the task moved back to open/closed, clear
+    // the session so stale avatars don't linger.
+    const IN_FLIGHT = new Set([
+      "in_progress", "verifying", "needs_task_review",
+      "in_task_review", "needs_pm_intervention", "in_pm_intervention",
+    ]);
     const existing = taskStore.getState().getTask(task.id);
     if (existing) {
-      if (!("active_session" in task)) task.active_session = existing.active_session;
+      const isInFlight = IN_FLIGHT.has(task.status);
+      if (!("active_session" in task)) {
+        task.active_session = isInFlight ? existing.active_session : undefined;
+      }
       if (!("session_count" in task)) task.session_count = existing.session_count;
       if (!("duration_seconds" in task)) task.duration_seconds = existing.duration_seconds;
     }
