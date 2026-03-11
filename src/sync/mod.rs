@@ -80,6 +80,8 @@ pub struct ChannelStatus {
     pub failure_count: u32,
     /// Seconds to wait before the next retry (0 when not backing off).
     pub backoff_secs: u64,
+    /// Whether the channel needs attention (3+ failures) (SYNC-16).
+    pub needs_attention: bool,
 }
 
 /// Result of an export or import operation on a single channel (SYNC-05).
@@ -241,7 +243,7 @@ impl SyncManager {
         }
     }
 
-    /// Per-channel status snapshot for all registered channels (SYNC-01 + SYNC-07).
+    /// Per-channel status snapshot for all registered channels (SYNC-01 + SYNC-07 + SYNC-16).
     pub async fn status(&self) -> Vec<ChannelStatus> {
         let mut out = Vec::new();
 
@@ -250,7 +252,7 @@ impl SyncManager {
         let project_paths: Vec<String> = sync_projects.iter().map(|p| p.path.clone()).collect();
 
         for def in REGISTERED_CHANNELS {
-            let (last_synced_at, last_error, failure_count, backoff_secs) = {
+            let (last_synced_at, last_error, failure_count, backoff_secs, needs_attention) = {
                 let states = self.inner.states.lock().await;
                 let st = states.get(def.name);
                 (
@@ -258,6 +260,7 @@ impl SyncManager {
                     st.and_then(|s| s.last_error.clone()),
                     st.map(|s| s.backoff.failure_count()).unwrap_or(0),
                     st.map(|s| s.backoff.delay_secs()).unwrap_or(0),
+                    st.map(|s| s.backoff.needs_attention()).unwrap_or(false),
                 )
             };
 
@@ -270,6 +273,7 @@ impl SyncManager {
                 last_error,
                 failure_count,
                 backoff_secs,
+                needs_attention,
             });
         }
         out
