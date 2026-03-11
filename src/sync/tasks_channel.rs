@@ -405,6 +405,7 @@ mod tests {
     use super::*;
     use crate::db::repositories::epic::EpicRepository;
     use crate::db::repositories::task::TaskRepository;
+    use crate::models::task::TransitionAction;
 
     /// Create a temp dir with a git repo + bare "origin" remote.
     /// Returns (project_path, _temp_dir_guard).
@@ -683,7 +684,7 @@ mod tests {
             .await
             .unwrap();
         task_repo
-            .close(&task1.id, "other_reason")
+            .transition(&task1.id, TransitionAction::ForceClose, "test", "user", Some("other_reason"), None)
             .await
             .unwrap();
 
@@ -700,7 +701,7 @@ mod tests {
         assert_eq!(fetched.status, "closed");
         // Safety guard: no reconciliation when peer file is empty (0 tasks),
         // so close_reason should remain unchanged
-        assert_eq!(fetched.close_reason, Some("other_reason".to_string()));
+        assert_eq!(fetched.close_reason, Some("force_closed".to_string()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -761,7 +762,7 @@ mod tests {
 
         // Write alice.jsonl with 1 task (not task1).
         let wt = ensure_worktree(&repo).await.unwrap();
-        let other_task = make_test_task("other-id", &epic.project_id, "Other");
+        let mut other_task = make_test_task("other-id", &epic.project_id, "Other");
         other_task.owner = "alice".to_string();
         tokio::fs::write(
             wt.join("alice.jsonl"),
@@ -802,7 +803,7 @@ mod tests {
 
         // Write alice.jsonl with a peer task (not task_local).
         let wt = ensure_worktree(&repo).await.unwrap();
-        let peer_task = make_test_task("peer-task-id", &epic.project_id, "Peer Task");
+        let mut peer_task = make_test_task("peer-task-id", &epic.project_id, "Peer Task");
         peer_task.owner = "alice".to_string();
         let jsonl = serde_json::to_string(&peer_task).unwrap();
         tokio::fs::write(wt.join("alice.jsonl"), &jsonl).await.unwrap();
@@ -839,13 +840,13 @@ mod tests {
             .await
             .unwrap();
         task_repo
-            .close(&task_closed.id, "manually_closed")
+            .transition(&task_closed.id, TransitionAction::ForceClose, "test", "user", Some("manually_closed"), None)
             .await
             .unwrap();
 
         // Write alice.jsonl with 1 task (not task_closed).
         let wt = ensure_worktree(&repo).await.unwrap();
-        let other = make_test_task("other", &epic.project_id, "Other");
+        let mut other = make_test_task("other", &epic.project_id, "Other");
         other.owner = "alice".to_string();
         tokio::fs::write(
             wt.join("alice.jsonl"),
@@ -861,7 +862,7 @@ mod tests {
 
         // Verify the already-closed task still has its original close_reason.
         let fetched = task_repo.get(&task_closed.id).await.unwrap().unwrap();
-        assert_eq!(fetched.close_reason, Some("manually_closed".to_string()));
+        assert_eq!(fetched.close_reason, Some("force_closed".to_string()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

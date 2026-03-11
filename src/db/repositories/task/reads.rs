@@ -462,7 +462,7 @@ impl TaskRepository {
         // SQLite has a limit on the number of parameters, but for typical peer files
         // this should be fine. If needed, can chunk in the future.
         let placeholders: Vec<String> = (1..=present_task_ids.len())
-            .map(|i| format!("?{}", i + 2)) // ?3, ?4, ... (after ?1=owner, ?2 placeholder logic)
+            .map(|i| format!("?{}", i + 1)) // ?2, ?3, ... (after ?1=owner)
             .collect();
 
         let sql = format!(
