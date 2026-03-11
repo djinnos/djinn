@@ -310,7 +310,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
     return persisted + extraSeconds;
   }, [now, runningSessionStartMs, task.duration_seconds]);
 
-  const shouldShowDuration = totalTrackedSeconds > 0 || (task.session_count ?? 0) > 0;
+  const shouldShowDuration = totalTrackedSeconds > 0 || !!runningSessionStartMs;
   const isInFlight =
     task.status === "in_progress" ||
     task.status === "verifying" ||
