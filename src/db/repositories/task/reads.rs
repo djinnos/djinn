@@ -1,5 +1,7 @@
 use super::*;
 
+use tracing::warn;
+
 impl TaskRepository {
     pub async fn list_by_epic(&self, epic_id: &str) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
@@ -148,7 +150,9 @@ impl TaskRepository {
     /// Returns `true` if the row was inserted or updated, `false` if:
     ///   - The task's `epic_id` doesn't exist locally (FK constraint).
     ///   - The local copy is already newer or equal (LWW check).
-    ///   - Any other constraint violation (UNIQUE on short_id, CHECK, etc.).
+    ///
+    /// On UNIQUE(short_id) constraint violation, the incoming short_id is
+    /// extended by one character from the task UUID hex and retried (SYNC-15).
     pub async fn upsert_peer(&self, task: &Task) -> Result<bool> {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
@@ -164,68 +168,124 @@ impl TaskRepository {
             }
         }
 
-        let changed = match sqlx::query(
-            "INSERT INTO tasks (
-                id, project_id, short_id, epic_id, title, description, design,
-                issue_type, status, priority, owner, labels,
-                acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
-                created_at, updated_at, closed_at,
-                close_reason, merge_commit_sha, memory_refs
-             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
-             )
-             ON CONFLICT(id) DO UPDATE SET
-                project_id          = excluded.project_id,
-                title               = excluded.title,
-                description         = excluded.description,
-                design              = excluded.design,
-                issue_type          = excluded.issue_type,
-                status              = excluded.status,
-                priority            = excluded.priority,
-                owner               = excluded.owner,
-                labels              = excluded.labels,
-                acceptance_criteria = excluded.acceptance_criteria,
-                reopen_count        = excluded.reopen_count,
-                continuation_count  = excluded.continuation_count,
-                verification_failure_count = excluded.verification_failure_count,
-                updated_at          = excluded.updated_at,
-                closed_at           = excluded.closed_at,
-                close_reason        = excluded.close_reason,
-                merge_commit_sha    = excluded.merge_commit_sha,
-                memory_refs         = excluded.memory_refs
-             WHERE excluded.updated_at > tasks.updated_at
-               AND NOT (tasks.status = 'closed' AND excluded.status != 'closed')",
-        )
-        .bind(&task.id)
-        .bind(&task.project_id)
-        .bind(&task.short_id)
-        .bind(&task.epic_id)
-        .bind(&task.title)
-        .bind(&task.description)
-        .bind(&task.design)
-        .bind(&task.issue_type)
-        .bind(&task.status)
-        .bind(task.priority)
-        .bind(&task.owner)
-        .bind(&task.labels)
-        .bind(&task.acceptance_criteria)
-        .bind(task.reopen_count)
-        .bind(task.continuation_count)
-        .bind(task.verification_failure_count)
-        .bind(&task.created_at)
-        .bind(&task.updated_at)
-        .bind(&task.closed_at)
-        .bind(&task.close_reason)
-        .bind(&task.merge_commit_sha)
-        .bind(&task.memory_refs)
-        .execute(&mut *tx)
-        .await
-        {
-            Ok(result) => result.rows_affected() > 0,
-            Err(sqlx::Error::Database(db_err)) if is_constraint_violation(db_err.as_ref()) => false,
-            Err(e) => return Err(Error::Database(e)),
+        // Clone task for mutation if we need to extend short_id
+        let mut task = task.clone();
+        let mut retry_count = 0;
+        const MAX_RETRIES: usize = 3;
+
+        let changed = loop {
+            let result = sqlx::query(
+                "INSERT INTO tasks (
+                    id, project_id, short_id, epic_id, title, description, design,
+                    issue_type, status, priority, owner, labels,
+                    acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
+                    created_at, updated_at, closed_at,
+                    close_reason, merge_commit_sha, memory_refs
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                 )
+                 ON CONFLICT(id) DO UPDATE SET
+                    project_id          = excluded.project_id,
+                    title               = excluded.title,
+                    description         = excluded.description,
+                    design              = excluded.design,
+                    issue_type          = excluded.issue_type,
+                    status              = excluded.status,
+                    priority            = excluded.priority,
+                    owner               = excluded.owner,
+                    labels              = excluded.labels,
+                    acceptance_criteria = excluded.acceptance_criteria,
+                    reopen_count        = excluded.reopen_count,
+                    continuation_count  = excluded.continuation_count,
+                    verification_failure_count = excluded.verification_failure_count,
+                    updated_at          = excluded.updated_at,
+                    closed_at           = excluded.closed_at,
+                    close_reason        = excluded.close_reason,
+                    merge_commit_sha    = excluded.merge_commit_sha,
+                    memory_refs         = excluded.memory_refs
+                 WHERE excluded.updated_at > tasks.updated_at
+                   AND NOT (tasks.status = 'closed' AND excluded.status != 'closed')",
+            )
+            .bind(&task.id)
+            .bind(&task.project_id)
+            .bind(&task.short_id)
+            .bind(&task.epic_id)
+            .bind(&task.title)
+            .bind(&task.description)
+            .bind(&task.design)
+            .bind(&task.issue_type)
+            .bind(&task.status)
+            .bind(task.priority)
+            .bind(&task.owner)
+            .bind(&task.labels)
+            .bind(&task.acceptance_criteria)
+            .bind(task.reopen_count)
+            .bind(task.continuation_count)
+            .bind(task.verification_failure_count)
+            .bind(&task.created_at)
+            .bind(&task.updated_at)
+            .bind(&task.closed_at)
+            .bind(&task.close_reason)
+            .bind(&task.merge_commit_sha)
+            .bind(&task.memory_refs)
+            .execute(&mut *tx)
+            .await;
+
+            match result {
+                Ok(res) => break res.rows_affected() > 0,
+                Err(sqlx::Error::Database(db_err)) if is_constraint_violation(db_err.as_ref()) => {
+                    // Check if this is a short_id collision we can handle
+                    let constraint_name = extract_constraint_name(db_err.as_ref());
+
+                    if constraint_name.as_deref() == Some("short_id") {
+                        retry_count += 1;
+
+                        if retry_count > MAX_RETRIES {
+                            warn!(
+                                task_id = %task.id,
+                                short_id = %task.short_id,
+                                retry_count,
+                                "Short ID collision retry limit exceeded after {MAX_RETRIES} attempts"
+                            );
+                            return Err(Error::Database(sqlx::Error::Database(db_err)));
+                        }
+
+                        // Get the next character from the UUID hex string
+                        let uuid_hex_chars: Vec<char> = task.id.chars().collect();
+                        if let Some(next_char) = uuid_hex_chars.get(retry_count - 1) {
+                            warn!(
+                                task_id = %task.id,
+                                short_id = %task.short_id,
+                                retry_count,
+                                "Short ID collision detected, extending with char '{next_char}'"
+                            );
+                            task.short_id.push(*next_char);
+                        } else {
+                            // Shouldn't happen with valid UUIDs, but handle gracefully
+                            warn!(
+                                task_id = %task.id,
+                                short_id = %task.short_id,
+                                retry_count,
+                                "Short ID collision but UUID exhausted, cannot extend further"
+                            );
+                            return Err(Error::Database(sqlx::Error::Database(db_err)));
+                        }
+                        // Continue to next loop iteration with extended short_id
+                    } else {
+                        // Other constraint violations (FK, etc.) should not be retried
+                        warn!(
+                            constraint = %db_err.message(),
+                            task_id = %task.id,
+                            "Non-retriable constraint violation during peer upsert"
+                        );
+                        return Err(Error::Database(sqlx::Error::Database(db_err)));
+                    }
+                },
+                Err(e) => return Err(Error::Database(e)),
+            }
         };
+
         tx.commit().await?;
 
         if changed && let Ok(Some(updated)) = self.get(&task.id).await {
@@ -241,10 +301,14 @@ impl TaskRepository {
     /// after the transaction commits.
     ///
     /// Returns `true` if the row was inserted or updated.
+    ///
+    /// On UNIQUE(short_id) constraint violation, the incoming short_id is
+    /// extended by one character from the task UUID hex and retried (SYNC-15).
     pub async fn upsert_peer_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         task: &Task,
     ) -> Result<bool> {
+
         // Verify epic exists before INSERT when task references one.
         if let Some(epic_id) = &task.epic_id {
             let epic_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM epics WHERE id = ?1")
@@ -256,68 +320,122 @@ impl TaskRepository {
             }
         }
 
-        let changed = match sqlx::query(
-            "INSERT INTO tasks (
-                id, project_id, short_id, epic_id, title, description, design,
-                issue_type, status, priority, owner, labels,
-                acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
-                created_at, updated_at, closed_at,
-                close_reason, merge_commit_sha, memory_refs
-             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
-             )
-             ON CONFLICT(id) DO UPDATE SET
-                project_id          = excluded.project_id,
-                title               = excluded.title,
-                description         = excluded.description,
-                design              = excluded.design,
-                issue_type          = excluded.issue_type,
-                status              = excluded.status,
-                priority            = excluded.priority,
-                owner               = excluded.owner,
-                labels              = excluded.labels,
-                acceptance_criteria = excluded.acceptance_criteria,
-                reopen_count        = excluded.reopen_count,
-                continuation_count  = excluded.continuation_count,
-                verification_failure_count = excluded.verification_failure_count,
-                updated_at          = excluded.updated_at,
-                closed_at           = excluded.closed_at,
-                close_reason        = excluded.close_reason,
-                merge_commit_sha    = excluded.merge_commit_sha,
-                memory_refs         = excluded.memory_refs
-             WHERE excluded.updated_at > tasks.updated_at
-               AND NOT (tasks.status = 'closed' AND excluded.status != 'closed')",
-        )
-        .bind(&task.id)
-        .bind(&task.project_id)
-        .bind(&task.short_id)
-        .bind(&task.epic_id)
-        .bind(&task.title)
-        .bind(&task.description)
-        .bind(&task.design)
-        .bind(&task.issue_type)
-        .bind(&task.status)
-        .bind(task.priority)
-        .bind(&task.owner)
-        .bind(&task.labels)
-        .bind(&task.acceptance_criteria)
-        .bind(task.reopen_count)
-        .bind(task.continuation_count)
-        .bind(task.verification_failure_count)
-        .bind(&task.created_at)
-        .bind(&task.updated_at)
-        .bind(&task.closed_at)
-        .bind(&task.close_reason)
-        .bind(&task.merge_commit_sha)
-        .bind(&task.memory_refs)
-        .execute(&mut **tx)
-        .await
-        {
-            Ok(result) => result.rows_affected() > 0,
-            Err(sqlx::Error::Database(db_err)) if is_constraint_violation(db_err.as_ref()) => false,
-            Err(e) => return Err(Error::Database(e)),
-        };
-        Ok(changed)
+        // Clone task for mutation if we need to extend short_id
+        let mut task = task.clone();
+        let mut retry_count = 0;
+        const MAX_RETRIES: usize = 3;
+
+        loop {
+            let result = sqlx::query(
+                "INSERT INTO tasks (
+                    id, project_id, short_id, epic_id, title, description, design,
+                    issue_type, status, priority, owner, labels,
+                    acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
+                    created_at, updated_at, closed_at,
+                    close_reason, merge_commit_sha, memory_refs
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                 )
+                 ON CONFLICT(id) DO UPDATE SET
+                    project_id          = excluded.project_id,
+                    title               = excluded.title,
+                    description         = excluded.description,
+                    design              = excluded.design,
+                    issue_type          = excluded.issue_type,
+                    status              = excluded.status,
+                    priority            = excluded.priority,
+                    owner               = excluded.owner,
+                    labels              = excluded.labels,
+                    acceptance_criteria = excluded.acceptance_criteria,
+                    reopen_count        = excluded.reopen_count,
+                    continuation_count  = excluded.continuation_count,
+                    verification_failure_count = excluded.verification_failure_count,
+                    updated_at          = excluded.updated_at,
+                    closed_at           = excluded.closed_at,
+                    close_reason        = excluded.close_reason,
+                    merge_commit_sha    = excluded.merge_commit_sha,
+                    memory_refs         = excluded.memory_refs
+                 WHERE excluded.updated_at > tasks.updated_at
+                   AND NOT (tasks.status = 'closed' AND excluded.status != 'closed')",
+            )
+            .bind(&task.id)
+            .bind(&task.project_id)
+            .bind(&task.short_id)
+            .bind(&task.epic_id)
+            .bind(&task.title)
+            .bind(&task.description)
+            .bind(&task.design)
+            .bind(&task.issue_type)
+            .bind(&task.status)
+            .bind(task.priority)
+            .bind(&task.owner)
+            .bind(&task.labels)
+            .bind(&task.acceptance_criteria)
+            .bind(task.reopen_count)
+            .bind(task.continuation_count)
+            .bind(task.verification_failure_count)
+            .bind(&task.created_at)
+            .bind(&task.updated_at)
+            .bind(&task.closed_at)
+            .bind(&task.close_reason)
+            .bind(&task.merge_commit_sha)
+            .bind(&task.memory_refs)
+            .execute(&mut **tx)
+            .await;
+
+            match result {
+                Ok(res) => return Ok(res.rows_affected() > 0),
+                Err(sqlx::Error::Database(db_err)) if is_constraint_violation(db_err.as_ref()) => {
+                    // Check if this is a short_id collision we can handle
+                    let constraint_name = extract_constraint_name(db_err.as_ref());
+
+                    if constraint_name.as_deref() == Some("short_id") {
+                        retry_count += 1;
+
+                        if retry_count > MAX_RETRIES {
+                            warn!(
+                                task_id = %task.id,
+                                short_id = %task.short_id,
+                                retry_count,
+                                "Short ID collision retry limit exceeded after {MAX_RETRIES} attempts"
+                            );
+                            return Err(Error::Database(sqlx::Error::Database(db_err)));
+                        }
+
+                        // Get the next character from the UUID hex string
+                        let uuid_hex_chars: Vec<char> = task.id.chars().collect();
+                        if let Some(next_char) = uuid_hex_chars.get(retry_count - 1) {
+                            warn!(
+                                task_id = %task.id,
+                                short_id = %task.short_id,
+                                retry_count,
+                                "Short ID collision detected, extending with char '{next_char}'"
+                            );
+                            task.short_id.push(*next_char);
+                        } else {
+                            // Shouldn't happen with valid UUIDs, but handle gracefully
+                            warn!(
+                                task_id = %task.id,
+                                short_id = %task.short_id,
+                                retry_count,
+                                "Short ID collision but UUID exhausted, cannot extend further"
+                            );
+                            return Err(Error::Database(sqlx::Error::Database(db_err)));
+                        }
+                        // Continue to next loop iteration with extended short_id
+                    } else {
+                        // Other constraint violations (FK, etc.) should not be retried
+                        warn!(
+                            constraint = %db_err.message(),
+                            task_id = %task.id,
+                            "Non-retriable constraint violation during peer upsert"
+                        );
+                        return Err(Error::Database(sqlx::Error::Database(db_err)));
+                    }
+                },
+                Err(e) => return Err(Error::Database(e)),
+            }
+        }
     }
 }

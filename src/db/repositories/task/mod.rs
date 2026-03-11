@@ -190,6 +190,19 @@ pub(super) fn is_constraint_violation(db_err: &dyn sqlx::error::DatabaseError) -
         || db_err.message().contains("constraint failed")
 }
 
+/// Extract the constraint name from a database error message.
+pub(super) fn extract_constraint_name(db_err: &dyn sqlx::error::DatabaseError) -> Option<String> {
+    let message = db_err.message();
+    // SQLite constraint messages follow patterns like:
+    // "UNIQUE constraint failed: tasks.short_id"
+    // "FOREIGN KEY constraint failed"
+    if message.contains("short_id") {
+        Some("short_id".to_string())
+    } else {
+        None
+    }
+}
+
 pub(super) async fn short_id_exists(
     pool: &SqlitePool,
     table: &str,
