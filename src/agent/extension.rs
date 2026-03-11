@@ -90,6 +90,9 @@ struct TaskCreateParams {
     design: Option<String>,
     priority: Option<i64>,
     owner: Option<String>,
+    acceptance_criteria: Option<Vec<String>>,
+    blocked_by: Option<Vec<String>>,
+    memory_refs: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -198,7 +201,7 @@ async fn call_task_create(
     let priority = p.priority.unwrap_or(0);
     let owner = p.owner.as_deref().unwrap_or("");
 
-    let task = repo
+    let mut task = repo
         .create(
             &p.epic_id,
             &p.title,
@@ -210,6 +213,48 @@ async fn call_task_create(
         )
         .await
         .map_err(|e| e.to_string())?;
+
+    // Set acceptance criteria if provided.
+    if let Some(ref ac) = p.acceptance_criteria {
+        let ac_items: Vec<serde_json::Value> = ac
+            .iter()
+            .map(|c| serde_json::json!({"criterion": c, "met": false}))
+            .collect();
+        let ac_json = serde_json::to_string(&ac_items).unwrap_or_else(|_| "[]".into());
+        task = repo
+            .update(
+                &task.id,
+                &task.title,
+                &task.description,
+                &task.design,
+                task.priority,
+                &task.owner,
+                &task.labels,
+                &ac_json,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Set memory_refs if provided.
+    if let Some(ref refs) = p.memory_refs {
+        if !refs.is_empty() {
+            let refs_json = serde_json::to_string(refs).unwrap_or_else(|_| "[]".into());
+            if let Ok(t) = repo.update_memory_refs(&task.id, &refs_json).await {
+                task = t;
+            }
+        }
+    }
+
+    // Set blocked_by relationships if provided.
+    if let Some(ref blockers) = p.blocked_by {
+        for blocker_ref in blockers {
+            // Resolve short_id to full UUID if needed.
+            if let Ok(Some(blocker_task)) = repo.resolve(blocker_ref).await {
+                let _ = repo.add_blocker(&task.id, &blocker_task.id).await;
+            }
+        }
+    }
 
     Ok(task_to_value(&task))
 }
@@ -949,7 +994,7 @@ fn tool_edit() -> RmcpTool {
 fn tool_task_create() -> RmcpTool {
     RmcpTool::new(
         "task_create".to_string(),
-        "Create a new task under an epic.".to_string(),
+        "Create a new task under an epic. Use blocked_by to set dependencies and acceptance_criteria to define success criteria at creation.".to_string(),
         object!({
             "type": "object",
             "required": ["epic_id", "title"],
@@ -960,7 +1005,10 @@ fn tool_task_create() -> RmcpTool {
                 "description": {"type": "string"},
                 "design": {"type": "string"},
                 "priority": {"type": "integer"},
-                "owner": {"type": "string"}
+                "owner": {"type": "string"},
+                "acceptance_criteria": {"type": "array", "items": {"type": "string"}, "description": "List of acceptance criteria strings."},
+                "blocked_by": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) that block this task."},
+                "memory_refs": {"type": "array", "items": {"type": "string"}, "description": "Memory note permalinks to attach."}
             }
         }),
     )
