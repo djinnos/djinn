@@ -154,19 +154,16 @@ pub(super) async fn run_project_health_check(
         .map_err(|e| format!("failed to open git repo at {path}: {e}"))?;
 
     // Remove any stale health-check worktree from a previous crashed run.
-    // Prune first to clear orphaned git metadata (directory may already be
-    // gone but git worktree list still shows it), then force-remove the
-    // directory if it still exists on disk.
-    let _ = git
-        .run_command(vec!["worktree".into(), "prune".into()])
-        .await;
     let stale = project_path
         .join(".djinn")
         .join("worktrees")
         .join("_health_check");
     if stale.exists() {
-        let _ = git.remove_worktree(&stale).await;
+        let _ = tokio::fs::remove_dir_all(&stale).await;
     }
+    let _ = git
+        .run_command(vec!["worktree".into(), "prune".into()])
+        .await;
 
     let wt_path = git
         .create_worktree("_health_check", &target_branch, true)

@@ -81,9 +81,12 @@ struct SharedCoordinatorState {
 
 impl SharedCoordinatorState {
     fn to_status(&self, project_id: Option<&str>) -> CoordinatorStatus {
-        let paused = project_id.is_some_and(|id| {
-            self.unhealthy_project_ids.contains(id) || self.paused_projects.contains(id)
-        });
+        let paused = match project_id {
+            Some(id) => {
+                self.unhealthy_project_ids.contains(id) || self.paused_projects.contains(id)
+            }
+            None => !self.paused_projects.is_empty(),
+        };
         let unhealthy_projects = match project_id {
             Some(id) => self
                 .unhealthy_project_errors
