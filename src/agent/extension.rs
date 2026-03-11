@@ -180,8 +180,8 @@ async fn call_task_show(
                         // Truncate large payload string values (e.g. verification output).
                         if let Some(obj) = payload.as_object_mut() {
                             for value in obj.values_mut() {
-                                if let Some(s) = value.as_str() {
-                                    if s.len() > MAX_PAYLOAD_CHARS {
+                                if let Some(s) = value.as_str()
+                                    && s.len() > MAX_PAYLOAD_CHARS {
                                         let truncated = format!(
                                             "{}… [truncated, {} total chars]",
                                             &s[..MAX_PAYLOAD_CHARS],
@@ -189,7 +189,6 @@ async fn call_task_show(
                                         );
                                         *value = serde_json::json!(truncated);
                                     }
-                                }
                             }
                         }
                         serde_json::json!({

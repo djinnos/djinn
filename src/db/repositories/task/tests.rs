@@ -454,7 +454,7 @@ async fn delete_task_emits_event() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_enum_roundtrips() {
     let statuses = [
-        "draft",
+        "backlog",
         "open",
         "in_progress",
         "needs_task_review",
@@ -557,7 +557,7 @@ async fn invalid_transition_returns_error() {
         "expected InvalidTransition, got {err:?}"
     );
 
-    // Can't accept from open (must be draft).
+    // Can't accept from open (must be backlog).
     let err = repo
         .transition(&task.id, TransitionAction::Accept, "", "system", None, None)
         .await

@@ -55,7 +55,7 @@ pub struct ActivityEntry {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
-    Draft,
+    Backlog,
     Open,
     InProgress,
     Verifying,
@@ -70,7 +70,7 @@ impl TaskStatus {
     /// The DB/wire string representation.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Draft => "draft",
+            Self::Backlog => "backlog",
             Self::Open => "open",
             Self::InProgress => "in_progress",
             Self::Verifying => "verifying",
@@ -85,7 +85,7 @@ impl TaskStatus {
     /// Parse from a DB/wire string.
     pub fn parse(s: &str) -> Result<Self> {
         match s {
-            "draft" => Ok(Self::Draft),
+            "backlog" => Ok(Self::Backlog),
             "open" => Ok(Self::Open),
             "in_progress" => Ok(Self::InProgress),
             "verifying" => Ok(Self::Verifying),
@@ -263,8 +263,8 @@ pub fn compute_transition(
 
     Ok(match action {
         TransitionAction::Accept => {
-            if *from != TaskStatus::Draft {
-                return bad("accept is only valid from draft");
+            if *from != TaskStatus::Backlog {
+                return bad("accept is only valid from backlog");
             }
             TransitionApply::simple(TaskStatus::Open)
         }
