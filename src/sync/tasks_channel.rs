@@ -283,8 +283,12 @@ pub async fn import(
         let _ = git(&wt, &["merge", "--ff-only", &format!("origin/{BRANCH}")]).await;
     }
 
-    // Read all *.jsonl files — collect the best (newest) version of each task.
+    // Read all *.jsonl files — collect the best (newest) version of each task,
+    // and track task IDs per peer for reconciliation (SYNC-14).
     let mut peer_tasks: std::collections::HashMap<String, Task> = std::collections::HashMap::new();
+    // Map: peer_user_id -> set of task IDs from that peer's file
+    let mut peer_task_sets: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
 
     let mut dir = tokio::fs::read_dir(&wt).await?;
     while let Some(entry) = dir.next_entry().await? {
@@ -292,7 +296,17 @@ pub async fn import(
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
+        // Extract peer user_id from filename (e.g., "user123.jsonl" -> "user123")
+        let peer_user_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if peer_user_id.is_empty() {
+            continue;
+        }
         let content = tokio::fs::read_to_string(&path).await?;
+        let mut task_ids_for_peer = std::collections::HashSet::new();
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -300,6 +314,7 @@ pub async fn import(
             }
             match serde_json::from_str::<Task>(line) {
                 Ok(task) => {
+                    task_ids_for_peer.insert(task.id.clone());
                     let is_newer = peer_tasks
                         .get(&task.id)
                         .map(|existing: &Task| task.updated_at > existing.updated_at)
@@ -311,6 +326,8 @@ pub async fn import(
                 Err(e) => tracing::warn!(error = %e, "skipping malformed line in sync JSONL"),
             }
         }
+        // Store the task ID set for this peer (even if empty, for safety guard)
+        peer_task_sets.insert(peer_user_id, task_ids_for_peer);
     }
 
     if peer_tasks.is_empty() {
@@ -319,6 +336,7 @@ pub async fn import(
 
     // Upsert into local DB within a single transaction (SYNC-10).
     // Events are collected and emitted only after commit succeeds.
+    // Peer reconciliation also runs within this transaction (SYNC-14).
     let mut tx = db.pool().begin().await.map_err(|e| TaskSyncError::Database(e.to_string()))?;
     let mut upserted = 0usize;
     let mut upserted_ids: Vec<String> = Vec::new();
@@ -331,6 +349,28 @@ pub async fn import(
             }
             Ok(false) => {}
             Err(e) => tracing::warn!(task_id = task.id, error = %e, "peer upsert failed"),
+        }
+    }
+
+    // Peer reconciliation (SYNC-14): close local tasks owned by peer that are
+    // not present in their file and not already in terminal state.
+    // Safety guard: skip if peer file has 0 tasks.
+    for (peer_user_id, task_ids) in &peer_task_sets {
+        // Safety guard: skip reconciliation if peer file has 0 tasks
+        if task_ids.is_empty() {
+            continue;
+        }
+        match TaskRepository::reconcile_peer_in_tx(&mut tx, peer_user_id, task_ids).await {
+            Ok(count) => {
+                tracing::debug!(
+                    peer = %peer_user_id,
+                    count,
+                    "peer reconciliation completed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(peer = %peer_user_id, error = %e, "peer reconciliation failed");
+            }
         }
     }
 
@@ -572,6 +612,256 @@ mod tests {
         // task is only updated if the peer's updated_at is newer. Same timestamp
         // means no update.
         assert_eq!(imported, 0, "same timestamp should not re-upsert");
+    }
+
+    // ── Peer reconciliation tests (SYNC-14) ───────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peer_reconciliation_closes_missing_tasks() {
+        let (repo, _tmp) = setup_git_repo().await;
+        let db = crate::test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(64);
+
+        // Create an epic.
+        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+
+        // Create 3 tasks locally, all owned by peer "alice".
+        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task1 = task_repo
+            .create(&epic.id, "Task 1", "", "", "task", 0, "alice")
+            .await
+            .unwrap();
+        let task2 = task_repo
+            .create(&epic.id, "Task 2", "", "", "task", 0, "alice")
+            .await
+            .unwrap();
+        let task3 = task_repo
+            .create(&epic.id, "Task 3", "", "", "task", 0, "alice")
+            .await
+            .unwrap();
+
+        // Write alice.jsonl with only task1 and task2 (task3 is missing).
+        let wt = ensure_worktree(&repo).await.unwrap();
+        let tasks_in_file = vec![task1.clone(), task2.clone()];
+        let jsonl: String = tasks_in_file
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        tokio::fs::write(wt.join("alice.jsonl"), &jsonl).await.unwrap();
+        git(&wt, &["add", "alice.jsonl"]).await.unwrap();
+        git(&wt, &["commit", "-m", "peer update"]).await.unwrap();
+
+        // Run import - reconciliation should close task3.
+        let imported = import(&repo, &epic.project_id, &db, &tx).await.unwrap();
+
+        // Verify reconciliation happened.
+        let fetched3 = task_repo.get(&task3.id).await.unwrap();
+        assert!(fetched3.is_some(), "task3 should still exist");
+        assert_eq!(
+            fetched3.unwrap().status,
+            "closed",
+            "task3 should be closed by reconciliation"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peer_reconciliation_skips_closed_tasks() {
+        let (repo, _tmp) = setup_git_repo().await;
+        let db = crate::test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(64);
+
+        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+
+        // Create a task and close it.
+        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task1 = task_repo
+            .create(&epic.id, "Task 1", "", "", "task", 0, "alice")
+            .await
+            .unwrap();
+        task_repo
+            .close(&task1.id, "other_reason")
+            .await
+            .unwrap();
+
+        // Write empty alice.jsonl (but file exists with empty content).
+        let wt = ensure_worktree(&repo).await.unwrap();
+        tokio::fs::write(wt.join("alice.jsonl"), "").await.unwrap();
+        git(&wt, &["add", "alice.jsonl"]).await.unwrap();
+        git(&wt, &["commit", "-m", "empty"]).await.unwrap();
+
+        // Import - reconciliation should not affect already-closed tasks.
+        let _ = import(&repo, &epic.project_id, &db, &tx).await.unwrap();
+
+        let fetched = task_repo.get(&task1.id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, "closed");
+        // Safety guard: no reconciliation when peer file is empty (0 tasks),
+        // so close_reason should remain unchanged
+        assert_eq!(fetched.close_reason, Some("other_reason".to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peer_reconciliation_respects_peer_ownership() {
+        let (repo, _tmp) = setup_git_repo().await;
+        let db = crate::test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(64);
+
+        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+
+        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        // Task owned by alice, but empty file means reconciliation skipped.
+        let task_alice = task_repo
+            .create(&epic.id, "Alice Task", "", "", "task", 0, "alice")
+            .await
+            .unwrap();
+        // Task owned by bob, open.
+        let task_bob = task_repo
+            .create(&epic.id, "Bob Task", "", "", "task", 0, "bob")
+            .await
+            .unwrap();
+
+        // Write alice.jsonl as empty (0 tasks = safety guard).
+        let wt = ensure_worktree(&repo).await.unwrap();
+        tokio::fs::write(wt.join("alice.jsonl"), "").await.unwrap();
+        git(&wt, &["add", "alice.jsonl"]).await.unwrap();
+        git(&wt, &["commit", "-m", "empty"]).await.unwrap();
+
+        // Import - alice's reconciliation skipped (empty file), bob unaffected.
+        let _ = import(&repo, &epic.project_id, &db, &tx).await.unwrap();
+
+        let fetched_alice = task_repo.get(&task_alice.id).await.unwrap().unwrap();
+        assert_eq!(
+            fetched_alice.status,
+            "open",
+            "alice's task should remain open (empty file = no reconciliation)"
+        );
+
+        let fetched_bob = task_repo.get(&task_bob.id).await.unwrap().unwrap();
+        assert_eq!(fetched_bob.status, "open", "bob's task should remain open");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peer_reconciliation_sets_close_reason() {
+        let (repo, _tmp) = setup_git_repo().await;
+        let db = crate::test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(64);
+
+        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+
+        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task1 = task_repo
+            .create(&epic.id, "Task 1", "", "", "task", 0, "alice")
+            .await
+            .unwrap();
+
+        // Write alice.jsonl with 1 task (not task1).
+        let wt = ensure_worktree(&repo).await.unwrap();
+        let other_task = make_test_task("other-id", &epic.project_id, "Other");
+        other_task.owner = "alice".to_string();
+        tokio::fs::write(
+            wt.join("alice.jsonl"),
+            serde_json::to_string(&other_task).unwrap(),
+        )
+        .await
+        .unwrap();
+        git(&wt, &["add", "alice.jsonl"]).await.unwrap();
+        git(&wt, &["commit", "-m", "peer"]).await.unwrap();
+
+        // Import.
+        let _ = import(&repo, &epic.project_id, &db, &tx).await.unwrap();
+
+        let fetched = task_repo.get(&task1.id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, "closed");
+        assert_eq!(
+            fetched.close_reason,
+            Some("peer_reconciled".to_string()),
+            "should use close_reason = peer_reconciled"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peer_reconciliation_in_same_transaction() {
+        let (repo, _tmp) = setup_git_repo().await;
+        let db = crate::test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(64);
+
+        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+
+        // Create local task owned by alice.
+        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_local = task_repo
+            .create(&epic.id, "Local Task", "", "", "task", 0, "alice")
+            .await
+            .unwrap();
+
+        // Write alice.jsonl with a peer task (not task_local).
+        let wt = ensure_worktree(&repo).await.unwrap();
+        let peer_task = make_test_task("peer-task-id", &epic.project_id, "Peer Task");
+        peer_task.owner = "alice".to_string();
+        let jsonl = serde_json::to_string(&peer_task).unwrap();
+        tokio::fs::write(wt.join("alice.jsonl"), &jsonl).await.unwrap();
+        git(&wt, &["add", "alice.jsonl"]).await.unwrap();
+        git(&wt, &["commit", "-m", "peer"]).await.unwrap();
+
+        // Import should upsert the peer task AND reconcile the local task.
+        let count = import(&repo, &epic.project_id, &db, &tx).await.unwrap();
+        assert_eq!(count, 1, "should upsert one peer task");
+
+        // Verify peer task was inserted.
+        let peer_fetched = task_repo.get("peer-task-id").await.unwrap();
+        assert!(peer_fetched.is_some());
+
+        // Verify local task was closed (reconciliation happened).
+        let local_fetched = task_repo.get(&task_local.id).await.unwrap().unwrap();
+        assert_eq!(local_fetched.status, "closed");
+        assert_eq!(local_fetched.close_reason, Some("peer_reconciled".to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peer_reconciliation_excludes_terminal_states() {
+        let (repo, _tmp) = setup_git_repo().await;
+        let db = crate::test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(64);
+
+        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+
+        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        // Create a closed task.
+        let task_closed = task_repo
+            .create(&epic.id, "Closed Task", "", "", "task", 0, "alice")
+            .await
+            .unwrap();
+        task_repo
+            .close(&task_closed.id, "manually_closed")
+            .await
+            .unwrap();
+
+        // Write alice.jsonl with 1 task (not task_closed).
+        let wt = ensure_worktree(&repo).await.unwrap();
+        let other = make_test_task("other", &epic.project_id, "Other");
+        other.owner = "alice".to_string();
+        tokio::fs::write(
+            wt.join("alice.jsonl"),
+            serde_json::to_string(&other).unwrap(),
+        )
+        .await
+        .unwrap();
+        git(&wt, &["add", "alice.jsonl"]).await.unwrap();
+        git(&wt, &["commit", "-m", "peer"]).await.unwrap();
+
+        // Import.
+        let _ = import(&repo, &epic.project_id, &db, &tx).await.unwrap();
+
+        // Verify the already-closed task still has its original close_reason.
+        let fetched = task_repo.get(&task_closed.id).await.unwrap().unwrap();
+        assert_eq!(fetched.close_reason, Some("manually_closed".to_string()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

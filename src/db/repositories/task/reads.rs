@@ -438,4 +438,51 @@ impl TaskRepository {
             }
         }
     }
+
+    /// Reconciles tasks for a specific peer within a transaction.
+    ///
+    /// Closes local tasks where:
+    /// - owned by the given peer (peer_user_id)
+    /// - NOT in the provided set of task IDs (present_task_ids)
+    /// - NOT already in terminal state (status != 'closed')
+    ///
+    /// Returns the number of tasks closed.
+    /// Safety guard: if present_task_ids is empty, returns 0 without executing.
+    pub async fn reconcile_peer_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        peer_user_id: &str,
+        present_task_ids: &std::collections::HashSet<String>,
+    ) -> Result<usize> {
+        // Safety guard: skip reconciliation if peer file has 0 tasks
+        if present_task_ids.is_empty() {
+            return Ok(0);
+        }
+
+        // Build the NOT IN clause with bound parameters
+        // SQLite has a limit on the number of parameters, but for typical peer files
+        // this should be fine. If needed, can chunk in the future.
+        let placeholders: Vec<String> = (1..=present_task_ids.len())
+            .map(|i| format!("?{}", i + 2)) // ?3, ?4, ... (after ?1=owner, ?2 placeholder logic)
+            .collect();
+
+        let sql = format!(
+            "UPDATE tasks
+             SET status = 'closed',
+                 close_reason = 'peer_reconciled',
+                 closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE owner = ?1
+               AND status != 'closed'
+               AND id NOT IN ({})",
+            placeholders.join(", ")
+        );
+
+        let mut query = sqlx::query(&sql).bind(peer_user_id);
+        for task_id in present_task_ids {
+            query = query.bind(task_id);
+        }
+
+        let result = query.execute(&mut **tx).await?;
+        Ok(result.rows_affected() as usize)
+    }
 }
