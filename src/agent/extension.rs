@@ -36,6 +36,7 @@ where
             .map_err(|e| format!("invalid frontend tool payload: {e}"))?;
 
     match call.name.as_str() {
+        "task_list" => call_task_list(state, &call.arguments).await,
         "task_show" => call_task_show(state, &call.arguments).await,
         "task_create" => call_task_create(state, &call.arguments).await,
         "task_update" => call_task_update(state, &call.arguments).await,
@@ -54,6 +55,23 @@ where
         "edit" => call_edit(&call.arguments, worktree_path).await,
         other => Err(format!("unknown djinn frontend tool: {other}")),
     }
+}
+
+#[derive(Deserialize)]
+struct TaskListParams {
+    status: Option<String>,
+    issue_type: Option<String>,
+    priority: Option<i64>,
+    q: Option<String>,
+    sort: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    owner: Option<String>,
+    blocked: Option<bool>,
+    blocked_by: Option<String>,
+    labels: Option<Vec<String>>,
+    memory_ref: Option<String>,
+    include_closed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -139,6 +157,44 @@ struct EditParams {
     new_text: String,
 }
 
+async fn call_task_list(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: TaskListParams = parse_args(arguments)?;
+    let repo = TaskRepository::new(state.db().clone(), state.events().clone());
+
+    let query = crate::db::repositories::task::ListQuery {
+        status: p.status,
+        issue_type: p.issue_type,
+        priority: p.priority,
+        text: p.q,
+        owner: p.owner,
+        blocked: p.blocked,
+        blocked_by: p.blocked_by,
+        labels: p.labels,
+        memory_ref: p.memory_ref,
+        include_closed: p.include_closed,
+        sort: p.sort.unwrap_or_else(|| "priority".to_string()),
+        limit: p.limit.unwrap_or(50),
+        offset: p.offset.unwrap_or(0),
+    };
+
+    let result = repo.list_filtered(query).await.map_err(|e| e.to_string())?;
+
+    let limit = p.limit.unwrap_or(50);
+    let offset = p.offset.unwrap_or(0);
+    let has_more = offset + i64::try_from(result.tasks.len()).unwrap_or(0) < result.total_count;
+
+    Ok(serde_json::json!({
+        "tasks": result.tasks.iter().map(task_to_value).collect::<Vec<_>>(),
+        "total": result.total_count,
+        "limit": limit,
+        "offset": offset,
+        "has_more": has_more,
+    }))
+}
+
 async fn call_task_show(
     state: &AppState,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -182,14 +238,15 @@ async fn call_task_show(
                         if let Some(obj) = payload.as_object_mut() {
                             for value in obj.values_mut() {
                                 if let Some(s) = value.as_str()
-                                    && s.len() > MAX_PAYLOAD_CHARS {
-                                        let truncated = format!(
-                                            "{}… [truncated, {} total chars]",
-                                            &s[..MAX_PAYLOAD_CHARS],
-                                            s.len()
-                                        );
-                                        *value = serde_json::json!(truncated);
-                                    }
+                                    && s.len() > MAX_PAYLOAD_CHARS
+                                {
+                                    let truncated = format!(
+                                        "{}… [truncated, {} total chars]",
+                                        &s[..MAX_PAYLOAD_CHARS],
+                                        s.len()
+                                    );
+                                    *value = serde_json::json!(truncated);
+                                }
                             }
                         }
                         serde_json::json!({
@@ -891,6 +948,28 @@ async fn call_task_kill_session(
     }))
 }
 
+<<<<<<< HEAD
+fn tool_task_list() -> RmcpTool {
+    RmcpTool::new(
+        "task_list".to_string(),
+        "List tasks with optional filters and pagination.".to_string(),
+        object!({
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "issue_type": {"type": "string"},
+                "owner": {"type": "string"},
+                "priority": {"type": "integer"},
+                "q": {"type": "string"},
+                "blocked": {"type": "boolean"},
+                "blocked_by": {"type": "string"},
+                "labels": {"type": "array", "items": {"type": "string"}},
+                "memory_ref": {"type": "string"},
+                "include_closed": {"type": "boolean"},
+                "sort": {"type": "string"},
+                "limit": {"type": "integer"},
+                "offset": {"type": "integer"}
+=======
 async fn call_task_blocked_list(
     state: &AppState,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -924,6 +1003,7 @@ fn tool_task_blocked_list() -> RmcpTool {
             "required": ["id"],
             "properties": {
                 "id": {"type": "string", "description": "Task UUID or short ID"}
+>>>>>>> origin/main
             }
         }),
     )
@@ -1054,6 +1134,7 @@ fn tool_edit() -> RmcpTool {
     )
 }
 
+#[allow(dead_code)]
 fn tool_task_create() -> RmcpTool {
     RmcpTool::new(
         "task_create".to_string(),
@@ -1118,6 +1199,7 @@ fn tool_task_transition() -> RmcpTool {
     )
 }
 
+#[allow(dead_code)]
 fn tool_task_delete_branch() -> RmcpTool {
     RmcpTool::new(
         "task_delete_branch".to_string(),
@@ -1132,6 +1214,7 @@ fn tool_task_delete_branch() -> RmcpTool {
     )
 }
 
+#[allow(dead_code)]
 fn tool_task_archive_activity() -> RmcpTool {
     RmcpTool::new(
         "task_archive_activity".to_string(),
@@ -1146,6 +1229,7 @@ fn tool_task_archive_activity() -> RmcpTool {
     )
 }
 
+#[allow(dead_code)]
 fn tool_task_reset_counters() -> RmcpTool {
     RmcpTool::new(
         "task_reset_counters".to_string(),
@@ -1160,6 +1244,7 @@ fn tool_task_reset_counters() -> RmcpTool {
     )
 }
 
+#[allow(dead_code)]
 fn tool_task_kill_session() -> RmcpTool {
     RmcpTool::new(
         "task_kill_session".to_string(),
@@ -1227,6 +1312,7 @@ where
 pub fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
     let mut tool_values = vec![
         serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
+        serde_json::to_value(tool_task_list()).expect("serialize tool_task_list"),
         serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
         serde_json::to_value(tool_memory_read()).expect("serialize tool_memory_read"),
         serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
@@ -1245,11 +1331,12 @@ pub fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
         );
     }
 
-    if matches!(agent_type, AgentType::PM) {
+    if matches!(agent_type, AgentType::PM | AgentType::Groomer) {
         for value in [
-            serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
             serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
             serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
+<<<<<<< HEAD
+=======
             serde_json::to_value(tool_task_delete_branch())
                 .expect("serialize tool_task_delete_branch"),
             serde_json::to_value(tool_task_archive_activity())
@@ -1260,6 +1347,7 @@ pub fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
                 .expect("serialize tool_task_kill_session"),
             serde_json::to_value(tool_task_blocked_list())
                 .expect("serialize tool_task_blocked_list"),
+>>>>>>> origin/main
         ] {
             tool_values.push(value);
         }
@@ -1289,3 +1377,4 @@ pub(crate) async fn call_tool(
     let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
     dispatch_tool_call(state, &synthetic, worktree_path).await
 }
+
