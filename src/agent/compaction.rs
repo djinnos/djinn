@@ -11,7 +11,6 @@ use futures::StreamExt;
 use crate::agent::message::{Conversation, Message, Role};
 use crate::agent::provider::{LlmProvider, StreamEvent};
 use crate::db::repositories::session_message::SessionMessageRepository;
-use crate::db::repositories::task::TaskRepository;
 use crate::server::AppState;
 
 // ─── Threshold ────────────────────────────────────────────────────────────────
@@ -136,15 +135,10 @@ pub async fn compact_conversation(
 
             conversation.messages = new_messages;
 
-            // Increment continuation_count in the DB so stale-cycle detection works.
-            let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
-            if let Err(e) = task_repo.increment_continuation_count(task_id).await {
-                tracing::warn!(
-                    task_id = %task_id,
-                    error = %e,
-                    "compaction: failed to increment continuation_count in DB"
-                );
-            }
+            // NOTE: Do NOT increment continuation_count here.  That counter is
+            // reserved for stale-review-cycle detection (TaskReviewRejectStale).
+            // Compaction during a normal long-running session is expected and
+            // must not eat into the stale-escalation budget.
 
             tracing::info!(
                 task_id = %task_id,

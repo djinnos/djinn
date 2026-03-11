@@ -614,13 +614,19 @@ pub(super) async fn run_reply_loop(
 
         if !saw_any_tool_use {
             if is_resumed_session {
-                // Resumed worker may immediately respond text-only if it
-                // determines the reviewer's concerns are already addressed.
-                tracing::info!(
+                // A resumed worker that responds text-only with zero tool calls
+                // is NOT making progress — it saw its own prior "done" message
+                // and short-circuited.  Treat this as an error so the lifecycle
+                // does NOT send it to verification (which would create a review
+                // doom loop: verify→review→reject→resume→text-only→verify…).
+                tracing::warn!(
                     task_id = %task_id,
                     agent_type = %agent_type.as_str(),
-                    "ReplyLoop: resumed session ended text-only (worker deems feedback addressed)"
+                    "ReplyLoop: resumed session ended text-only (no tool calls = no progress)"
                 );
+                return Err(anyhow::anyhow!(
+                    "resumed worker ended without any tool use (no progress made on reviewer feedback)"
+                ));
             } else {
                 let reason = match agent_type {
                     AgentType::Worker | AgentType::ConflictResolver => {

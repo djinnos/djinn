@@ -112,6 +112,13 @@ impl Message {
         }
     }
 
+    /// Returns `true` if any content block is a `ToolUse`.
+    pub fn has_tool_use(&self) -> bool {
+        self.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+    }
+
     /// Return the concatenated text of all `Text` content blocks.
     pub fn text_content(&self) -> String {
         self.content

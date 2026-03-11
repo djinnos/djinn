@@ -232,6 +232,15 @@ pub(crate) async fn resume_context_for_task(task_id: &str, app_state: &AppState)
     let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
 
+    // Preamble reminding the model that any prior "I'm done" statements are
+    // stale and it MUST use tools to make real changes.
+    const RESUME_PREAMBLE: &str = "\
+**IMPORTANT: Your session is being resumed after a review rejection.** \
+Disregard any prior statements where you claimed the work was complete — the \
+reviewer determined it was NOT. You MUST use your tools (shell, editor, etc.) \
+to make concrete changes before stopping. A text-only response with no tool \
+calls will be treated as a failure.\n\n";
+
     for entry in activity.iter().rev() {
         if entry.event_type == "comment"
             && entry.actor_role == "task_reviewer"
@@ -239,7 +248,7 @@ pub(crate) async fn resume_context_for_task(task_id: &str, app_state: &AppState)
             && let Some(body) = payload.get("body").and_then(|v| v.as_str())
         {
             return format!(
-                "Your previous work was reviewed and returned with this feedback:\n\n{body}\n\nAddress this feedback, make the necessary changes, then stop."
+                "{RESUME_PREAMBLE}Reviewer feedback:\n\n{body}\n\nAddress this feedback, make the necessary changes, then stop."
             );
         }
     }
@@ -265,7 +274,22 @@ pub(crate) async fn resume_context_for_task(task_id: &str, app_state: &AppState)
         }
     }
 
-    "Your previous submission needs revision. Review your work, address any issues, then stop.".to_string()
+    // Also check the transition reason as a fallback — the status_changed
+    // event from TaskReviewReject/TaskReviewRejectStale stores a reason.
+    for entry in activity.iter().rev() {
+        if entry.event_type == "status_changed"
+            && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
+            && payload.get("to_status").and_then(|v| v.as_str()) == Some("open")
+            && let Some(reason) = payload.get("reason").and_then(|v| v.as_str())
+            && !reason.is_empty()
+        {
+            return format!(
+                "{RESUME_PREAMBLE}Your work was returned with this reason:\n\n{reason}\n\nAddress the issues, make the necessary changes, then stop."
+            );
+        }
+    }
+
+    format!("{RESUME_PREAMBLE}Your previous submission was rejected. Re-read the task acceptance criteria with `task_show`, identify what is unmet, make changes, then stop.")
 }
 
 // ─── Retry helper for SQLite lock contention ─────────────────────────────────
