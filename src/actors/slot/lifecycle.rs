@@ -575,6 +575,7 @@ pub async fn run_task_lifecycle(
                     &task_id,
                     &app_state,
                     crate::agent::compaction::CompactionContext::PreResume(agent_type),
+                    context_window,
                 )
                 .await;
                 tracing::info!(

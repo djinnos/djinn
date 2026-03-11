@@ -220,6 +220,7 @@ pub(super) async fn run_reply_loop(
                     let compacted = crate::agent::compaction::compact_conversation(
                         provider, conversation, session_id, task_id, app_state,
                         crate::agent::compaction::CompactionContext::MidSession(agent_type),
+                        context_window,
                     ).await;
                     if compacted {
                         total_tokens_in = 0;
@@ -376,6 +377,7 @@ pub(super) async fn run_reply_loop(
                 let compacted = crate::agent::compaction::compact_conversation(
                     provider, conversation, session_id, task_id, app_state,
                     crate::agent::compaction::CompactionContext::MidSession(agent_type),
+                    context_window,
                 ).await;
                 if compacted {
                     total_tokens_in = 0;
@@ -484,6 +486,7 @@ pub(super) async fn run_reply_loop(
                     task_id,
                     app_state,
                     crate::agent::compaction::CompactionContext::MidSession(agent_type),
+                    context_window,
                 )
                 .await;
                 if compacted {
