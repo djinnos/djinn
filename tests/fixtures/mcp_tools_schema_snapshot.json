@@ -4783,6 +4783,11 @@
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "actor_role": {
+            "description": "Filter by actor_role (e.g. \"pm\", \"task_reviewer\", \"worker\", \"verification\", \"system\").",
+            "nullable": true,
+            "type": "string"
+          },
           "event_type": {
             "description": "Filter by event_type (e.g. \"status_changed\", \"comment\").",
             "nullable": true,

@@ -385,45 +385,96 @@ pub async fn run_task_lifecycle(
             .join("\n")
     });
 
-    // Fetch activity log for the prompt so agents see comments/transitions
-    // without needing to call task_show.
-    // Cap individual entries and total size to prevent bloated system prompts
-    // (e.g. a verification failure dumping a huge test diff).
-    const MAX_ENTRY_CHARS: usize = 800;
-    const MAX_ACTIVITY_ENTRIES: usize = 20;
-    const MAX_ACTIVITY_CHARS: usize = 6000;
+    // Fetch activity log for the prompt. Split into two tiers:
+    // 1. Feedback (PM + reviewer comments) — shown prominently and in full
+    // 2. History (worker notes, transitions, verification) — summarized
+    // Agents can use `task_activity_list` with filters for deeper queries.
+    const MAX_FEEDBACK_CHARS: usize = 2000;
+    const MAX_HISTORY_ENTRY_CHARS: usize = 400;
+    const MAX_HISTORY_ENTRIES: usize = 10;
+    const MAX_TOTAL_CHARS: usize = 6000;
     let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     let activity_text = match task_repo.list_activity(&task.id).await {
         Ok(entries) if !entries.is_empty() => {
-            let lines: Vec<String> = entries
+            // Tier 1: PM and reviewer feedback — high-signal, shown in full
+            let feedback_lines: Vec<String> = entries
                 .iter()
-                .filter(|e| e.event_type == "comment" || e.event_type == "transition")
-                .take(MAX_ACTIVITY_ENTRIES)
+                .filter(|e| {
+                    e.event_type == "comment"
+                        && (e.actor_role == "pm" || e.actor_role == "task_reviewer")
+                })
                 .map(|e| {
-                    let payload_preview = serde_json::from_str::<serde_json::Value>(&e.payload)
+                    let body = serde_json::from_str::<serde_json::Value>(&e.payload)
                         .ok()
-                        .and_then(|v| {
-                            // For comments show the body, for transitions show to_status
-                            v.get("body")
-                                .or_else(|| v.get("to_status"))
-                                .and_then(|s| s.as_str().map(String::from))
-                        })
+                        .and_then(|v| v.get("body").and_then(|s| s.as_str().map(String::from)))
                         .unwrap_or_default();
-                    let mut line = format!("- **{}** ({}): {}", e.event_type, e.actor_role, payload_preview);
-                    if line.len() > MAX_ENTRY_CHARS {
-                        line.truncate(MAX_ENTRY_CHARS);
+                    let label = if e.actor_role == "pm" {
+                        "PM guidance"
+                    } else {
+                        "Reviewer feedback"
+                    };
+                    let mut line = format!("- **{label}**: {body}");
+                    if line.len() > MAX_FEEDBACK_CHARS {
+                        line.truncate(MAX_FEEDBACK_CHARS);
                         line.push_str("… [truncated]");
                     }
                     line
                 })
                 .collect();
-            if lines.is_empty() {
+
+            // Tier 2: Everything else — compact summary
+            let history_lines: Vec<String> = entries
+                .iter()
+                .filter(|e| {
+                    // Skip feedback (already shown above) and noisy events
+                    if e.event_type == "comment"
+                        && (e.actor_role == "pm" || e.actor_role == "task_reviewer")
+                    {
+                        return false;
+                    }
+                    e.event_type == "comment"
+                        || e.event_type == "status_changed"
+                        || e.event_type == "merge_conflict"
+                })
+                .take(MAX_HISTORY_ENTRIES)
+                .map(|e| {
+                    let preview = serde_json::from_str::<serde_json::Value>(&e.payload)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("body")
+                                .or_else(|| v.get("to_status"))
+                                .and_then(|s| s.as_str().map(String::from))
+                        })
+                        .unwrap_or_default();
+                    let mut line =
+                        format!("- **{}** ({}): {}", e.event_type, e.actor_role, preview);
+                    if line.len() > MAX_HISTORY_ENTRY_CHARS {
+                        line.truncate(MAX_HISTORY_ENTRY_CHARS);
+                        line.push('…');
+                    }
+                    line
+                })
+                .collect();
+
+            let mut sections = Vec::new();
+            if !feedback_lines.is_empty() {
+                sections.push(format!(
+                    "**Feedback (action required):**\n{}",
+                    feedback_lines.join("\n")
+                ));
+            }
+            if !history_lines.is_empty() {
+                sections.push(format!("**History:**\n{}", history_lines.join("\n")));
+            }
+            if sections.is_empty() {
                 None
             } else {
-                let mut joined = lines.join("\n");
-                if joined.len() > MAX_ACTIVITY_CHARS {
-                    joined.truncate(MAX_ACTIVITY_CHARS);
-                    joined.push_str("\n… [activity truncated]");
+                let mut joined = sections.join("\n\n");
+                if joined.len() > MAX_TOTAL_CHARS {
+                    joined.truncate(MAX_TOTAL_CHARS);
+                    joined.push_str(
+                        "\n… [truncated — use `task_activity_list` with filters for full history]",
+                    );
                 }
                 Some(joined)
             }

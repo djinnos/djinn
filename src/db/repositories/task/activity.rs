@@ -66,6 +66,10 @@ impl TaskRepository {
             clauses.push("event_type = ?".to_owned());
             params.push(SqlParam::Text(et.clone()));
         }
+        if let Some(ref ar) = q.actor_role {
+            clauses.push("actor_role = ?".to_owned());
+            params.push(SqlParam::Text(ar.clone()));
+        }
         if let Some(ref ft) = q.from_time {
             clauses.push("created_at >= ?".to_owned());
             params.push(SqlParam::Text(ft.clone()));

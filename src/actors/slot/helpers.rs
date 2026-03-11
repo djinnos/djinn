@@ -243,12 +243,17 @@ calls will be treated as a failure.\n\n";
 
     for entry in activity.iter().rev() {
         if entry.event_type == "comment"
-            && entry.actor_role == "task_reviewer"
+            && (entry.actor_role == "task_reviewer" || entry.actor_role == "pm")
             && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
             && let Some(body) = payload.get("body").and_then(|v| v.as_str())
         {
+            let label = if entry.actor_role == "pm" {
+                "PM intervention guidance"
+            } else {
+                "Reviewer feedback"
+            };
             return format!(
-                "{RESUME_PREAMBLE}Reviewer feedback:\n\n{body}\n\nAddress this feedback, make the necessary changes, then stop."
+                "{RESUME_PREAMBLE}{label}:\n\n{body}\n\nAddress this feedback, make the necessary changes, then stop."
             );
         }
     }

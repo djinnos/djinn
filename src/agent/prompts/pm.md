@@ -34,7 +34,7 @@ When decomposing:
 
 ## Required Workflow
 
-1. **Read the task** with `task_show` to understand AC state, activity history, reopen_count, and continuation_count.
+1. **Read the task** with `task_show` to understand AC state, reopen_count, and continuation_count. Use `task_activity_list(id, actor_role="verification")` to inspect verification failures and `task_activity_list(id, actor_role="worker")` to see what the worker attempted.
 2. **Inspect the codebase** if needed — use `shell` to check `git log`, `git diff`, file contents on the task branch.
 3. **Diagnose and act.** Choose ONE strategy:
 

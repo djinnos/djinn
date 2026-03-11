@@ -880,6 +880,7 @@ impl DjinnMcpServer {
             project_id: Some(project_id),
             task_id,
             event_type: p.event_type,
+            actor_role: p.actor_role,
             from_time: p.from_time,
             to_time: p.to_time,
             limit: validate_limit(p.limit.unwrap_or(50)),

@@ -136,7 +136,7 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
 
     let activity_section = match &ctx.activity {
         Some(log) if !log.trim().is_empty() => format!(
-            "### Activity Log\n\nComments and events from previous agent sessions on this task. You do not need to call `task_show` — this context is already complete.\n\n{log}\n"
+            "### Activity Log\n\nKey feedback and recent history from previous sessions. Use `task_activity_list` with filters for full details.\n\n{log}\n"
         ),
         _ => String::new(),
     };

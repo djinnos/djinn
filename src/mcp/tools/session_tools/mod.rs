@@ -494,6 +494,7 @@ impl DjinnMcpServer {
             project_id: Some(project_id),
             task_id: Some(task.id),
             event_type: None,
+            actor_role: None,
             from_time: None,
             to_time: None,
             limit: 500,

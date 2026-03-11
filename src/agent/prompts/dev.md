@@ -19,7 +19,7 @@ Your sole job is to write working code that satisfies the acceptance criteria. I
 
 ## Instructions
 
-1. **Check for prior feedback** — call `task_show(id="{{task_id}}")` and inspect the activity log. If there are reviewer comments (actor_role `task_reviewer`), read the feedback carefully — your previous attempt was rejected for specific reasons. Fix exactly what the reviewer asked for before proceeding.
+1. **Check for prior feedback** — read the Activity Log section above carefully. If there is PM guidance or reviewer feedback, your previous attempt was rejected for specific reasons. Fix exactly what was asked for before proceeding. Use `task_activity_list(id="{{task_id}}", actor_role="pm")` or `task_activity_list(id="{{task_id}}", actor_role="task_reviewer")` if you need full details.
 2. **Read the task** — understand what needs to be done from the description, design, and acceptance criteria.
 3. **Check memory** — look up any ADRs or patterns referenced in the design field.
 4. **Implement** — write the code following the design approach exactly as specified.
