@@ -2,7 +2,7 @@
   "tools": [
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Absolute project path.",
@@ -23,7 +23,7 @@
       },
       "name": "board_health",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrBoardHealthResponse",
         "type": "object"
@@ -31,7 +31,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Absolute project path.",
@@ -52,7 +52,7 @@
       },
       "name": "board_reconcile",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrBoardReconcileResponse",
         "type": "object"
@@ -60,7 +60,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "key_name": {
             "description": "Env-var style key name of the credential to delete (e.g. 'ANTHROPIC_API_KEY').",
@@ -75,7 +75,7 @@
       },
       "name": "credential_delete",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "deleted": {
             "type": "boolean"
@@ -140,7 +140,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "credentials": {
             "items": {
@@ -158,7 +158,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "api_key": {
             "description": "The raw API key value to store encrypted.",
@@ -183,7 +183,7 @@
       },
       "name": "credential_set",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -214,7 +214,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "id": {
             "description": "Epic UUID or short_id.",
@@ -234,7 +234,7 @@
       },
       "name": "epic_close",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "closed_at": {
             "nullable": true,
@@ -281,7 +281,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "group_by": {
             "description": "Group results by: \"status\".",
@@ -323,7 +323,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -348,7 +348,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "color": {
             "nullable": true,
@@ -383,7 +383,7 @@
       },
       "name": "epic_create",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "closed_at": {
             "nullable": true,
@@ -430,7 +430,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "id": {
             "description": "Epic UUID or short_id.",
@@ -450,7 +450,7 @@
       },
       "name": "epic_delete",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "deleted_task_count": {
             "format": "int64",
@@ -472,7 +472,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "limit": {
             "format": "int64",
@@ -564,7 +564,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "epics": {
             "items": {
@@ -603,7 +603,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "id": {
             "description": "Epic UUID or short_id.",
@@ -623,7 +623,7 @@
       },
       "name": "epic_reopen",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "closed_at": {
             "nullable": true,
@@ -670,7 +670,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "id": {
             "description": "Epic UUID or short_id.",
@@ -690,7 +690,7 @@
       },
       "name": "epic_show",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "closed_at": {
             "nullable": true,
@@ -753,7 +753,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "epic_id": {
             "description": "Epic UUID or short_id.",
@@ -779,7 +779,7 @@
             "type": "string"
           },
           "sort": {
-            "description": "Sort order: \"priority\" (default), \"created\", \"created_desc\",\"updated\", \"updated_desc\", \"closed\".",
+            "description": "Sort order: \"priority\" (default), \"created\", \"created_desc\",\n\"updated\", \"updated_desc\", \"closed\".",
             "nullable": true,
             "type": "string"
           },
@@ -928,7 +928,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -967,7 +967,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "color": {
             "nullable": true,
@@ -1007,7 +1007,7 @@
       },
       "name": "epic_update",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "closed_at": {
             "nullable": true,
@@ -1054,7 +1054,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Project path (accepted for API compatibility, currently unused).",
@@ -1074,7 +1074,7 @@
       },
       "name": "execution_kill_task",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -1097,7 +1097,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "mode": {
             "description": "Pause mode: \"graceful\" (default) or \"immediate\".",
@@ -1120,7 +1120,7 @@
       },
       "name": "execution_pause",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -1155,7 +1155,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Optional project path for project-scoped execution resume.",
@@ -1168,7 +1168,7 @@
       },
       "name": "execution_resume",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -1199,7 +1199,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Optional project path for project-scoped execution start.",
@@ -1212,7 +1212,7 @@
       },
       "name": "execution_start",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -1247,7 +1247,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Optional project path for project-scoped execution status.",
@@ -1324,7 +1324,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "capacity": {
             "additionalProperties": {
@@ -1391,7 +1391,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "folder": {
             "nullable": true,
@@ -1435,7 +1435,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "broken_links": {
             "items": {
@@ -1457,7 +1457,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "depth": {
             "description": "Link traversal depth (default 1).",
@@ -1580,7 +1580,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -1609,7 +1609,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "type": "string"
@@ -1623,7 +1623,7 @@
       },
       "name": "memory_catalog",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "catalog": {
             "type": "string"
@@ -1642,7 +1642,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "identifier": {
             "type": "string"
@@ -1660,7 +1660,7 @@
       },
       "name": "memory_delete",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -1679,7 +1679,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "permalink": {
             "type": "string"
@@ -1702,7 +1702,7 @@
       },
       "name": "memory_diff",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "diff": {
             "type": "string"
@@ -1721,7 +1721,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "content": {
             "type": "string"
@@ -1764,7 +1764,7 @@
       },
       "name": "memory_edit",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "content": {
             "nullable": true,
@@ -1828,7 +1828,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "type": "string"
@@ -1898,7 +1898,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "edges": {
             "items": {
@@ -1927,7 +1927,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Absolute path to the project directory.",
@@ -1959,7 +1959,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "broken_link_count": {
             "format": "int64",
@@ -1994,7 +1994,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "limit": {
             "format": "int64",
@@ -2043,7 +2043,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -2065,7 +2065,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "depth": {
             "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels.",
@@ -2129,7 +2129,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -2151,7 +2151,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "identifier": {
             "type": "string"
@@ -2179,7 +2179,7 @@
       },
       "name": "memory_move",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "content": {
             "nullable": true,
@@ -2243,7 +2243,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "folder": {
             "nullable": true,
@@ -2291,7 +2291,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -2313,7 +2313,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "identifier": {
             "description": "Note permalink (e.g. \"decisions/my-adr\") or title.",
@@ -2332,7 +2332,7 @@
       },
       "name": "memory_read",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "content": {
             "nullable": true,
@@ -2396,7 +2396,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "limit": {
             "format": "int64",
@@ -2454,7 +2454,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -2476,7 +2476,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "type": "string"
@@ -2490,7 +2490,7 @@
       },
       "name": "memory_reindex",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "created": {
             "format": "int64",
@@ -2525,7 +2525,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "folder": {
             "nullable": true,
@@ -2589,7 +2589,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -2611,7 +2611,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "permalink": {
             "type": "string"
@@ -2654,7 +2654,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -2676,7 +2676,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "content": {
             "type": "string"
@@ -2711,7 +2711,7 @@
       },
       "name": "memory_write",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "content": {
             "nullable": true,
@@ -2775,7 +2775,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "action": {
             "default": "status",
@@ -2835,7 +2835,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "action": {
             "type": "string"
@@ -2861,7 +2861,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "name": {
             "description": "Human-readable project name (unique identifier).",
@@ -2902,7 +2902,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "$ref": "#/$defs/ProjectInfo"
@@ -2921,7 +2921,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Absolute project path.",
@@ -2962,7 +2962,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "type": "string"
@@ -3021,7 +3021,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Absolute project path.",
@@ -3078,7 +3078,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "type": "string"
@@ -3105,7 +3105,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "type": "string"
@@ -3119,7 +3119,7 @@
       },
       "name": "project_config_get",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "auto_merge": {
             "type": "boolean"
@@ -3154,7 +3154,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "key": {
             "type": "string"
@@ -3176,7 +3176,7 @@
       },
       "name": "project_config_set",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "auto_merge": {
             "type": "boolean"
@@ -3237,7 +3237,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "projects": {
             "items": {
@@ -3255,7 +3255,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "name": {
             "description": "Project name to remove.",
@@ -3291,7 +3291,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "$ref": "#/$defs/ProjectInfo"
@@ -3327,7 +3327,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "base_url": {
             "description": "Root URL for OpenAI-compatible API calls (e.g. https://api.my-llm.com/v1).",
@@ -3365,7 +3365,7 @@
       },
       "name": "provider_add_custom",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -3459,7 +3459,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "providers": {
             "items": {
@@ -3549,7 +3549,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "providers": {
             "items": {
@@ -3572,7 +3572,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "model_id": {
             "description": "Full model ID in 'providerID/modelID' format (e.g. 'anthropic/claude-opus-4-6').",
@@ -3661,7 +3661,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "found": {
             "type": "boolean"
@@ -3684,7 +3684,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "provider_id": {
             "description": "Provider ID to fetch models for (e.g. 'anthropic', 'openai').",
@@ -3773,7 +3773,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "models": {
             "items": {
@@ -3879,7 +3879,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "models": {
             "items": {
@@ -3902,7 +3902,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "provider_id": {
             "description": "Provider ID to start OAuth for (accepts catalog/goose aliases, e.g. 'github-copilot').",
@@ -3917,7 +3917,7 @@
       },
       "name": "provider_oauth_start",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "configured_keys": {
             "items": {
@@ -3959,7 +3959,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "provider_id": {
             "description": "Provider ID to disconnect and remove (e.g. 'anthropic', 'openai', 'my-custom-llm').",
@@ -3974,7 +3974,7 @@
       },
       "name": "provider_remove",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "credentials_deleted": {
             "format": "int64",
@@ -4014,7 +4014,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "api_key": {
             "description": "API key to validate.",
@@ -4039,7 +4039,7 @@
       },
       "name": "provider_validate",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "type": "string"
@@ -4074,7 +4074,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Absolute project path (required).",
@@ -4148,7 +4148,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -4179,7 +4179,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Absolute project path.",
@@ -4199,7 +4199,7 @@
       },
       "name": "session_for_task",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "duration_seconds": {
             "format": "int64",
@@ -4243,7 +4243,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Absolute project path (required).",
@@ -4322,7 +4322,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -4346,7 +4346,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "id": {
             "description": "Session UUID.",
@@ -4387,7 +4387,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "agent_type": {
             "nullable": true,
@@ -4419,7 +4419,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "id": {
             "description": "Session UUID.",
@@ -4439,7 +4439,7 @@
       },
       "name": "session_show",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "agent_type": {
             "type": "string"
@@ -4494,7 +4494,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "key": {
             "description": "Optional settings key to fetch (defaults to settings.raw).",
@@ -4557,7 +4557,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -4588,13 +4588,13 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "SettingsResetParams",
         "type": "object"
       },
       "name": "settings_reset",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "deleted": {
             "type": "boolean"
@@ -4617,7 +4617,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "dispatch_limit": {
             "description": "Maximum number of tasks to dispatch per cycle. Omit to keep current value.",
@@ -4687,7 +4687,7 @@
       },
       "name": "settings_set",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "applied": {
             "type": "boolean"
@@ -4710,7 +4710,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "level": {
             "nullable": true,
@@ -4727,7 +4727,7 @@
       },
       "name": "system_logs",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -4762,7 +4762,7 @@
       },
       "name": "system_ping",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "status": {
             "type": "string"
@@ -4781,7 +4781,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "actor_role": {
             "description": "Filter by actor_role (e.g. \"pm\", \"task_reviewer\", \"worker\", \"verification\", \"system\").",
@@ -4831,7 +4831,7 @@
       },
       "name": "task_activity_list",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrTaskActivityListResponse",
         "type": "object"
@@ -4839,7 +4839,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "id": {
             "description": "Task UUID or short_id.",
@@ -4859,7 +4859,7 @@
       },
       "name": "task_blocked_list",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrTaskBlockedListResponse",
         "type": "object"
@@ -4867,7 +4867,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "id": {
             "description": "Task UUID or short_id.",
@@ -4887,7 +4887,7 @@
       },
       "name": "task_blockers_list",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrTaskBlockersListResponse",
         "type": "object"
@@ -4895,7 +4895,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "label": {
             "description": "Filter by label value.",
@@ -4931,7 +4931,7 @@
       },
       "name": "task_claim",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrTaskClaimSuccess",
         "type": "object"
@@ -4939,7 +4939,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "actor_id": {
             "nullable": true,
@@ -4972,7 +4972,7 @@
       },
       "name": "task_comment_add",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrActivityEntryResponse",
         "type": "object"
@@ -4980,7 +4980,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "group_by": {
             "description": "Group results by: \"status\", \"priority\", \"issue_type\", or \"epic\".",
@@ -5021,7 +5021,7 @@
       },
       "name": "task_count",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrTaskCountSuccess",
         "type": "object"
@@ -5056,7 +5056,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "acceptance_criteria": {
             "items": {
@@ -5132,7 +5132,7 @@
       },
       "name": "task_create",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrTaskResponse",
         "type": "object"
@@ -5140,7 +5140,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "issue_type": {
             "description": "Positive (\"task\") or negative (\"!epic\") issue_type filter.",
@@ -5172,7 +5172,7 @@
             "type": "string"
           },
           "sort": {
-            "description": "Sort order: \"priority\" (default), \"created\", \"created_desc\",\"updated\", \"updated_desc\", \"closed\".",
+            "description": "Sort order: \"priority\" (default), \"created\", \"created_desc\",\n\"updated\", \"updated_desc\", \"closed\".",
             "nullable": true,
             "type": "string"
           },
@@ -5365,7 +5365,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "has_more": {
             "type": "boolean"
@@ -5402,7 +5402,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "id": {
             "description": "Task UUID or short_id.",
@@ -5422,7 +5422,7 @@
       },
       "name": "task_memory_refs",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrTaskMemoryRefsResponse",
         "type": "object"
@@ -5430,7 +5430,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "label": {
             "description": "Filter by label value.",
@@ -5466,7 +5466,7 @@
       },
       "name": "task_ready",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrTaskReadyResponse",
         "type": "object"
@@ -5474,7 +5474,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "id": {
             "description": "Task UUID or short_id.",
@@ -5494,7 +5494,7 @@
       },
       "name": "task_show",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrTaskShowResponse",
         "type": "object"
@@ -5502,7 +5502,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Absolute path to the project git repository.",
@@ -5522,7 +5522,7 @@
       },
       "name": "task_sync_disable",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -5543,7 +5543,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Absolute path to the project git repository.",
@@ -5558,7 +5558,7 @@
       },
       "name": "task_sync_enable",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "nullable": true,
@@ -5584,7 +5584,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Project path (accepted for API compatibility, currently unused).",
@@ -5623,7 +5623,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "channels": {
             "items": {
@@ -5647,7 +5647,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Project path (accepted for API compatibility, currently unused).",
@@ -5686,7 +5686,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "channels": {
             "items": {
@@ -5710,7 +5710,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Project path (accepted for API compatibility, currently unused).",
@@ -5775,7 +5775,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "channels": {
             "items": {
@@ -5795,7 +5795,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
             "description": "Absolute project path (required).",
@@ -5928,7 +5928,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "activity": {
             "items": {
@@ -5962,7 +5962,7 @@
     },
     {
       "input_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "action": {
             "description": "Transition action: accept, start, submit_verification,\nverification_pass, verification_fail, release_verification,\nsubmit_task_review, task_review_start,\ntask_review_reject, task_review_reject_conflict, task_review_approve,\nreopen, close, release, release_task_review, force_close,\nuser_override.",
@@ -6005,7 +6005,7 @@
       },
       "name": "task_transition",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrTaskResponse",
         "type": "object"
@@ -6040,7 +6040,7 @@
             "type": "object"
           }
         },
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "acceptance_criteria": {
             "description": "Full replacement for acceptance_criteria.",
@@ -6142,7 +6142,7 @@
       },
       "name": "task_update",
       "output_schema": {
-        "$schema": "https://json-schema.org/draft-2020-12/schema",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrTaskResponse",
         "type": "object"

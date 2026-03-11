@@ -183,14 +183,18 @@ pub fn needs_compaction(total_tokens_in: u32, context_window: i64) -> bool {
 
 // ─── Main compaction entry point ──────────────────────────────────────────────
 
-/// Compact `conversation` in-place using LLM summarisation.
+/// Compact `conversation` in-place using LLM summarisation, with a
+/// deterministic truncation fallback if summarisation fails (e.g. the
+/// conversation is too large to even summarise).
 ///
 /// Steps:
 /// 1. Persist all current messages to `session_messages`.
-/// 2. Call `do_compact` to obtain a summary string.
-/// 3. Replace `conversation` with `[system, user(summary), assistant(continuation), last_user]`.
+/// 2. Try `do_compact` (LLM summarisation).
+/// 3. If that fails, fall back to `deterministic_compact` — a hard truncation
+///    that keeps the system prompt and the most recent messages within ~80% of
+///    the context window.
 ///
-/// Returns `true` if compaction was performed, `false` if `do_compact` failed.
+/// Returns `true` if compaction was performed, `false` only if both strategies fail.
 pub async fn compact_conversation(
     provider: &dyn LlmProvider,
     conversation: &mut Conversation,
@@ -198,6 +202,7 @@ pub async fn compact_conversation(
     task_id: &str,
     app_state: &AppState,
     ctx: CompactionContext,
+    context_window: i64,
 ) -> bool {
     // 1. Persist current messages before replacing them.
     let repo = SessionMessageRepository::new(app_state.db().clone(), app_state.events().clone());
@@ -291,8 +296,25 @@ pub async fn compact_conversation(
                 task_id = %task_id,
                 session_id = %session_id,
                 error = %e,
-                "compaction: do_compact failed, leaving conversation unchanged"
+                "compaction: LLM summarisation failed, falling back to deterministic truncation"
             );
+
+            // Deterministic fallback: truncate to fit within 80% of context window.
+            if context_window > 0 {
+                let max_chars = estimate_char_budget(context_window);
+                let truncated = deterministic_compact(&conversation.messages, max_chars);
+                if truncated.len() < conversation.messages.len() {
+                    conversation.messages = truncated;
+                    tracing::info!(
+                        task_id = %task_id,
+                        session_id = %session_id,
+                        new_message_count = conversation.messages.len(),
+                        "compaction: deterministic truncation applied"
+                    );
+                    return true;
+                }
+            }
+
             false
         }
     }
@@ -457,6 +479,85 @@ fn format_messages_as_text(messages: &[Message]) -> String {
     out
 }
 
+// ─── Deterministic truncation ─────────────────────────────────────────────
+
+/// Rough chars-per-token estimate. Conservative (low) so we don't overshoot.
+const CHARS_PER_TOKEN: usize = 3;
+
+/// Convert a token-based context window to a character budget at 80%.
+fn estimate_char_budget(context_window: i64) -> usize {
+    let tokens_80pct = (context_window as f64 * COMPACTION_THRESHOLD) as usize;
+    tokens_80pct * CHARS_PER_TOKEN
+}
+
+/// Estimate the character size of a single message (all content blocks).
+fn estimate_message_chars(msg: &Message) -> usize {
+    use crate::agent::message::ContentBlock;
+    msg.content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => text.len(),
+            ContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
+            ContentBlock::ToolResult { content, .. } => content
+                .iter()
+                .map(|b| match b {
+                    ContentBlock::Text { text } => text.len(),
+                    _ => 64,
+                })
+                .sum(),
+        })
+        .sum()
+}
+
+/// Deterministic compaction: keep the system prompt (first message) and as many
+/// recent messages as fit within `max_chars`. Older messages in the middle are
+/// dropped. A notice message is inserted where the cut happened.
+pub(crate) fn deterministic_compact(messages: &[Message], max_chars: usize) -> Vec<Message> {
+    if messages.is_empty() {
+        return vec![];
+    }
+
+    // Always keep the system prompt.
+    let system_msg = messages[0].clone();
+    let system_chars = estimate_message_chars(&system_msg);
+
+    // Reserve space for system + compaction notice.
+    let notice_overhead = 200;
+    let available = max_chars.saturating_sub(system_chars + notice_overhead);
+
+    // Walk from the end backwards, keeping recent messages until budget is exhausted.
+    let rest = &messages[1..];
+    let mut kept_indices: Vec<usize> = Vec::new();
+    let mut accumulated = 0usize;
+
+    for (i, msg) in rest.iter().enumerate().rev() {
+        let msg_chars = estimate_message_chars(msg);
+        if accumulated + msg_chars > available {
+            break;
+        }
+        accumulated += msg_chars;
+        kept_indices.push(i);
+    }
+    kept_indices.reverse();
+
+    let mut result = vec![system_msg];
+
+    if kept_indices.len() < rest.len() {
+        let trimmed_count = rest.len() - kept_indices.len();
+        result.push(Message::user(format!(
+            "[Context compacted: {trimmed_count} earlier messages were trimmed to fit the context window. \
+             The system prompt and most recent messages are preserved. Use `task_activity_list` or \
+             `task_show` if you need historical context.]"
+        )));
+    }
+
+    for &i in &kept_indices {
+        result.push(rest[i].clone());
+    }
+
+    result
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -538,6 +639,63 @@ mod tests {
         assert!(text.contains("[system]: You are helpful."));
         assert!(text.contains("[user]: What is 2+2?"));
         assert!(text.contains("[assistant]: 4"));
+    }
+
+    #[test]
+    fn deterministic_compact_keeps_system_and_recent() {
+        let messages = vec![
+            Message::system("System prompt that must be preserved."),
+            Message::user("old message 1"),
+            Message::assistant("old response 1"),
+            Message::user("old message 2"),
+            Message::assistant("old response 2"),
+            Message::user("recent message"),
+            Message::assistant("recent response"),
+        ];
+        // Budget that fits system + ~2 messages
+        let budget = estimate_message_chars(&messages[0]) + 200 + 50;
+        let result = deterministic_compact(&messages, budget);
+
+        // System prompt is always first
+        assert_eq!(result[0].role, Role::System);
+        assert_eq!(result[0].text_content(), "System prompt that must be preserved.");
+
+        // A compaction notice was inserted
+        assert!(result[1].text_content().contains("Context compacted"));
+
+        // Most recent message(s) are kept
+        let last = result.last().unwrap();
+        assert_eq!(last.text_content(), "recent response");
+
+        // We have fewer messages than the original
+        assert!(result.len() < messages.len());
+    }
+
+    #[test]
+    fn deterministic_compact_no_trim_when_fits() {
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("hello"),
+            Message::assistant("world"),
+        ];
+        // Generous budget
+        let result = deterministic_compact(&messages, 100_000);
+
+        // No trimming needed — same count, no notice
+        assert_eq!(result.len(), 3);
+        assert!(!result[1].text_content().contains("Context compacted"));
+    }
+
+    #[test]
+    fn deterministic_compact_empty_input() {
+        let result = deterministic_compact(&[], 1000);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn estimate_char_budget_80_percent() {
+        // 10000 tokens * 0.8 * 3 chars/token = 24000
+        assert_eq!(estimate_char_budget(10000), 24000);
     }
 
     #[test]
