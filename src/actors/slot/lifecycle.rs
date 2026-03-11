@@ -147,10 +147,7 @@ pub async fn run_task_lifecycle(
     // (same model, same agent type, worktree intact, conversation file present).
     let mut resume_record_id: Option<String> = None;
 
-    let worktree_path = if agent_type == AgentType::PM {
-        // PM has no dedicated worktree — use the project dir directly.
-        project_dir.clone()
-    } else if let Some(paused) = paused {
+    let worktree_path = if let Some(paused) = paused {
         if let Some(paused_worktree_path) = paused.worktree_path.as_deref().map(PathBuf::from) {
             if paused.model_id != model_id {
                 tracing::info!(
