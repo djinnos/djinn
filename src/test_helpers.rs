@@ -85,7 +85,7 @@ pub async fn create_test_task(db: &Database, project_id: &str, epic_id: &str) ->
         )
         .await
         .expect("failed to create test task");
-    assert_eq!(task.status, "open");
+    assert_eq!(task.status, "backlog");
     task
 }
 
