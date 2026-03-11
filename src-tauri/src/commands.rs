@@ -181,7 +181,7 @@ pub fn auth_get_state() -> Result<AuthStateResponse, String> {
     }
 
     // Otherwise check if we have a valid token from silent refresh
-    if let Some(token_state) = token_refresh::get_token_state() {
+    if let Some(_token_state) = token_refresh::get_token_state() {
         // Return authenticated state even without profile (it will be fetched asynchronously)
         return Ok(AuthStateResponse {
             is_authenticated: true,
