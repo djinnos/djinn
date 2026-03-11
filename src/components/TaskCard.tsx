@@ -211,7 +211,7 @@ function TaskCardActions({ task }: { task: Task }) {
   const { busy: killing, killTask } = useExecutionControl();
   const busy = transitioning || killing;
 
-  const taskProjectId = (task as Record<string, unknown>).project_id as string | undefined;
+  const taskProjectId = task.project_id ?? undefined;
   const project = isAll
     ? projectStore.getState().projects.find((p) => p.id === taskProjectId)
     : selectedProject;
@@ -337,8 +337,8 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
         {/* Row 1: ID, priority, badges, pipeline */}
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
           <TaskIdLabel taskId={task.id} shortId={task.short_id} />
+          <ProjectBadge projectId={task.project_id ?? undefined} />
           <PriorityBadge priority={task.priority} />
-          <ProjectBadge projectId={(task as Record<string, unknown>).project_id as string | undefined} />
 
           {/* Acceptance criteria progress */}
           {acTotal > 0 && (

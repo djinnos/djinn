@@ -2,6 +2,7 @@ import { callMcpTool } from "@/api/mcpClient";
 import type { McpToolOutput } from "@/api/generated/mcp-tools.gen";
 import { getServerPort } from "@/tauri/commands";
 import type { Epic, Task } from "@/api/types";
+import { projectStore } from "@/stores/projectStore";
 
 async function getBaseUrl(): Promise<string> {
   const port = await getServerPort();
@@ -365,9 +366,13 @@ export async function fetchKanbanSnapshot(
     }),
   ]);
 
+  // Stamp each task with the project it belongs to (needed for all-projects view)
+  const projectId = projectStore.getState().projects.find((p) => p.path === resolvedProjectPath)?.id ?? null;
+  const tasks = (taskList.tasks as unknown as Task[]).map((t) => ({ ...t, project_id: projectId }));
+
   return {
     projectPath: resolvedProjectPath,
-    tasks: taskList.tasks as unknown as Task[],
+    tasks,
     epics: (epicList.epics ?? []) as unknown as Epic[],
   };
 }

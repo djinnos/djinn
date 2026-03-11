@@ -14,6 +14,8 @@ export type Task = Omit<TaskListOutputSchema.TaskListItem, "owner"> & {
   // Enriched by task_show and SSE events from agent sessions — not in task_list
   active_session?: { model_id?: string; started_at?: string } | null;
   session_count?: number;
+  // Stamped by the desktop app when fetching from a specific project
+  project_id?: string | null;
 };
 
 export type Epic = Omit<EpicListOutputSchema.EpicModel, "owner"> & {
