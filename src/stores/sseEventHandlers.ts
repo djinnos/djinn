@@ -75,6 +75,17 @@ export function initSSEEventHandlers(): () => void {
     const task = normalizeSSEPayload(unwrapPayload(event.data)) as unknown as Task;
     const selectedProject = projectStore.getState().getSelectedProject();
     if (selectedProject && task.project_id && task.project_id !== selectedProject.id) return;
+
+    // SSE task.updated payloads don't include active_session or session_count
+    // (those are only added by MCP task_list/task_show). Preserve the values
+    // that the session_started handler already set on the store.
+    const existing = taskStore.getState().getTask(task.id);
+    if (existing) {
+      if (!("active_session" in task)) task.active_session = existing.active_session;
+      if (!("session_count" in task)) task.session_count = existing.session_count;
+      if (!("duration_seconds" in task)) task.duration_seconds = existing.duration_seconds;
+    }
+
     taskStore.getState().updateTask(task);
     queryClient.setQueryData(["tasks"], (current: Task[] | undefined) =>
       current?.map((t) => (t.id === task.id ? task : t))
@@ -121,6 +132,27 @@ export function initSSEEventHandlers(): () => void {
   });
 
   // Session events — update active_session on the corresponding task
+  const sessionDispatchedUnsub = subscribe("session_dispatched", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as {
+      task_id?: string;
+      agent_type?: string;
+      model_id?: string;
+    };
+    if (!payload.task_id) return;
+    const existing = taskStore.getState().getTask(payload.task_id);
+    if (!existing) return;
+    taskStore.getState().updateTask({
+      ...existing,
+      active_session: {
+        session_id: undefined,
+        agent_type: payload.agent_type,
+        model_id: payload.model_id,
+        started_at: new Date().toISOString(),
+        status: "dispatched",
+      },
+    });
+  });
+
   const sessionStartedUnsub = subscribe("session_started", (event: SSEEvent) => {
     const payload = unwrapPayload(event.data) as {
       id?: string;
@@ -196,6 +228,7 @@ export function initSSEEventHandlers(): () => void {
     epicUpdatedUnsub?.();
     epicDeletedUnsub?.();
     projectChangedUnsub?.();
+    sessionDispatchedUnsub?.();
     sessionStartedUnsub?.();
     sessionEndedUnsub?.();
     syncCompletedUnsub?.();

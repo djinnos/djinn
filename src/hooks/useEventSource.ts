@@ -43,6 +43,7 @@ export function useEventSource(projectId?: string | null) {
     if (normalized === "epic_updated") return "epic_updated";
     if (normalized === "epic_deleted") return "epic_deleted";
     if (normalized === "session_message") return "session_message";
+    if (normalized === "session_dispatched") return "session_dispatched";
     if (normalized === "session_started") return "session_started";
     if (
       normalized === "session_completed" ||
@@ -171,6 +172,7 @@ export function useEventSource(projectId?: string | null) {
           "project.health_ok",
           "project.health_error",
           "session.message",
+          "session.dispatched",
           "session.started",
           "session.completed",
           "session.interrupted",

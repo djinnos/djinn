@@ -16,6 +16,7 @@ export type SSEEventType =
   | "epic_deleted"
   | "project_changed"
   | "session_message"
+  | "session_dispatched"
   | "session_started"
   | "session_ended"
   | "sync_completed";
