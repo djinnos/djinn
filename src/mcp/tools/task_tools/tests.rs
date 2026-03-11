@@ -24,7 +24,7 @@ async fn task_create_success_shape() {
 
     assert!(payload["id"].as_str().is_some());
     assert!(payload["short_id"].as_str().is_some());
-    assert_eq!(payload["status"], "open");
+    assert_eq!(payload["status"], "backlog");
     assert_eq!(payload["title"], "Create task contract test");
     assert_eq!(payload["epic_id"], epic.id);
 }
