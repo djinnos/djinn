@@ -70,6 +70,13 @@ pub enum PoolMessage {
         model_id: String,
         respond_to: Reply<()>,
     },
+    DispatchProject {
+        project_id: String,
+        project_path: String,
+        agent_type: String,
+        model_id: String,
+        respond_to: Reply<()>,
+    },
     HasSession {
         task_id: String,
         respond_to: Reply<bool>,

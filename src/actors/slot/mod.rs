@@ -1,8 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use tokio::sync::oneshot;
 
 // ─── Slot types ──────────────────────────────────────────────────────────────
 
@@ -20,40 +18,6 @@ pub enum SlotEvent {
         model_id: String,
         task_id: String,
     },
-}
-
-#[derive(Debug)]
-pub enum SlotCommand {
-    /// Run a task lifecycle in this slot.
-    RunTask {
-        task_id: String,
-        project_path: String,
-        respond_to: oneshot::Sender<Result<(), SlotError>>,
-    },
-    /// Kill the currently running task.
-    Kill,
-    /// Pause the currently running task (commit WIP, preserve worktree).
-    Pause,
-    /// Finish current task then shut down (for capacity reduction).
-    Drain,
-}
-
-#[derive(Debug, Error, Clone)]
-pub enum SlotError {
-    #[error("slot is busy")]
-    SlotBusy,
-    #[error("session failed: {0}")]
-    SessionFailed(String),
-    #[error("setup failed: {0}")]
-    SetupFailed(String),
-    #[error("worktree failed: {0}")]
-    WorktreeFailed(String),
-    #[error("goose error: {0}")]
-    GooseError(String),
-    #[error("task not found: {0}")]
-    TaskNotFound(String),
-    #[error("cancelled")]
-    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,6 +109,6 @@ pub use actor::*;
 pub(crate) use commands::*;
 pub(crate) use task_review::*;
 pub(crate) use helpers::*;
-pub use lifecycle::run_task_lifecycle;
+pub use lifecycle::{ProjectLifecycleParams, run_project_lifecycle, run_task_lifecycle};
 pub use pool::*;
 pub(crate) use worktree::*;

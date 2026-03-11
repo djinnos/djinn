@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::server::AppState;
 
-use super::{SlotCommand, SlotError, SlotEvent, run_task_lifecycle};
+use super::{ProjectLifecycleParams, SlotCommand, SlotError, SlotEvent, run_project_lifecycle, run_task_lifecycle};
 
 type LifecycleFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'static>>;
 type LifecycleRunner = Arc<
@@ -72,6 +72,10 @@ impl SlotActor {
                                 let _ = respond_to.send(Err(SlotError::SlotBusy));
                                 active = Some(running);
                             }
+                            Some(SlotCommand::RunProject { respond_to, .. }) => {
+                                let _ = respond_to.send(Err(SlotError::SlotBusy));
+                                active = Some(running);
+                            }
                             Some(SlotCommand::Kill) => {
                                 running.killed = true;
                                 running.kill.cancel();
@@ -116,6 +120,42 @@ impl SlotActor {
                                 let _ = respond_to.send(Ok(()));
                                 active = Some(ActiveLifecycle {
                                     task_id,
+                                    join,
+                                    kill,
+                                    pause,
+                                    killed: false,
+                                });
+                            }
+                            Some(SlotCommand::RunProject {
+                                project_id,
+                                project_path,
+                                agent_type,
+                                model_id,
+                                respond_to,
+                            }) => {
+                                let kill = CancellationToken::new();
+                                let pause = CancellationToken::new();
+                                let event_tx = self.event_tx.clone();
+                                let app_state = self.app_state.clone();
+                                let project_task_id = format!("project:{project_id}:{agent_type}");
+                                let kill_for_task = kill.clone();
+                                let pause_for_task = pause.clone();
+                                let join = tokio::spawn(async move {
+                                    run_project_lifecycle(ProjectLifecycleParams {
+                                        project_id,
+                                        project_path,
+                                        agent_type,
+                                        model_id,
+                                        app_state,
+                                        cancel: kill_for_task,
+                                        pause: pause_for_task,
+                                        event_tx,
+                                    })
+                                    .await
+                                });
+                                let _ = respond_to.send(Ok(()));
+                                active = Some(ActiveLifecycle {
+                                    task_id: project_task_id,
                                     join,
                                     kill,
                                     pause,
@@ -240,6 +280,28 @@ impl SlotHandle {
             .send(SlotCommand::RunTask {
                 task_id,
                 project_path,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| SlotError::SessionFailed("slot actor channel closed".to_string()))?;
+        rx.await
+            .map_err(|_| SlotError::SessionFailed("slot actor did not ack dispatch".to_string()))?
+    }
+
+    pub async fn run_project(
+        &self,
+        project_id: String,
+        project_path: String,
+        agent_type: String,
+        model_id: String,
+    ) -> Result<(), SlotError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(SlotCommand::RunProject {
+                project_id,
+                project_path,
+                agent_type,
+                model_id,
                 respond_to: tx,
             })
             .await

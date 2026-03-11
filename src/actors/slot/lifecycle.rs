@@ -883,3 +883,30 @@ pub async fn run_task_lifecycle(
 
     return_free!();
 }
+
+pub struct ProjectLifecycleParams {
+    pub project_id: String,
+    pub project_path: String,
+    pub agent_type: String,
+    pub model_id: String,
+    pub app_state: AppState,
+    pub cancel: CancellationToken,
+    pub pause: CancellationToken,
+    pub event_tx: mpsc::Sender<SlotEvent>,
+}
+
+pub async fn run_project_lifecycle(
+    params: ProjectLifecycleParams,
+) -> anyhow::Result<()> {
+    let task_id = format!("project:{}:{}", params.project_id, params.agent_type);
+    run_task_lifecycle(
+        task_id,
+        params.project_path,
+        params.model_id,
+        params.app_state,
+        params.cancel,
+        params.pause,
+        params.event_tx,
+    )
+    .await
+}
