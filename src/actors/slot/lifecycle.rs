@@ -389,14 +389,16 @@ pub async fn run_task_lifecycle(
     // without needing to call task_show.
     // Cap individual entries and total size to prevent bloated system prompts
     // (e.g. a verification failure dumping a huge test diff).
-    const MAX_ENTRY_CHARS: usize = 2000;
-    const MAX_ACTIVITY_CHARS: usize = 8000;
+    const MAX_ENTRY_CHARS: usize = 800;
+    const MAX_ACTIVITY_ENTRIES: usize = 20;
+    const MAX_ACTIVITY_CHARS: usize = 6000;
     let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     let activity_text = match task_repo.list_activity(&task.id).await {
         Ok(entries) if !entries.is_empty() => {
             let lines: Vec<String> = entries
                 .iter()
                 .filter(|e| e.event_type == "comment" || e.event_type == "transition")
+                .take(MAX_ACTIVITY_ENTRIES)
                 .map(|e| {
                     let payload_preview = serde_json::from_str::<serde_json::Value>(&e.payload)
                         .ok()
@@ -499,12 +501,6 @@ pub async fn run_task_lifecycle(
 
     // ── Create or resume session record + build conversation ─────────────────
     let tools = extension::tool_schemas(agent_type);
-    // On resume, reuse the paused session's record ID so OTel/Langfuse traces
-    // group under the same logical session.  Fresh sessions get a new UUID.
-    let current_session_id = resume_record_id
-        .as_deref()
-        .map(String::from)
-        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
 
     // Try to resume from a paused session's saved conversation.
     let (current_record_id, mut conversation) = if let Some(ref resume_id) = resume_record_id {
@@ -620,6 +616,12 @@ pub async fn run_task_lifecycle(
         ));
         (record_id, conv)
     };
+
+    // Use the DB record ID as the session ID so OTel/Langfuse traces, error
+    // diagnostics, and session_messages all reference the same identifier.
+    let current_session_id = current_record_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
 
     // ── Run reply loop ────────────────────────────────────────────────────────
     let (reply_result, final_output, tokens_in_loop, tokens_out_loop) = run_reply_loop(

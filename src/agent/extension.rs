@@ -163,15 +163,40 @@ async fn call_task_show(
 
                 // Include recent activity (comments, transitions) so agents
                 // can see worker notes and review history.
+                // Cap entries and payload sizes to prevent context-window blowup
+                // on tasks with many sessions / verbose error logs.
+                const MAX_ACTIVITY_ENTRIES: usize = 30;
+                const MAX_PAYLOAD_CHARS: usize = 1500;
                 let activity = repo.list_activity(&task.id).await.unwrap_or_default();
                 let activity_json: Vec<serde_json::Value> = activity
                     .iter()
+                    // Skip session_error events — they contain verbose diagnostics
+                    // that are not useful for agent decision-making.
+                    .filter(|e| e.event_type != "session_error")
+                    .take(MAX_ACTIVITY_ENTRIES)
                     .map(|entry| {
+                        let mut payload = serde_json::from_str::<serde_json::Value>(&entry.payload)
+                            .unwrap_or(serde_json::json!({}));
+                        // Truncate large payload string values (e.g. verification output).
+                        if let Some(obj) = payload.as_object_mut() {
+                            for value in obj.values_mut() {
+                                if let Some(s) = value.as_str() {
+                                    if s.len() > MAX_PAYLOAD_CHARS {
+                                        let truncated = format!(
+                                            "{}… [truncated, {} total chars]",
+                                            &s[..MAX_PAYLOAD_CHARS],
+                                            s.len()
+                                        );
+                                        *value = serde_json::json!(truncated);
+                                    }
+                                }
+                            }
+                        }
                         serde_json::json!({
                             "id": entry.id,
                             "actor_role": entry.actor_role,
                             "event_type": entry.event_type,
-                            "payload": serde_json::from_str::<serde_json::Value>(&entry.payload).unwrap_or(serde_json::json!({})),
+                            "payload": payload,
                             "created_at": entry.created_at,
                         })
                     })
