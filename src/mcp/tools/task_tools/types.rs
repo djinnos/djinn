@@ -307,6 +307,40 @@ pub struct TaskShowResponse {
     pub active_session: Option<SessionRecordResponse>,
 }
 
+/// Lightweight session info included in task_list responses.
+#[derive(Clone, Serialize)]
+pub struct ActiveSessionSummary {
+    pub session_id: String,
+    pub agent_type: String,
+    pub model_id: String,
+    pub started_at: String,
+    pub status: String,
+}
+
+impl schemars::JsonSchema for ActiveSessionSummary {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ActiveSessionSummary".into()
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "string" },
+                "agent_type": { "type": "string" },
+                "model_id": { "type": "string" },
+                "started_at": { "type": "string" },
+                "status": { "type": "string" }
+            },
+            "required": ["session_id", "agent_type", "model_id", "started_at", "status"]
+        })
+    }
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SessionRecordResponse {
     pub id: String,
@@ -486,6 +520,11 @@ pub struct TaskListItem {
     pub close_reason: Option<String>,
     pub merge_commit_sha: Option<String>,
     pub unresolved_blocker_count: i64,
+    /// Active running session for this task, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_session: Option<ActiveSessionSummary>,
+    /// Total number of sessions that have worked on this task.
+    pub session_count: i64,
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────────
@@ -538,7 +577,11 @@ pub fn task_to_response(t: &Task) -> TaskResponse {
     }
 }
 
-pub fn task_to_list_item(t: &Task) -> TaskListItem {
+pub fn task_to_list_item(
+    t: &Task,
+    active_session: Option<ActiveSessionSummary>,
+    session_count: i64,
+) -> TaskListItem {
     let base = task_to_response(t);
     TaskListItem {
         id: base.id,
@@ -563,6 +606,8 @@ pub fn task_to_list_item(t: &Task) -> TaskListItem {
         close_reason: base.close_reason,
         merge_commit_sha: base.merge_commit_sha,
         unresolved_blocker_count: t.unresolved_blocker_count,
+        active_session,
+        session_count,
     }
 }
 

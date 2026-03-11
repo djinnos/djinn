@@ -5228,6 +5228,35 @@
                 },
                 "type": "array"
               },
+              "active_session": {
+                "description": "Active running session for this task, if any.",
+                "nullable": true,
+                "properties": {
+                  "agent_type": {
+                    "type": "string"
+                  },
+                  "model_id": {
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "type": "string"
+                  },
+                  "started_at": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "session_id",
+                  "agent_type",
+                  "model_id",
+                  "started_at",
+                  "status"
+                ],
+                "type": "object"
+              },
               "close_reason": {
                 "nullable": true,
                 "type": "string"
@@ -5286,6 +5315,11 @@
                 "format": "int64",
                 "type": "integer"
               },
+              "session_count": {
+                "description": "Total number of sessions that have worked on this task.",
+                "format": "int64",
+                "type": "integer"
+              },
               "short_id": {
                 "type": "string"
               },
@@ -5325,7 +5359,8 @@
               "verification_failure_count",
               "created_at",
               "updated_at",
-              "unresolved_blocker_count"
+              "unresolved_blocker_count",
+              "session_count"
             ],
             "type": "object"
           }

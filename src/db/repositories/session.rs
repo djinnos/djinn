@@ -216,6 +216,28 @@ impl SessionRepository {
         )
     }
 
+    /// Batch count sessions per task for a list of task IDs.
+    pub async fn count_for_tasks(
+        &self,
+        task_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        self.db.ensure_initialized().await?;
+        if task_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders: Vec<String> = (1..=task_ids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT task_id, COUNT(*) as cnt FROM sessions WHERE task_id IN ({}) GROUP BY task_id",
+            placeholders.join(", ")
+        );
+        let mut q = sqlx::query_as::<_, (String, i64)>(&sql);
+        for id in task_ids {
+            q = q.bind(*id);
+        }
+        let rows = q.fetch_all(self.db.pool()).await?;
+        Ok(rows.into_iter().collect())
+    }
+
     /// Set session status to Paused without setting ended_at.
     /// Used when a worker completes (Done) but its worktree is kept alive for the review cycle.
     pub async fn pause(&self, id: &str, tokens_in: i64, tokens_out: i64) -> Result<SessionRecord> {
