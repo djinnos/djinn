@@ -118,6 +118,7 @@ struct TaskCreateParams {
     design: Option<String>,
     priority: Option<i64>,
     owner: Option<String>,
+    status: Option<String>,
     acceptance_criteria: Option<Vec<String>>,
     blocked_by: Option<Vec<String>>,
     memory_refs: Option<Vec<String>>,
@@ -347,6 +348,16 @@ async fn call_task_create(
     let design = p.design.as_deref().unwrap_or("");
     let priority = p.priority.unwrap_or(0);
     let owner = p.owner.as_deref().unwrap_or("");
+    let status = match p.status.as_deref() {
+        None => None,
+        Some("backlog") => Some("backlog"),
+        Some("open") => Some("open"),
+        Some(other) => {
+            return Err(format!(
+                "invalid status: {other:?} (expected backlog or open)"
+            ));
+        }
+    };
 
     let mut task = repo
         .create(
@@ -357,7 +368,7 @@ async fn call_task_create(
             issue_type,
             priority,
             owner,
-            None,
+            status,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -1231,6 +1242,7 @@ fn tool_task_create() -> RmcpTool {
                 "design": {"type": "string"},
                 "priority": {"type": "integer"},
                 "owner": {"type": "string"},
+                "status": {"type": "string", "description": "Optional initial status. Allowed: backlog or open."},
                 "acceptance_criteria": {"type": "array", "items": {"type": "string"}, "description": "List of acceptance criteria strings."},
                 "blocked_by": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) that block this task."},
                 "memory_refs": {"type": "array", "items": {"type": "string"}, "description": "Memory note permalinks to attach."}
