@@ -497,7 +497,7 @@ impl DjinnMcpServer {
         let offset = validate_offset(p.offset.unwrap_or(0));
 
         let query = ListQuery {
-            project_id: Some(project_id),
+            project_id: Some(project_id.clone()),
             status: p.status,
             issue_type: p.issue_type,
             priority: p.priority,
@@ -510,9 +510,49 @@ impl DjinnMcpServer {
         };
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let session_repo =
+            SessionRepository::new(self.state.db().clone(), self.state.events().clone());
         match repo.list_filtered(query).await {
             Ok(result) => {
-                let tasks = result.tasks.iter().map(task_to_list_item).collect();
+                // Batch-fetch active sessions and session counts for the project
+                let active_sessions = session_repo
+                    .list_active_in_project(&project_id)
+                    .await
+                    .unwrap_or_default();
+                let mut session_by_task: HashMap<String, _> = HashMap::new();
+                for s in active_sessions {
+                    if let Some(tid) = &s.task_id {
+                        session_by_task.entry(tid.clone()).or_insert(s);
+                    }
+                }
+
+                let task_ids: Vec<&str> =
+                    result.tasks.iter().map(|t| t.id.as_str()).collect();
+                let session_counts = session_repo
+                    .count_for_tasks(&task_ids)
+                    .await
+                    .unwrap_or_default();
+
+                let tasks = result
+                    .tasks
+                    .iter()
+                    .map(|t| {
+                        let active = session_by_task.remove(&t.id).map(|s| {
+                            ActiveSessionSummary {
+                                session_id: s.id,
+                                agent_type: s.agent_type,
+                                model_id: s.model_id,
+                                started_at: s.started_at,
+                                status: s.status,
+                            }
+                        });
+                        let count = session_counts
+                            .get(&t.id)
+                            .copied()
+                            .unwrap_or(0);
+                        task_to_list_item(t, active, count)
+                    })
+                    .collect();
                 Json(TaskListResponse {
                     has_more: offset + limit < result.total_count,
                     tasks,
