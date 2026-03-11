@@ -79,6 +79,14 @@ pub enum DjinnEvent {
     },
 
     // Agent sessions
+    /// Emitted immediately when a task is dispatched to a slot, before the
+    /// session record is created in the DB. Lets the frontend show the agent
+    /// avatar as soon as the task goes in-progress.
+    SessionDispatched {
+        task_id: String,
+        model_id: String,
+        agent_type: String,
+    },
     SessionCreated(SessionRecord),
     SessionUpdated(SessionRecord),
 

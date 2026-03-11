@@ -161,6 +161,21 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             id: Some(id),
             project_id: None,
         },
+        DjinnEvent::SessionDispatched {
+            task_id,
+            model_id,
+            agent_type,
+        } => Envelope {
+            entity_type: "session",
+            action: "dispatched",
+            data: Some(serde_json::json!({
+                "task_id": task_id,
+                "model_id": model_id,
+                "agent_type": agent_type,
+            })),
+            id: None,
+            project_id: None,
+        },
         DjinnEvent::SessionCreated(v) => Envelope {
             entity_type: "session",
             action: "started",
