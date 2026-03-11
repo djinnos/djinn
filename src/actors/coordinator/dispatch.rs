@@ -78,7 +78,7 @@ impl CoordinatorActor {
                     "CoordinatorActor: rapid failure detected, adding dispatch cooldown"
                 );
                 self.dispatch_cooldowns
-                    .insert(task.id.clone(), Instant::now());
+                    .insert(task.id.clone(), StdInstant::now());
             }
             // Skip tasks in cooldown (recently failed lifecycle setup).
             if self.dispatch_cooldowns.contains_key(&task.id) {
@@ -146,7 +146,7 @@ impl CoordinatorActor {
                             "CoordinatorActor: task dispatched"
                         );
                         self.last_dispatched
-                            .insert(task.id.clone(), Instant::now());
+                            .insert(task.id.clone(), StdInstant::now());
                         self.dispatched += 1;
                         dispatched = true;
                         break;
@@ -363,5 +363,97 @@ impl CoordinatorActor {
             self.dispatch_ready_tasks(None).await;
         }
         self.publish_status();
+    }
+}
+
+
+impl CoordinatorActor {
+    pub(super) fn mark_backlog_event(&mut self, project_id: &str) {
+        self.backlog_debounce.insert(
+            project_id.to_string(),
+            Instant::now() + Duration::from_secs(2),
+        );
+    }
+
+    async fn backlog_count(&self, project_id: &str) -> usize {
+        let repo = self.task_repo();
+        match repo.list_by_status("backlog").await {
+            Ok(tasks) => tasks.into_iter().filter(|t| t.project_id == project_id).count(),
+            Err(e) => {
+                tracing::warn!(project_id = %project_id, error = %e, "CoordinatorActor: failed to count backlog tasks");
+                0
+            }
+        }
+    }
+
+    async fn dispatch_groomer_for_project(&mut self, project_id: &str) -> bool {
+        if self.active_groomer_sessions.contains(project_id) {
+            return false;
+        }
+        if !self.is_project_dispatch_enabled(project_id) {
+            return false;
+        }
+        let count = self.backlog_count(project_id).await;
+        if count == 0 {
+            return false;
+        }
+        let role = AgentType::Groomer.dispatch_role();
+        let model_ids = self.resolve_dispatch_models_for_role(role).await;
+        let Some(project_path) = self.project_path_for_id(project_id).await else {
+            return false;
+        };
+        for model_id in model_ids {
+            if !self.health.is_available(&model_id) {
+                continue;
+            }
+            match self
+                .pool
+                .dispatch_project(project_id, &project_path, "groomer", &model_id)
+                .await
+            {
+                Ok(()) => {
+                    self.active_groomer_sessions.insert(project_id.to_string());
+                    self.dispatched += 1;
+                    return true;
+                }
+                Err(PoolError::AtCapacity { .. }) => continue,
+                Err(_) => break,
+            }
+        }
+        false
+    }
+
+    pub(super) async fn ensure_groomer_dispatch(&mut self, project_filter: Option<&str>) {
+        let now = Instant::now();
+        let due: Vec<String> = self
+            .backlog_debounce
+            .iter()
+            .filter_map(|(project_id, when)| {
+                if when <= &now && project_filter.is_none_or(|p| p == project_id) {
+                    Some(project_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for project_id in due {
+            self.backlog_debounce.remove(&project_id);
+            let _ = self.dispatch_groomer_for_project(&project_id).await;
+        }
+
+        let repo = self.task_repo();
+        if let Ok(tasks) = repo.list_by_status("backlog").await {
+            let mut projects = HashSet::new();
+            for task in tasks {
+                if project_filter.is_none_or(|p| p == task.project_id) {
+                    projects.insert(task.project_id);
+                }
+            }
+            for project_id in projects {
+                if !self.active_groomer_sessions.contains(&project_id) {
+                    let _ = self.dispatch_groomer_for_project(&project_id).await;
+                }
+            }
+        }
     }
 }

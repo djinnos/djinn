@@ -126,6 +126,9 @@ async fn task_list_filters_and_pagination() {
         )
         .await
         .unwrap();
+    repo.transition(&t1.id, crate::models::task::TransitionAction::Accept, "a", "user", None, None)
+        .await
+        .unwrap();
     repo.transition(&t1.id, crate::models::task::TransitionAction::Start, "a", "user", None, None)
         .await
         .unwrap();
@@ -203,10 +206,10 @@ async fn task_transition_valid_and_invalid() {
         &app,
         &sid,
         "task_transition",
-        json!({"project": project.path, "id": task.id, "action": "start", "actor_id": "u1", "actor_role": "user"}),
+        json!({"project": project.path, "id": task.id, "action": "accept", "actor_id": "u1", "actor_role": "user"}),
     )
     .await;
-    assert_eq!(ok["status"], "in_progress");
+    assert_eq!(ok["status"], "open");
 
     let bad = mcp_call_tool(
         &app,
@@ -225,6 +228,9 @@ async fn task_count_plain_and_grouped() {
     let epic = create_test_epic(&db, &project.id).await;
     let t1 = create_test_task(&db, &project.id, &epic.id).await;
     let repo = TaskRepository::new(db.clone(), tokio::sync::broadcast::channel(16).0);
+    repo.transition(&t1.id, crate::models::task::TransitionAction::Accept, "u1", "user", None, None)
+        .await
+        .unwrap();
     repo.transition(&t1.id, crate::models::task::TransitionAction::Start, "u1", "user", None, None)
         .await
         .unwrap();
