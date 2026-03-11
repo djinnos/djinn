@@ -1,4 +1,5 @@
 import type { Epic, Task } from "@/api/types";
+import workerAvatar from "@/assets/worker.png";
 import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -145,6 +146,14 @@ function getBacklogBadge(status: string): { label: string; className: string } |
   return null;
 }
 
+const AGENT_AVATARS: Record<string, string> = {
+  worker: workerAvatar,
+};
+
+function agentAvatar(agentType?: string): string {
+  return AGENT_AVATARS[agentType ?? "worker"] ?? workerAvatar;
+}
+
 function acProgressIcon(met: number, total: number) {
   if (met === total) return Tick01Icon;
   if (met === 0) return Progress01Icon;
@@ -154,21 +163,6 @@ function acProgressIcon(met: number, total: number) {
   return Progress04Icon;
 }
 
-const AVATAR_COLORS = ["d8b4fe", "fdba74", "93c5fd", "86efac", "fca5a5", "fde68a", "99f6e4", "f9a8d4"];
-
-function ownerAvatarColor(owner: string | null | undefined): string {
-  if (!owner) return AVATAR_COLORS[0];
-  let hash = 0;
-  for (let i = 0; i < owner.length; i++) {
-    hash = owner.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
-}
-
-function ownerAvatarUrl(owner: string | null | undefined): string {
-  const seed = encodeURIComponent(owner ?? "unknown");
-  return `https://api.dicebear.com/9.x/micah/svg?seed=${seed}`;
-}
 
 function ActionButton({
   icon: Icon,
@@ -395,24 +389,25 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
 
         </div>
 
-        {/* Avatar – absolutely positioned so it doesn't affect card height */}
-        <img
-          src={ownerAvatarUrl(task.owner)}
-          alt={task.owner ?? "Unassigned"}
-          title={task.owner ?? "Unassigned"}
-          className="pointer-events-none absolute bottom-0 right-1 h-6 w-6 transition-opacity duration-150 group-hover/taskcard:opacity-0"
-        />
-
         {/* Row 2: Title */}
         <h4
           className={cn(
-            "text-sm font-medium leading-snug",
+            "pr-12 text-sm font-medium leading-snug",
             isDone && "text-muted-foreground line-through decoration-muted-foreground/30"
           )}
           title={task.title}
         >
           {task.title}
         </h4>
+
+        {/* Agent avatar – shown when task has an active session */}
+        {task.active_session && (
+          <img
+            src={agentAvatar(task.active_session.agent_type)}
+            alt={task.active_session.agent_type ?? "agent"}
+            className="pointer-events-none absolute bottom-0 right-1 h-12 w-12 transition-opacity duration-150 group-hover/taskcard:opacity-0"
+          />
+        )}
 
       </CardContent>
 

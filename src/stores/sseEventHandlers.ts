@@ -120,6 +120,43 @@ export function initSSEEventHandlers(): () => void {
     );
   });
 
+  // Session events — update active_session on the corresponding task
+  const sessionStartedUnsub = subscribe("session_started", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as {
+      id?: string;
+      task_id?: string;
+      agent_type?: string;
+      model_id?: string;
+      started_at?: string;
+      status?: string;
+    };
+    if (!payload.task_id) return;
+    const existing = taskStore.getState().getTask(payload.task_id);
+    if (!existing) return;
+    taskStore.getState().updateTask({
+      ...existing,
+      active_session: {
+        session_id: payload.id,
+        agent_type: payload.agent_type,
+        model_id: payload.model_id,
+        started_at: payload.started_at,
+        status: payload.status,
+      },
+    });
+  });
+
+  const sessionEndedUnsub = subscribe("session_ended", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as { task_id?: string };
+    if (!payload.task_id) return;
+    const existing = taskStore.getState().getTask(payload.task_id);
+    if (!existing) return;
+    taskStore.getState().updateTask({
+      ...existing,
+      active_session: undefined,
+      session_count: (existing.session_count ?? 0) + 1,
+    });
+  });
+
   // Sync events — when an import brings in new tasks, the individual task.updated
   // SSE events (from_sync=true) will have already updated the stores. This handler
   // is for visibility — invalidate queries so any list views re-fetch.
@@ -159,6 +196,8 @@ export function initSSEEventHandlers(): () => void {
     epicUpdatedUnsub?.();
     epicDeletedUnsub?.();
     projectChangedUnsub?.();
+    sessionStartedUnsub?.();
+    sessionEndedUnsub?.();
     syncCompletedUnsub?.();
   };
 }
