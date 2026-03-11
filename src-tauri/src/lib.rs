@@ -126,12 +126,10 @@ pub fn run() {
             let silent_auth_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 match token_refresh::attempt_silent_auth_on_startup().await {
-                    token_refresh::RefreshResult::Success(state) => {
+                    token_refresh::RefreshResult::Success(_state) => {
                         log::info!("Silent authentication successful on startup");
-                        // Emit event to frontend indicating successful silent auth
-                        let _ = silent_auth_app.emit("auth:silent-refresh-success", serde_json::json!({
-                            "user_id": state.user_id,
-                        }));
+                        // Populate AUTH_SESSION and emit auth:state-changed event
+                        let _ = commands::populate_session_after_silent_refresh(&silent_auth_app).await;
                     }
                     token_refresh::RefreshResult::NoToken => {
                         log::info!("No refresh token available, user needs to login");

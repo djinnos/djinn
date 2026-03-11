@@ -175,7 +175,61 @@ pub fn auth_get_state() -> Result<AuthStateResponse, String> {
         .lock()
         .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
 
-    Ok(build_auth_state_response(session.as_ref()))
+    // If we have a legacy session, use it
+    if let Some(session) = session.as_ref() {
+        return Ok(build_auth_state_response(Some(session)));
+    }
+
+    // Otherwise check if we have a valid token from silent refresh
+    if let Some(token_state) = token_refresh::get_token_state() {
+        // Return authenticated state even without profile (it will be fetched asynchronously)
+        return Ok(AuthStateResponse {
+            is_authenticated: true,
+            user: None,
+        });
+    }
+
+    Ok(build_auth_state_response(None))
+}
+
+/// Populate AUTH_SESSION after successful silent refresh
+/// Called by lib.rs setup to bridge silent refresh to legacy auth state
+pub async fn populate_session_after_silent_refresh(
+    app: &AppHandle,
+) -> Result<(), String> {
+    // Get current token state from silent refresh
+    let token_state = token_refresh::get_token_state()
+        .ok_or_else(|| "No token state available from silent refresh".to_string())?;
+
+    // Try to fetch user profile from /userinfo endpoint
+    let user_profile = match fetch_user_profile_from_userinfo(&token_state.access_token).await {
+        Ok(profile) => Some(profile),
+        Err(e) => {
+            log::warn!("Failed to fetch user profile from userinfo: {}, falling back to id_token decode", e);
+            // Try to decode from id_token if available in stored state (from previous login)
+            // For now, we'll proceed without profile - the frontend can trigger a profile fetch
+            None
+        }
+    };
+
+    // Populate AUTH_SESSION with token and profile
+    let session = {
+        let mut auth_session = AUTH_SESSION
+            .lock()
+            .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+        let session = AuthSession {
+            access_token: token_state.access_token.clone(),
+            user_profile: user_profile.clone(),
+        };
+        *auth_session = Some(session.clone());
+        session
+    };
+
+    let state = build_auth_state_response(Some(&session));
+    emit_auth_state_changed(app, &state);
+
+    log::info!("Populated AUTH_SESSION after silent refresh");
+    Ok(())
 }
 
 #[tauri::command]
@@ -317,6 +371,46 @@ pub async fn exchange_auth_code(
     user_profile.ok_or_else(|| "Missing id_token in token response".to_string())
 }
 
+/// Fetch user profile from Clerk /userinfo endpoint using access token
+async fn fetch_user_profile_from_userinfo(access_token: &str) -> Result<UserProfile, String> {
+    let client = reqwest::Client::new();
+    let userinfo_url = format!("https://{}/userinfo", crate::auth::CLERK_DOMAIN);
+
+    let resp = client
+        .get(&userinfo_url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .map_err(|e| format!("Userinfo request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_string());
+        return Err(format!("Userinfo endpoint returned {}: {}", status, body));
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct UserInfoResponse {
+        sub: String,
+        name: Option<String>,
+        email: Option<String>,
+        picture: Option<String>,
+    }
+
+    let user_info: UserInfoResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse userinfo response: {}", e))?;
+
+    Ok(UserProfile {
+        sub: user_info.sub,
+        name: user_info.name,
+        email: user_info.email,
+        picture: user_info.picture,
+    })
+}
+
+/// Decode id_token to extract user profile
 fn decode_id_token(id_token: &str) -> Result<UserProfile, String> {
     let mut parts = id_token.split('.');
     let _header = parts.next().ok_or("Invalid id_token format")?;
