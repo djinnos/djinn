@@ -167,8 +167,7 @@ function ownerAvatarColor(owner: string | null | undefined): string {
 
 function ownerAvatarUrl(owner: string | null | undefined): string {
   const seed = encodeURIComponent(owner ?? "unknown");
-  const bg = ownerAvatarColor(owner);
-  return `https://api.dicebear.com/9.x/lorelei-neutral/svg?seed=${seed}&backgroundColor=${bg}`;
+  return `https://api.dicebear.com/9.x/micah/svg?seed=${seed}`;
 }
 
 function ActionButton({
@@ -250,7 +249,7 @@ function TaskCardActions({ task }: { task: Task }) {
 
   return (
     <div
-      className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1 rounded-b-xl bg-zinc-800/70 px-3 py-1.5 opacity-0 backdrop-blur-sm transition-opacity duration-150 group-hover/taskcard:opacity-100 [&>*]:pointer-events-auto"
+      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-center gap-1 rounded-b-xl bg-zinc-800/70 px-3 py-1.5 opacity-0 backdrop-blur-sm transition-opacity duration-150 group-hover/taskcard:opacity-100 [&>*]:pointer-events-auto"
       onClick={(e) => e.stopPropagation()}
     >
       {actions}
@@ -394,13 +393,15 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
             </span>
           )}
 
-          <img
-            src={ownerAvatarUrl(task.owner)}
-            alt={task.owner ?? "Unassigned"}
-            title={task.owner ?? "Unassigned"}
-            className="h-6 w-6 shrink-0 rounded-full border-2 border-zinc-600"
-          />
         </div>
+
+        {/* Avatar – absolutely positioned so it doesn't affect card height */}
+        <img
+          src={ownerAvatarUrl(task.owner)}
+          alt={task.owner ?? "Unassigned"}
+          title={task.owner ?? "Unassigned"}
+          className="pointer-events-none absolute bottom-0 right-1 h-6 w-6"
+        />
 
         {/* Row 2: Title */}
         <h4
