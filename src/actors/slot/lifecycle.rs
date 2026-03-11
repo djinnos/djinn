@@ -387,6 +387,10 @@ pub async fn run_task_lifecycle(
 
     // Fetch activity log for the prompt so agents see comments/transitions
     // without needing to call task_show.
+    // Cap individual entries and total size to prevent bloated system prompts
+    // (e.g. a verification failure dumping a huge test diff).
+    const MAX_ENTRY_CHARS: usize = 2000;
+    const MAX_ACTIVITY_CHARS: usize = 8000;
     let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     let activity_text = match task_repo.list_activity(&task.id).await {
         Ok(entries) if !entries.is_empty() => {
@@ -403,10 +407,24 @@ pub async fn run_task_lifecycle(
                                 .and_then(|s| s.as_str().map(String::from))
                         })
                         .unwrap_or_default();
-                    format!("- **{}** ({}): {}", e.event_type, e.actor_role, payload_preview)
+                    let mut line = format!("- **{}** ({}): {}", e.event_type, e.actor_role, payload_preview);
+                    if line.len() > MAX_ENTRY_CHARS {
+                        line.truncate(MAX_ENTRY_CHARS);
+                        line.push_str("… [truncated]");
+                    }
+                    line
                 })
                 .collect();
-            if lines.is_empty() { None } else { Some(lines.join("\n")) }
+            if lines.is_empty() {
+                None
+            } else {
+                let mut joined = lines.join("\n");
+                if joined.len() > MAX_ACTIVITY_CHARS {
+                    joined.truncate(MAX_ACTIVITY_CHARS);
+                    joined.push_str("\n… [activity truncated]");
+                }
+                Some(joined)
+            }
         }
         _ => None,
     };

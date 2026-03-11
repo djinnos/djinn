@@ -214,34 +214,61 @@ fn parse_stream_event(data: &str) -> anyhow::Result<Option<ResponsesStreamEvent>
     Ok(Some(event))
 }
 
+/// Parsed line result: either zero or more stream events, or a provider error
+/// that should be propagated through the stream.
+enum ParsedLine {
+    Events(Vec<StreamEvent>),
+    ProviderError(String),
+}
+
+/// Extract a human-readable error message from an OpenAI error JSON value.
+fn extract_error_message(error: &Value) -> String {
+    // OpenAI errors: {"message": "...", "code": "..."}
+    // or nested: {"error": {"message": "...", "code": "..."}}
+    let msg = error
+        .get("message")
+        .or_else(|| error.get("error").and_then(|e| e.get("message")))
+        .and_then(Value::as_str);
+    let code = error
+        .get("code")
+        .or_else(|| error.get("error").and_then(|e| e.get("code")))
+        .and_then(Value::as_str);
+    match (code, msg) {
+        (Some(c), Some(m)) => format!("{c}: {m}"),
+        (None, Some(m)) => m.to_string(),
+        (Some(c), None) => c.to_string(),
+        (None, None) => error.to_string(),
+    }
+}
+
 /// Parse a single SSE data line from the OpenAI Responses streaming API.
 ///
 /// `accumulated_items` collects OutputItemDone items across the stream.
-/// Returns zero or more `StreamEvent`s.
+/// Returns zero or more `StreamEvent`s, or a provider error.
 fn parse_responses_line(
     line: &str,
     accumulated_items: &mut Vec<OutputItemInfo>,
-) -> Vec<StreamEvent> {
+) -> ParsedLine {
     let event = match parse_stream_event(line) {
         Ok(Some(e)) => e,
-        Ok(None) => return vec![],
+        Ok(None) => return ParsedLine::Events(vec![]),
         Err(e) => {
             tracing::debug!(error = %e, "failed to parse Responses SSE event");
-            return vec![];
+            return ParsedLine::Events(vec![]);
         }
     };
 
     match event {
         ResponsesStreamEvent::OutputTextDelta { delta } => {
             if delta.is_empty() {
-                vec![]
+                ParsedLine::Events(vec![])
             } else {
-                vec![StreamEvent::Delta(ContentBlock::Text { text: delta })]
+                ParsedLine::Events(vec![StreamEvent::Delta(ContentBlock::Text { text: delta })])
             }
         }
         ResponsesStreamEvent::OutputItemDone { item } => {
             accumulated_items.push(item);
-            vec![]
+            ParsedLine::Events(vec![])
         }
         ResponsesStreamEvent::ResponseCompleted { response } => {
             let mut events = Vec::new();
@@ -282,18 +309,20 @@ fn parse_responses_line(
                 }));
             }
 
-            events
+            ParsedLine::Events(events)
         }
         ResponsesStreamEvent::ResponseFailed { error } => {
-            tracing::error!(?error, "Responses API failed");
-            vec![]
+            let msg = extract_error_message(&error);
+            tracing::error!(error = %msg, "Responses API failed");
+            ParsedLine::ProviderError(msg)
         }
         ResponsesStreamEvent::Error { error } => {
-            tracing::error!(?error, "Responses API error");
-            vec![]
+            let msg = extract_error_message(&error);
+            tracing::error!(error = %msg, "Responses API error");
+            ParsedLine::ProviderError(msg)
         }
         // Ignore all other event types
-        _ => vec![],
+        _ => ParsedLine::Events(vec![]),
     }
 }
 
@@ -333,8 +362,16 @@ impl LlmProvider for OpenAIResponsesProvider {
                         match result {
                             Err(e) => { yield Err(e); return; }
                             Ok(line) => {
-                                for event in parse_responses_line(&line, &mut accumulated_items) {
-                                    yield Ok(event);
+                                match parse_responses_line(&line, &mut accumulated_items) {
+                                    ParsedLine::Events(events) => {
+                                        for event in events {
+                                            yield Ok(event);
+                                        }
+                                    }
+                                    ParsedLine::ProviderError(msg) => {
+                                        yield Err(anyhow::anyhow!("{}", msg));
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -464,7 +501,9 @@ mod tests {
     fn test_parse_text_delta() {
         let line = r#"{"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"Hello"}"#;
         let mut acc = Vec::new();
-        let events = parse_responses_line(line, &mut acc);
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+            panic!("expected events");
+        };
         assert_eq!(events.len(), 1);
         match &events[0] {
             StreamEvent::Delta(ContentBlock::Text { text }) => assert_eq!(text, "Hello"),
@@ -476,7 +515,9 @@ mod tests {
     fn test_parse_empty_delta_skipped() {
         let line = r#"{"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"delta":""}"#;
         let mut acc = Vec::new();
-        let events = parse_responses_line(line, &mut acc);
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+            panic!("expected events");
+        };
         assert!(events.is_empty());
     }
 
@@ -484,7 +525,9 @@ mod tests {
     fn test_parse_completed_with_function_call() {
         let line = r#"{"type":"response.completed","sequence_number":10,"response":{"id":"resp_1","object":"response","created_at":1737368310,"status":"completed","model":"gpt-5.1-codex","output":[{"type":"function_call","id":"fc_1","status":"completed","call_id":"call_abc","name":"bash","arguments":"{\"cmd\":\"ls\"}"}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
         let mut acc = Vec::new();
-        let events = parse_responses_line(line, &mut acc);
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+            panic!("expected events");
+        };
         // Should have tool use + usage
         assert_eq!(events.len(), 2);
         match &events[0] {
@@ -508,7 +551,9 @@ mod tests {
     fn test_parse_keepalive_ignored() {
         let line = r#"{"type":"keepalive"}"#;
         let mut acc = Vec::new();
-        let events = parse_responses_line(line, &mut acc);
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+            panic!("expected events");
+        };
         assert!(events.is_empty());
     }
 
@@ -516,8 +561,30 @@ mod tests {
     fn test_parse_unknown_event_ignored() {
         let line = r#"{"type":"response.some_future_event","data":"foo"}"#;
         let mut acc = Vec::new();
-        let events = parse_responses_line(line, &mut acc);
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+            panic!("expected events");
+        };
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_parse_error_propagates() {
+        let line = r#"{"type":"error","error":{"message":"context_length_exceeded: too many tokens","code":"context_length_exceeded"}}"#;
+        let mut acc = Vec::new();
+        let ParsedLine::ProviderError(msg) = parse_responses_line(line, &mut acc) else {
+            panic!("expected provider error");
+        };
+        assert!(msg.contains("context_length_exceeded"));
+    }
+
+    #[test]
+    fn test_parse_response_failed_propagates() {
+        let line = r#"{"type":"response.failed","error":{"message":"server error","code":"server_error"}}"#;
+        let mut acc = Vec::new();
+        let ParsedLine::ProviderError(msg) = parse_responses_line(line, &mut acc) else {
+            panic!("expected provider error");
+        };
+        assert!(msg.contains("server_error"));
     }
 
     #[test]
