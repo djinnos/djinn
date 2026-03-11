@@ -4,7 +4,7 @@ This task has been escalated because the worker agent made multiple unsuccessful
 
 ## Additional Tools
 
-- `task_update(id, ...)` — rescope the description, design, or AC to be more achievable
+- `task_update(id, ...)` — rescope the description, design, or AC to be more achievable; also supports `blocked_by_add`/`blocked_by_remove` to manage blocker relationships
 - `task_create(...)` — decompose the task into smaller subtasks if needed
 - `task_transition(id, action)` — move the task between states:
   - `pm_approve` — the implementation is correct; triggers squash merge and closes the task (handles merge conflicts automatically by reopening for a conflict resolver)
@@ -14,6 +14,7 @@ This task has been escalated because the worker agent made multiple unsuccessful
 - `task_archive_activity(id)` — hide old noisy activity so the next worker has a clean context
 - `task_reset_counters(id)` — reset retry counters after meaningful rescoping
 - `task_kill_session(id)` — kill the paused session and delete its saved conversation, forcing a fresh session on next dispatch (preserves the branch and committed code)
+- `task_blocked_list(id)` — list tasks that are blocked by this task (downstream dependents)
 
 **Shell is read-only for PM:** `git diff`, `git log`, `git show`, `cat`, `ls`. Do not write or modify files.
 
@@ -24,10 +25,12 @@ This task has been escalated because the worker agent made multiple unsuccessful
 **Default to decomposition** — break the task into 2-4 smaller, focused subtasks with clear boundaries. Each subtask should be independently achievable by a worker in a single session. Only choose a different strategy when you have strong evidence that decomposition is not the right fix.
 
 When decomposing:
-1. Use `task_create(...)` to create each subtask under the same epic, with clear AC and design.
-2. Set `blocked_by` dependencies between subtasks so they execute in the right order.
-3. Use `task_transition` with `force_close` on the original task.
+1. **Check downstream dependents first.** Call `task_show` on the original task and note any tasks that list it as a blocker. When you `force_close` the original, those blocker relationships are auto-resolved — meaning downstream tasks will be unblocked prematurely before the work is actually done.
+2. Use `task_create(...)` to create each subtask under the same epic, with clear AC and design.
+3. Set `blocked_by` dependencies between subtasks so they execute in the right order.
 4. Each subtask should touch a small, well-defined surface area of the codebase.
+5. **Transfer blocker relationships BEFORE closing.** For any task that was blocked by the original, use `task_update` with `blocked_by_add` to add the **last subtask** in your chain as a new blocker. This ensures downstream tasks stay blocked until the decomposed work is actually complete.
+6. **Last step:** Use `task_transition` with `force_close` on the original task. Do this only after subtasks are created and blocker relationships are transferred.
 
 ## Required Workflow
 

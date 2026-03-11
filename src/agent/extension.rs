@@ -46,6 +46,7 @@ where
         "task_archive_activity" => call_task_archive_activity(state, &call.arguments).await,
         "task_reset_counters" => call_task_reset_counters(state, &call.arguments).await,
         "task_kill_session" => call_task_kill_session(state, &call.arguments).await,
+        "task_blocked_list" => call_task_blocked_list(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
@@ -890,6 +891,44 @@ async fn call_task_kill_session(
     }))
 }
 
+async fn call_task_blocked_list(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: TaskShowParams = parse_args(arguments)?;
+    let repo = TaskRepository::new(state.db().clone(), state.events().clone());
+    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
+    };
+    let blocked = repo.list_blocked_by(&task.id).await.map_err(|e| e.to_string())?;
+    let tasks: Vec<serde_json::Value> = blocked
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "task_id": b.task_id,
+                "short_id": b.short_id,
+                "title": b.title,
+                "status": b.status,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "tasks": tasks }))
+}
+
+fn tool_task_blocked_list() -> RmcpTool {
+    RmcpTool::new(
+        "task_blocked_list".to_string(),
+        "List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"}
+            }
+        }),
+    )
+}
+
 fn tool_task_show() -> RmcpTool {
     RmcpTool::new(
         "task_show".to_string(),
@@ -1219,6 +1258,8 @@ pub fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
                 .expect("serialize tool_task_reset_counters"),
             serde_json::to_value(tool_task_kill_session())
                 .expect("serialize tool_task_kill_session"),
+            serde_json::to_value(tool_task_blocked_list())
+                .expect("serialize tool_task_blocked_list"),
         ] {
             tool_values.push(value);
         }
