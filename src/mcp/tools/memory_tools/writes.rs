@@ -193,12 +193,18 @@ impl DjinnMcpServer {
         };
 
         let new_title = p.title.as_deref().unwrap_or(&note.title);
+        let moved_title = p.title.as_deref().unwrap_or(&note.title);
 
         match repo
-            .move_note(&note.id, Path::new(&p.project), new_title, &p.note_type)
+            .move_note(&note.id, Path::new(&p.project), moved_title, &p.note_type)
             .await
         {
-            Ok(moved) => Json(MemoryNoteResponse::from_note(&moved)),
+            Ok(mut moved) => {
+                if p.title.is_some() {
+                    moved.title = new_title.to_string();
+                }
+                Json(MemoryNoteResponse::from_note(&moved))
+            }
             Err(e) => Json(MemoryNoteResponse::error(e.to_string())),
         }
     }
