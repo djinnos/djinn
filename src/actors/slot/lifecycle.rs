@@ -604,7 +604,7 @@ pub async fn run_task_lifecycle(
     };
 
     // ── Run reply loop ────────────────────────────────────────────────────────
-    let (reply_result, final_output, tokens_in_loop, tokens_out_loop): (anyhow::Result<()>, _, i64, i64) = run_reply_loop(
+    let (reply_result, final_output, tokens_in_loop, tokens_out_loop) = run_reply_loop(
         provider.as_ref(),
         &mut conversation,
         &tools,
