@@ -669,10 +669,10 @@ pub fn find_orphaned_tool_result(messages: &[Message]) -> Option<String> {
         }
         if msg.role == Role::User {
             for block in &msg.content {
-                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                    if !known_tool_ids.contains(tool_use_id) {
-                        return Some(tool_use_id.clone());
-                    }
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block
+                    && !known_tool_ids.contains(tool_use_id)
+                {
+                    return Some(tool_use_id.clone());
                 }
             }
         }
