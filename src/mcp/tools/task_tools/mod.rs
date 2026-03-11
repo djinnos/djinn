@@ -24,6 +24,8 @@ use crate::models::task::{Task, TaskStatus, TransitionAction};
 
 mod board;
 mod types;
+#[cfg(test)]
+mod tests;
 
 pub use types::*;
 
