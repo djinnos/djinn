@@ -295,6 +295,10 @@ pub(crate) async fn success_transition(
             tracing::warn!(task_id = %task_id, "PM agent: session ended without explicit completion → releasing back to needs_pm_intervention");
             Some((TransitionAction::PmInterventionRelease, None))
         }
+        AgentType::Groomer => {
+            // Groomer has no lifecycle transition wiring yet.
+            None
+        }
         AgentType::TaskReviewer => {
             // Derive verdict from acceptance criteria state on the task.
             let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());

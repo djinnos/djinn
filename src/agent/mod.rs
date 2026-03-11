@@ -7,7 +7,6 @@ pub mod output_parser;
 pub mod prompts;
 pub mod provider;
 pub mod sandbox;
-
 // ─── Agent type ───────────────────────────────────────────────────────────────
 
 /// Role an agent is playing within Djinn.
@@ -21,6 +20,8 @@ pub enum AgentType {
     TaskReviewer,
     /// PM agent that grooms backlog and handles intervention for stuck tasks.
     PM,
+    /// Groomer agent for backlog grooming workflows.
+    Groomer,
 }
 
 impl AgentType {
@@ -30,6 +31,7 @@ impl AgentType {
             Self::ConflictResolver => "conflict_resolver",
             Self::TaskReviewer => "task_reviewer",
             Self::PM => "pm",
+            Self::Groomer => "groomer",
         }
     }
 
@@ -55,6 +57,7 @@ impl AgentType {
             Self::Worker | Self::ConflictResolver => "worker",
             Self::TaskReviewer => "task_reviewer",
             Self::PM => "pm",
+            Self::Groomer => "groomer",
         }
     }
 
@@ -67,6 +70,7 @@ impl AgentType {
             (Self::Worker | Self::ConflictResolver, "open") => Some(TransitionAction::Start),
             (Self::TaskReviewer, "needs_task_review") => Some(TransitionAction::TaskReviewStart),
             (Self::PM, "needs_pm_intervention") => Some(TransitionAction::PmInterventionStart),
+            (Self::Groomer, _) => None,
             _ => None,
         }
     }
@@ -78,6 +82,41 @@ impl AgentType {
             Self::Worker | Self::ConflictResolver => TransitionAction::Release,
             Self::TaskReviewer => TransitionAction::ReleaseTaskReview,
             Self::PM => TransitionAction::PmInterventionRelease,
+            Self::Groomer => TransitionAction::Release,
         }
+    }
+}
+
+impl std::str::FromStr for AgentType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "worker" => Ok(Self::Worker),
+            "conflict_resolver" => Ok(Self::ConflictResolver),
+            "task_reviewer" => Ok(Self::TaskReviewer),
+            "pm" => Ok(Self::PM),
+            "groomer" => Ok(Self::Groomer),
+            _ => Err(format!("unknown agent type: {s}")),
+        }
+    }
+}
+
+impl serde::Serialize for AgentType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AgentType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = <String as serde::Deserialize>::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }

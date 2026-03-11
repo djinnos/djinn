@@ -17,6 +17,7 @@ const DEV_TEMPLATE: &str = include_str!("prompts/dev.md");
 const CONFLICT_RESOLVER_TEMPLATE: &str = include_str!("prompts/conflict-resolver.md");
 const TASK_REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.md");
 const PM_TEMPLATE: &str = include_str!("prompts/pm.md");
+const GROOMER_TEMPLATE: &str = include_str!("prompts/groomer.md");
 
 // ─── Context ───────────────────────────────────────────────────────────────────
 
@@ -69,6 +70,7 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
         AgentType::ConflictResolver => ("Conflict Resolver", CONFLICT_RESOLVER_TEMPLATE),
         AgentType::TaskReviewer => ("Task Reviewer", TASK_REVIEWER_TEMPLATE),
         AgentType::PM => ("PM Intervention", PM_TEMPLATE),
+        AgentType::Groomer => ("Groomer", GROOMER_TEMPLATE),
     };
 
     let ac = format_acceptance_criteria(&task.acceptance_criteria);

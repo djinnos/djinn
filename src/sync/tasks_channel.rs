@@ -656,7 +656,7 @@ mod tests {
         git(&wt, &["commit", "-m", "peer update"]).await.unwrap();
 
         // Run import - reconciliation should close task3.
-        let imported = import(&repo, &epic.project_id, &db, &tx).await.unwrap();
+        let _imported = import(&repo, &epic.project_id, &db, &tx).await.unwrap();
 
         // Verify reconciliation happened.
         let fetched3 = task_repo.get(&task3.id).await.unwrap();

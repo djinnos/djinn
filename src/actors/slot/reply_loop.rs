@@ -639,6 +639,9 @@ pub(super) async fn run_reply_loop(
                         "task reviewer ended without any tool use (provider error?)"
                     }
                     AgentType::PM => "PM agent ended without any tool use (provider error?)",
+                    AgentType::Groomer => {
+                        "groomer agent ended without any tool use (provider error?)"
+                    }
                 };
                 tracing::warn!(
                     task_id = %task_id,
