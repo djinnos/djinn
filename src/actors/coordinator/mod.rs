@@ -11,6 +11,7 @@
 //   4. 30-second Interval tick — stuck detection safety net (AGENT-08).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, watch};
@@ -28,6 +29,11 @@ use crate::db::repositories::task::{ReadyQuery, TaskRepository};
 use crate::events::DjinnEvent;
 use crate::provider::catalog::CatalogService;
 use crate::provider::health::HealthTracker;
+
+/// Shared tracker for in-flight verification pipelines.  The verification
+/// spawner registers task IDs here; the coordinator checks it during stuck
+/// detection so it can distinguish live pipelines from orphans after restart.
+pub type VerificationTracker = Arc<std::sync::Mutex<HashSet<String>>>;
 
 mod dispatch;
 mod health;
@@ -181,6 +187,8 @@ struct CoordinatorActor {
     /// hot dispatch loops (e.g. missing credential → release → re-dispatch).
     last_dispatched: HashMap<String, Instant>,
     dispatch_cooldowns: HashMap<String, Instant>,
+    /// Shared tracker for in-flight verification background tasks.
+    verification_tracker: VerificationTracker,
     // Metrics
     dispatched: u64,
     recovered: u64,
@@ -201,6 +209,7 @@ impl CoordinatorActor {
         catalog: CatalogService,
         health: HealthTracker,
         status_tx: watch::Sender<SharedCoordinatorState>,
+        verification_tracker: VerificationTracker,
     ) -> Self {
         let events = events_tx.subscribe();
         let mut tick = time::interval(STUCK_INTERVAL);
@@ -223,6 +232,7 @@ impl CoordinatorActor {
             unhealthy_projects: HashMap::new(),
             last_dispatched: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
+            verification_tracker,
             dispatched: 0,
             recovered: 0,
         }
@@ -595,6 +605,7 @@ impl CoordinatorHandle {
         pool: SlotPoolHandle,
         catalog: CatalogService,
         health: HealthTracker,
+        verification_tracker: VerificationTracker,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(32);
         let initial_state = SharedCoordinatorState {
@@ -615,6 +626,7 @@ impl CoordinatorHandle {
             catalog,
             health,
             status_tx,
+            verification_tracker,
         );
         tokio::spawn(actor.run());
         Self { sender, status_rx }
@@ -833,7 +845,8 @@ mod tests {
         );
         let catalog = CatalogService::new();
         let health = HealthTracker::new();
-        CoordinatorHandle::spawn(tx.clone(), cancel, db.clone(), pool, catalog, health)
+        let verification_tracker = VerificationTracker::default();
+        CoordinatorHandle::spawn(tx.clone(), cancel, db.clone(), pool, catalog, health, verification_tracker)
     }
 
     async fn make_epic(

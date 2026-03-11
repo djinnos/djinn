@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -49,6 +49,10 @@ struct Inner {
     /// authentication is added, update `resolve_sync_user_id()` to return
     /// the authenticated email instead — everything else follows.
     pub sync_user_id: String,
+    /// Task IDs with an in-flight verification pipeline (background tokio task).
+    /// Used by the coordinator to distinguish genuinely stuck `verifying` tasks
+    /// (orphaned after server restart) from ones with a live pipeline.
+    pub verifying_tasks: crate::actors::coordinator::VerificationTracker,
 }
 
 impl AppState {
@@ -73,6 +77,7 @@ impl AppState {
                 coordinator: Mutex::new(None),
                 pool: Mutex::new(None),
                 sync_user_id,
+                verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
             }),
         }
     }
@@ -109,6 +114,21 @@ impl AppState {
 
     pub fn sync_manager(&self) -> &SyncManager {
         &self.inner.sync
+    }
+
+    /// Register a task as having an in-flight verification pipeline.
+    pub fn register_verification(&self, task_id: &str) {
+        self.inner.verifying_tasks.lock().expect("poisoned").insert(task_id.to_string());
+    }
+
+    /// Deregister a task's verification pipeline (completed or crashed).
+    pub fn deregister_verification(&self, task_id: &str) {
+        self.inner.verifying_tasks.lock().expect("poisoned").remove(task_id);
+    }
+
+    /// Check whether a task has a live verification pipeline.
+    pub fn has_verification(&self, task_id: &str) -> bool {
+        self.inner.verifying_tasks.lock().expect("poisoned").contains(task_id)
     }
 
     pub async fn coordinator(&self) -> Option<CoordinatorHandle> {
@@ -149,6 +169,7 @@ impl AppState {
             pool.clone(),
             self.catalog().clone(),
             self.health_tracker().clone(),
+            self.inner.verifying_tasks.clone(),
         );
 
         *self.inner.pool.lock().await = Some(pool.clone());

@@ -199,14 +199,18 @@ impl CoordinatorActor {
     /// On each tick: find tasks in active execution states with no active session
     /// and release them back to a dispatch-ready state (AGENT-08).
     ///
-    /// Note: "verifying" is intentionally excluded — verification runs as a
-    /// background task without a slot, so no session will exist.  Stuck
-    /// verifying tasks are handled by the verification pipeline itself
-    /// (it transitions to open on failure/crash).
+    /// For slot-based statuses (in_progress, in_task_review, in_pm_intervention),
+    /// we check `has_session` in the slot pool.
+    ///
+    /// For "verifying", we check the shared `VerificationTracker` — if no
+    /// background verification pipeline is registered for the task, it was
+    /// orphaned (e.g. server restart) and gets released back to open.
     pub(super) async fn detect_and_recover_stuck_filtered(&mut self, project_filter: Option<&str>) {
         let repo = self.task_repo();
 
         let mut any_recovered = false;
+
+        // ── Slot-based statuses: check has_session ──
         for (status, agent_type) in [
             ("in_progress", AgentType::Worker),
             ("in_task_review", AgentType::TaskReviewer),
@@ -289,6 +293,65 @@ impl CoordinatorActor {
                             status,
                             error = %e,
                             "CoordinatorActor: recovery transition failed (task may have already transitioned)"
+                        );
+                    }
+                }
+            }
+        }
+
+        // ── Verifying: check verification tracker ──
+        // Verification runs as a background tokio task (not in a slot).
+        // After server restart the background task is gone but the task stays
+        // in "verifying".  We release orphaned verifying tasks back to open.
+        if let Ok(verifying_tasks) = repo.list_by_status("verifying").await {
+            // Collect orphaned task info under the lock, then release it before async work.
+            let orphans: Vec<_> = {
+                let tracker = self.verification_tracker.lock().expect("poisoned");
+                verifying_tasks
+                    .into_iter()
+                    .filter(|task| {
+                        if let Some(project_id) = project_filter
+                            && task.project_id != project_id
+                        {
+                            return false;
+                        }
+                        !tracker.contains(&task.id)
+                    })
+                    .collect()
+            };
+
+            for task in orphans {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    task_uuid = %task.id,
+                    project_id = %task.project_id,
+                    "CoordinatorActor: orphaned verifying task (no pipeline) — releasing to open"
+                );
+                match repo
+                    .transition(
+                        &task.id,
+                        crate::models::task::TransitionAction::ReleaseVerification,
+                        "coordinator",
+                        "system",
+                        Some("orphaned verifying task — verification pipeline lost (server restart)"),
+                        None,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            task_uuid = %task.id,
+                            "CoordinatorActor: released orphaned verifying task"
+                        );
+                        self.recovered += 1;
+                        any_recovered = true;
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            task_id = %task.short_id,
+                            error = %e,
+                            "CoordinatorActor: verifying recovery transition failed"
                         );
                     }
                 }

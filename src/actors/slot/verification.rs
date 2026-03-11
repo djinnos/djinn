@@ -26,6 +26,7 @@ pub fn spawn_verification(
     project_path: String,
     app_state: AppState,
 ) {
+    app_state.register_verification(&task_id);
     tokio::spawn(async move {
         if let Err(e) = run_verification_pipeline(&task_id, &project_path, &app_state).await {
             tracing::error!(
@@ -45,6 +46,8 @@ pub fn spawn_verification(
                 )
                 .await;
         }
+
+        app_state.deregister_verification(&task_id);
 
         // Trigger redispatch so newly-open tasks (on failure) or newly-ready
         // review tasks (on pass) get picked up promptly.
