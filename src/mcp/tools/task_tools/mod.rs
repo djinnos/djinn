@@ -113,6 +113,7 @@ impl DjinnMcpServer {
                 issue_type,
                 priority,
                 &owner,
+                None,
             )
             .await
         {

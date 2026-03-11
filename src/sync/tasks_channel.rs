@@ -496,7 +496,7 @@ mod tests {
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task = task_repo
-            .create(&epic.id, "My Task", "", "", "task", 0, "")
+            .create(&epic.id, "My Task", "", "", "task", 0 , "", Some("open"))
             .await
             .unwrap();
 
@@ -531,11 +531,11 @@ mod tests {
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         task_repo
-            .create_in_project(&p1.id, Some(&epic.id), "Task A", "", "", "task", 0, "")
+            .create_in_project(&p1.id, Some(&epic.id), "Task A", "", "", "task", 0 , "", Some("open"))
             .await
             .unwrap();
         task_repo
-            .create_in_project(&p2.id, Some(&epic.id), "Task B", "", "", "task", 0, "")
+            .create_in_project(&p2.id, Some(&epic.id), "Task B", "", "", "task", 0 , "", Some("open"))
             .await
             .unwrap();
 
@@ -595,7 +595,7 @@ mod tests {
         let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task = task_repo
-            .create(&epic.id, "Round Trip", "", "", "task", 0, "")
+            .create(&epic.id, "Round Trip", "", "", "task", 0 , "", Some("open"))
             .await
             .unwrap();
 
@@ -631,15 +631,15 @@ mod tests {
         // Create 3 tasks locally, all owned by peer "alice".
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task1 = task_repo
-            .create(&epic.id, "Task 1", "", "", "task", 0, "alice")
+            .create(&epic.id, "Task 1", "", "", "task", 0, "alice", None)
             .await
             .unwrap();
         let task2 = task_repo
-            .create(&epic.id, "Task 2", "", "", "task", 0, "alice")
+            .create(&epic.id, "Task 2", "", "", "task", 0, "alice", None)
             .await
             .unwrap();
         let task3 = task_repo
-            .create(&epic.id, "Task 3", "", "", "task", 0, "alice")
+            .create(&epic.id, "Task 3", "", "", "task", 0, "alice", None)
             .await
             .unwrap();
 
@@ -681,7 +681,7 @@ mod tests {
         // Create a task and close it.
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task1 = task_repo
-            .create(&epic.id, "Task 1", "", "", "task", 0, "alice")
+            .create(&epic.id, "Task 1", "", "", "task", 0, "alice", None)
             .await
             .unwrap();
         task_repo
@@ -717,12 +717,12 @@ mod tests {
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         // Task owned by alice, but empty file means reconciliation skipped.
         let task_alice = task_repo
-            .create(&epic.id, "Alice Task", "", "", "task", 0, "alice")
+            .create(&epic.id, "Alice Task", "", "", "task", 0, "alice", None)
             .await
             .unwrap();
         // Task owned by bob, open.
         let task_bob = task_repo
-            .create(&epic.id, "Bob Task", "", "", "task", 0, "bob")
+            .create(&epic.id, "Bob Task", "", "", "task", 0, "bob", None)
             .await
             .unwrap();
 
@@ -757,7 +757,7 @@ mod tests {
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task1 = task_repo
-            .create(&epic.id, "Task 1", "", "", "task", 0, "alice")
+            .create(&epic.id, "Task 1", "", "", "task", 0, "alice", None)
             .await
             .unwrap();
 
@@ -798,7 +798,7 @@ mod tests {
         // Create local task owned by alice.
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task_local = task_repo
-            .create(&epic.id, "Local Task", "", "", "task", 0, "alice")
+            .create(&epic.id, "Local Task", "", "", "task", 0, "alice", None)
             .await
             .unwrap();
 
@@ -837,7 +837,7 @@ mod tests {
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         // Create a closed task.
         let task_closed = task_repo
-            .create(&epic.id, "Closed Task", "", "", "task", 0, "alice")
+            .create(&epic.id, "Closed Task", "", "", "task", 0, "alice", None)
             .await
             .unwrap();
         task_repo

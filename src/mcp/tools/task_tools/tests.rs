@@ -94,6 +94,7 @@ async fn task_list_filters_and_pagination() {
             "task",
             1,
             "owner",
+            None,
         )
         .await
         .unwrap();
@@ -107,6 +108,7 @@ async fn task_list_filters_and_pagination() {
             "task",
             2,
             "owner",
+            None,
         )
         .await
         .unwrap();
@@ -120,6 +122,7 @@ async fn task_list_filters_and_pagination() {
             "task",
             3,
             "owner",
+            None,
         )
         .await
         .unwrap();

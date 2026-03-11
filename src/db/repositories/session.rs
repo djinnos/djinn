@@ -316,7 +316,7 @@ mod tests {
 
         let task_repo = TaskRepository::new(db, repo_events);
         let task = task_repo
-            .create(&epic.id, "Task", "", "", "task", 0, "")
+            .create(&epic.id, "Task", "", "", "task", 0, "", None)
             .await
             .unwrap();
         (task.project_id, task.id)

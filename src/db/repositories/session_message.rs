@@ -197,7 +197,7 @@ mod tests {
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task = task_repo
-            .create(&epic.id, "Task", "", "", "task", 0, "")
+            .create(&epic.id, "Task", "", "", "task", 0 , "", Some("open"))
             .await
             .unwrap();
 

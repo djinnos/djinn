@@ -14,7 +14,7 @@ async fn make_epic(
 }
 
 async fn open_task(repo: &TaskRepository, epic_id: &str) -> Task {
-    repo.create(epic_id, "T", "", "", "task", 0, "")
+    repo.create(epic_id, "T", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap()
 }
@@ -29,7 +29,7 @@ async fn create_and_get_task() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "My Task", "", "", "task", 0, "user@example.com")
+        .create(&epic.id, "My Task", "", "", "task", 0, "user@example.com", Some("open"))
         .await
         .unwrap();
     assert_eq!(task.title, "My Task");
@@ -50,7 +50,7 @@ async fn creating_task_reopens_closed_epic() {
 
     let repo = TaskRepository::new(db.clone(), tx);
     let _task = repo
-        .create(&epic.id, "New Task", "", "", "task", 0, "")
+        .create(&epic.id, "New Task", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
 
@@ -67,7 +67,7 @@ async fn short_id_lookup() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0, "")
+        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     let found = repo.get_by_short_id(&task.short_id).await.unwrap().unwrap();
@@ -82,7 +82,7 @@ async fn create_emits_event() {
     let _ = rx.recv().await.unwrap(); // consume EpicCreated
     let repo = TaskRepository::new(db, tx);
 
-    repo.create(&epic.id, "Event Task", "", "", "task", 0, "")
+    repo.create(&epic.id, "Event Task", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     match rx.recv().await.unwrap() {
@@ -101,7 +101,7 @@ async fn update_emits_event() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "Old", "", "", "task", 0, "")
+        .create(&epic.id, "Old", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap();
@@ -130,7 +130,7 @@ async fn transition_emits_event_start() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0, "")
+        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap();
@@ -157,7 +157,7 @@ async fn transition_emits_event_close_with_closed_at() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0, "")
+        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap();
@@ -185,7 +185,7 @@ async fn transition_emits_event_reopen() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0, "")
+        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap();
@@ -221,7 +221,7 @@ async fn set_status_transitions() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0, "")
+        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     let updated = repo.set_status(&task.id, "in_progress").await.unwrap();
@@ -240,7 +240,7 @@ async fn reopen_increments_counter() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0, "")
+        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     repo.set_status(&task.id, "closed").await.unwrap();
@@ -256,11 +256,11 @@ async fn blocker_management() {
     let repo = TaskRepository::new(db, tx);
 
     let t1 = repo
-        .create(&epic.id, "T1", "", "", "task", 0, "")
+        .create(&epic.id, "T1", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     let t2 = repo
-        .create(&epic.id, "T2", "", "", "task", 1, "")
+        .create(&epic.id, "T2", "", "", "task", 1 , "", Some("open"))
         .await
         .unwrap();
 
@@ -293,15 +293,15 @@ async fn blocker_cycle_detection() {
     let repo = TaskRepository::new(db, tx);
 
     let t1 = repo
-        .create(&epic.id, "T1", "", "", "task", 0, "")
+        .create(&epic.id, "T1", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     let t2 = repo
-        .create(&epic.id, "T2", "", "", "task", 1, "")
+        .create(&epic.id, "T2", "", "", "task", 1 , "", Some("open"))
         .await
         .unwrap();
     let t3 = repo
-        .create(&epic.id, "T3", "", "", "task", 2, "")
+        .create(&epic.id, "T3", "", "", "task", 2 , "", Some("open"))
         .await
         .unwrap();
 
@@ -322,11 +322,11 @@ async fn start_blocked_by_unresolved_blocker() {
     let repo = TaskRepository::new(db, tx);
 
     let t1 = repo
-        .create(&epic.id, "T1", "", "", "task", 0, "")
+        .create(&epic.id, "T1", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     let t2 = repo
-        .create(&epic.id, "T2", "", "", "task", 1, "")
+        .create(&epic.id, "T2", "", "", "task", 1 , "", Some("open"))
         .await
         .unwrap();
 
@@ -352,11 +352,11 @@ async fn list_ready_excludes_blocked_tasks() {
     let repo = TaskRepository::new(db, tx);
 
     let t1 = repo
-        .create(&epic.id, "T1", "", "", "task", 0, "")
+        .create(&epic.id, "T1", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     let t2 = repo
-        .create(&epic.id, "T2", "", "", "task", 1, "")
+        .create(&epic.id, "T2", "", "", "task", 1 , "", Some("open"))
         .await
         .unwrap();
 
@@ -389,7 +389,7 @@ async fn activity_log() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0, "")
+        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     repo.log_activity(
@@ -415,10 +415,10 @@ async fn list_by_epic() {
     let epic = make_epic(&db, tx.clone()).await;
     let repo = TaskRepository::new(db, tx);
 
-    repo.create(&epic.id, "A", "", "", "task", 1, "")
+    repo.create(&epic.id, "A", "", "", "task", 1 , "", Some("open"))
         .await
         .unwrap();
-    repo.create(&epic.id, "B", "", "", "feature", 0, "")
+    repo.create(&epic.id, "B", "", "", "feature", 0 , "", Some("open"))
         .await
         .unwrap();
 
@@ -437,7 +437,7 @@ async fn delete_task_emits_event() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "Del", "", "", "task", 0, "")
+        .create(&epic.id, "Del", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap();

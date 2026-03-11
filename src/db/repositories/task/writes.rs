@@ -11,6 +11,7 @@ impl TaskRepository {
         issue_type: &str,
         priority: i64,
         owner: &str,
+        status: Option<&str>,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let project_id =
@@ -28,6 +29,7 @@ impl TaskRepository {
             issue_type,
             priority,
             owner,
+            status,
         )
         .await
     }
@@ -43,6 +45,7 @@ impl TaskRepository {
         issue_type: &str,
         priority: i64,
         owner: &str,
+        status: Option<&str>,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
@@ -50,8 +53,8 @@ impl TaskRepository {
         sqlx::query(
             "INSERT INTO tasks
                 (id, project_id, short_id, epic_id, title, description, design,
-                 issue_type, priority, owner)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 issue_type, priority, owner, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, 'open'))",
         )
         .bind(&id)
         .bind(project_id)
@@ -63,6 +66,7 @@ impl TaskRepository {
         .bind(issue_type)
         .bind(priority)
         .bind(owner)
+        .bind(status)
         .execute(self.db.pool())
         .await?;
         let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
