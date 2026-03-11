@@ -645,7 +645,7 @@ mod tests {
 
         // Write alice.jsonl with only task1 and task2 (task3 is missing).
         let wt = ensure_worktree(&repo).await.unwrap();
-        let tasks_in_file = vec![task1.clone(), task2.clone()];
+        let tasks_in_file = [task1.clone(), task2.clone()];
         let jsonl: String = tasks_in_file
             .iter()
             .map(serde_json::to_string)
@@ -1003,7 +1003,7 @@ mod tests {
         // Store it manually in settings (simulating what import does).
         let settings_repo = SettingsRepository::new(db.clone(), tx.clone());
         let sha_key = sha_settings_key(&epic.project_id);
-        let _ = settings_repo.set(&sha_key, &remote_sha.as_ref().unwrap()).await;
+        let _ = settings_repo.set(&sha_key, remote_sha.as_ref().unwrap()).await;
 
         // Second import with unchanged SHA should skip.
         let count2 = import(&repo, &epic.project_id, &db, &tx).await.unwrap();

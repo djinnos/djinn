@@ -403,7 +403,7 @@ mod tests {
         };
 
         let sync_status: SyncChannelStatus = channel_status.into();
-        assert_eq!(sync_status.needs_attention, true);
+        assert!(sync_status.needs_attention);
         assert_eq!(sync_status.failure_count, 5);
     }
 }

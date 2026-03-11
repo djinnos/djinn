@@ -140,7 +140,7 @@ async fn task_list_filters_and_pagination() {
         json!({"project": project.path, "status": "in_progress"}),
     )
     .await;
-    assert!(by_status["tasks"].as_array().unwrap().len() >= 1);
+    assert!(!by_status["tasks"].as_array().unwrap().is_empty());
 
     let by_text = mcp_call_tool(
         &app,
