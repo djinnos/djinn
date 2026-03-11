@@ -12,15 +12,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant as StdInstant};
 
 use tokio::sync::{broadcast, mpsc, watch};
-use tokio::time::{self, Interval};
+use tokio::time::{self, Instant, Interval};
 use tokio_util::sync::CancellationToken;
 
 use crate::actors::git::GitActorHandle;
-use crate::actors::slot::{PoolError, SlotPoolHandle};
-use crate::agent::AgentType;
+use crate::actors::slot::{PoolError, SlotPoolHandle};use crate::agent::AgentType;
 use crate::commands::{CommandSpec, run_commands};
 use crate::db::connection::Database;
 use crate::db::repositories::git_settings::GitSettingsRepository;
@@ -185,10 +184,14 @@ struct CoordinatorActor {
     /// When a task becomes ready again within `RAPID_FAILURE_THRESHOLD` of its
     /// last dispatch, it is placed in cooldown for `DISPATCH_COOLDOWN` to prevent
     /// hot dispatch loops (e.g. missing credential → release → re-dispatch).
-    last_dispatched: HashMap<String, Instant>,
-    dispatch_cooldowns: HashMap<String, Instant>,
+    last_dispatched: HashMap<String, StdInstant>,
+    dispatch_cooldowns: HashMap<String, StdInstant>,
     /// Shared tracker for in-flight verification background tasks.
     verification_tracker: VerificationTracker,
+    /// Per-project debounce deadline for backlog-triggered groomer dispatch.
+    backlog_debounce: HashMap<String, Instant>,
+    /// Projects with an active groomer session.
+    active_groomer_sessions: HashSet<String>,
     // Metrics
     dispatched: u64,
     recovered: u64,
@@ -233,6 +236,8 @@ impl CoordinatorActor {
             last_dispatched: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             verification_tracker,
+            backlog_debounce: HashMap::new(),
+            active_groomer_sessions: HashSet::new(),
             dispatched: 0,
             recovered: 0,
         }
@@ -289,7 +294,8 @@ impl CoordinatorActor {
                 //    tasks surviving a server restart).
                 _ = self.tick.tick() => {
                     self.detect_and_recover_stuck_filtered(None).await;
-                    self.dispatch_ready_tasks(None).await;
+                    self.ensure_groomer_dispatch(None).await;
+                self.dispatch_ready_tasks(None).await;
                 }
             }
         }
@@ -318,9 +324,11 @@ impl CoordinatorActor {
                 // re-dispatched, fails again, frees the slot, triggers
                 // dispatch, etc.  The 30-second tick is sufficient for stuck
                 // recovery.
+                self.ensure_groomer_dispatch(None).await;
                 self.dispatch_ready_tasks(None).await;
             }
             CoordinatorMessage::TriggerProjectDispatch { project_id } => {
+                self.ensure_groomer_dispatch(Some(&project_id)).await;
                 self.dispatch_ready_tasks(Some(&project_id)).await;
             }
             CoordinatorMessage::Pause {
@@ -368,6 +376,7 @@ impl CoordinatorActor {
                 self.paused_projects.clear();
                 tracing::info!("CoordinatorActor: resumed all projects");
                 self.detect_and_recover_stuck_filtered(None).await;
+                self.ensure_groomer_dispatch(None).await;
                 self.dispatch_ready_tasks(None).await;
                 self.publish_status();
             }
@@ -375,6 +384,7 @@ impl CoordinatorActor {
                 self.paused_projects.remove(&project_id);
                 self.detect_and_recover_stuck_filtered(Some(&project_id))
                     .await;
+                self.ensure_groomer_dispatch(Some(&project_id)).await;
                 self.dispatch_ready_tasks(Some(&project_id)).await;
                 self.publish_status();
             }
@@ -429,7 +439,8 @@ impl CoordinatorActor {
                 self.publish_status();
                 // If project just became healthy and dispatch is enabled, trigger a dispatch pass.
                 if healthy && self.is_project_dispatch_enabled(&project_id) {
-                    self.dispatch_ready_tasks(Some(&project_id)).await;
+                    self.ensure_groomer_dispatch(Some(&project_id)).await;
+                self.dispatch_ready_tasks(Some(&project_id)).await;
                 }
             }
         }
@@ -448,6 +459,7 @@ impl CoordinatorActor {
                 );
                 self.events = self.events_tx.subscribe();
                 self.detect_and_recover_stuck_filtered(None).await;
+                self.ensure_groomer_dispatch(None).await;
                 self.dispatch_ready_tasks(None).await;
             }
             Err(broadcast::error::RecvError::Closed) => {
@@ -471,18 +483,32 @@ impl CoordinatorActor {
                 );
                 self.publish_status();
             }
-            DjinnEvent::TaskCreated { task, .. } | DjinnEvent::TaskUpdated { task, .. }
+            DjinnEvent::TaskCreated { task, .. } | DjinnEvent::TaskUpdated { task, .. } => {
+                if task.status == "backlog" {
+                    self.mark_backlog_event(&task.project_id);
+                }
                 if matches!(
                     task.status.as_str(),
                     "open" | "needs_task_review" | "needs_pm_intervention" | "closed"
-                ) =>
-            {
-                tracing::debug!(
-                    task_id = %task.short_id,
-                    status = %task.status,
-                    "CoordinatorActor: ready-task event → dispatch pass"
-                );
-                self.dispatch_ready_tasks(Some(&task.project_id)).await;
+                ) {
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        status = %task.status,
+                        "CoordinatorActor: ready-task event → dispatch pass"
+                    );
+                    self.ensure_groomer_dispatch(Some(&task.project_id)).await;
+                    self.dispatch_ready_tasks(Some(&task.project_id)).await;
+                }
+            }
+            DjinnEvent::SessionUpdated(session) => {
+                if session.agent_type == "groomer"
+                    && matches!(session.status.as_str(), "completed" | "interrupted")
+                {
+                    self.active_groomer_sessions.remove(&session.project_id);
+                    if self.backlog_count(&session.project_id).await > 0 {
+                        let _ = self.dispatch_groomer_for_project(&session.project_id).await;
+                    }
+                }
             }
             _ => {}
         }

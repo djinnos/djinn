@@ -738,12 +738,12 @@ mod tests {
         let fetched_alice = task_repo.get(&task_alice.id).await.unwrap().unwrap();
         assert_eq!(
             fetched_alice.status,
-            "open",
-            "alice's task should remain open (empty file = no reconciliation)"
+            "backlog",
+            "alice's task should remain backlog (empty file = no reconciliation)"
         );
 
         let fetched_bob = task_repo.get(&task_bob.id).await.unwrap().unwrap();
-        assert_eq!(fetched_bob.status, "open", "bob's task should remain open");
+        assert_eq!(fetched_bob.status, "backlog", "bob's task should remain backlog");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

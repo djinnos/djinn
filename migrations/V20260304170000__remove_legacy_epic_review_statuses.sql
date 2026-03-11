@@ -30,7 +30,7 @@ CREATE TABLE tasks_new (
                              CHECK(issue_type IN ('feature', 'task', 'bug')),
     status              TEXT NOT NULL DEFAULT 'open'
                              CHECK(status IN (
-                                 'draft', 'open', 'in_progress',
+                                 'draft', 'backlog', 'open', 'in_progress',
                                  'needs_task_review', 'in_task_review',
                                  'closed', 'blocked'
                              )),
