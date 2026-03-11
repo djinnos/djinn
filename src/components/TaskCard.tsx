@@ -1,5 +1,7 @@
 import type { Epic, Task } from "@/api/types";
 import workerAvatar from "@/assets/worker.png";
+import taskReviewerAvatar from "@/assets/task_reviewer.png";
+import pmAvatar from "@/assets/pm.png";
 import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -127,9 +129,12 @@ function PipelineIndicator({ status }: { status: string }) {
 
 // --- Card tint based on status ---
 
-function getCardTint(task: Task): { ring: string; bg: string; hover: string } | null {
+function getCardTint(task: Task): { ring: string; bg: string; hover: string; actionsBg: string } | null {
   if (task.status === "needs_pm_intervention" || task.status === "in_pm_intervention") {
-    return { ring: "ring-red-500/40", bg: "bg-red-500/5", hover: "hover:bg-red-500/10 hover:ring-red-500/60" };
+    return { ring: "ring-red-500/40", bg: "bg-red-500/5", hover: "hover:bg-red-500/10 hover:ring-red-500/60", actionsBg: "bg-red-500/10 text-white" };
+  }
+  if (task.status === "needs_task_review" || task.status === "in_task_review") {
+    return { ring: "ring-orange-500/40", bg: "bg-orange-500/5", hover: "hover:bg-orange-500/10 hover:ring-orange-500/60", actionsBg: "bg-orange-500/10 text-white" };
   }
   return null;
 }
@@ -148,6 +153,8 @@ function getBacklogBadge(status: string): { label: string; className: string } |
 
 const AGENT_AVATARS: Record<string, string> = {
   worker: workerAvatar,
+  task_reviewer: taskReviewerAvatar,
+  pm: pmAvatar,
 };
 
 function agentAvatar(agentType?: string): string {
@@ -182,7 +189,7 @@ function ActionButton({
       type="button"
       disabled={disabled}
       className={cn(
-        "flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-white/10 disabled:pointer-events-none disabled:opacity-30",
+        "flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-inherit transition-colors hover:bg-white/10 disabled:pointer-events-none disabled:opacity-30",
         className,
       )}
       onClick={(e) => {
@@ -197,7 +204,7 @@ function ActionButton({
   );
 }
 
-function TaskCardActions({ task }: { task: Task }) {
+function TaskCardActions({ task, actionsBg }: { task: Task; actionsBg?: string }) {
   const selectedProject = useSelectedProject();
   const isAll = useIsAllProjects();
   const { busy: transitioning, transition } = useTaskActions();
@@ -243,7 +250,10 @@ function TaskCardActions({ task }: { task: Task }) {
 
   return (
     <div
-      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-center gap-1 rounded-b-xl bg-zinc-800/70 px-3 py-1.5 opacity-0 backdrop-blur-sm transition-opacity duration-150 group-hover/taskcard:opacity-100 [&>*]:pointer-events-auto"
+      className={cn(
+        "pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-center gap-1 rounded-b-xl px-3 py-1.5 opacity-0 backdrop-blur-sm transition-opacity duration-150 group-hover/taskcard:opacity-100 [&>*]:pointer-events-auto",
+        actionsBg ?? "bg-zinc-800/70"
+      )}
       onClick={(e) => e.stopPropagation()}
     >
       {actions}
@@ -392,7 +402,8 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
         {/* Row 2: Title */}
         <h4
           className={cn(
-            "pr-12 text-sm font-medium leading-snug",
+            "text-sm font-medium leading-snug",
+            task.active_session && "pr-12",
             isDone && "text-muted-foreground line-through decoration-muted-foreground/30"
           )}
           title={task.title}
@@ -412,7 +423,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
       </CardContent>
 
       {/* Actions overlay (hover only) */}
-      <TaskCardActions task={task} />
+      <TaskCardActions task={task} actionsBg={cardTint?.actionsBg} />
     </Card>
   );
 }
