@@ -129,8 +129,12 @@ async fn run_verification_pipeline(
     Ok(())
 }
 
-/// Log verification failure, transition to open, and escalate to PM if the
-/// consecutive failure count has reached the threshold.
+/// Log verification failure and transition appropriately.
+///
+/// If the consecutive failure count will reach the escalation threshold, go
+/// directly from `verifying` → `needs_pm_intervention` (single Escalate
+/// transition) to avoid a race where the intermediate `open` status triggers
+/// a worker dispatch before the PM escalation happens.
 async fn handle_verification_failure(
     task_id: &str,
     feedback: &str,
@@ -148,41 +152,53 @@ async fn handle_verification_failure(
         )
         .await;
 
-    // Transition to open (increments verification_failure_count).
-    let updated = task_repo
-        .transition(
-            task_id,
-            TransitionAction::VerificationFail,
-            "agent-supervisor",
-            "system",
-            Some(feedback),
-            None,
-        )
-        .await;
+    // Check if this failure will hit the escalation threshold BEFORE
+    // transitioning, so we can go directly to PM without an intermediate
+    // `open` state that would trigger a spurious worker dispatch.
+    let current_count = task_repo
+        .get(task_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|t| t.verification_failure_count)
+        .unwrap_or(0);
 
-    // Check if we've hit the escalation threshold.
-    if let Ok(task) = updated
-        && task.verification_failure_count >= VERIFICATION_ESCALATION_THRESHOLD
-    {
-            tracing::warn!(
-                task_id = %task_id,
-                verification_failure_count = task.verification_failure_count,
-                "Verification: escalating to PM after {} consecutive failures",
-                task.verification_failure_count,
-            );
-            let reason = format!(
-                "verification failed {} consecutive times; last failure:\n{}",
-                task.verification_failure_count, feedback
-            );
-            let _ = task_repo
-                .transition(
-                    task_id,
-                    TransitionAction::Escalate,
-                    "agent-supervisor",
-                    "system",
-                    Some(&reason),
-                    None,
-                )
-                .await;
+    // VerificationFail increments the count, so the post-transition count
+    // will be current_count + 1.
+    if current_count + 1 >= VERIFICATION_ESCALATION_THRESHOLD {
+        tracing::warn!(
+            task_id = %task_id,
+            verification_failure_count = current_count + 1,
+            "Verification: escalating directly to PM after {} consecutive failures",
+            current_count + 1,
+        );
+        let reason = format!(
+            "verification failed {} consecutive times; last failure:\n{}",
+            current_count + 1,
+            feedback
+        );
+        // Single transition: verifying → needs_pm_intervention.
+        let _ = task_repo
+            .transition(
+                task_id,
+                TransitionAction::Escalate,
+                "agent-supervisor",
+                "system",
+                Some(&reason),
+                None,
+            )
+            .await;
+    } else {
+        // Normal path: transition to open for re-dispatch to worker.
+        let _ = task_repo
+            .transition(
+                task_id,
+                TransitionAction::VerificationFail,
+                "agent-supervisor",
+                "system",
+                Some(feedback),
+                None,
+            )
+            .await;
     }
 }
