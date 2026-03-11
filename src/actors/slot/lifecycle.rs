@@ -104,6 +104,14 @@ pub async fn run_task_lifecycle(
         return_free!();
     }
 
+    // Notify the frontend immediately so it can show the agent avatar while
+    // worktree/setup is still running.
+    let _ = app_state.events().send(crate::events::DjinnEvent::SessionDispatched {
+        task_id: task.id.clone(),
+        model_id: model_id.clone(),
+        agent_type: agent_type.as_str().to_string(),
+    });
+
     // ── Parse model ID and load credentials ───────────────────────────────────
     let (catalog_provider_id, model_name) = match parse_model_id(&model_id) {
         Ok((provider_id, name)) => {
