@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::actors::git::GitError;
+use crate::db::repositories::project::ProjectRepository;
 use crate::db::repositories::session::SessionRepository;
 use crate::server::AppState;
 
@@ -426,4 +427,93 @@ pub(crate) async fn cleanup_worktree(task_id: &str, worktree_path: &Path, app_st
             tracing::warn!(task_id = %task_id, error = %remove_err, "failed to remove worktree directory");
         }
     }
+}
+
+/// Remove all worktrees for all projects on execution start.
+///
+/// Cleans both git worktree metadata and leftover filesystem directories under
+/// each project's `.djinn/worktrees/`. Skips entries that start with `.` (sync
+/// worktrees are transient and handled separately).
+pub(crate) async fn purge_all_worktrees(app_state: &AppState) {
+    let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
+    let projects = match project_repo.list().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "purge_all_worktrees: failed to list projects");
+            return;
+        }
+    };
+
+    for project in &projects {
+        purge_project_worktrees(&project.path, app_state).await;
+    }
+}
+
+async fn purge_project_worktrees(project_path: &str, app_state: &AppState) {
+    let project_dir = Path::new(project_path);
+    let worktrees_dir = project_dir.join(".djinn").join("worktrees");
+    if !worktrees_dir.exists() {
+        return;
+    }
+
+    let git = match app_state.git_actor(project_dir).await {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(project = %project_path, error = %e, "purge_project_worktrees: failed to open git actor");
+            return;
+        }
+    };
+
+    // First, prune stale git worktree metadata (references to directories that no longer exist).
+    let _ = git
+        .run_command(vec!["worktree".into(), "prune".into()])
+        .await;
+
+    // Then remove all worktree directories.
+    let entries = match std::fs::read_dir(&worktrees_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(project = %project_path, error = %e, "purge_project_worktrees: failed to read worktrees dir");
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip hidden entries (sync worktrees like `.sync-task-foo`).
+        if name_str.starts_with('.') {
+            continue;
+        }
+
+        let wt_path = entry.path();
+        if !wt_path.is_dir() {
+            continue;
+        }
+
+        tracing::info!(
+            project = %project_path,
+            worktree = %name_str,
+            "purge_project_worktrees: removing worktree on execution start"
+        );
+
+        // Try git removal first (cleans metadata), then filesystem fallback.
+        let _ = git.remove_worktree(&wt_path).await;
+        if wt_path.exists()
+            && let Err(e) = std::fs::remove_dir_all(&wt_path)
+        {
+            tracing::warn!(
+                project = %project_path,
+                worktree = %name_str,
+                error = %e,
+                "purge_project_worktrees: failed to remove worktree directory"
+            );
+        }
+    }
+
+    // Final prune to clean up any remaining stale metadata.
+    let _ = git
+        .run_command(vec!["worktree".into(), "prune".into()])
+        .await;
 }

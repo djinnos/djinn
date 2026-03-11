@@ -193,6 +193,10 @@ impl DjinnMcpServer {
             });
         };
 
+        // Purge all worktrees so stale leftovers from previous runs don't
+        // cause git2 errors or test failures in health checks / verification.
+        crate::actors::slot::purge_all_worktrees(&self.state).await;
+
         // Trigger background health validation before dispatching (ADR-014).
         if let Err(e) = coordinator
             .validate_project_health(project_id.clone())
