@@ -1,6 +1,5 @@
 use serde_json::json;
 
-use crate::db::repositories::session::SessionRepository;
 use crate::db::repositories::session_message::SessionMessageRepository;
 use crate::test_helpers::{
     create_test_app, create_test_db, create_test_epic, create_test_project, create_test_session,
@@ -140,11 +139,7 @@ async fn session_active_includes_running_session() {
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
-    let mut session = create_test_session(&db, &project.id, &task.id).await;
-
-    let repo = SessionRepository::new(db.clone(), tokio::sync::broadcast::channel(16).0);
-    session.status = "running".to_string();
-    repo.update(&session).await.unwrap();
+    let session = create_test_session(&db, &project.id, &task.id).await;
 
     let app = create_test_app();
     let payload = mcp_call_tool(

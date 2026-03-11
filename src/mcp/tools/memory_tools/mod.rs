@@ -225,7 +225,7 @@ async fn git_diff_for_file(file_path: &str, sha: Option<&str>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+mod param_tests {
     use super::*;
     use schemars::schema_for;
 

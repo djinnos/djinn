@@ -193,23 +193,25 @@ mod tests {
 
         let msg_repo = SessionMessageRepository::new(db.clone(), tokio::sync::broadcast::channel(8).0);
         msg_repo
-            .append_message(
+            .insert_message(
                 &session_a.id,
+                &task.id,
                 "assistant",
                 r#"[{\"type\":\"text\",\"text\":\"a1\"}]"#,
-                Some("2026-01-01T00:00:01Z"),
+                None,
             )
             .await
-            .expect("append a1");
+            .expect("insert a1");
         msg_repo
-            .append_message(
+            .insert_message(
                 &session_b.id,
+                &task.id,
                 "assistant",
                 r#"[{\"type\":\"text\",\"text\":\"b1\"}]"#,
-                Some("2026-01-01T00:00:02Z"),
+                None,
             )
             .await
-            .expect("append b1");
+            .expect("insert b1");
 
         let task_repo = TaskRepository::new(db.clone(), tokio::sync::broadcast::channel(8).0);
         task_repo
