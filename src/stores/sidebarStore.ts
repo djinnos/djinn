@@ -1,20 +1,26 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
+export type ActiveView = 'kanban' | 'epics' | 'settings';
+
 export interface SidebarState {
   isCollapsed: boolean;
-  activeSection: 'kanban' | 'roadmap' | 'settings';
+  activeSection: ActiveView;
+  /** Whether the projects list in the sidebar is expanded. */
+  projectsExpanded: boolean;
 }
 
 export interface SidebarActions {
   toggleCollapse: () => void;
   setCollapsed: (collapsed: boolean) => void;
-  setActiveSection: (section: 'kanban' | 'roadmap' | 'settings') => void;
+  setActiveSection: (section: ActiveView) => void;
+  setProjectsExpanded: (expanded: boolean) => void;
 }
 
 const INITIAL_STATE: SidebarState = {
   isCollapsed: false,
   activeSection: 'kanban',
+  projectsExpanded: true,
 };
 
 export const useSidebarStore = create<SidebarState & SidebarActions>()(
@@ -30,14 +36,19 @@ export const useSidebarStore = create<SidebarState & SidebarActions>()(
         set({ isCollapsed: collapsed });
       },
 
-      setActiveSection: (section: 'kanban' | 'roadmap' | 'settings') => {
+      setActiveSection: (section: ActiveView) => {
         set({ activeSection: section });
+      },
+
+      setProjectsExpanded: (expanded: boolean) => {
+        set({ projectsExpanded: expanded });
       },
     }),
     {
       name: 'djinnos-sidebar-storage',
       partialize: (state) => ({
         isCollapsed: state.isCollapsed,
+        projectsExpanded: state.projectsExpanded,
       }),
     }
   )

@@ -89,11 +89,21 @@ export function useEventSource(projectId?: string | null) {
     if (!selectedProjectPath && projectId) {
       unsubProjectPath = projectStore.subscribe((state) => {
         if (!isActive) return;
-        const project = state.getSelectedProject();
-        if (project?.path) {
-          unsubProjectPath?.();
-          unsubProjectPath = undefined;
-          void hydrateSnapshot(project.path);
+        if (isAll) {
+          // ALL_PROJECTS mode: wait for projects to load, then hydrate all
+          const paths = state.projects.map((p) => p.path).filter(Boolean) as string[];
+          if (paths.length > 0) {
+            unsubProjectPath?.();
+            unsubProjectPath = undefined;
+            void hydrateSnapshot(null);
+          }
+        } else {
+          const project = state.getSelectedProject();
+          if (project?.path) {
+            unsubProjectPath?.();
+            unsubProjectPath = undefined;
+            void hydrateSnapshot(project.path);
+          }
         }
       });
     }

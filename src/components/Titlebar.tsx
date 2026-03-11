@@ -5,17 +5,10 @@ import {
   SquareIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ChevronDown, Layers } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
-import { useProjects, useSelectedProject, useIsAllProjects } from "@/stores/useProjectStore";
-import { projectStore, ALL_PROJECTS } from "@/stores/projectStore";
+import { ChevronRight, Layers } from "lucide-react";
+import { useSelectedProject, useIsAllProjects } from "@/stores/useProjectStore";
+import { useProjectRoute } from "@/hooks/useProjectRoute";
+import { useState, useRef, useEffect } from "react";
 import { useExecutionStatus } from "@/hooks/useExecutionStatus";
 
 const appWindow = getCurrentWindow();
@@ -47,74 +40,98 @@ function TitlebarButton({
   );
 }
 
-function ProjectSwitcher() {
-  const projects = useProjects();
+const VIEW_LABELS: Record<string, string> = {
+  kanban: "Kanban",
+  epics: "Epics",
+};
+
+function Breadcrumb() {
   const selected = useSelectedProject();
   const isAll = useIsAllProjects();
+  const { currentView } = useProjectRoute();
 
-  const displayName = isAll ? "All Projects" : selected?.name ?? "No project";
+  const projectLabel = isAll ? "All Projects" : selected?.name ?? "No project";
+  const viewLabel = currentView ? VIEW_LABELS[currentView] : null;
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger
-        className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-foreground/80 transition-colors hover:bg-muted hover:text-foreground"
-      >
-        {isAll && <Layers className="h-3 w-3 shrink-0 text-muted-foreground" />}
-        <span className="max-w-[160px] truncate">{displayName}</span>
-        <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start">
-        <DropdownMenuItem
-          onClick={() => projectStore.getState().setSelectedProjectId(ALL_PROJECTS)}
-          className={cn(isAll && "bg-accent")}
-        >
-          <Layers className="mr-2 h-3.5 w-3.5 text-muted-foreground" />
-          All Projects
-        </DropdownMenuItem>
-        {projects.length > 0 && <DropdownMenuSeparator />}
-        {projects.map((p) => (
-          <DropdownMenuItem
-            key={p.id}
-            onClick={() => projectStore.getState().setSelectedProjectId(p.id)}
-            className={cn(!isAll && selected?.id === p.id && "bg-accent")}
-          >
-            <span className="truncate">{p.name}</span>
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <div className="flex items-center gap-1.5 text-xs font-medium text-foreground/80">
+      {isAll && <Layers className="h-3 w-3 shrink-0 text-muted-foreground" />}
+      <span className="max-w-[160px] truncate">{projectLabel}</span>
+      {viewLabel && (
+        <>
+          <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/50" />
+          <span className="text-muted-foreground">{viewLabel}</span>
+        </>
+      )}
+    </div>
   );
 }
 
-function ExecutionBadge() {
-  const selected = useSelectedProject();
-  const isAll = useIsAllProjects();
-  const projectPath = isAll ? undefined : selected?.path;
-  const { state, runningSessions } = useExecutionStatus(projectPath ?? null);
+function formatModelName(modelId: string): string {
+  // "openai/gpt-5.3-codex" → "gpt-5.3-codex"
+  const parts = modelId.split("/");
+  return parts.length > 1 ? parts.slice(1).join("/") : modelId;
+}
 
-  if (!state) return null;
+function ExecutionIndicator() {
+  const { state, runningSessions, maxSessions, capacity } = useExecutionStatus();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
 
-  const isActive = state === "active";
-  const isPaused = state === "paused";
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  if (state === null) return null;
+
+  const capacityEntries = Object.entries(capacity);
+  const hasActive = runningSessions > 0;
 
   return (
-    <div className={cn(
-      "flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium",
-      isActive && runningSessions > 0 && "bg-emerald-500/15 text-emerald-400",
-      isActive && runningSessions === 0 && "bg-emerald-500/10 text-emerald-400/60",
-      isPaused && "bg-yellow-500/10 text-yellow-400/60",
-      !isActive && !isPaused && "bg-zinc-500/10 text-zinc-400",
-    )}>
-      <span className={cn(
-        "inline-block h-1.5 w-1.5 rounded-full",
-        isActive && "bg-emerald-400",
-        isPaused && "bg-yellow-400",
-        !isActive && !isPaused && "bg-zinc-500",
-        isActive && runningSessions > 0 && "animate-pulse",
-      )} />
-      {isActive
-        ? runningSessions > 0 ? `${runningSessions} active` : "idle"
-        : isPaused ? "paused" : state}
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 rounded px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground outline-none"
+      >
+        <span className="tabular-nums">{runningSessions}/{maxSessions}</span>
+        <span>sessions</span>
+      </button>
+      {open && (
+        <div className="absolute top-full left-1/2 z-50 mt-1 min-w-[180px] -translate-x-1/2 rounded-lg bg-popover p-1 text-popover-foreground shadow-md ring-1 ring-foreground/10 animate-in fade-in-0 zoom-in-95">
+          <div className="px-2 py-1 text-xs font-medium text-muted-foreground">
+            Capacity
+          </div>
+          <div className="-mx-1 my-1 h-px bg-border" />
+          {capacityEntries.length === 0 ? (
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">
+              No models configured
+            </div>
+          ) : (
+            capacityEntries.map(([modelId, cap]) => (
+              <div
+                key={modelId}
+                className="flex items-center justify-between gap-4 px-2 py-1.5 text-xs"
+              >
+                <span className="truncate text-muted-foreground">
+                  {formatModelName(modelId)}
+                </span>
+                <span className="shrink-0 tabular-nums font-medium">
+                  {cap.active}/{cap.max}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -125,14 +142,14 @@ export function Titlebar() {
       data-tauri-drag-region
       className="flex h-9 select-none items-center border-b border-border/50 bg-background"
     >
-      {/* Left: Project switcher */}
+      {/* Left: Breadcrumb */}
       <div className="flex items-center pl-3">
-        <ProjectSwitcher />
+        <Breadcrumb />
       </div>
 
-      {/* Center: Execution badge */}
+      {/* Center: Session indicator */}
       <div data-tauri-drag-region className="flex flex-1 items-center justify-center">
-        <ExecutionBadge />
+        <ExecutionIndicator />
       </div>
 
       {/* Right: Window controls */}

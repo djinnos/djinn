@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
-import { useProjects, useSelectedProjectId, useProjectStore } from "@/stores/useProjectStore";
+import { useProjects, useSelectedProjectId } from "@/stores/useProjectStore";
 import { taskStore } from "@/stores/taskStore";
 import type { Epic, Task } from "@/api/types";
 import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
@@ -106,7 +106,7 @@ export function KanbanBoard({
   const storeEpics = useEpicStore((state) => state.epics);
   const projects = useProjects();
   const selectedProjectId = useSelectedProjectId();
-  const setSelectedProjectId = useProjectStore((state) => state.setSelectedProjectId);
+
   const tasks = tasksProp ?? storeTasks;
   const epics = epicsProp ?? storeEpics;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -279,23 +279,6 @@ export function KanbanBoard({
   return (
     <div className="flex h-full min-h-0 flex-col gap-5 overflow-hidden px-4 pt-5 pb-2">
       <div className="flex flex-wrap items-center gap-3 border-b border-white/[0.04] px-4 pb-5">
-        <Combobox
-          value={selectedProjectId ?? ""}
-          onValueChange={(v) => setSelectedProjectId(v || null)}
-          itemToStringLabel={(id) => projects.find((p) => p.id === id)?.name ?? id}
-        >
-          <ComboboxInput placeholder="Project" className="w-44" />
-          <ComboboxContent>
-            <ComboboxList>
-              {projects.map((project) => (
-                <ComboboxItem key={project.id} value={project.id}>
-                  {project.name}
-                </ComboboxItem>
-              ))}
-            </ComboboxList>
-          </ComboboxContent>
-        </Combobox>
-
         <Combobox
           multiple
           value={epicFilters}

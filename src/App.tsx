@@ -14,13 +14,12 @@ import { RoadmapPage } from "@/pages/RoadmapPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { TaskSessionPage } from "@/pages/TaskSessionPage";
 import { useWizardStore } from "@/stores/wizardStore";
-import { useSidebarStore } from "@/stores/sidebarStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
 import { useSelectedProjectId } from "@/stores/useProjectStore";
 import { Button } from "@/components/ui/button";
-import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 
 function WelcomeStep() {
   return (
@@ -56,19 +55,6 @@ function DoneState({ onDismiss }: { onDismiss: (path: "/" | "/settings") => void
 }
 
 function MainLayout() {
-  const { setActiveSection } = useSidebarStore();
-  const location = useLocation();
-
-  useEffect(() => {
-    if (location.pathname.startsWith('/roadmap')) {
-      setActiveSection('roadmap');
-    } else if (location.pathname.startsWith('/settings')) {
-      setActiveSection('settings');
-    } else {
-      setActiveSection('kanban');
-    }
-  }, [location.pathname, setActiveSection]);
-
   return (
     <main className="flex h-screen overflow-hidden bg-background">
       <Sidebar />
@@ -76,12 +62,23 @@ function MainLayout() {
         <Titlebar />
         <div className="flex min-h-0 flex-1 flex-col">
           <Routes>
-            <Route path="/" element={<KanbanPage />} />
+            {/* Global views (All Projects) */}
+            <Route path="/kanban" element={<KanbanPage />} />
+            <Route path="/epics" element={<RoadmapPage />} />
+
+            {/* Project-scoped views */}
+            <Route path="/projects/:projectId/kanban" element={<KanbanPage />} />
+            <Route path="/projects/:projectId/epics" element={<RoadmapPage />} />
+
+            {/* Task session (global) */}
             <Route path="/task/:taskId" element={<TaskSessionPage />} />
-            <Route path="/roadmap" element={<RoadmapPage />} />
+
+            {/* Settings */}
             <Route path="/settings" element={<Navigate to="/settings/providers" replace />} />
             <Route path="/settings/:category" element={<SettingsPage />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
+
+            {/* Default redirect */}
+            <Route path="*" element={<Navigate to="/kanban" replace />} />
           </Routes>
         </div>
       </div>
@@ -171,7 +168,7 @@ export default function App() {
   if (showDoneState) {
     return <DoneState onDismiss={(path) => {
       setShowDoneState(false);
-      navigate(path);
+      navigate(path === "/" ? "/kanban" : path);
     }} />;
   }
 

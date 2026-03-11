@@ -264,7 +264,7 @@ export function TaskSessionPage() {
         <button
           type="button"
           className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          onClick={() => navigate("/")}
+          onClick={() => navigate(-1)}
           title="Back to board"
         >
           <HugeiconsIcon icon={ArrowLeft02Icon} size={16} />

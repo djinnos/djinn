@@ -2,13 +2,6 @@ import type { Epic, Task } from "@/api/types";
 import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { Card, CardContent } from "@/components/ui/card";
 import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu";
-import {
   ArrowReloadHorizontalIcon,
   FullSignalIcon,
   LowSignalIcon,
@@ -22,7 +15,7 @@ import {
   UnavailableIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { MoreVertical, Play, Square, RotateCcw, X } from "lucide-react";
+import { Play, Square, RotateCcw, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useState } from "react";
 import { useTaskActions } from "@/hooks/useTaskActions";
@@ -161,19 +154,67 @@ function acProgressIcon(met: number, total: number) {
   return Progress04Icon;
 }
 
-function ownerInitials(owner: string | null | undefined): string {
-  if (!owner) return "?";
-  const parts = owner.trim().split(/\s+/);
-  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-  return owner.slice(0, 2).toUpperCase();
+const AVATAR_COLORS = ["d8b4fe", "fdba74", "93c5fd", "86efac", "fca5a5", "fde68a", "99f6e4", "f9a8d4"];
+
+function ownerAvatarColor(owner: string | null | undefined): string {
+  if (!owner) return AVATAR_COLORS[0];
+  let hash = 0;
+  for (let i = 0; i < owner.length; i++) {
+    hash = owner.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
 }
 
-function TaskCardMenu({ task }: { task: Task }) {
-  const project = useSelectedProject();
+function ownerAvatarUrl(owner: string | null | undefined): string {
+  const seed = encodeURIComponent(owner ?? "unknown");
+  const bg = ownerAvatarColor(owner);
+  return `https://api.dicebear.com/9.x/lorelei-neutral/svg?seed=${seed}&backgroundColor=${bg}`;
+}
+
+function ActionButton({
+  icon: Icon,
+  label,
+  disabled,
+  className,
+  onClick,
+}: {
+  icon: typeof Play;
+  label: string;
+  disabled?: boolean;
+  className?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      className={cn(
+        "flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-white/10 disabled:pointer-events-none disabled:opacity-30",
+        className,
+      )}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      aria-label={label}
+    >
+      <Icon className="h-3 w-3" />
+      {label}
+    </button>
+  );
+}
+
+function TaskCardActions({ task }: { task: Task }) {
+  const selectedProject = useSelectedProject();
+  const isAll = useIsAllProjects();
   const { busy: transitioning, transition } = useTaskActions();
   const { busy: killing, killTask } = useExecutionControl();
   const busy = transitioning || killing;
 
+  const taskProjectId = (task as Record<string, unknown>).project_id as string | undefined;
+  const project = isAll
+    ? projectStore.getState().projects.find((p) => p.id === taskProjectId)
+    : selectedProject;
   if (!project?.path) return null;
   const projectPath = project.path;
 
@@ -182,48 +223,38 @@ function TaskCardMenu({ task }: { task: Task }) {
   const isClosed = task.status === "closed";
   const isBlocked = (task.unresolved_blocker_count ?? 0) > 0;
 
-  const hasActions = (isOpen && !isBlocked) || isInProgress || isClosed || (!isClosed && !isInProgress);
-  if (!hasActions) return null;
+  const actions: React.ReactNode[] = [];
+
+  if (isOpen && !isBlocked) {
+    actions.push(
+      <ActionButton key="start" icon={Play} label="Start" disabled={busy} className="hover:text-emerald-400" onClick={() => transition(task.id, projectPath, "start")} />
+    );
+  }
+  if (isInProgress) {
+    actions.push(
+      <ActionButton key="stop" icon={Square} label="Stop" disabled={busy} className="hover:text-red-400" onClick={() => killTask(task.id)} />
+    );
+  }
+  if (isClosed) {
+    actions.push(
+      <ActionButton key="reopen" icon={RotateCcw} label="Reopen" disabled={busy} onClick={() => transition(task.id, projectPath, "reopen", "Reopened from desktop")} />
+    );
+  }
+  if (!isClosed && !isInProgress) {
+    actions.push(
+      <ActionButton key="close" icon={X} label="Close" disabled={busy} className="hover:text-red-400" onClick={() => transition(task.id, projectPath, "force_close", "Closed from desktop")} />
+    );
+  }
+
+  if (actions.length === 0) return null;
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger
-        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-white/10 group-hover/card:opacity-100"
-        onClick={(e: React.MouseEvent) => e.stopPropagation()}
-        aria-label="Task actions"
-      >
-        <MoreVertical className="h-3.5 w-3.5" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
-        {isOpen && !isBlocked && (
-          <DropdownMenuItem disabled={busy} onClick={() => transition(task.id, projectPath, "start")}>
-            <Play className="mr-2 h-3.5 w-3.5 text-emerald-500" />
-            Start
-          </DropdownMenuItem>
-        )}
-        {isInProgress && (
-          <DropdownMenuItem disabled={busy} onClick={() => killTask(task.id)}>
-            <Square className="mr-2 h-3.5 w-3.5 text-red-500" />
-            Stop
-          </DropdownMenuItem>
-        )}
-        {isClosed && (
-          <DropdownMenuItem disabled={busy} onClick={() => transition(task.id, projectPath, "reopen", "Reopened from desktop")}>
-            <RotateCcw className="mr-2 h-3.5 w-3.5" />
-            Reopen
-          </DropdownMenuItem>
-        )}
-        {!isClosed && !isInProgress && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem disabled={busy} onClick={() => transition(task.id, projectPath, "force_close", "Closed from desktop")}>
-              <X className="mr-2 h-3.5 w-3.5 text-red-500" />
-              Close
-            </DropdownMenuItem>
-          </>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <div
+      className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1 rounded-b-xl bg-zinc-800/70 px-3 py-1.5 opacity-0 backdrop-blur-sm transition-opacity duration-150 group-hover/taskcard:opacity-100 [&>*]:pointer-events-auto"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {actions}
+    </div>
   );
 }
 
@@ -296,7 +327,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
     <Card
       size="sm"
       className={cn(
-        "group/card cursor-pointer py-2 ring-1 transition-all duration-200 ease-in-out",
+        "group/taskcard relative cursor-pointer py-2 ring-1 transition-all duration-200 ease-in-out",
         cardTint ? `${cardTint.ring} ${cardTint.bg} ${cardTint.hover}` : "bg-zinc-800 ring-white/[0.06] hover:bg-zinc-700/80 hover:ring-white/[0.1]",
         moving ? "scale-[1.02] opacity-70" : "scale-100 opacity-100"
       )}
@@ -363,16 +394,12 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
             </span>
           )}
 
-          <div className="flex items-center gap-1">
-            <div
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold uppercase text-muted-foreground"
-              title={task.owner ?? "Unassigned"}
-              aria-label={`Owner: ${task.owner ?? "Unassigned"}`}
-            >
-              {ownerInitials(task.owner)}
-            </div>
-            <TaskCardMenu task={task} />
-          </div>
+          <img
+            src={ownerAvatarUrl(task.owner)}
+            alt={task.owner ?? "Unassigned"}
+            title={task.owner ?? "Unassigned"}
+            className="h-6 w-6 shrink-0 rounded-full border-2 border-zinc-600"
+          />
         </div>
 
         {/* Row 2: Title */}
@@ -385,7 +412,11 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
         >
           {task.title}
         </h4>
+
       </CardContent>
+
+      {/* Actions overlay (hover only) */}
+      <TaskCardActions task={task} />
     </Card>
   );
 }

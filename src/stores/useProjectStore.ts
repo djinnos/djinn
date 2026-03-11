@@ -1,9 +1,10 @@
 import { useCallback } from "react";
 import { useStoreWithSelector } from "./useStoreWithSelector";
-import { projectStore, type ProjectState, ALL_PROJECTS } from "./projectStore";
+import { projectStore, type ProjectState, ALL_PROJECTS, type ProjectView } from "./projectStore";
 import type { Project } from "@/api/types";
 
 export { projectStore, ALL_PROJECTS } from "./projectStore";
+export type { ProjectView } from "./projectStore";
 
 export function useProjectStore(): ProjectState;
 export function useProjectStore<T>(selector: (state: ProjectState) => T): T;
@@ -27,4 +28,10 @@ export function useSelectedProject(): Project | undefined {
 
 export function useIsAllProjects(): boolean {
   return useProjectStore((state) => state.selectedProjectId === ALL_PROJECTS);
+}
+
+export function useLastViewForProject(projectId: string): ProjectView {
+  return useProjectStore(
+    useCallback((state) => state.getLastView(projectId), [projectId])
+  );
 }
