@@ -27,6 +27,17 @@ fn is_context_length_error(e: &anyhow::Error) -> bool {
         || msg.contains("prompt is too long")
 }
 
+/// Detect "No tool call found for function call output" errors from the OpenAI
+/// Responses API. These happen when a `tool` role message references a
+/// `tool_call_id` that doesn't exist in any preceding assistant message —
+/// typically after compaction removed the assistant message but left orphaned
+/// tool results.
+fn is_orphaned_tool_call_error(e: &anyhow::Error) -> bool {
+    let msg = e.to_string().to_lowercase();
+    msg.contains("no tool call found for function call output")
+        || msg.contains("no function call found")
+}
+
 fn serialize_message(msg: &Message) -> serde_json::Value {
     serde_json::to_value(msg).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "failed to serialize Message for SessionMessage event");
@@ -207,12 +218,14 @@ pub(super) async fn run_reply_loop(
             let stream_result = provider.stream(conversation, tools).await;
             let mut stream = match stream_result {
                 Ok(s) => s,
-                Err(e) if is_context_length_error(&e) && compaction_attempts < MAX_COMPACTION_RETRIES => {
-                    // Reactive compaction: context exceeded on stream init.
+                Err(e) if (is_context_length_error(&e) || is_orphaned_tool_call_error(&e)) && compaction_attempts < MAX_COMPACTION_RETRIES => {
+                    // Reactive compaction: context exceeded or orphaned tool
+                    // call references on stream init.
                     tracing::warn!(
                         task_id = %task_id,
                         compaction_attempts,
-                        "ReplyLoop: context_length_exceeded on stream init; compacting reactively"
+                        error = %e,
+                        "ReplyLoop: recoverable provider error on stream init; compacting reactively"
                     );
                     if let Some(llm) = otel_llm {
                         llm.end_error("context_length_exceeded");
@@ -271,7 +284,7 @@ pub(super) async fn run_reply_loop(
                         let Some(evt) = evt else { break; };
                         let evt = match evt {
                             Ok(e) => e,
-                            Err(e) if is_context_length_error(&e) && compaction_attempts < MAX_COMPACTION_RETRIES => {
+                            Err(e) if (is_context_length_error(&e) || is_orphaned_tool_call_error(&e)) && compaction_attempts < MAX_COMPACTION_RETRIES => {
                                 needs_reactive_compaction = true;
                                 break;
                             }
@@ -495,6 +508,23 @@ pub(super) async fn run_reply_loop(
                     // values for the new context size.
                     total_tokens_in = 0;
                     total_tokens_out = 0;
+
+                    // After compaction the conversation was replaced — the
+                    // assistant message containing this turn's ToolUse blocks
+                    // is gone. If we dispatched tool calls and appended
+                    // ToolResults, those would reference call_ids that no
+                    // longer exist, causing "No tool call found for function
+                    // call output" from the OpenAI API.
+                    //
+                    // Skip tool dispatch and let the LLM produce a fresh
+                    // response against the compacted conversation.
+                    if !turn_tool_calls.is_empty() {
+                        compaction_attempts += 1;
+                        conversation.push(Message::user(
+                            "Continue with the task.",
+                        ));
+                        continue;
+                    }
                 }
                 // Text-only after compaction = worker thinks it's done.
                 // Let it fall through to the normal text-only exit below —

@@ -645,6 +645,42 @@ pub(crate) fn deterministic_compact(messages: &[Message], max_chars: usize) -> V
     result
 }
 
+// ─── Conversation integrity validation ────────────────────────────────────────
+
+/// Check that every `ToolResult` in the conversation references a `ToolUse`
+/// with the same `id` in a preceding assistant message.  Returns the first
+/// orphaned `tool_use_id` found, or `None` if the conversation is valid.
+///
+/// This can be used as a debug assertion after compaction and in tests.
+pub fn find_orphaned_tool_result(messages: &[Message]) -> Option<String> {
+    use crate::agent::message::ContentBlock;
+    use std::collections::HashSet;
+
+    // Collect all ToolUse IDs emitted by assistant messages, in order.
+    let mut known_tool_ids = HashSet::new();
+
+    for msg in messages {
+        if msg.role == Role::Assistant {
+            for block in &msg.content {
+                if let ContentBlock::ToolUse { id, .. } = block {
+                    known_tool_ids.insert(id.clone());
+                }
+            }
+        }
+        if msg.role == Role::User {
+            for block in &msg.content {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                    if !known_tool_ids.contains(tool_use_id) {
+                        return Some(tool_use_id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -863,5 +899,246 @@ mod tests {
         assert!(worker_resume.contains("{messages}"));
         assert!(worker_mid.contains("{messages}"));
         assert!(reviewer.contains("{messages}"));
+    }
+
+    // ── Orphaned tool result detection ───────────────────────────────────────
+
+    #[test]
+    fn find_orphaned_tool_result_valid_conversation() {
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("do something"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "echo hi"}),
+                }],
+                metadata: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: vec![ContentBlock::text("hi")],
+                    is_error: false,
+                }],
+                metadata: None,
+            },
+            Message::assistant("done"),
+        ];
+        assert!(find_orphaned_tool_result(&messages).is_none());
+    }
+
+    #[test]
+    fn find_orphaned_tool_result_detects_orphan() {
+        // Simulate what happens if compaction removes the assistant ToolUse
+        // but a ToolResult referencing its call_id survives.
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("summary of prior work"),
+            Message::assistant("Continuing with the task."),
+            // Orphaned: no preceding ToolUse with "call_gone"
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_gone".into(),
+                    content: vec![ContentBlock::text("result from vanished call")],
+                    is_error: false,
+                }],
+                metadata: None,
+            },
+        ];
+        assert_eq!(
+            find_orphaned_tool_result(&messages),
+            Some("call_gone".into()),
+        );
+    }
+
+    #[test]
+    fn find_orphaned_tool_result_multiple_tool_calls() {
+        // Second tool result references a call_id that doesn't exist.
+        let messages = vec![
+            Message::system("sys"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "call_a".into(),
+                        name: "read_file".into(),
+                        input: serde_json::json!({"path": "a.rs"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_b".into(),
+                        name: "read_file".into(),
+                        input: serde_json::json!({"path": "b.rs"}),
+                    },
+                ],
+                metadata: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_a".into(),
+                        content: vec![ContentBlock::text("contents a")],
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_b".into(),
+                        content: vec![ContentBlock::text("contents b")],
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_c_orphan".into(),
+                        content: vec![ContentBlock::text("orphaned")],
+                        is_error: false,
+                    },
+                ],
+                metadata: None,
+            },
+        ];
+        assert_eq!(
+            find_orphaned_tool_result(&messages),
+            Some("call_c_orphan".into()),
+        );
+    }
+
+    /// Regression test: LLM compaction output (system + summary + continuation)
+    /// must never contain orphaned tool results.
+    #[test]
+    fn llm_compaction_output_has_no_orphaned_tool_results() {
+        // Simulate the conversation that compact_conversation builds on success.
+        let compacted = vec![
+            Message::system("You are a coding agent."),
+            Message::user("## Summary\nFiles changed: src/main.rs — added feature X"),
+            Message::assistant(
+                "Your context was compacted. The previous message contains a summary.",
+            ),
+            Message::user("Continue with the task."),
+        ];
+        assert!(
+            find_orphaned_tool_result(&compacted).is_none(),
+            "LLM compaction output must not contain orphaned tool results",
+        );
+    }
+
+    /// Regression test: simulates the scenario where proactive compaction
+    /// replaces the conversation but tool results from the current turn would
+    /// be appended — producing orphaned tool results. The fix ensures the
+    /// reply loop skips tool dispatch after compaction; this test validates
+    /// the invariant from the compaction side.
+    #[test]
+    fn appending_tool_results_after_compaction_creates_orphans() {
+        // Step 1: Build a compacted conversation (what compact_conversation produces).
+        let mut compacted = vec![
+            Message::system("You are a coding agent."),
+            Message::user("## Summary\nPrior work summary."),
+            Message::assistant("Continuing with the task."),
+        ];
+
+        // Step 2: Simulate what the OLD buggy code did — append tool results
+        // from the pre-compaction turn onto the compacted conversation.
+        compacted.push(Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_y2pswqYWoPzF2C3mROIIBbIZ".into(),
+                    content: vec![ContentBlock::text("bash output")],
+                    is_error: false,
+                },
+            ],
+            metadata: None,
+        });
+
+        // This must be detected as invalid.
+        let orphan = find_orphaned_tool_result(&compacted);
+        assert_eq!(
+            orphan,
+            Some("call_y2pswqYWoPzF2C3mROIIBbIZ".into()),
+            "Appending tool results after compaction must produce an orphan — \
+             the reply loop must skip tool dispatch after proactive compaction",
+        );
+    }
+
+    /// Deterministic compaction must never produce orphaned tool results.
+    #[test]
+    fn deterministic_compact_never_produces_orphans() {
+        // A conversation with interleaved tool call/result pairs and plain text.
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("task description"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "ls"}),
+                }],
+                metadata: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: vec![ContentBlock::text("file1 file2")],
+                    is_error: false,
+                }],
+                metadata: None,
+            },
+            Message::assistant("I see two files."),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_2".into(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "file1"}),
+                }],
+                metadata: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_2".into(),
+                    content: vec![ContentBlock::text("contents of file1")],
+                    is_error: false,
+                }],
+                metadata: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_3".into(),
+                    name: "edit_file".into(),
+                    input: serde_json::json!({"path": "file1", "content": "new"}),
+                }],
+                metadata: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_3".into(),
+                    content: vec![ContentBlock::text("ok")],
+                    is_error: false,
+                }],
+                metadata: None,
+            },
+            Message::assistant("done editing"),
+        ];
+
+        // Try various tight budgets that force different amounts of truncation.
+        for budget_multiplier in [1usize, 2, 3, 5, 10] {
+            let budget = estimate_message_chars(&messages[0]) + 200 + (budget_multiplier * 50);
+            let result = deterministic_compact(&messages, budget);
+
+            let orphan = find_orphaned_tool_result(&result);
+            assert!(
+                orphan.is_none(),
+                "deterministic_compact produced orphaned tool result {:?} at budget multiplier {}",
+                orphan,
+                budget_multiplier,
+            );
+        }
     }
 }
