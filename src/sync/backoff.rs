@@ -45,6 +45,11 @@ impl BackoffState {
     pub fn delay_secs(&self) -> u64 {
         self.delay().as_secs()
     }
+
+    /// Whether the channel needs attention (3+ failures).
+    pub fn needs_attention(&self) -> bool {
+        self.failures >= 3
+    }
 }
 
 #[cfg(test)]
@@ -95,5 +100,37 @@ mod tests {
         b.record_success();
         assert_eq!(b.delay(), Duration::ZERO);
         assert_eq!(b.failure_count(), 0);
+    }
+
+    #[test]
+    fn needs_attention_false_when_failure_count_lt_3() {
+        let mut b = BackoffState::new();
+        assert!(!b.needs_attention());
+        b.record_failure();
+        assert!(!b.needs_attention());
+        b.record_failure();
+        assert!(!b.needs_attention());
+    }
+
+    #[test]
+    fn needs_attention_true_when_failure_count_gte_3() {
+        let mut b = BackoffState::new();
+        b.record_failure();
+        b.record_failure();
+        b.record_failure();
+        assert!(b.needs_attention());
+        b.record_failure();
+        assert!(b.needs_attention());
+    }
+
+    #[test]
+    fn needs_attention_resets_on_success() {
+        let mut b = BackoffState::new();
+        for _ in 0..5 {
+            b.record_failure();
+        }
+        assert!(b.needs_attention());
+        b.record_success();
+        assert!(!b.needs_attention());
     }
 }

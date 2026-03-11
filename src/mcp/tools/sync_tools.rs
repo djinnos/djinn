@@ -74,6 +74,8 @@ pub struct SyncChannelStatus {
     pub failure_count: u32,
     #[schemars(with = "i64")]
     pub backoff_secs: u64,
+    /// Whether the channel needs attention (3+ failures) (SYNC-16).
+    pub needs_attention: bool,
 }
 
 impl From<ChannelStatus> for SyncChannelStatus {
@@ -87,6 +89,7 @@ impl From<ChannelStatus> for SyncChannelStatus {
             last_error: value.last_error,
             failure_count: value.failure_count,
             backoff_secs: value.backoff_secs,
+            needs_attention: value.needs_attention,
         }
     }
 }
@@ -333,5 +336,74 @@ impl DjinnMcpServer {
             channels: Some(channels.into_iter().map(SyncChannelStatus::from).collect()),
             error: None,
         })
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Tests
+// ───────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that SyncChannelStatus includes needs_attention in its JSON representation.
+    /// This validates the task_sync_status MCP tool response shape.
+    #[test]
+    fn sync_channel_status_includes_needs_attention() {
+        let status = SyncChannelStatus {
+            name: "tasks".to_string(),
+            branch: "djinn/tasks".to_string(),
+            enabled: true,
+            project_paths: vec!["/tmp/test".to_string()],
+            last_synced_at: None,
+            last_error: None,
+            failure_count: 0,
+            backoff_secs: 0,
+            needs_attention: false,
+        };
+
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"needs_attention\":false"), "json: {json}");
+    }
+
+    /// Test that SyncChannelStatus serializes needs_attention=true correctly.
+    #[test]
+    fn sync_channel_status_needs_attention_true_when_flag_set() {
+        let status = SyncChannelStatus {
+            name: "tasks".to_string(),
+            branch: "djinn/tasks".to_string(),
+            enabled: true,
+            project_paths: vec![],
+            last_synced_at: None,
+            last_error: Some("connection timeout".to_string()),
+            failure_count: 3,
+            backoff_secs: 120,
+            needs_attention: true,
+        };
+
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"needs_attention\":true"), "json: {json}");
+        assert!(json.contains("\"failure_count\":3"), "json: {json}");
+    }
+
+    /// Test conversion from ChannelStatus to SyncChannelStatus propagates needs_attention.
+    #[test]
+    fn sync_channel_status_from_channel_status_propagates_needs_attention() {
+        let channel_status = ChannelStatus {
+            name: "tasks".to_string(),
+            branch: "djinn/tasks".to_string(),
+            enabled: true,
+            project_paths: vec![],
+            last_synced_at: None,
+            last_error: None,
+            failure_count: 5,
+            backoff_secs: 240,
+            needs_attention: true,
+        };
+
+        let sync_status: SyncChannelStatus = channel_status.into();
+        assert_eq!(sync_status.needs_attention, true);
+        assert_eq!(sync_status.failure_count, 5);
     }
 }
