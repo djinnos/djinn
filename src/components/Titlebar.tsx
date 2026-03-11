@@ -93,7 +93,6 @@ function ExecutionIndicator() {
   if (state === null) return null;
 
   const capacityEntries = Object.entries(capacity);
-  const hasActive = runningSessions > 0;
 
   return (
     <div ref={ref} className="relative">

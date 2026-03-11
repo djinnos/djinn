@@ -7,6 +7,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+export const CLERK_DOMAIN = "clerk.djinnai.io";
+export const CLIENT_ID = "djinnos-desktop";
 
 export interface AuthUser {
   sub: string;
@@ -99,4 +101,26 @@ export async function authLogin(): Promise<void> {
  */
 export async function authLogout(): Promise<void> {
   await invoke("auth_logout");
+}
+
+/**
+ * Exchange OAuth authorization code for user profile.
+ * @param code Authorization code from OAuth callback
+ * @param codeVerifier PKCE code_verifier used in the auth request
+ * @param redirectUri Redirect URI used in the auth request
+ * @param clientId OAuth client ID
+ * @returns User profile information
+ */
+export async function exchangeAuthCode(
+  code: string,
+  codeVerifier: string,
+  redirectUri: string,
+  clientId: string
+): Promise<AuthUser> {
+  return invoke("exchange_auth_code", {
+    code,
+    codeVerifier,
+    redirectUri,
+    clientId,
+  });
 }

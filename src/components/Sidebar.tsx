@@ -1,5 +1,5 @@
 import { useSidebarStore } from '@/stores/sidebarStore';
-import { Button, buttonVariants } from '@/components/ui/button';
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import {
   Settings,
@@ -19,18 +19,9 @@ import { HugeiconsIcon } from '@hugeicons/react';
 import logoSvg from '@/assets/logo.svg';
 import { useEffect, useCallback, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useExecutionStatus } from '@/hooks/useExecutionStatus';
-import { useExecutionControl } from '@/hooks/useExecutionControl';
-import { useSelectedProject, useIsAllProjects, useProjects, useSelectedProjectId } from '@/stores/useProjectStore';
-import { projectStore, ALL_PROJECTS } from '@/stores/projectStore';
-import { taskStore } from '@/stores/taskStore';
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-} from '@/components/ui/dropdown-menu';
+import { useProjects, useSelectedProjectId } from '@/stores/useProjectStore';
+import { ALL_PROJECTS } from '@/stores/projectStore';
+
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -42,6 +33,8 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { useProjectRoute } from '@/hooks/useProjectRoute';
+import { useExecutionStatus } from '@/hooks/useExecutionStatus';
+import { useExecutionControl } from '@/hooks/useExecutionControl';
 
 interface NavItemProps {
   icon: React.ReactNode;
@@ -101,7 +94,7 @@ function StatusDot({ state, pulsing = false }: { state: "running" | "paused" | "
 }
 
 /** Shorten a full model ID like "anthropic/Claude Opus 4.6" → "opus" */
-function shortModelName(modelId: string): string {
+/* function shortModelName(modelId: string): string {
   const lower = modelId.toLowerCase();
   if (lower.includes("opus")) return "opus";
   if (lower.includes("sonnet")) return "sonnet";
@@ -109,31 +102,31 @@ function shortModelName(modelId: string): string {
   if (lower.includes("glm")) return "glm";
   const parts = modelId.split("/");
   return parts[parts.length - 1].slice(0, 12);
-}
+} */
 
 /** Resolve a task_id (UUID or short_id) to a human-readable title */
-function resolveTaskTitle(taskId: string): string {
+/* function resolveTaskTitle(taskId: string): string {
   const tasks = taskStore.getState().getAllTasks();
   const match = tasks.find((t) => t.id === taskId || t.short_id === taskId);
   return match?.title ?? taskId;
-}
+} */
 
 /** Resolve a project_id to its name */
-function resolveProjectName(projectId: string | undefined): string | undefined {
+/* function resolveProjectName(projectId: string | undefined): string | undefined {
   if (!projectId) return undefined;
   const projects = projectStore.getState().projects;
   return projects.find((p) => p.id === projectId)?.name;
-}
+} */
 
-function formatSessionDuration(seconds: number): string {
+/* function formatSessionDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   const m = Math.floor(seconds / 60);
   if (m < 60) return `${m}m`;
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
-}
+} */
 
-function ExecutionDiagnostics({ scopePath }: { scopePath: string | null }) {
+/* function ExecutionDiagnostics({ scopePath }: { scopePath: string | null }) {
   const { state, runningSessions, maxSessions, raw } = useExecutionStatus(scopePath);
   const [expandedModel, setExpandedModel] = useState<string | null>(null);
   const isGlobal = scopePath === null;
@@ -221,121 +214,7 @@ function ExecutionDiagnostics({ scopePath }: { scopePath: string | null }) {
     </div>
   );
 }
-
-/** Scope for execution controls — independent of the project selector view. */
-type ExecScope = { type: "all" } | { type: "project"; path: string; name: string };
-
-function ExecutionPanel() {
-  const viewProject = useSelectedProject();
-  const isAllView = useIsAllProjects();
-  const projects = useProjects();
-
-  const [scopeOverride, setScopeOverride] = useState<ExecScope | null>(null);
-
-  const scope: ExecScope = scopeOverride
-    ?? (isAllView
-      ? { type: "all" }
-      : viewProject?.path
-        ? { type: "project", path: viewProject.path, name: viewProject.name }
-        : { type: "all" });
-
-  const scopePath = scope.type === "all" ? null : scope.path;
-  const { state, runningSessions, refresh } = useExecutionStatus(scopePath);
-  const { busy, start, pause, resume } = useExecutionControl(refresh);
-
-  const isActive = state === "active";
-  const isPaused = state === "paused";
-  const hasRunningSessions = runningSessions > 0;
-  const isIdle = !isActive && !isPaused;
-  const dotState = isPaused ? "paused" as const : isActive ? "running" as const : "idle" as const;
-
-  const handleClick = async () => {
-    if (busy) return;
-    if (isActive) {
-      await pause(scopePath);
-    } else if (isPaused) {
-      await resume(scopePath);
-    } else {
-      await start(scopePath);
-    }
-  };
-
-  const scopeLabel = scope.type === "all" ? "All" : scope.name;
-  const actionLabel = isActive ? "Pause" : isPaused ? "Resume" : "Start";
-  const label = `${actionLabel} ${scopeLabel}`;
-
-  const icon = busy ? (
-    <Loader2 className="h-4 w-4 animate-spin" />
-  ) : isActive ? (
-    <Pause className="h-4 w-4" />
-  ) : (
-    <Play className="h-4 w-4" />
-  );
-
-  const buttonStyles = cn(
-    "h-10 transition-all duration-200",
-    isActive && "border-emerald-500/40 bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25",
-    isPaused && "border-yellow-500/40 bg-yellow-500/15 text-yellow-400 hover:bg-yellow-500/25",
-    isIdle && "bg-primary/80 text-primary-foreground hover:bg-primary"
-  );
-
-  return (
-    <>
-      <div className="p-2">
-        <div className="flex gap-px">
-          <Button
-            variant={isActive ? "secondary" : isPaused ? "outline" : "default"}
-            size="default"
-            onClick={handleClick}
-            disabled={busy}
-            className={cn(buttonStyles, "flex-1 gap-2 px-3 rounded-r-none")}
-          >
-            <StatusDot state={dotState} pulsing={hasRunningSessions} />
-            {icon}
-            <span className="text-sm font-medium truncate flex-1 text-left">{label}</span>
-            {hasRunningSessions && (
-              <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-emerald-500/30 px-1.5 text-[10px] font-bold text-emerald-300">
-                {runningSessions}
-              </span>
-            )}
-          </Button>
-
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              className={cn(
-                buttonVariants({ variant: isActive ? "secondary" : isPaused ? "outline" : "default", size: "icon" }),
-                buttonStyles,
-                "w-8 shrink-0 rounded-l-none border-l border-white/10"
-              )}
-            >
-              <ChevronDown className="h-3.5 w-3.5" />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="min-w-[160px]">
-              <DropdownMenuItem
-                onClick={() => setScopeOverride({ type: "all" })}
-                className={cn(scope.type === "all" && "bg-accent")}
-              >
-                <Layers className="mr-2 h-3.5 w-3.5 text-muted-foreground" />
-                All Projects
-              </DropdownMenuItem>
-              {projects.length > 0 && <DropdownMenuSeparator />}
-              {projects.filter((p) => p.path).map((p) => (
-                <DropdownMenuItem
-                  key={p.id}
-                  onClick={() => setScopeOverride({ type: "project", path: p.path!, name: p.name })}
-                  className={cn(scope.type === "project" && scope.path === p.path && "bg-accent")}
-                >
-                  <span className="truncate">{p.name}</span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      </div>
-      <ExecutionDiagnostics scopePath={scopePath} />
-    </>
-  );
-}
+*/
 
 type ProjectExecState = "active" | "paused" | "idle";
 
