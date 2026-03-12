@@ -206,14 +206,13 @@ async fn call_task_list(
         project_id: project_id.map(|s| s.to_string()),
         status: non_empty(p.status),
         issue_type: non_empty(p.issue_type),
-        priority: p.priority,
+        priority: p.priority.filter(|&v| v != 0),
         text: non_empty(p.text),
         label: non_empty(p.label),
         parent: non_empty(p.parent),
         sort: non_empty(p.sort).unwrap_or_else(|| "priority".to_string()),
         limit,
         offset,
-        ..Default::default()
     };
 
     let result = repo.list_filtered(query).await.map_err(|e| e.to_string())?;
