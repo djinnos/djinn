@@ -2,6 +2,7 @@ import type { Epic, Task } from "@/api/types";
 import workerAvatar from "@/assets/worker.png";
 import taskReviewerAvatar from "@/assets/task_reviewer.png";
 import pmAvatar from "@/assets/pm.png";
+import conflictResolverAvatar from "@/assets/conflict_resolver.png";
 import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -89,7 +90,7 @@ function getStatusOverlay(status: string): { label: string; className: string } 
     return { label: "intervening…", className: "text-red-400 animate-pulse" };
   }
   if (status === "needs_pm_intervention") {
-    return { label: "intervening…", className: "text-red-400" };
+    return { label: "agent stuck", className: "text-red-400" };
   }
   return null;
 }
@@ -137,9 +138,6 @@ function getCardTint(task: Task): { ring: string; bg: string; hover: string; act
   if (task.status === "needs_pm_intervention" || task.status === "in_pm_intervention") {
     return { ring: "ring-red-500/40", bg: "bg-red-500/5", hover: "hover:bg-red-500/10 hover:ring-red-500/60", actionsBg: "bg-red-500/10 text-white" };
   }
-  if (task.status === "needs_task_review" || task.status === "in_task_review") {
-    return { ring: "ring-orange-500/40", bg: "bg-orange-500/5", hover: "hover:bg-orange-500/10 hover:ring-orange-500/60", actionsBg: "bg-orange-500/10 text-white" };
-  }
   return null;
 }
 
@@ -158,6 +156,7 @@ function getBacklogBadge(status: string): { label: string; className: string } |
 const AGENT_AVATARS: Record<string, string> = {
   worker: workerAvatar,
   task_reviewer: taskReviewerAvatar,
+  conflict_resolver: conflictResolverAvatar,
   pm: pmAvatar,
 };
 
