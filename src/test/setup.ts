@@ -1,4 +1,14 @@
 import "@testing-library/jest-dom/vitest"
+import { vi } from "vitest"
+
+// jsdom does not implement scrollIntoView; make it safe for components using autoscroll effects
+if (!Element.prototype.scrollIntoView) {
+  Object.defineProperty(Element.prototype, "scrollIntoView", {
+    value: vi.fn(),
+    writable: true,
+    configurable: true,
+  })
+}
 
 // Mock Tauri internals — prevents "window.__TAURI_INTERNALS__ is not defined" errors
 Object.defineProperty(window, "__TAURI_INTERNALS__", {
