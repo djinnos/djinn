@@ -11,6 +11,9 @@ use crate::provider::builtin;
 use crate::provider::health::ModelHealth;
 use crate::provider::validate::{self, ValidationRequest};
 
+#[cfg(test)]
+mod contract_tests;
+
 // ── Shared response helpers ───────────────────────────────────────────────────
 
 fn model_to_output(m: &Model) -> ProviderModelOutput {
