@@ -395,7 +395,7 @@ export function KanbanBoard({
                 className="relative min-h-0 flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
             >
               {column.key === "backlog" && (
-                <img src={scribeAvatar} alt="Scribe" className="pointer-events-none absolute right-4 -top-2 z-0 h-16 w-16" />
+                <img src={scribeAvatar} alt="Scribe" className="pointer-events-none absolute right-4 top-0 z-0 h-16 w-16" />
               )}
               <div className="flex flex-col">
                 <div className="relative px-4 pb-2.5 pt-3.5 text-sm font-semibold">
