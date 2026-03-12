@@ -3,6 +3,19 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Truncate a `String` to at most `max_bytes` bytes, rounding down to the
+/// nearest UTF-8 char boundary so we never panic.
+fn truncate_utf8(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
 use crate::agent::extension;
 use crate::agent::message::{Conversation, Message};
 use crate::agent::prompts::{TaskContext, render_prompt};
@@ -423,7 +436,7 @@ pub async fn run_task_lifecycle(
                     };
                     let mut line = format!("- **{label}**: {body}");
                     if line.len() > MAX_FEEDBACK_CHARS {
-                        line.truncate(MAX_FEEDBACK_CHARS);
+                        truncate_utf8(&mut line, MAX_FEEDBACK_CHARS);
                         line.push_str("… [truncated]");
                     }
                     line
@@ -457,7 +470,7 @@ pub async fn run_task_lifecycle(
                     let mut line =
                         format!("- **{}** ({}): {}", e.event_type, e.actor_role, preview);
                     if line.len() > MAX_HISTORY_ENTRY_CHARS {
-                        line.truncate(MAX_HISTORY_ENTRY_CHARS);
+                        truncate_utf8(&mut line, MAX_HISTORY_ENTRY_CHARS);
                         line.push('…');
                     }
                     line
@@ -479,7 +492,7 @@ pub async fn run_task_lifecycle(
             } else {
                 let mut joined = sections.join("\n\n");
                 if joined.len() > MAX_TOTAL_CHARS {
-                    joined.truncate(MAX_TOTAL_CHARS);
+                    truncate_utf8(&mut joined, MAX_TOTAL_CHARS);
                     joined.push_str(
                         "\n… [truncated — use `task_activity_list` with filters for full history]",
                     );
