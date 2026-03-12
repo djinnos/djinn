@@ -588,11 +588,13 @@ pub(super) async fn run_reply_loop(
                                     };
                                     if text.len() > MAX_TOOL_RESULT_CHARS {
                                         let truncated_len = text.len();
-                                        text.truncate(MAX_TOOL_RESULT_CHARS);
-                                        // Find a clean UTF-8 boundary.
-                                        while !text.is_char_boundary(text.len()) {
-                                            text.pop();
+                                        // Find a clean UTF-8 boundary at or before the limit,
+                                        // then truncate. (truncate panics on non-boundaries.)
+                                        let mut end = MAX_TOOL_RESULT_CHARS;
+                                        while end > 0 && !text.is_char_boundary(end) {
+                                            end -= 1;
                                         }
+                                        text.truncate(end);
                                         text.push_str(&format!(
                                             "\n\n[OUTPUT TRUNCATED — showing {MAX_TOOL_RESULT_CHARS} of {truncated_len} chars. Narrow your query for full results.]"
                                         ));
