@@ -47,8 +47,15 @@ where
         from_value(serde_json::to_value(tool_call).map_err(|e| e.to_string())?)
             .map_err(|e| format!("invalid frontend tool payload: {e}"))?;
 
+    // Resolve project_id from worktree_path so agent tools are project-scoped.
+    let project_id = {
+        let repo = ProjectRepository::new(state.db().clone(), state.events().clone());
+        let path_str = worktree_path.to_string_lossy();
+        repo.resolve(&path_str).await.ok().flatten()
+    };
+
     match call.name.as_str() {
-        "task_list" => call_task_list(state, &call.arguments).await,
+        "task_list" => call_task_list(state, &call.arguments, project_id.as_deref()).await,
         "task_show" => call_task_show(state, &call.arguments).await,
         "task_create" => call_task_create(state, &call.arguments).await,
         "task_update" => call_task_update(state, &call.arguments).await,
@@ -179,9 +186,16 @@ struct EditParams {
     new_text: String,
 }
 
+/// Normalize `Some("")` → `None`. OpenAI models often send empty strings
+/// for optional parameters instead of omitting them, which breaks SQL filters.
+fn non_empty(opt: Option<String>) -> Option<String> {
+    opt.filter(|s| !s.is_empty())
+}
+
 async fn call_task_list(
     state: &AppState,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: TaskListParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db().clone(), state.events().clone());
@@ -189,13 +203,14 @@ async fn call_task_list(
     let limit = p.limit.unwrap_or(50);
     let offset = p.offset.unwrap_or(0);
     let query = crate::db::repositories::task::ListQuery {
-        status: p.status,
-        issue_type: p.issue_type,
+        project_id: project_id.map(|s| s.to_string()),
+        status: non_empty(p.status),
+        issue_type: non_empty(p.issue_type),
         priority: p.priority,
-        text: p.text,
-        label: p.label,
-        parent: p.parent,
-        sort: p.sort.unwrap_or_else(|| "priority".to_string()),
+        text: non_empty(p.text),
+        label: non_empty(p.label),
+        parent: non_empty(p.parent),
+        sort: non_empty(p.sort).unwrap_or_else(|| "priority".to_string()),
         limit,
         offset,
         ..Default::default()
