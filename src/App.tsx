@@ -13,6 +13,7 @@ import { KanbanPage } from "@/pages/KanbanPage";
 import { RoadmapPage } from "@/pages/RoadmapPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { TaskSessionPage } from "@/pages/TaskSessionPage";
+import { ChatPage } from "@/pages/ChatPage";
 import { SyncHealthBanner } from "@/components/SyncHealthBanner";
 import { useWizardStore } from "@/stores/wizardStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -22,9 +23,6 @@ import { useSelectedProjectId } from "@/stores/useProjectStore";
 import { Button } from "@/components/ui/button";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 
-function ChatPage() {
-  return <div className="flex h-full items-center justify-center text-muted-foreground">Chat coming soon</div>;
-}
 
 function WelcomeStep() {
   return (

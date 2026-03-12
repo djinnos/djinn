@@ -215,6 +215,9 @@ export const useChatStore = create<ChatState>()(
       name: STORAGE_KEY,
       partialize: (state) => ({
         sessions: state.sessions,
+        messagesBySession: state.messagesBySession,
+        streamingBySession: state.streamingBySession,
+        loadingBySession: state.loadingBySession,
         activeSessionId: state.activeSessionId,
       }),
     }
