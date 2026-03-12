@@ -11,6 +11,7 @@ const ROLE_LABELS: Record<AgentRole, string> = {
   task_reviewer: "R",
   conflict_resolver: "C",
   pm: "PM",
+  groomer: "G",
 };
 
 const ROLE_FULL_LABELS: Record<AgentRole, string> = {
@@ -18,9 +19,10 @@ const ROLE_FULL_LABELS: Record<AgentRole, string> = {
   task_reviewer: "Task Reviewer",
   conflict_resolver: "Conflict Resolver",
   pm: "PM",
+  groomer: "Groomer",
 };
 
-const ALL_ROLES: AgentRole[] = ["worker", "task_reviewer", "conflict_resolver", "pm"];
+const ALL_ROLES: AgentRole[] = ["worker", "task_reviewer", "conflict_resolver", "pm", "groomer"];
 
 function ModelPicker({
   availableModels,

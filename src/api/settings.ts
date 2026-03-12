@@ -1,7 +1,7 @@
 import { callMcpTool } from "@/api/mcpClient";
 import type { McpToolOutput } from "@/api/generated/mcp-tools.gen";
 
-export type AgentRole = "worker" | "task_reviewer" | "conflict_resolver" | "pm";
+export type AgentRole = "worker" | "task_reviewer" | "conflict_resolver" | "pm" | "groomer";
 
 export interface ModelPriorityItem {
   model: string;
@@ -91,6 +91,7 @@ export async function fetchSettings(): Promise<SettingsResponse> {
         task_reviewer: toPriorityItems(modelPriority.task_reviewer),
         conflict_resolver: toPriorityItems(modelPriority.conflict_resolver),
         pm: toPriorityItems(modelPriority.pm),
+        groomer: toPriorityItems(modelPriority.groomer),
       },
       session_limits: sessionLimits,
     },
@@ -117,6 +118,9 @@ export async function saveSettings(settings: SettingsResponse): Promise<void> {
       combineModelId(item.provider, item.model)
     ),
     model_priority_pm: settings.agents.model_priorities.pm.map((item) =>
+      combineModelId(item.provider, item.model)
+    ),
+    model_priority_groomer: settings.agents.model_priorities.groomer.map((item) =>
       combineModelId(item.provider, item.model)
     ),
     max_sessions: maxSessions,
