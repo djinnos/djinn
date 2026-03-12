@@ -355,7 +355,6 @@ export async function fetchKanbanSnapshot(
   const [taskList, epicList] = await Promise.all([
     callMcpTool("task_list", {
       project: resolvedProjectPath,
-      issue_type: "!epic",
       limit: 500,
       offset: 0,
     }),
