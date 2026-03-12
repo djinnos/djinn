@@ -116,8 +116,22 @@ fn truncate(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         s.to_string()
     } else {
-        format!("{}...(truncated)", &s[..max_bytes])
+        // Find a clean UTF-8 char boundary at or before max_bytes.
+        let end = floor_char_boundary(s, max_bytes);
+        format!("{}...(truncated)", &s[..end])
     }
+}
+
+/// Find the largest byte index <= `idx` that is a valid UTF-8 char boundary.
+fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    let mut i = idx;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 // ─── Session span (root trace) ───────────────────────────────────────────────
@@ -376,5 +390,68 @@ impl ToolSpan {
             .span()
             .set_status(Status::error(error.to_string()));
         self.cx.span().end();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_ascii_within_limit() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_ascii_at_limit() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_ascii_over_limit() {
+        assert_eq!(truncate("hello world", 5), "hello...(truncated)");
+    }
+
+    #[test]
+    fn truncate_multibyte_on_char_boundary() {
+        // '─' is 3 bytes (U+2500). "──" = 6 bytes.
+        let s = "──test";
+        // Truncate at 6 should land exactly after the two dashes.
+        assert_eq!(truncate(s, 6), "──...(truncated)");
+    }
+
+    #[test]
+    fn truncate_multibyte_splits_char_safely() {
+        // '─' is bytes 0..3. Truncating at byte 2 must back up to 0.
+        let s = "─test";
+        let result = truncate(s, 2);
+        assert_eq!(result, "...(truncated)");
+    }
+
+    #[test]
+    fn truncate_emoji_boundary() {
+        // '🔥' is 4 bytes. Truncating at byte 5 should back up to byte 4.
+        let s = "🔥hello";
+        let result = truncate(s, 5);
+        assert_eq!(result, "🔥h...(truncated)");
+    }
+
+    #[test]
+    fn floor_char_boundary_within_ascii() {
+        assert_eq!(floor_char_boundary("hello", 3), 3);
+    }
+
+    #[test]
+    fn floor_char_boundary_at_multibyte_interior() {
+        // '─' occupies bytes 0..3
+        let s = "─";
+        assert_eq!(floor_char_boundary(s, 1), 0);
+        assert_eq!(floor_char_boundary(s, 2), 0);
+        assert_eq!(floor_char_boundary(s, 3), 3);
+    }
+
+    #[test]
+    fn floor_char_boundary_beyond_len() {
+        assert_eq!(floor_char_boundary("hi", 100), 2);
     }
 }
