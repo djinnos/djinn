@@ -22,6 +22,10 @@ import { useSelectedProjectId } from "@/stores/useProjectStore";
 import { Button } from "@/components/ui/button";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 
+function ChatPage() {
+  return <div className="flex h-full items-center justify-center text-muted-foreground">Chat coming soon</div>;
+}
+
 function WelcomeStep() {
   return (
     <div className="flex flex-col gap-4 text-center">
@@ -67,10 +71,14 @@ function MainLayout() {
             {/* Global views (All Projects) */}
             <Route path="/kanban" element={<KanbanPage />} />
             <Route path="/epics" element={<RoadmapPage />} />
+            <Route path="/chat" element={<ChatPage />} />
+            <Route path="/chat/:sessionId" element={<ChatPage />} />
 
             {/* Project-scoped views */}
             <Route path="/projects/:projectId/kanban" element={<KanbanPage />} />
             <Route path="/projects/:projectId/epics" element={<RoadmapPage />} />
+            <Route path="/projects/:projectId/chat" element={<ChatPage />} />
+            <Route path="/projects/:projectId/chat/:sessionId" element={<ChatPage />} />
 
             {/* Task session (global) */}
             <Route path="/task/:taskId" element={<TaskSessionPage />} />

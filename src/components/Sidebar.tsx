@@ -12,6 +12,7 @@ import {
   Layers,
   FolderOpen,
   Plus,
+  MessageSquare,
 } from 'lucide-react';
 import { KanbanIcon } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
@@ -297,6 +298,8 @@ export function Sidebar() {
   useEffect(() => {
     if (location.pathname.includes('/epics')) {
       setActiveSection('epics');
+    } else if (location.pathname.includes('/chat')) {
+      setActiveSection('chat');
     } else if (location.pathname.startsWith('/settings')) {
       setActiveSection('settings');
     } else {
@@ -323,6 +326,10 @@ export function Sidebar() {
       case 'e':
         e.preventDefault();
         navigateToView('epics');
+        break;
+      case 'c':
+        e.preventDefault();
+        navigateToView('chat');
         break;
       case 's':
         e.preventDefault();
@@ -400,6 +407,16 @@ export function Sidebar() {
           isCollapsed={isCollapsed}
           onClick={() => navigateToView('epics')}
         />
+
+        <NavItem
+          icon={<MessageSquare className="h-4 w-4" />}
+          label="Chat"
+          hotkey="c"
+          isActive={activeSection === 'chat'}
+          isCollapsed={isCollapsed}
+          onClick={() => navigateToView('chat')}
+        />
+
         <NavItem
           icon={<Settings className="h-4 w-4" />}
           label="Settings"
