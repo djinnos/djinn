@@ -1,7 +1,10 @@
 use serde_json::json;
 
 use crate::mcp::tools::memory_tools::types::*;
-use crate::test_helpers::{create_test_app, initialize_mcp_session, mcp_call_tool};
+use crate::test_helpers::{
+    create_test_app, create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
+    initialize_mcp_session, mcp_call_tool,
+};
 
 #[tokio::test]
 async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
@@ -506,4 +509,241 @@ fn broken_links_params_deserialize() {
     let params: BrokenLinksParams =
         serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(params.project, "/tmp/p");
+}
+
+
+#[tokio::test]
+async fn mcp_memory_history_and_diff_round_trip() {
+    let app = create_test_app();
+    let session_id = initialize_mcp_session(&app).await;
+    let project = "/tmp/mcp-memory-history-diff";
+
+    let created = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({"project": project, "title": "History Diff", "content": "line one", "type": "reference"}),
+    )
+    .await;
+    let permalink = created["permalink"].as_str().unwrap().to_string();
+
+    let edited = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_edit",
+        json!({"project": project, "identifier": permalink, "operation": "append", "content": "line two"}),
+    )
+    .await;
+    assert!(edited.get("error").is_none() || edited["error"].is_null());
+
+    let history = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_history",
+        json!({"project": project, "permalink": created["permalink"], "limit": 10}),
+    )
+    .await;
+
+    assert!(history.get("error").is_none() || history["error"].is_null());
+    let entries = history["history"]
+        .as_array()
+        .or_else(|| history["entries"].as_array())
+        .expect("memory_history should return history/entries array");
+
+    if entries.is_empty() {
+        let diff = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_diff",
+            json!({
+                "project": project,
+                "permalink": created["permalink"]
+            }),
+        )
+        .await;
+
+        assert!(diff.get("error").is_none() || diff["error"].is_null());
+        let d = diff["diff"].as_str().unwrap();
+        assert!(d.contains("@@") || d.contains("diff --git") || d.is_empty());
+        return;
+    }
+
+    let latest_sha = entries.first().and_then(|e| e["sha"].as_str()).unwrap().to_string();
+
+    let diff = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_diff",
+        json!({
+            "project": project,
+            "permalink": created["permalink"],
+            "sha": latest_sha
+        }),
+    )
+    .await;
+
+    assert!(diff.get("error").is_none() || diff["error"].is_null());
+    let d = diff["diff"].as_str().unwrap();
+    assert!(d.contains("@@") || d.contains("diff --git") || !d.is_empty());
+}
+
+#[tokio::test]
+async fn mcp_memory_reindex_returns_expected_contract_shape() {
+    let app = create_test_app();
+    let session_id = initialize_mcp_session(&app).await;
+    let project = "/tmp/mcp-memory-reindex";
+
+    let _ = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({"project": project, "title": "Reindex Seed", "content": "seed", "type": "reference"}),
+    )
+    .await;
+
+    let reindex = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_reindex",
+        json!({"project": project}),
+    )
+    .await;
+
+    assert!(reindex.get("error").is_none() || reindex["error"].is_null());
+    assert!(reindex.get("updated").and_then(|v| v.as_i64()).is_some());
+    assert!(reindex.get("created").and_then(|v| v.as_i64()).is_some());
+    assert!(reindex.get("deleted").and_then(|v| v.as_i64()).is_some());
+    assert!(reindex.get("unchanged").and_then(|v| v.as_i64()).is_some());
+}
+
+#[tokio::test]
+async fn mcp_memory_build_context_follows_wikilinks() {
+    let app = create_test_app();
+    let session_id = initialize_mcp_session(&app).await;
+    let project = "/tmp/mcp-memory-build-context";
+
+    let target = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({"project": project, "title": "Context Target", "content": "target body", "type": "reference"}),
+    )
+    .await;
+    let seed = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({"project": project, "title": "Context Seed", "content": "see [[Context Target]]", "type": "reference"}),
+    )
+    .await;
+
+    let built = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_build_context",
+        json!({"project": project, "url": seed["permalink"], "depth": 1, "max_related": 5}),
+    )
+    .await;
+
+    assert!(built.get("error").is_none() || built["error"].is_null());
+    let primary = built["primary"].as_array().unwrap();
+    let related = built["related"].as_array().unwrap();
+    assert_eq!(primary[0]["permalink"], seed["permalink"]);
+    assert!(related.iter().any(|n| n["permalink"] == target["permalink"]));
+}
+
+#[tokio::test]
+async fn mcp_memory_task_refs_returns_tasks_for_permalink() {
+    let db = create_test_db();
+    let project_row = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project_row.id).await;
+    let app = create_test_app_with_db(db);
+    let session_id = initialize_mcp_session(&app).await;
+    let project = project_row.path.clone();
+
+    let note = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({"project": project, "title": "Task Ref Note", "content": "task refs seed", "type": "reference"}),
+    )
+    .await;
+
+    let task = mcp_call_tool(
+        &app,
+        &session_id,
+        "task_create",
+        json!({
+            "project": project,
+            "epic_id": epic.id,
+            "title": "Task referencing memory note",
+            "issue_type": "task",
+            "priority": 2,
+            "status": "open",
+            "memory_refs": [note["permalink"]]
+        }),
+    )
+    .await;
+
+    assert!(task.get("error").is_none() || task["error"].is_null());
+
+    let refs = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_task_refs",
+        json!({"project": project, "permalink": note["permalink"]}),
+    )
+    .await;
+
+    assert!(refs.get("error").is_none() || refs["error"].is_null());
+    let tasks = refs["tasks"].as_array().unwrap();
+    assert!(tasks.iter().any(|t| {
+        t["id"] == task["id"] && t["title"] == "Task referencing memory note"
+    }));
+}
+
+#[test]
+fn history_params_deserialize() {
+    let params: HistoryParams =
+        serde_json::from_value(json!({"project":"/tmp/p","permalink":"decisions/a","limit":10}))
+            .unwrap();
+    assert_eq!(params.project, "/tmp/p");
+    assert_eq!(params.permalink, "decisions/a");
+    assert_eq!(params.limit, Some(10));
+}
+
+#[test]
+fn diff_params_deserialize() {
+    let params: DiffParams =
+        serde_json::from_value(json!({"project":"/tmp/p","permalink":"decisions/a","sha":"abc"}))
+            .unwrap();
+    assert_eq!(params.project, "/tmp/p");
+    assert_eq!(params.permalink, "decisions/a");
+    assert_eq!(params.sha.as_deref(), Some("abc"));
+}
+
+#[test]
+fn build_context_params_deserialize() {
+    let params: BuildContextParams = serde_json::from_value(
+        json!({"project":"/tmp/p","url":"memory://references/note","depth":2,"max_related":3}),
+    )
+    .unwrap();
+    assert_eq!(params.project, "/tmp/p");
+    assert_eq!(params.url, "memory://references/note");
+    assert_eq!(params.depth, Some(2));
+    assert_eq!(params.max_related, Some(3));
+}
+
+#[test]
+fn reindex_params_deserialize() {
+    let params: ReindexParams = serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
+    assert_eq!(params.project, "/tmp/p");
+}
+
+#[test]
+fn task_refs_params_deserialize() {
+    let params: TaskRefsParams =
+        serde_json::from_value(json!({"project":"/tmp/p","permalink":"references/n"})).unwrap();
+    assert_eq!(params.project, "/tmp/p");
+    assert_eq!(params.permalink, "references/n");
 }

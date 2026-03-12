@@ -232,3 +232,40 @@ async fn task_timeline_not_found_returns_error_shape() {
     assert!(payload.get("sessions").is_none());
     assert!(payload.get("messages").is_none());
 }
+
+
+#[tokio::test]
+async fn session_messages_returns_messages_for_valid_session_id() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let sess = create_test_session(&db, &project.id, &task.id).await;
+
+    let msg_repo = SessionMessageRepository::new(db.clone(), tokio::sync::broadcast::channel(16).0);
+    msg_repo
+        .insert_message(
+            &sess.id,
+            &task.id,
+            "user",
+            &json!([{"type":"text","text":"hello"}]).to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let app = create_test_app_with_db(db);
+    let mcp_session = initialize_mcp_session(&app).await;
+    let payload = mcp_call_tool(
+        &app,
+        &mcp_session,
+        "session_messages",
+        json!({ "id": sess.id, "project": project.path }),
+    )
+    .await;
+
+    assert_eq!(payload.get("error"), None);
+    let messages = payload.get("messages").and_then(|v| v.as_array()).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].get("role").and_then(|v| v.as_str()), Some("user"));
+}
