@@ -251,6 +251,11 @@ export function KanbanBoard({
     });
   }, [tasks, epicFilters, ownerFilters, priorityFilters, textFilter]);
 
+  const isGrooming = useMemo(
+    () => tasks.some((t) => t.status === "grooming"),
+    [tasks]
+  );
+
   const groupedByStatusThenEpic = useMemo(() => {
     const byColumn = new Map<ColumnKey, Map<string, Task[]>>();
 
@@ -394,7 +399,7 @@ export function KanbanBoard({
               <Card
                 className="relative min-h-0 flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
             >
-              {column.key === "backlog" && (
+              {column.key === "backlog" && isGrooming && (
                 <img src={scribeAvatar} alt="Scribe" className="pointer-events-none absolute right-4 top-0 z-0 h-16 w-16" />
               )}
               <div className="flex flex-col">
@@ -413,7 +418,7 @@ export function KanbanBoard({
                     )}
                     <span className="leading-none">{column.label}</span>
                     <span className="text-xs leading-none text-muted-foreground">{taskCount}</span>
-                    {column.key === "backlog" && (
+                    {column.key === "backlog" && isGrooming && (
                       <span className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-amber-400 bg-amber-400/10 animate-pulse">
                         grooming
                       </span>
