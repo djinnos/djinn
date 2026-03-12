@@ -1,5 +1,5 @@
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
@@ -7,6 +7,7 @@ use tower_http::cors::CorsLayer;
 use crate::mcp;
 use crate::sse;
 
+mod chat;
 mod state;
 pub use state::AppState;
 
@@ -21,6 +22,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/events", get(sse::events_handler))
         .route("/db-info", get(sse::db_info_handler))
+        .route("/api/chat/completions", post(chat::completions_handler))
         .nest("/mcp", mcp_router)
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -228,6 +230,82 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chat_completions_rejects_empty_messages() {
+        let app = test_helpers::create_test_app();
+
+        let payload = serde_json::json!({
+            "model": "openai/gpt-4o-mini",
+            "messages": []
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/completions")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 400);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).expect("response body should be utf-8");
+        assert!(text.contains("messages must not be empty"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chat_completions_rejects_unknown_provider() {
+        let app = test_helpers::create_test_app();
+
+        let payload = serde_json::json!({
+            "model": "doesnotexist/model",
+            "messages": [
+                {"role": "user", "content": "hello"}
+            ]
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/completions")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 400);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).expect("response body should be utf-8");
+        assert!(text.contains("unknown provider"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chat_completions_rejects_missing_provider_credential() {
+        let app = test_helpers::create_test_app();
+
+        let payload = serde_json::json!({
+            "model": "openai/gpt-4o-mini",
+            "messages": [
+                {"role": "user", "content": "hello"}
+            ]
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/completions")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 400);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).expect("response body should be utf-8");
+        assert!(text.contains("provider credential resolution failed"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
