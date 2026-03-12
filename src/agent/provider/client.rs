@@ -3,6 +3,7 @@ use async_stream::stream;
 use futures::{Stream, StreamExt};
 use reqwest::header::HeaderMap;
 use std::pin::Pin;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::io::StreamReader;
 
@@ -19,6 +20,17 @@ const BACKOFF_MULTIPLIER: f64 = 2.0;
 /// Maximum backoff interval in milliseconds.
 const MAX_BACKOFF_MS: u64 = 30_000;
 
+/// Overall HTTP request timeout (covers connect + full response).
+/// Goose uses 600s; OpenCode uses 300s. We use 600s since LLM generations
+/// with tool use can legitimately take minutes.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Timeout for reading the next SSE chunk from a streaming response.
+/// If the provider stops sending data for this long, we consider the stream
+/// dead. This catches the "hung connection" scenario that the overall request
+/// timeout might not catch once headers have already been received.
+const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// HTTP client for streaming SSE requests to LLM provider APIs.
 pub struct ApiClient {
     inner: reqwest::Client,
@@ -27,6 +39,7 @@ pub struct ApiClient {
 impl ApiClient {
     pub fn new() -> Self {
         let inner = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
             .pool_max_idle_per_host(10)
             .build()
             .expect("failed to build reqwest client");
@@ -145,8 +158,8 @@ impl ApiClient {
             let mut lines = BufReader::new(stream_reader).lines();
 
             loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => {
+                match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, lines.next_line()).await {
+                    Ok(Ok(Some(line))) => {
                         // SSE lines starting with "data: "
                         if let Some(data) = line.strip_prefix("data: ") {
                             let data = data.trim();
@@ -157,9 +170,16 @@ impl ApiClient {
                         }
                         // Skip event:, id:, comment lines, and blank lines
                     }
-                    Ok(None) => break, // end of stream
-                    Err(e) => {
+                    Ok(Ok(None)) => break, // end of stream
+                    Ok(Err(e)) => {
                         yield Err(anyhow!("SSE read error: {}", e));
+                        break;
+                    }
+                    Err(_) => {
+                        yield Err(anyhow!(
+                            "SSE stream timed out: no data received for {}s",
+                            STREAM_CHUNK_TIMEOUT.as_secs()
+                        ));
                         break;
                     }
                 }
@@ -262,5 +282,39 @@ fn pseudo_random_f64() -> f64 {
 impl Default for ApiClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_timeout_is_10_minutes() {
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn stream_chunk_timeout_is_2_minutes() {
+        assert_eq!(STREAM_CHUNK_TIMEOUT, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn backoff_delay_first_attempt() {
+        let delay = backoff_delay_ms(1);
+        // First attempt: 1000ms * 2^0 = 1000ms, with 0.8-1.2x jitter
+        assert!(delay >= 800 && delay <= 1200, "delay was {delay}");
+    }
+
+    #[test]
+    fn backoff_delay_capped_at_max() {
+        let delay = backoff_delay_ms(100);
+        // Should be capped at MAX_BACKOFF_MS (30s) * 1.2x jitter max
+        assert!(delay <= 36_000, "delay was {delay}");
+    }
+
+    #[test]
+    fn client_builds_successfully() {
+        let _client = ApiClient::new();
     }
 }

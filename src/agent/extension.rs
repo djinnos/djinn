@@ -23,6 +23,18 @@ struct IncomingToolCall {
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
+/// Find the largest byte index <= `idx` that is a valid UTF-8 char boundary.
+fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    let mut i = idx;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 async fn dispatch_tool_call<T>(
     state: &AppState,
     tool_call: &T,
@@ -246,9 +258,10 @@ async fn call_task_show(
                                 if let Some(s) = value.as_str()
                                     && s.len() > MAX_PAYLOAD_CHARS
                                 {
+                                    let end = floor_char_boundary(s, MAX_PAYLOAD_CHARS);
                                     let truncated = format!(
                                         "{}… [truncated, {} total chars]",
-                                        &s[..MAX_PAYLOAD_CHARS],
+                                        &s[..end],
                                         s.len()
                                     );
                                     *value = serde_json::json!(truncated);
@@ -315,9 +328,10 @@ async fn call_task_activity_list(
                     if let Some(s) = value.as_str()
                         && s.len() > MAX_PAYLOAD_CHARS
                     {
+                        let end = floor_char_boundary(s, MAX_PAYLOAD_CHARS);
                         let truncated = format!(
                             "{}… [truncated, {} total chars]",
-                            &s[..MAX_PAYLOAD_CHARS],
+                            &s[..end],
                             s.len()
                         );
                         *value = serde_json::json!(truncated);
@@ -1490,5 +1504,45 @@ pub(crate) async fn call_tool(
 ) -> Result<serde_json::Value, String> {
     let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
     dispatch_tool_call(state, &synthetic, worktree_path).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn floor_char_boundary_ascii() {
+        assert_eq!(floor_char_boundary("hello", 3), 3);
+    }
+
+    #[test]
+    fn floor_char_boundary_multibyte_interior() {
+        // '─' (U+2500) is 3 bytes: E2 94 80
+        let s = "─";
+        assert_eq!(floor_char_boundary(s, 1), 0);
+        assert_eq!(floor_char_boundary(s, 2), 0);
+        assert_eq!(floor_char_boundary(s, 3), 3);
+    }
+
+    #[test]
+    fn floor_char_boundary_emoji() {
+        // '🔥' is 4 bytes
+        let s = "🔥x";
+        assert_eq!(floor_char_boundary(s, 1), 0);
+        assert_eq!(floor_char_boundary(s, 2), 0);
+        assert_eq!(floor_char_boundary(s, 3), 0);
+        assert_eq!(floor_char_boundary(s, 4), 4);
+        assert_eq!(floor_char_boundary(s, 5), 5);
+    }
+
+    #[test]
+    fn floor_char_boundary_beyond_len() {
+        assert_eq!(floor_char_boundary("hi", 100), 2);
+    }
+
+    #[test]
+    fn floor_char_boundary_zero() {
+        assert_eq!(floor_char_boundary("hello", 0), 0);
+    }
 }
 
