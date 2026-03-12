@@ -442,7 +442,7 @@ export function KanbanBoard({
                     const isCollapsed = !!collapsedEpics[collapseKey];
 
                     return (
-                      <Card key={epicKey} size="sm" className="gap-0 cursor-pointer bg-zinc-900 py-3 ring-white/[0.04] transition-colors hover:bg-zinc-800/80" onClick={() => toggleEpic(column.key, epicKey)}>
+                      <Card key={epicKey} size="sm" className="gap-0 cursor-pointer bg-zinc-900 py-3 ring-white/[0.04]" onClick={() => toggleEpic(column.key, epicKey)}>
                         <CardContent>
                           <div className="flex w-full items-center justify-between gap-2 px-1 py-1.5 text-sm font-medium">
                             <span className="flex items-center gap-2 truncate">
