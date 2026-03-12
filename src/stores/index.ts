@@ -2,6 +2,9 @@
  * Stores index - Export all store modules
  */
 
+// Chat Store
+export { useChatStore, type ChatState, type ChatSession, type ChatMessage } from "./chatStore";
+
 // SSE Store
 export { sseStore, type SSEState, type SSEEvent, type SSEEventType } from "./sseStore";
 
