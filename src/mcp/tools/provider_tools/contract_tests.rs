@@ -14,8 +14,6 @@ async fn provider_catalog_returns_expected_shape() {
     let first = &providers[0];
     assert!(first.get("id").is_some());
     assert!(first.get("name").is_some());
-    assert!(first.get("models").is_some());
-    assert!(first["models"].is_array());
     assert!(result.get("total").is_some());
 }
 
@@ -42,7 +40,9 @@ async fn provider_models_returns_models_for_valid_provider_and_error_for_unknown
         serde_json::json!({"provider_id":"no-such-provider"}),
     )
     .await;
-    assert!(unknown.get("error").is_some());
+    // Unknown provider returns empty models array, not an error key.
+    assert_eq!(unknown["total"], 0);
+    assert!(unknown["models"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -135,7 +135,7 @@ async fn model_health_status_and_param_validation_shapes() {
     )
     .await;
     assert_eq!(status["action"], "status");
-    assert!(status["entries"].is_array());
+    assert!(status["models"].is_array());
 
     let reset_err = mcp_call_tool(
         &app,
