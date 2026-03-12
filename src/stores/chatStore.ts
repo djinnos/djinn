@@ -33,6 +33,7 @@ export interface ChatState {
   addMessage: (sessionId: string, message: ChatMessage) => void;
   appendStreamingText: (sessionId: string, chunk: string) => void;
   finalizeStreaming: (sessionId: string, message?: Omit<ChatMessage, 'content'> & { content?: string }) => void;
+  updateSessionTitle: (sessionId: string, title: string) => void;
   clearStreaming: (sessionId: string) => void;
   getSessionsForProject: (projectPath: string | null) => ChatSession[];
 }
@@ -192,6 +193,19 @@ export const useChatStore = create<ChatState>()(
             ),
           };
         });
+      },
+
+      updateSessionTitle: (sessionId, title) => {
+        const normalizedTitle = title.trim().replace(/\s+/g, ' ');
+        if (!normalizedTitle) return;
+
+        set((state) => ({
+          sessions: state.sessions.map((session) =>
+            session.id === sessionId
+              ? { ...session, title: normalizedTitle, updatedAt: Date.now() }
+              : session
+          ),
+        }));
       },
 
       clearStreaming: (sessionId) => {

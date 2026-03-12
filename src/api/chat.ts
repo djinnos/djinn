@@ -8,6 +8,8 @@ async function getBaseUrl(): Promise<string> {
 
 export interface SendChatMessageOptions {
   signal?: AbortSignal;
+  systemPrompt?: string;
+  onCompleteText?: (text: string) => void;
 }
 
 export async function sendChatMessage(
@@ -22,12 +24,15 @@ export async function sendChatMessage(
 ): Promise<void> {
   try {
     const baseUrl = await getBaseUrl();
+    let completedText = "";
+
     const response = await fetch(`${baseUrl}/api/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        system_prompt: options?.systemPrompt,
         messages: messages.map((message) => ({
           role: message.role,
           content: message.content,
@@ -84,7 +89,10 @@ export async function sendChatMessage(
       switch (eventType) {
         case "delta": {
           const text = typeof payload.text === "string" ? payload.text : "";
-          if (text) onDelta(text);
+          if (text) {
+            onDelta(text);
+            completedText += text;
+          }
           break;
         }
         case "tool_call": {
@@ -125,6 +133,10 @@ export async function sendChatMessage(
 
     if (buffer.trim()) {
       handleEvent(buffer);
+    }
+
+    if (options?.onCompleteText) {
+      options.onCompleteText(completedText);
     }
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {

@@ -22,6 +22,7 @@ export function ChatView() {
   const addMessage = useChatStore((state) => state.addMessage);
   const appendStreamingText = useChatStore((state) => state.appendStreamingText);
   const finalizeStreaming = useChatStore((state) => state.finalizeStreaming);
+  const updateSessionTitle = useChatStore((state) => state.updateSessionTitle);
   const clearStreaming = useChatStore((state) => state.clearStreaming);
   const messages = useChatStore((state) => (state.activeSessionId ? state.messagesBySession[state.activeSessionId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES));
   const streamingText = useChatStore((state) => (state.activeSessionId ? state.streamingBySession[state.activeSessionId] ?? '' : ''));
@@ -70,6 +71,36 @@ export function ChatView() {
           createdAt: Date.now(),
           toolCalls: toolCalls.map((name) => ({ name })),
         });
+
+        const state = useChatStore.getState();
+        const session = state.sessions.find((s) => s.id === sessionId);
+        const sessionMessages = state.messagesBySession[sessionId] ?? [];
+        const firstUserMessage = sessionMessages.find((m) => m.role === 'user');
+        const firstAssistantMessage = sessionMessages.find((m) => m.role === 'assistant');
+
+        if (
+          session?.title === 'New Chat' &&
+          firstUserMessage &&
+          firstAssistantMessage
+        ) {
+          void sendChatMessage(
+            [
+              { ...firstUserMessage, content: firstUserMessage.content },
+              { ...firstAssistantMessage, content: firstAssistantMessage.content },
+            ],
+            selectedModel,
+            projectPath,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            {
+              systemPrompt:
+                'Generate a concise 3-6 word title for this conversation. Return only the title text, nothing else.',
+              onCompleteText: (titleText) => updateSessionTitle(sessionId, titleText),
+            }
+          );
+        }
       },
       (message) => {
         toast.error(message);

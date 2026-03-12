@@ -70,6 +70,14 @@ describe('chatStore', () => {
     expect(useChatStore.getState().messagesBySession[id]).toHaveLength(0);
   });
 
+
+
+  it('updates session title directly', () => {
+    const id = useChatStore.getState().createSession(null);
+    useChatStore.getState().updateSessionTitle(id, 'Generated Title');
+    expect(useChatStore.getState().sessions.find((s) => s.id === id)?.title).toBe('Generated Title');
+  });
+
   it('clearStreaming resets streaming and loading', () => {
     const id = useChatStore.getState().createSession(null);
     useChatStore.getState().appendStreamingText(id, 'x');
