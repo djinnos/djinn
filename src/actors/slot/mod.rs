@@ -102,7 +102,7 @@ mod helpers;
 mod lifecycle;
 mod pool;
 mod reply_loop;
-mod verification;
+pub(crate) mod verification;
 mod worktree;
 
 pub use actor::*;
