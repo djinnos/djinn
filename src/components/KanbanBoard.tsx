@@ -415,7 +415,7 @@ export function KanbanBoard({
                         <span className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-amber-400 bg-amber-400/10 animate-pulse">
                           grooming
                         </span>
-                        <img src={scribeAvatar} alt="Scribe" className="size-5 rounded-full ring-1 ring-amber-400/40" />
+                        <img src={scribeAvatar} alt="Scribe" className="ml-auto h-8 w-8" />
                       </>
                     )}
                   </div>
