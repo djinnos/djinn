@@ -2,6 +2,9 @@
 //!
 //! Ported from Goose's `chatgpt_codex.rs`. Handles the full PKCE browser-redirect
 //! flow, token caching, and silent refresh for the ChatGPT Codex provider.
+//!
+//! Tokens are stored encrypted in the credentials DB table. Filesystem cache
+//! (`~/.djinn/oauth/codex.json`) is supported as a migration fallback only.
 
 use anyhow::{anyhow, Result};
 use base64::Engine as _;
@@ -10,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex as TokioMutex};
+
+use crate::db::repositories::credential::CredentialRepository;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -33,6 +38,9 @@ const OAUTH_SCOPES: &[&str] = &["openid", "profile", "email", "offline_access"];
 
 /// Default model for ChatGPT Codex provider.
 pub const CODEX_DEFAULT_MODEL: &str = "gpt-5.1-codex";
+
+/// Credential key name for DB-stored OAuth tokens.
+pub const CODEX_OAUTH_DB_KEY: &str = "__OAUTH_CHATGPT_CODEX";
 
 // ─── Token types ─────────────────────────────────────────────────────────────
 
@@ -91,15 +99,56 @@ impl CodexTokens {
     pub fn clear() {
         let _ = std::fs::remove_file(Self::cache_path());
     }
+
+    /// Load tokens from the encrypted credential DB.
+    /// Falls back to the filesystem cache and migrates it into the DB.
+    pub async fn load_from_db(repo: &CredentialRepository) -> Option<Self> {
+        // Try DB first.
+        if let Ok(Some(json)) = repo.get_decrypted(CODEX_OAUTH_DB_KEY).await {
+            if let Ok(tokens) = serde_json::from_str::<Self>(&json) {
+                return Some(tokens);
+            }
+            tracing::warn!("Codex: corrupt token JSON in DB, ignoring");
+        }
+        // Fallback: migrate from filesystem.
+        if let Some(tokens) = Self::load_cached() {
+            tracing::info!("Codex: migrating tokens from filesystem to DB");
+            if let Err(e) = tokens.save_to_db(repo).await {
+                tracing::warn!("Codex: migration save failed: {e}");
+            }
+            // Remove old file after successful migration.
+            let _ = std::fs::remove_file(Self::cache_path());
+            return Some(tokens);
+        }
+        None
+    }
+
+    /// Persist tokens to the encrypted credential DB.
+    pub async fn save_to_db(&self, repo: &CredentialRepository) -> Result<()> {
+        let json = serde_json::to_string(self)?;
+        repo.set("chatgpt_codex", CODEX_OAUTH_DB_KEY, &json)
+            .await
+            .map_err(|e| anyhow!("failed to save codex tokens to DB: {e}"))?;
+        Ok(())
+    }
+
+    /// Remove tokens from the DB (and any lingering filesystem cache).
+    pub async fn clear_from_db(repo: &CredentialRepository) {
+        let _ = repo.delete(CODEX_OAUTH_DB_KEY).await;
+        let _ = std::fs::remove_file(Self::cache_path());
+    }
 }
 
 /// Attempt a silent token refresh using the cached refresh_token.
-/// Returns refreshed `CodexTokens` on success, saving them to disk.
-pub async fn refresh_cached_token(cached: &CodexTokens) -> Result<CodexTokens> {
+/// Returns refreshed `CodexTokens` on success, saving them to the DB.
+pub async fn refresh_cached_token(
+    cached: &CodexTokens,
+    repo: &CredentialRepository,
+) -> Result<CodexTokens> {
     let tr = refresh_token(ISSUER, &cached.refresh_token).await?;
     let account_id = pick_account_id(&tr).or(cached.account_id.clone());
     let tokens = token_response_to_tokens(tr, account_id);
-    let _ = tokens.save();
+    tokens.save_to_db(repo).await?;
     tracing::info!("Codex: token refreshed successfully (lifecycle)");
     Ok(tokens)
 }
@@ -387,12 +436,16 @@ fn open_browser(url: &str) {
 
 /// Perform the full Codex PKCE OAuth flow.
 ///
-/// 1. Checks disk cache; returns immediately if unexpired.
+/// 1. Checks DB cache; returns immediately if unexpired.
 /// 2. Attempts a silent token refresh if the cached token is expired.
 /// 3. Falls back to a full browser redirect if refresh fails or no cache exists.
-pub async fn run_codex_flow() -> Result<CodexTokens> {
+///
+/// Tokens are persisted to the encrypted credential DB on success. On refresh
+/// failure the existing tokens are **not** cleared — the refresh token is
+/// preserved so a future attempt can retry.
+pub async fn run_codex_flow(repo: &CredentialRepository) -> Result<CodexTokens> {
     // 1. Check cache
-    if let Some(cached) = CodexTokens::load_cached() {
+    if let Some(cached) = CodexTokens::load_from_db(repo).await {
         if !cached.is_expired() {
             tracing::debug!("Codex: using cached access token");
             return Ok(cached);
@@ -402,13 +455,13 @@ pub async fn run_codex_flow() -> Result<CodexTokens> {
             Ok(tr) => {
                 let account_id = pick_account_id(&tr).or(cached.account_id.clone());
                 let tokens = token_response_to_tokens(tr, account_id);
-                let _ = tokens.save();
+                let _ = tokens.save_to_db(repo).await;
                 tracing::info!("Codex: token refreshed successfully");
                 return Ok(tokens);
             }
             Err(e) => {
+                // Do NOT clear tokens — keep the refresh token for future retries.
                 tracing::warn!("Codex: token refresh failed, starting full flow: {}", e);
-                CodexTokens::clear();
             }
         }
     }
@@ -452,7 +505,7 @@ pub async fn run_codex_flow() -> Result<CodexTokens> {
     let tr = exchange_code(ISSUER, &code, &redirect_uri, &pkce).await?;
     let account_id = pick_account_id(&tr);
     let tokens = token_response_to_tokens(tr, account_id);
-    let _ = tokens.save();
+    tokens.save_to_db(repo).await?;
     tracing::info!("Codex OAuth: authentication successful");
     Ok(tokens)
 }

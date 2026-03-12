@@ -54,7 +54,8 @@ fn provider_connection_status(
             .iter()
             .any(|env| credential_key_names.contains(env));
 
-    let oauth_connected = !oauth_keys.is_empty() && builtin::is_oauth_key_present(oauth_keys);
+    let oauth_connected =
+        !oauth_keys.is_empty() && builtin::is_oauth_key_present(oauth_keys, credential_key_names);
 
     let mut methods = Vec::new();
     if credential_connected {
@@ -680,11 +681,15 @@ impl DjinnMcpServer {
             });
         };
 
+        let credential_repo =
+            CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
         let result = match flow_kind {
-            OAuthFlowKind::Codex => codex::run_codex_flow().await.map(|_| ()),
+            OAuthFlowKind::Codex => codex::run_codex_flow(&credential_repo).await.map(|_| ()),
             OAuthFlowKind::Copilot => {
                 match copilot::start_copilot_flow().await {
-                    Ok(session) => copilot::poll_copilot_flow(session).await.map(|_| ()),
+                    Ok(session) => copilot::poll_copilot_flow(session, &credential_repo)
+                        .await
+                        .map(|_| ()),
                     Err(e) => Err(e),
                 }
             }
@@ -917,7 +922,7 @@ impl DjinnMcpServer {
         let oauth_keys = builtin::all_oauth_keys_for_provider(provider_id);
         let oauth_cleared = !oauth_keys.is_empty();
         if oauth_cleared {
-            builtin::clear_oauth_tokens(&oauth_keys);
+            builtin::clear_oauth_tokens(&oauth_keys, &credential_repo).await;
         }
 
         // 3. Delete custom provider entry (no-op for built-in providers).

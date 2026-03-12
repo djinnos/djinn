@@ -459,12 +459,21 @@ pub(crate) async fn load_provider_credential(
         "chatgpt_codex" | "githubcopilot" => provider_id,
         other => crate::provider::builtin::resolve_oauth_provider(other).unwrap_or(other),
     };
+    let credential_repo =
+        CredentialRepository::new(app_state.db().clone(), app_state.events().clone());
     match effective_oauth_id {
         "chatgpt_codex" => {
-            if let Some(tokens) = crate::agent::oauth::codex::CodexTokens::load_cached() {
+            if let Some(tokens) =
+                crate::agent::oauth::codex::CodexTokens::load_from_db(&credential_repo).await
+            {
                 if tokens.is_expired() {
                     // Attempt silent refresh.
-                    match crate::agent::oauth::codex::refresh_cached_token(&tokens).await {
+                    match crate::agent::oauth::codex::refresh_cached_token(
+                        &tokens,
+                        &credential_repo,
+                    )
+                    .await
+                    {
                         Ok(refreshed) => {
                             return Ok(ProviderCredential::OAuthConfig(
                                 crate::agent::oauth::codex_provider_config(&refreshed),
@@ -486,14 +495,21 @@ pub(crate) async fn load_provider_credential(
             }
         }
         "githubcopilot" => {
-            if let Some(tokens) = crate::agent::oauth::copilot::CopilotTokens::load_cached() {
+            if let Some(tokens) =
+                crate::agent::oauth::copilot::CopilotTokens::load_from_db(&credential_repo).await
+            {
                 if !tokens.is_expired() {
                     return Ok(ProviderCredential::OAuthConfig(
                         crate::agent::oauth::copilot_provider_config(&tokens),
                     ));
                 }
                 // Copilot refresh requires the github_token → try exchange.
-                match crate::agent::oauth::copilot::refresh_copilot_token(&tokens).await {
+                match crate::agent::oauth::copilot::refresh_copilot_token(
+                    &tokens,
+                    &credential_repo,
+                )
+                .await
+                {
                     Ok(refreshed) => {
                         return Ok(ProviderCredential::OAuthConfig(
                             crate::agent::oauth::copilot_provider_config(&refreshed),
@@ -521,8 +537,7 @@ pub(crate) async fn load_provider_credential(
         .and_then(|p| p.env_vars.into_iter().next())
         .unwrap_or_else(|| format!("{}_API_KEY", provider_id.to_ascii_uppercase()));
 
-    let repo = CredentialRepository::new(app_state.db().clone(), app_state.events().clone());
-    let key = repo
+    let key = credential_repo
         .get_decrypted(&key_name)
         .await
         .map_err(|e| anyhow::anyhow!("credential lookup failed: {e}"))?;
