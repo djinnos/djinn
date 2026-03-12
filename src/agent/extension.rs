@@ -1448,6 +1448,284 @@ where
     serde_json::from_value(value)
 }
 
+/// Returns the planning-safe subset of MCP tool schemas for chat LLM usage.
+///
+/// This intentionally excludes shell/write/edit and any filesystem-mutating
+/// tools. It includes only project-management tool families requested by design.
+pub fn chat_tool_schemas() -> Vec<RmcpTool> {
+    vec![
+        // task_*
+        tool_task_create(),
+        tool_task_list(),
+        tool_task_show(),
+        tool_task_update(),
+        tool_task_transition(),
+        RmcpTool::new(
+            "task_count".to_string(),
+            "Count tasks matching optional filters. Supports optional grouping by status/priority/type/owner/epic and returns grouped counts when requested.".to_string(),
+            object!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Optional project path/name/UUID; auto-resolved from current session when omitted"},
+                    "status": {"type": "string"},
+                    "issue_type": {"type": "string"},
+                    "priority": {"type": "integer"},
+                    "text": {"type": "string", "description": "Free-text search in title/description"},
+                    "label": {"type": "string", "description": "Filter tasks containing this label"},
+                    "parent": {"type": "string", "description": "Epic ID to filter by"},
+                    "group_by": {"type": "string", "enum": ["status", "priority", "issue_type", "owner", "epic"]}
+                }
+            }),
+        ),
+        tool_task_comment_add(),
+        tool_task_blocked_list(),
+        RmcpTool::new(
+            "task_blockers_list".to_string(),
+            "List blockers in a project with blocker statuses, blocked counts, and sample blocked tasks.".to_string(),
+            object!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Optional project path/name/UUID; auto-resolved from current session when omitted"},
+                    "status": {"type": "string", "description": "Optional blocker status filter"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0}
+                }
+            }),
+        ),
+        RmcpTool::new(
+            "task_ready".to_string(),
+            "List ready-to-start tasks in a project (open and not blocked by open tasks), sorted by priority asc then id desc.".to_string(),
+            object!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Optional project path/name/UUID; auto-resolved from current session when omitted"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0}
+                }
+            }),
+        ),
+        tool_task_activity_list(),
+        RmcpTool::new(
+            "task_timeline".to_string(),
+            "task_timeline(task_id) returns sessions, all conversation messages (with timestamps), and activity log entries for a task in a single call.".to_string(),
+            object!({
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task UUID or short_id"},
+                    "session_id": {"type": "string", "description": "Optional specific session UUID to filter messages"},
+                    "limit_messages": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 5000},
+                    "limit_activity": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1000}
+                }
+            }),
+        ),
+        // epic_*
+        RmcpTool::new(
+            "epic_create".to_string(),
+            "Create an epic in a project. Title required.".to_string(),
+            object!({
+                "type": "object",
+                "required": ["title"],
+                "properties": {
+                    "project": {"type": "string", "description": "Optional project path/name/UUID; auto-resolved from current session when omitted"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "priority": {"type": "integer"},
+                    "status": {"type": "string"},
+                    "owner": {"type": "string"}
+                }
+            }),
+        ),
+        RmcpTool::new(
+            "epic_list".to_string(),
+            "List epics with optional filters and pagination.".to_string(),
+            object!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Optional project path/name/UUID; auto-resolved from current session when omitted"},
+                    "status": {"type": "string"},
+                    "priority": {"type": "integer"},
+                    "owner": {"type": "string"},
+                    "text": {"type": "string", "description": "Free-text search in title/description"},
+                    "sort": {"type": "string", "description": "sort key (e.g., priority, created_at, updated_at)"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0}
+                }
+            }),
+        ),
+        RmcpTool::new(
+            "epic_show".to_string(),
+            "Show a single epic by UUID or short_id.".to_string(),
+            object!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string", "description": "Epic UUID or short_id"}
+                }
+            }),
+        ),
+        RmcpTool::new(
+            "epic_tasks".to_string(),
+            "List tasks under an epic with optional status filter and pagination.".to_string(),
+            object!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string", "description": "Epic UUID or short_id"},
+                    "status": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0}
+                }
+            }),
+        ),
+        RmcpTool::new(
+            "epic_update".to_string(),
+            "Update mutable fields on an epic.".to_string(),
+            object!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string", "description": "Epic UUID or short_id"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "priority": {"type": "integer"},
+                    "owner": {"type": "string"},
+                    "status": {"type": "string"}
+                }
+            }),
+        ),
+        RmcpTool::new(
+            "epic_delete".to_string(),
+            "Delete an epic and all its child tasks (CASCADE). Returns {ok, deleted_task_count}. Accepts epic UUID or short_id.".to_string(),
+            object!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string", "description": "Epic UUID or short_id"}
+                }
+            }),
+        ),
+        RmcpTool::new(
+            "epic_close".to_string(),
+            "Close an epic by UUID or short_id.".to_string(),
+            object!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string", "description": "Epic UUID or short_id"}
+                }
+            }),
+        ),
+        RmcpTool::new(
+            "epic_reopen".to_string(),
+            "Reopen a closed epic by UUID or short_id.".to_string(),
+            object!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string", "description": "Epic UUID or short_id"}
+                }
+            }),
+        ),
+        RmcpTool::new(
+            "epic_count".to_string(),
+            "Count epics matching optional filters. Supports optional grouping by status/priority/owner and returns grouped counts when requested.".to_string(),
+            object!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Optional project path/name/UUID; auto-resolved from current session when omitted"},
+                    "status": {"type": "string"},
+                    "priority": {"type": "integer"},
+                    "owner": {"type": "string"},
+                    "text": {"type": "string", "description": "Free-text search in title/description"},
+                    "group_by": {"type": "string", "enum": ["status", "priority", "owner"]}
+                }
+            }),
+        ),
+        // memory_*
+        tool_memory_read(),
+        tool_memory_search(),
+        RmcpTool::new(
+            "memory_write".to_string(),
+            "Create a new memory note in the project knowledge base.".to_string(),
+            object!({
+                "type": "object",
+                "required": ["project", "title", "content"],
+                "properties": {
+                    "project": {"type": "string", "description": "Absolute project path"},
+                    "title": {"type": "string"},
+                    "content": {"type": "string"},
+                    "type": {"type": "string", "enum": ["general", "decision", "architecture", "api", "bug", "runbook", "reference", "adr"]},
+                    "folder": {"type": "string", "description": "Optional folder override under memory root"},
+                    "tags": {"type": "array", "items": {"type": "string"}}
+                }
+            }),
+        ),
+        RmcpTool::new(
+            "memory_catalog".to_string(),
+            "Return a structured catalog of notes in project memory.".to_string(),
+            object!({
+                "type": "object",
+                "required": ["project"],
+                "properties": {
+                    "project": {"type": "string", "description": "Absolute project path"}
+                }
+            }),
+        ),
+        RmcpTool::new(
+            "memory_list".to_string(),
+            "List note paths in project memory with optional folder and type filters.".to_string(),
+            object!({
+                "type": "object",
+                "required": ["project"],
+                "properties": {
+                    "project": {"type": "string", "description": "Absolute project path"},
+                    "folder": {"type": "string"},
+                    "type": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}
+                }
+            }),
+        ),
+        RmcpTool::new(
+            "memory_build_context".to_string(),
+            "Build a contextual memory bundle from a seed query/identifier by traversing links and relevance.".to_string(),
+            object!({
+                "type": "object",
+                "required": ["project"],
+                "properties": {
+                    "project": {"type": "string", "description": "Absolute project path"},
+                    "query": {"type": "string"},
+                    "identifier": {"type": "string"},
+                    "max_notes": {"type": "integer", "minimum": 1, "maximum": 100, "default": 12}
+                }
+            }),
+        ),
+        // board/execution
+        RmcpTool::new(
+            "board_health".to_string(),
+            "Summarize project board health (status counts, blocked/open, stale in-progress).".to_string(),
+            object!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Optional project path/name/UUID; auto-resolved from current session when omitted"},
+                    "stale_hours": {"type": "integer", "minimum": 1, "default": 24}
+                }
+            }),
+        ),
+        RmcpTool::new(
+            "execution_status".to_string(),
+            "Report execution/session status for a task, including active worker session details when present.".to_string(),
+            object!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string", "description": "Task UUID or short ID"}
+                }
+            }),
+        ),
+    ]
+}
+
 /// Returns the JSON tool schemas for the given agent type, suitable for
 /// passing directly to the `LlmProvider::stream` call in the Djinn-native
 /// reply loop.
