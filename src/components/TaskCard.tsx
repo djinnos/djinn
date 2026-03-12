@@ -144,9 +144,6 @@ function getCardTint(task: Task): { ring: string; bg: string; hover: string; act
 // --- Backlog badge ---
 
 function getBacklogBadge(status: string): { label: string; className: string } | null {
-  if (status === "grooming" || status === "backlog") {
-    return { label: "grooming", className: "text-zinc-400 bg-zinc-400/10" };
-  }
   if (status === "ready") {
     return { label: "ready", className: "text-violet-400 bg-violet-400/10" };
   }
