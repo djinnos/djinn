@@ -44,7 +44,7 @@ export function ChatView() {
   const groupedModels = useMemo(() => {
     const groups = new Map<string, typeof models>();
     for (const model of models) {
-      const providerId = model.provider_id;
+      const providerId = model.provider_id ?? 'other';
       const current = groups.get(providerId) ?? [];
       current.push(model);
       groups.set(providerId, current);
