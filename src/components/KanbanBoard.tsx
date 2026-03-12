@@ -392,8 +392,11 @@ export function KanbanBoard({
             <div key={column.key} className="flex min-h-0 min-w-[320px] flex-1">
               {colIdx > 0 && <div className="w-px shrink-0 self-stretch bg-white/[0.03]" />}
               <Card
-                className="min-h-0 flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
+                className="relative min-h-0 flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
             >
+              {column.key === "backlog" && (
+                <img src={scribeAvatar} alt="Scribe" className="pointer-events-none absolute right-4 top-6 z-0 h-16 w-16" />
+              )}
               <div className="flex flex-col">
                 <div className="relative px-4 pb-2.5 pt-3.5 text-sm font-semibold">
                   <div className="flex items-center gap-2.5">
@@ -411,12 +414,9 @@ export function KanbanBoard({
                     <span className="leading-none">{column.label}</span>
                     <span className="text-xs leading-none text-muted-foreground">{taskCount}</span>
                     {column.key === "backlog" && (
-                      <>
-                        <span className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-amber-400 bg-amber-400/10 animate-pulse">
-                          grooming
-                        </span>
-                        <img src={scribeAvatar} alt="Scribe" className="absolute right-2 -bottom-6 h-14 w-14" />
-                      </>
+                      <span className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-amber-400 bg-amber-400/10 animate-pulse">
+                        grooming
+                      </span>
                     )}
                   </div>
                 </div>
@@ -425,7 +425,7 @@ export function KanbanBoard({
                 </div>
               </div>
 
-              <CardContent className="flex-1 overflow-y-auto px-3 pt-4">
+              <CardContent className="relative z-10 flex-1 overflow-y-auto px-3 pt-4">
                 {taskCount === 0 ? (
                   <p className="px-1 text-xs text-muted-foreground/50">No tasks</p>
                 ) : (
