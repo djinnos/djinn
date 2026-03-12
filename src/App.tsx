@@ -13,6 +13,7 @@ import { KanbanPage } from "@/pages/KanbanPage";
 import { RoadmapPage } from "@/pages/RoadmapPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { TaskSessionPage } from "@/pages/TaskSessionPage";
+import { SyncHealthBanner } from "@/components/SyncHealthBanner";
 import { useWizardStore } from "@/stores/wizardStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
@@ -61,6 +62,7 @@ function MainLayout() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <Titlebar />
         <div className="flex min-h-0 flex-1 flex-col">
+          <SyncHealthBanner />
           <Routes>
             {/* Global views (All Projects) */}
             <Route path="/kanban" element={<KanbanPage />} />
