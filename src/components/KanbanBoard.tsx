@@ -395,7 +395,7 @@ export function KanbanBoard({
                 className="relative min-h-0 flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
             >
               {column.key === "backlog" && (
-                <img src={scribeAvatar} alt="Scribe" className="pointer-events-none absolute right-4 top-2 z-0 h-16 w-16" />
+                <img src={scribeAvatar} alt="Scribe" className="pointer-events-none absolute right-4 -top-2 z-0 h-16 w-16" />
               )}
               <div className="flex flex-col">
                 <div className="relative px-4 pb-2.5 pt-3.5 text-sm font-semibold">
@@ -437,7 +437,7 @@ export function KanbanBoard({
                     const isCollapsed = !!collapsedEpics[collapseKey];
 
                     return (
-                      <Card key={epicKey} size="sm" className="gap-0 cursor-pointer bg-muted py-3 ring-white/[0.04] transition-colors hover:bg-muted/80" onClick={() => toggleEpic(column.key, epicKey)}>
+                      <Card key={epicKey} size="sm" className="gap-0 cursor-pointer bg-zinc-900 py-3 ring-white/[0.04] transition-colors hover:bg-zinc-800/80" onClick={() => toggleEpic(column.key, epicKey)}>
                         <CardContent>
                           <div className="flex w-full items-center justify-between gap-2 px-1 py-1.5 text-sm font-medium">
                             <span className="flex items-center gap-2 truncate">
