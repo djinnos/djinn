@@ -395,7 +395,7 @@ export function KanbanBoard({
                 className="min-h-0 flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
             >
               <div className="flex flex-col">
-                <div className="px-4 pb-2.5 pt-3.5 text-sm font-semibold">
+                <div className="relative px-4 pb-2.5 pt-3.5 text-sm font-semibold">
                   <div className="flex items-center gap-2.5">
                     {column.key === "in_flight" && taskCount > 0 ? (
                       <HugeiconsIcon
@@ -415,7 +415,7 @@ export function KanbanBoard({
                         <span className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-amber-400 bg-amber-400/10 animate-pulse">
                           grooming
                         </span>
-                        <img src={scribeAvatar} alt="Scribe" className="ml-auto h-8 w-8" />
+                        <img src={scribeAvatar} alt="Scribe" className="absolute right-2 bottom-0 h-10 w-10" />
                       </>
                     )}
                   </div>
