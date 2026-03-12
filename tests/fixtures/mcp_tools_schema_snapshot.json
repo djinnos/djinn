@@ -4657,6 +4657,14 @@
             "nullable": true,
             "type": "array"
           },
+          "model_priority_groomer": {
+            "description": "Ordered model list for the 'groomer' role. Omit to keep current value.",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
           "model_priority_pm": {
             "description": "Ordered model list for the 'pm' role. Omit to keep current value.",
             "items": {

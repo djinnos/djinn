@@ -961,14 +961,242 @@ pub async fn run_project_lifecycle(
     params: ProjectLifecycleParams,
 ) -> anyhow::Result<()> {
     let task_id = format!("project:{}:{}", params.project_id, params.agent_type);
-    run_task_lifecycle(
-        task_id,
-        params.project_path,
-        params.model_id,
-        params.app_state,
-        params.cancel,
-        params.pause,
-        params.event_tx,
+    let model_id = params.model_id;
+    let app_state = params.app_state;
+    let cancel = params.cancel;
+    let pause = params.pause;
+    let event_tx = params.event_tx;
+    let project_path = params.project_path;
+    let project_id = params.project_id;
+
+    let agent_type: AgentType = params
+        .agent_type
+        .parse()
+        .unwrap_or(AgentType::Groomer);
+
+    macro_rules! return_free {
+        () => {{
+            let _ = event_tx
+                .send(SlotEvent::Free {
+                    slot_id: 0,
+                    model_id: model_id.clone(),
+                    task_id: task_id.clone(),
+                })
+                .await;
+            return Ok(());
+        }};
+    }
+    macro_rules! return_killed {
+        () => {{
+            let _ = event_tx
+                .send(SlotEvent::Killed {
+                    slot_id: 0,
+                    model_id: model_id.clone(),
+                    task_id: task_id.clone(),
+                })
+                .await;
+            return Ok(());
+        }};
+    }
+
+    if cancel.is_cancelled() {
+        return_killed!();
+    }
+    if pause.is_cancelled() {
+        return_free!();
+    }
+
+    tracing::info!(
+        task_id = %task_id,
+        project_id = %project_id,
+        model_id = %model_id,
+        agent_type = %agent_type.as_str(),
+        "Lifecycle: project-scoped dispatch accepted"
+    );
+
+    // ── Parse model ID and load credentials ───────────────────────────────
+    let (catalog_provider_id, model_name) = match parse_model_id(&model_id) {
+        Ok((provider_id, name)) => {
+            let resolved = app_state
+                .catalog()
+                .list_models(&provider_id)
+                .iter()
+                .find(|m| {
+                    let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
+                    m.id == name || m.name == name || bare == name
+                })
+                .map(|m| m.id.clone())
+                .unwrap_or(name);
+            (provider_id, resolved)
+        }
+        Err(e) => {
+            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: invalid model ID");
+            return_free!();
+        }
+    };
+    let provider_credential =
+        match load_provider_credential(&catalog_provider_id, &app_state).await {
+            Ok(cred) => cred,
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");
+                return_free!();
+            }
+        };
+
+    // ── Build prompt ──────────────────────────────────────────────────────
+    let system_prompt =
+        crate::agent::prompts::render_project_prompt(agent_type, &project_path);
+
+    let context_window = app_state
+        .catalog()
+        .find_model(&model_id)
+        .map(|m| m.context_window)
+        .unwrap_or(0);
+
+    let session_repo =
+        SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+
+    // ── Build provider ────────────────────────────────────────────────────
+    let telemetry_meta = build_telemetry_meta(agent_type, &task_id);
+    let provider_config = match provider_credential {
+        ProviderCredential::OAuthConfig(mut cfg) => {
+            cfg.model_id = model_name.clone();
+            cfg.context_window = context_window.max(0) as u32;
+            cfg.telemetry = Some(telemetry_meta);
+            cfg
+        }
+        ProviderCredential::ApiKey(_key_name, api_key) => {
+            let format_family =
+                format_family_for_provider(&catalog_provider_id, &model_name);
+            let base_url = app_state
+                .catalog()
+                .list_providers()
+                .iter()
+                .find(|p| p.id == catalog_provider_id)
+                .map(|p| p.base_url.clone())
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| default_base_url(&catalog_provider_id));
+            crate::agent::provider::ProviderConfig {
+                base_url,
+                auth: auth_method_for_provider(&catalog_provider_id, &api_key),
+                format_family,
+                model_id: model_name.clone(),
+                context_window: context_window.max(0) as u32,
+                telemetry: Some(telemetry_meta),
+                provider_headers: Default::default(),
+                capabilities: capabilities_for_provider(&catalog_provider_id),
+            }
+        }
+    };
+    let provider = create_provider(provider_config);
+
+    // ── Create session record (no task_id) ────────────────────────────────
+    let current_record_id = match session_repo
+        .create(
+            &project_id,
+            None, // no task
+            &model_id,
+            agent_type.as_str(),
+            Some(&project_path),
+            None,
+        )
+        .await
+    {
+        Ok(r) => Some(r.id),
+        Err(e) => {
+            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
+            return_free!();
+        }
+    };
+
+    let current_session_id = current_record_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+
+    // ── Build conversation ────────────────────────────────────────────────
+    let tools = extension::tool_schemas(agent_type);
+    let mut conversation = Conversation::new();
+    conversation.push(Message::system(system_prompt));
+    conversation.push(Message::user(
+        "Begin grooming the backlog for this project.",
+    ));
+
+    let project_dir = PathBuf::from(&project_path);
+
+    // ── Run reply loop ────────────────────────────────────────────────────
+    let (reply_result, _final_output, tokens_in, tokens_out) = run_reply_loop(
+        provider.as_ref(),
+        &mut conversation,
+        &tools,
+        &task_id,
+        &task_id, // short_id — use task_id for project-scoped
+        &current_session_id,
+        &project_path,
+        &project_dir, // worktree = project dir (no worktree for groomer)
+        agent_type,
+        &cancel,
+        &pause,
+        &app_state,
+        context_window,
+        &model_id,
+        false, // not a resumed session
     )
-    .await
+    .await;
+
+    // ── Persist messages ──────────────────────────────────────────────────
+    if let Some(ref record_id) = current_record_id {
+        let msg_repo = crate::db::repositories::session_message::SessionMessageRepository::new(
+            app_state.db().clone(),
+            app_state.events().clone(),
+        );
+        let _ = msg_repo
+            .insert_messages_batch(record_id, &task_id, &conversation.messages)
+            .await;
+    }
+
+    // ── Handle pause/kill ─────────────────────────────────────────────────
+    if pause.is_cancelled() {
+        update_session_record_paused(
+            current_record_id.as_deref(),
+            tokens_in,
+            tokens_out,
+            &app_state,
+        )
+        .await;
+        return_free!();
+    }
+    if cancel.is_cancelled() {
+        update_session_record(
+            current_record_id.as_deref(),
+            SessionStatus::Interrupted,
+            tokens_in,
+            tokens_out,
+            &app_state,
+        )
+        .await;
+        return_killed!();
+    }
+
+    // ── Health tracking ───────────────────────────────────────────────────
+    match &reply_result {
+        Ok(()) => app_state.health_tracker().record_success(&model_id),
+        Err(_) => app_state.health_tracker().record_failure(&model_id),
+    }
+    app_state.persist_model_health_state().await;
+
+    let session_status = if reply_result.is_ok() {
+        SessionStatus::Completed
+    } else {
+        SessionStatus::Failed
+    };
+    update_session_record(
+        current_record_id.as_deref(),
+        session_status,
+        tokens_in,
+        tokens_out,
+        &app_state,
+    )
+    .await;
+
+    return_free!();
 }
