@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchProviderModels } from '@/api/settings';
 import { sendChatMessage } from '@/api/chat';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from '@/lib/toast';
 import { useChatStore, type ChatMessage } from '@/stores/chatStore';
 import { useIsAllProjects, useSelectedProject } from '@/stores/useProjectStore';
@@ -40,7 +40,30 @@ export function ChatView() {
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const { data: models = [] } = useQuery({ queryKey: ['provider-models-connected'], queryFn: fetchProviderModels });
-  const modelOptions = useMemo(() => models.map((model) => `${model.provider}/${model.id}`), [models]);
+
+  const groupedModels = useMemo(() => {
+    const groups = new Map<string, typeof models>();
+    for (const model of models) {
+      const providerId = model.provider_id;
+      const current = groups.get(providerId) ?? [];
+      current.push(model);
+      groups.set(providerId, current);
+    }
+    return Array.from(groups.entries()).map(([providerId, providerModels]) => ({
+      providerId,
+      providerLabel: providerId.charAt(0).toUpperCase() + providerId.slice(1),
+      models: providerModels,
+    }));
+  }, [models]);
+
+  const modelOptions = useMemo(() => models.map((model) => model.id), [models]);
+  const modelNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const model of models) {
+      map.set(model.id, model.name);
+    }
+    return map;
+  }, [models]);
 
   const [selectedModel, setSelectedModel] = useState<string>('unknown/model');
 
@@ -177,13 +200,20 @@ export function ChatView() {
           }}
         >
           <SelectTrigger className="h-8 min-w-[280px]">
-            <SelectValue placeholder="Select a model" />
+            <SelectValue placeholder="Select a model">
+              {selectedModel !== 'unknown/model' ? modelNameById.get(selectedModel) ?? selectedModel : undefined}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
-            {modelOptions.map((option) => (
-              <SelectItem key={option} value={option}>
-                {option}
-              </SelectItem>
+            {groupedModels.map((group) => (
+              <SelectGroup key={group.providerId}>
+                <SelectLabel>{group.providerLabel}</SelectLabel>
+                {group.models.map((model) => (
+                  <SelectItem key={model.id} value={model.id}>
+                    {model.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
             ))}
           </SelectContent>
         </Select>

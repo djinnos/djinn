@@ -42,7 +42,7 @@ function ModelPicker({
     return availableModels.filter(
       (m) =>
         m.name.toLowerCase().includes(q) ||
-        m.provider.toLowerCase().includes(q) ||
+        m.provider_id.toLowerCase().includes(q) ||
         m.id.toLowerCase().includes(q),
     );
   }, [availableModels, query]);
@@ -80,14 +80,14 @@ function ModelPicker({
           ) : (
             filtered.map((m) => (
               <button
-                key={`${m.provider}::${m.id}`}
+                key={`${m.provider_id}::${m.id}`}
                 type="button"
                 className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent hover:text-accent-foreground"
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => handleSelect(m)}
               >
                 <span className="font-medium">{m.name}</span>
-                <span className="text-xs text-muted-foreground">{m.provider}</span>
+                <span className="text-xs text-muted-foreground">{m.provider_id}</span>
               </button>
             ))
           )}
@@ -190,7 +190,7 @@ export function AgentConfig({
           {/* Add Model */}
           <ModelPicker
             availableModels={availableModels}
-            onSelect={(m) => onAddModel({ model: m.id, provider: m.provider })}
+            onSelect={(m) => onAddModel({ model: m.id, provider: m.provider_id })}
           />
 
           {/* Role Legend */}

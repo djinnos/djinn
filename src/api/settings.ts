@@ -134,20 +134,28 @@ export async function saveSettings(settings: SettingsResponse): Promise<void> {
 export interface ProviderModel {
   id: string;
   name: string;
-  provider: string;
+  provider_id: string;
 }
 
 export async function fetchProviderModels(): Promise<ProviderModel[]> {
   const response = await callMcpTool("provider_models_connected");
   const seen = new Set<string>();
   const models: ProviderModel[] = [];
+
   for (const model of response.models) {
-    const key = `${model.provider_id}/${model.id}`;
+    // Chat selector should only include models that support tool calling.
+    if (model.tool_call === false) continue;
+
+    const key = model.id;
     if (seen.has(key)) continue;
-    // Skip embedding-only models
-    if (model.id.startsWith("text-embedding")) continue;
+
     seen.add(key);
-    models.push({ id: model.id, name: model.name, provider: model.provider_id });
+    models.push({
+      id: model.id,
+      name: model.name,
+      provider_id: model.provider_id,
+    });
   }
+
   return models;
 }
