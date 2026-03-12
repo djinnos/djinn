@@ -1094,7 +1094,7 @@ pub async fn run_project_lifecycle(
     let current_record_id = match session_repo
         .create(
             &project_id,
-            None, // no task
+            Some(&task_id),
             &model_id,
             agent_type.as_str(),
             Some(&project_path),
