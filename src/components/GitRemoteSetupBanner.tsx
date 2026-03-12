@@ -97,6 +97,7 @@ export function GitRemoteSetupBanner({ projectPath, onResolved }: GitRemoteSetup
               </div>
               <button
                 type="button"
+                aria-label="Dismiss Git Remote Setup banner"
                 onClick={() => setDismissed(true)}
                 className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
               >
