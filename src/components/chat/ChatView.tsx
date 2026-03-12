@@ -3,11 +3,13 @@ import { useQuery } from '@tanstack/react-query';
 import { fetchProviderModels } from '@/api/settings';
 import { sendChatMessage } from '@/api/chat';
 import { toast } from '@/lib/toast';
-import { useChatStore } from '@/stores/chatStore';
+import { useChatStore, type ChatMessage } from '@/stores/chatStore';
 import { useIsAllProjects, useSelectedProject } from '@/stores/useProjectStore';
 import { ChatMessageBubble } from './ChatMessageBubble';
 import { ChatInput } from './ChatInput';
 import { ChatEmptyState } from './ChatEmptyState';
+
+const EMPTY_MESSAGES: ChatMessage[] = [];
 
 export function ChatView() {
   const isAllProjects = useIsAllProjects();
@@ -21,7 +23,7 @@ export function ChatView() {
   const appendStreamingText = useChatStore((state) => state.appendStreamingText);
   const finalizeStreaming = useChatStore((state) => state.finalizeStreaming);
   const clearStreaming = useChatStore((state) => state.clearStreaming);
-  const messages = useChatStore((state) => (state.activeSessionId ? state.messagesBySession[state.activeSessionId] ?? [] : []));
+  const messages = useChatStore((state) => (state.activeSessionId ? state.messagesBySession[state.activeSessionId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES));
   const streamingText = useChatStore((state) => (state.activeSessionId ? state.streamingBySession[state.activeSessionId] ?? '' : ''));
   const loading = useChatStore((state) => (state.activeSessionId ? state.loadingBySession[state.activeSessionId] ?? false : false));
 
