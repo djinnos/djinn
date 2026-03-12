@@ -271,10 +271,15 @@ impl CatalogService {
         let mut connected: HashSet<String> =
             vault_credentials.iter().map(|c| c.provider_id.clone()).collect();
 
+        let credential_key_names: HashSet<String> =
+            vault_credentials.iter().map(|c| c.key_name.clone()).collect();
+
         // 2. OAuth-connected providers (own keys + merged children).
         for provider in self.list_providers() {
             let oauth_keys = builtin::all_oauth_keys_for_provider(&provider.id);
-            if !oauth_keys.is_empty() && builtin::is_oauth_key_present(&oauth_keys) {
+            if !oauth_keys.is_empty()
+                && builtin::is_oauth_key_present(&oauth_keys, &credential_key_names)
+            {
                 connected.insert(provider.id.clone());
             }
         }
@@ -286,7 +291,8 @@ impl CatalogService {
                 let child_oauth: Vec<String> =
                     bp.oauth_keys.iter().map(|k| k.to_string()).collect();
                 let child_connected = connected.contains(bp.id)
-                    || (!child_oauth.is_empty() && builtin::is_oauth_key_present(&child_oauth));
+                    || (!child_oauth.is_empty()
+                        && builtin::is_oauth_key_present(&child_oauth, &credential_key_names));
                 if child_connected {
                     connected.insert(parent_id.to_string());
                 }

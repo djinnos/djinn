@@ -4,11 +4,16 @@
 //!  1. `start_copilot_flow()` — request a device code, return it for display.
 //!  2. `poll_copilot_flow()` — poll until the user authorizes, then exchange
 //!     the GitHub token for a short-lived Copilot API token.
+//!
+//! Tokens are stored encrypted in the credentials DB table. Filesystem cache
+//! (`~/.djinn/oauth/copilot.json`) is supported as a migration fallback only.
 
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+use crate::db::repositories::credential::CredentialRepository;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -32,6 +37,9 @@ const DEFAULT_INTERVAL_SECS: u64 = 5;
 
 /// Default Copilot model to use.
 pub const COPILOT_DEFAULT_MODEL: &str = "gpt-4.1";
+
+/// Credential key name for DB-stored OAuth tokens.
+pub const COPILOT_OAUTH_DB_KEY: &str = "__OAUTH_GITHUB_COPILOT";
 
 // ─── Token types ─────────────────────────────────────────────────────────────
 
@@ -90,14 +98,53 @@ impl CopilotTokens {
     pub fn clear() {
         let _ = std::fs::remove_file(Self::cache_path());
     }
+
+    /// Load tokens from the encrypted credential DB.
+    /// Falls back to the filesystem cache and migrates it into the DB.
+    pub async fn load_from_db(repo: &CredentialRepository) -> Option<Self> {
+        if let Ok(Some(json)) = repo.get_decrypted(COPILOT_OAUTH_DB_KEY).await {
+            if let Ok(tokens) = serde_json::from_str::<Self>(&json) {
+                return Some(tokens);
+            }
+            tracing::warn!("Copilot: corrupt token JSON in DB, ignoring");
+        }
+        // Fallback: migrate from filesystem.
+        if let Some(tokens) = Self::load_cached() {
+            tracing::info!("Copilot: migrating tokens from filesystem to DB");
+            if let Err(e) = tokens.save_to_db(repo).await {
+                tracing::warn!("Copilot: migration save failed: {e}");
+            }
+            let _ = std::fs::remove_file(Self::cache_path());
+            return Some(tokens);
+        }
+        None
+    }
+
+    /// Persist tokens to the encrypted credential DB.
+    pub async fn save_to_db(&self, repo: &CredentialRepository) -> Result<()> {
+        let json = serde_json::to_string(self)?;
+        repo.set("githubcopilot", COPILOT_OAUTH_DB_KEY, &json)
+            .await
+            .map_err(|e| anyhow!("failed to save copilot tokens to DB: {e}"))?;
+        Ok(())
+    }
+
+    /// Remove tokens from the DB (and any lingering filesystem cache).
+    pub async fn clear_from_db(repo: &CredentialRepository) {
+        let _ = repo.delete(COPILOT_OAUTH_DB_KEY).await;
+        let _ = std::fs::remove_file(Self::cache_path());
+    }
 }
 
 /// Refresh an expired Copilot token by re-exchanging the long-lived GitHub
-/// token for a new short-lived Copilot API token.  Saves the result to disk.
-pub async fn refresh_copilot_token(cached: &CopilotTokens) -> Result<CopilotTokens> {
+/// token for a new short-lived Copilot API token.  Saves the result to the DB.
+pub async fn refresh_copilot_token(
+    cached: &CopilotTokens,
+    repo: &CredentialRepository,
+) -> Result<CopilotTokens> {
     let client = build_client()?;
     let tokens = exchange_for_copilot_token(&client, &cached.github_token).await?;
-    let _ = tokens.save();
+    tokens.save_to_db(repo).await?;
     tracing::info!("Copilot: token refreshed successfully (lifecycle)");
     Ok(tokens)
 }
@@ -193,7 +240,10 @@ pub async fn start_copilot_flow() -> Result<DeviceCodeSession> {
 ///
 /// Returns `CopilotTokens` which includes both the GitHub token (for future
 /// Copilot-token refreshes) and the short-lived Copilot API token.
-pub async fn poll_copilot_flow(session: DeviceCodeSession) -> Result<CopilotTokens> {
+pub async fn poll_copilot_flow(
+    session: DeviceCodeSession,
+    repo: &CredentialRepository,
+) -> Result<CopilotTokens> {
     let client = build_client()?;
 
     for attempt in 0..MAX_POLL_ATTEMPTS {
@@ -243,7 +293,7 @@ pub async fn poll_copilot_flow(session: DeviceCodeSession) -> Result<CopilotToke
         if let Some(github_token) = body["access_token"].as_str() {
             tracing::info!("Copilot: GitHub token obtained, exchanging for Copilot API token");
             let tokens = exchange_for_copilot_token(&client, github_token).await?;
-            let _ = tokens.save();
+            tokens.save_to_db(repo).await?;
             return Ok(tokens);
         }
 

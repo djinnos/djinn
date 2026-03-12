@@ -180,31 +180,45 @@ pub fn resolve_oauth_provider(provider_id: &str) -> Option<&'static str> {
         .map(|p| p.id)
 }
 
-/// Remove cached OAuth token files for the given keys.
-pub fn clear_oauth_tokens(oauth_keys: &[String]) {
+/// Remove OAuth tokens from the DB (and any lingering filesystem cache).
+pub async fn clear_oauth_tokens(
+    oauth_keys: &[String],
+    repo: &crate::db::repositories::credential::CredentialRepository,
+) {
     use crate::agent::oauth::{codex::CodexTokens, copilot::CopilotTokens};
 
     for key in oauth_keys {
         match key.as_str() {
-            "CHATGPT_CODEX_TOKEN" => CodexTokens::clear(),
-            "GITHUB_COPILOT_TOKEN" => CopilotTokens::clear(),
+            "CHATGPT_CODEX_TOKEN" => CodexTokens::clear_from_db(repo).await,
+            "GITHUB_COPILOT_TOKEN" => CopilotTokens::clear_from_db(repo).await,
             _ => {}
         }
     }
 }
 
-/// Check whether any of the given OAuth keys have a stored token on disk.
+/// Check whether any of the given OAuth keys have a stored token.
 ///
-/// Looks in `~/.djinn/oauth/` for token files written by
-/// [`crate::agent::oauth::codex`] and [`crate::agent::oauth::copilot`].
-pub fn is_oauth_key_present(oauth_keys: &[String]) -> bool {
-    use crate::agent::oauth::{codex::CodexTokens, copilot::CopilotTokens};
+/// Checks the vault credential key names (already queried by callers) for the
+/// well-known OAuth credential DB keys. Falls back to the filesystem cache
+/// for backward compatibility during migration.
+pub fn is_oauth_key_present(
+    oauth_keys: &[String],
+    credential_key_names: &std::collections::HashSet<String>,
+) -> bool {
+    use crate::agent::oauth::{
+        codex::{CodexTokens, CODEX_OAUTH_DB_KEY},
+        copilot::{CopilotTokens, COPILOT_OAUTH_DB_KEY},
+    };
 
     oauth_keys.iter().any(|key| match key.as_str() {
-        "CHATGPT_CODEX_TOKEN" => CodexTokens::load_cached()
-            .map(|t| !t.is_expired())
-            .unwrap_or(false),
-        "GITHUB_COPILOT_TOKEN" => CopilotTokens::load_cached().is_some(),
+        "CHATGPT_CODEX_TOKEN" => {
+            credential_key_names.contains(CODEX_OAUTH_DB_KEY)
+                || CodexTokens::load_cached().is_some()
+        }
+        "GITHUB_COPILOT_TOKEN" => {
+            credential_key_names.contains(COPILOT_OAUTH_DB_KEY)
+                || CopilotTokens::load_cached().is_some()
+        }
         _ => false,
     })
 }
