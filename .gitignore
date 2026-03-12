@@ -28,5 +28,8 @@ dist-ssr
 .cache/
 .npm-cache/
 
+# TypeScript build cache
+tsconfig.tsbuildinfo
+
 # Claude Code
 .claude/

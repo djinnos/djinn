@@ -61,17 +61,17 @@ export function useProjectRoute() {
     projectStore.getState().setLastView(pid, currentView);
   }, [routeProjectId, currentView]);
 
-  /** Navigate to a specific project's last-used view. */
+  /** Navigate to a specific project, keeping the current view. */
   const navigateToProject = useCallback(
     (projectId: string) => {
-      const lastView = projectStore.getState().getLastView(projectId);
+      const view = currentView ?? "kanban";
       if (projectId === ALL_PROJECTS) {
-        navigate(`/${lastView}`);
+        navigate(`/${view}`);
       } else {
-        navigate(`/projects/${projectId}/${lastView}`);
+        navigate(`/projects/${projectId}/${view}`);
       }
     },
-    [navigate]
+    [navigate, currentView]
   );
 
   /** Navigate to a view within the currently selected project. */
