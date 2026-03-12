@@ -375,7 +375,7 @@ impl CoordinatorActor {
         );
     }
 
-    async fn backlog_count(&self, project_id: &str) -> usize {
+    pub(super) async fn backlog_count(&self, project_id: &str) -> usize {
         let repo = self.task_repo();
         match repo.list_by_status("backlog").await {
             Ok(tasks) => tasks.into_iter().filter(|t| t.project_id == project_id).count(),
@@ -386,7 +386,7 @@ impl CoordinatorActor {
         }
     }
 
-    async fn dispatch_groomer_for_project(&mut self, project_id: &str) -> bool {
+    pub(super) async fn dispatch_groomer_for_project(&mut self, project_id: &str) -> bool {
         if self.active_groomer_sessions.contains(project_id) {
             return false;
         }
