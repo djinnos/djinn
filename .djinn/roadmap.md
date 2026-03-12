@@ -7,6 +7,7 @@ tags: []
 
 
 
+
 # Roadmap — Djinn Server Rust Rewrite
 
 Phased delivery plan for v1 requirements. Each phase builds on the previous and has testable success criteria. Phases are sequenced by real dependencies — later phases require earlier foundations.
@@ -502,7 +503,7 @@ Updated 2026-03-04. All phases complete. ADR-012 adds epic review batches. ADR-0
 - Phase 7: MCP-04, DB-05a, SYNC-01..04, WSL-01..04, LIFE-01..05 (16 reqs) ✅
 - Phase 8: AGENT-19, OBS-01 extension (2 reqs) ✅
 - Phase 9: GIT-09, OBS-02, CFG-02 MCP tools, REVIEW-01..03 completion (5 reqs) ✅
-- Cross-cutting: TEST-01..03 (3 reqs)
+- Cross-cutting: TEST-01..03 (3 reqs) — Phase 1 complete (ADR-026, epic `b11g` closed 2026-03-12; 454 tests, all passing)
 
 - Phase 10: AGENT-20..22, REVIEW-04 (4 reqs)
 - Phase 11: CMEM-01..14 (14 reqs)

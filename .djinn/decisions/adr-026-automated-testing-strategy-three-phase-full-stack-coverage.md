@@ -4,9 +4,10 @@ type: adr
 tags: ["adr","testing","ci","playwright","mcp","contract","e2e"]
 ---
 
+
 # ADR-026: Automated Testing Strategy — Three-Phase Full-Stack Coverage
 
-**Status:** Proposed
+**Status:** Accepted (Phase 1 complete, 2026-03-12)
 **Date:** 2026-03-08
 **Related:** [[ADR-019: MCP as Single API and Typed Tool Schemas]]
 
