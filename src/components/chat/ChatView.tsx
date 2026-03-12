@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchProviderModels } from '@/api/settings';
 import { sendChatMessage } from '@/api/chat';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from '@/lib/toast';
 import { useChatStore, type ChatMessage } from '@/stores/chatStore';
 import { useIsAllProjects, useSelectedProject } from '@/stores/useProjectStore';
@@ -10,6 +11,7 @@ import { ChatInput } from './ChatInput';
 import { ChatEmptyState } from './ChatEmptyState';
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
+const MODEL_STORAGE_KEY = 'djinnos-chat-model';
 
 export function ChatView() {
   const isAllProjects = useIsAllProjects();
@@ -18,7 +20,11 @@ export function ChatView() {
 
   const createSession = useChatStore((state) => state.createSession);
   const activeSessionId = useChatStore((state) => state.activeSessionId);
+  const activeSession = useChatStore((state) =>
+    state.activeSessionId ? state.sessions.find((session) => session.id === state.activeSessionId) ?? null : null
+  );
   const setActiveSession = useChatStore((state) => state.setActiveSession);
+  const setSessionModel = useChatStore((state) => state.setSessionModel);
   const addMessage = useChatStore((state) => state.addMessage);
   const appendStreamingText = useChatStore((state) => state.appendStreamingText);
   const finalizeStreaming = useChatStore((state) => state.finalizeStreaming);
@@ -34,15 +40,51 @@ export function ChatView() {
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const { data: models = [] } = useQuery({ queryKey: ['provider-models-connected'], queryFn: fetchProviderModels });
-  const selectedModel = models[0] ? `${models[0].provider}/${models[0].id}` : 'unknown/model';
+  const modelOptions = useMemo(() => models.map((model) => `${model.provider}/${model.id}`), [models]);
+
+  const [selectedModel, setSelectedModel] = useState<string>('unknown/model');
+
+  useEffect(() => {
+    if (modelOptions.length === 0) {
+      setSelectedModel('unknown/model');
+      return;
+    }
+
+    if (activeSession?.model && modelOptions.includes(activeSession.model)) {
+      setSelectedModel(activeSession.model);
+      return;
+    }
+
+    const persistedModel = typeof window !== 'undefined' ? window.localStorage.getItem(MODEL_STORAGE_KEY) : null;
+    if (persistedModel && modelOptions.includes(persistedModel)) {
+      setSelectedModel(persistedModel);
+      if (activeSessionId) {
+        setSessionModel(activeSessionId, persistedModel);
+      }
+      return;
+    }
+
+    const fallbackModel = modelOptions[0];
+    setSelectedModel(fallbackModel);
+    if (activeSessionId) {
+      setSessionModel(activeSessionId, fallbackModel);
+    }
+  }, [activeSession?.model, activeSessionId, modelOptions, setSessionModel]);
+
+  useEffect(() => {
+    if (selectedModel && selectedModel !== 'unknown/model' && typeof window !== 'undefined') {
+      window.localStorage.setItem(MODEL_STORAGE_KEY, selectedModel);
+    }
+  }, [selectedModel]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, streamingText, activeSessionId]);
 
   const send = async (text: string) => {
-    const sessionId = activeSessionId ?? createSession(projectPath);
+    const sessionId = activeSessionId ?? createSession(projectPath, selectedModel !== 'unknown/model' ? selectedModel : null);
     if (!activeSessionId) setActiveSession(sessionId);
+    if (selectedModel !== 'unknown/model') setSessionModel(sessionId, selectedModel);
 
     addMessage(sessionId, {
       id: `${Date.now()}-user`,
@@ -122,7 +164,30 @@ export function ChatView() {
 
   return (
     <section className="flex min-h-0 flex-1 flex-col">
-      <header className="border-b border-border px-4 py-3 text-sm text-muted-foreground">Model: {selectedModel}</header>
+      <header className="flex items-center gap-2 border-b border-border px-4 py-3 text-sm text-muted-foreground">
+        <span>Model:</span>
+        <Select
+          value={selectedModel}
+          onValueChange={(value) => {
+            if (!value) return;
+            setSelectedModel(value);
+            if (activeSessionId) {
+              setSessionModel(activeSessionId, value);
+            }
+          }}
+        >
+          <SelectTrigger className="h-8 min-w-[280px]">
+            <SelectValue placeholder="Select a model" />
+          </SelectTrigger>
+          <SelectContent>
+            {modelOptions.map((option) => (
+              <SelectItem key={option} value={option}>
+                {option}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         {isEmpty ? (

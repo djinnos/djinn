@@ -8,6 +8,7 @@ export interface ChatSession {
   id: string;
   title: string;
   projectPath: string | null;
+  model: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -27,9 +28,10 @@ export interface ChatState {
   loadingBySession: Record<string, boolean>;
   activeSessionId: string | null;
 
-  createSession: (projectPath?: string | null) => string;
+  createSession: (projectPath?: string | null, model?: string | null) => string;
   deleteSession: (sessionId: string) => void;
   setActiveSession: (sessionId: string | null) => void;
+  setSessionModel: (sessionId: string, model: string) => void;
   addMessage: (sessionId: string, message: ChatMessage) => void;
   appendStreamingText: (sessionId: string, chunk: string) => void;
   finalizeStreaming: (sessionId: string, message?: Omit<ChatMessage, 'content'> & { content?: string }) => void;
@@ -62,13 +64,14 @@ export const useChatStore = create<ChatState>()(
       loadingBySession: {},
       activeSessionId: null,
 
-      createSession: (projectPath = null) => {
+      createSession: (projectPath = null, model = null) => {
         const now = Date.now();
         const id = generateId();
         const newSession: ChatSession = {
           id,
           title: 'New Chat',
           projectPath,
+          model,
           createdAt: now,
           updatedAt: now,
         };
@@ -105,6 +108,14 @@ export const useChatStore = create<ChatState>()(
 
       setActiveSession: (sessionId) => {
         set({ activeSessionId: sessionId });
+      },
+
+      setSessionModel: (sessionId, model) => {
+        set((state) => ({
+          sessions: state.sessions.map((session) =>
+            session.id === sessionId ? { ...session, model, updatedAt: Date.now() } : session
+          ),
+        }));
       },
 
       addMessage: (sessionId, message) => {
