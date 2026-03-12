@@ -1090,11 +1090,11 @@ pub async fn run_project_lifecycle(
     };
     let provider = create_provider(provider_config);
 
-    // ── Create session record (no task_id) ────────────────────────────────
+    // ── Create session record (no task_id for project-scoped agents) ─────
     let current_record_id = match session_repo
         .create(
             &project_id,
-            Some(&task_id),
+            None,
             &model_id,
             agent_type.as_str(),
             Some(&project_path),

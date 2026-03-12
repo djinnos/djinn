@@ -388,18 +388,26 @@ impl CoordinatorActor {
 
     pub(super) async fn dispatch_groomer_for_project(&mut self, project_id: &str) -> bool {
         if self.active_groomer_sessions.contains(project_id) {
+            tracing::debug!(project_id = %project_id, "Groomer dispatch: skipped — already active");
             return false;
         }
         if !self.is_project_dispatch_enabled(project_id) {
+            tracing::debug!(project_id = %project_id, "Groomer dispatch: skipped — project dispatch disabled");
             return false;
         }
         let count = self.backlog_count(project_id).await;
         if count == 0 {
+            tracing::debug!(project_id = %project_id, "Groomer dispatch: skipped — backlog empty");
             return false;
         }
         let role = AgentType::Groomer.dispatch_role();
         let model_ids = self.resolve_dispatch_models_for_role(role).await;
+        if model_ids.is_empty() {
+            tracing::warn!(project_id = %project_id, role, "Groomer dispatch: no models resolved for role");
+            return false;
+        }
         let Some(project_path) = self.project_path_for_id(project_id).await else {
+            tracing::warn!(project_id = %project_id, "Groomer dispatch: project path not found");
             return false;
         };
         for model_id in model_ids {
