@@ -1,5 +1,4 @@
 import "@testing-library/jest-dom/vitest"
-import { vi } from "vitest"
 
 // jsdom does not implement scrollIntoView; make it safe for components using autoscroll effects
 if (!Element.prototype.scrollIntoView) {
@@ -20,18 +19,51 @@ Object.defineProperty(window, "__TAURI_INTERNALS__", {
   writable: true,
 })
 
+// Mock Tauri core invoke — default no-op, tests override per-command
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn().mockRejectedValue(new Error("invoke not mocked for this command")),
+}));
+
 // Mock @tauri-apps/api
 vi.mock("@tauri-apps/api", () => ({
   invoke: vi.fn(() => Promise.resolve()),
   transformCallback: vi.fn(() => 0),
 }))
 
-// Mock @tauri-apps/api/event
+// Mock Tauri event system
+const _listeners = new Map<string, Set<(event: unknown) => void>>();
+
+export function emitTauriEvent(event: string, payload: unknown) {
+  const handlers = _listeners.get(event);
+  if (handlers) {
+    handlers.forEach((fn) => fn({ payload }));
+  }
+}
+
+export function clearTauriListeners() {
+  _listeners.clear();
+}
+
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(() => Promise.resolve(() => {})),
-  emit: vi.fn(() => Promise.resolve()),
-  once: vi.fn(() => Promise.resolve(() => {})),
-}))
+  listen: vi.fn((event: string, handler: (event: unknown) => void) => {
+    if (!_listeners.has(event)) _listeners.set(event, new Set());
+    _listeners.get(event)!.add(handler);
+    const unlisten = () => {
+      _listeners.get(event)?.delete(handler);
+    };
+    return Promise.resolve(unlisten);
+  }),
+}));
+
+// Mock Tauri window API
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: vi.fn(() => ({
+    show: vi.fn(),
+    hide: vi.fn(),
+    close: vi.fn(),
+    setFocus: vi.fn(),
+  })),
+}));
 
 // Mock @tauri-apps/plugin-opener
 vi.mock("@tauri-apps/plugin-opener", () => ({
@@ -50,3 +82,6 @@ vi.mock("@tauri-apps/plugin-shell", () => ({
   },
   open: vi.fn(() => Promise.resolve()),
 }))
+
+// Mock SVG imports
+vi.mock("@/assets/logo.svg", () => ({ default: "logo.svg" }));
