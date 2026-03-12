@@ -129,6 +129,58 @@ async fn run_verification_pipeline(
     Ok(())
 }
 
+/// Run verification commands synchronously (blocking the caller) and return
+/// the failure feedback string if any command fails.  Used by `pm_approve` to
+/// gate merges — the task status is NOT modified here.
+///
+/// Returns `Ok(())` when all commands pass (or none are configured), and
+/// `Err(feedback)` with a human-readable failure description otherwise.
+pub(crate) async fn run_verification_gate(
+    task_id: &str,
+    project_path: &str,
+    app_state: &AppState,
+) -> Result<(), String> {
+    let task = load_task(task_id, app_state)
+        .await
+        .map_err(|e| format!("failed to load task: {e}"))?;
+    let project_dir = PathBuf::from(project_path);
+
+    // Check if there are any commands to run.
+    let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
+    if let Ok(Some(project)) = project_repo.get(&task.project_id).await {
+        let setup: Vec<CommandSpec> =
+            serde_json::from_str(&project.setup_commands).unwrap_or_default();
+        let verify: Vec<CommandSpec> =
+            serde_json::from_str(&project.verification_commands).unwrap_or_default();
+        if setup.is_empty() && verify.is_empty() {
+            return Ok(());
+        }
+    }
+
+    let worktree_path = prepare_worktree(&project_dir, &task, app_state)
+        .await
+        .map_err(|e| format!("failed to create verification worktree: {e}"))?;
+
+    // Run setup commands.
+    if let Some(feedback) =
+        run_setup_commands_checked(task_id, &worktree_path, app_state).await
+    {
+        cleanup_worktree(task_id, &worktree_path, app_state).await;
+        return Err(feedback);
+    }
+
+    // Run verification commands.
+    if let Some(feedback) =
+        run_verification_commands(task_id, &worktree_path, app_state).await
+    {
+        cleanup_worktree(task_id, &worktree_path, app_state).await;
+        return Err(feedback);
+    }
+
+    cleanup_worktree(task_id, &worktree_path, app_state).await;
+    Ok(())
+}
+
 /// Log verification failure and transition appropriately.
 ///
 /// If the consecutive failure count will reach the escalation threshold, go
