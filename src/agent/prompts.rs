@@ -61,6 +61,18 @@ pub struct TaskContext {
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
 
+/// Render a system prompt for a project-scoped agent (no task context).
+///
+/// Used for agents like the Groomer that operate on an entire column rather
+/// than a single task.
+pub fn render_project_prompt(agent_type: AgentType, project_path: &str) -> String {
+    let template = match agent_type {
+        AgentType::Groomer => GROOMER_TEMPLATE,
+        other => panic!("render_project_prompt called for task-scoped agent: {}", other.as_str()),
+    };
+    template.replace("{{project_path}}", project_path)
+}
+
 /// Render a system prompt for `agent_type` using data from `task` and `ctx`.
 ///
 /// Returns a plain `String` ready for `agent.set_system_prompt_override()`.
