@@ -10,6 +10,7 @@ import { ProjectSelector } from './ProjectSelector';
 import { ConnectionStatus } from './ConnectionStatus';
 import { Wizard } from './Wizard';
 
+import type { Project } from '@/api/types';
 import { useSidebarStore } from '@/stores/sidebarStore';
 import { useProjectStore } from '@/stores/useProjectStore';
 import { sseStore } from '@/stores/sseStore';
@@ -38,11 +39,13 @@ const ProjectSelectorState = ({ selectedId }: { selectedId: string | null }) => 
   const setSelectedProjectId = useProjectStore((s) => s.setSelectedProjectId);
 
   useEffect(() => {
-    setProjects([
-      { id: 'proj-1', name: 'DjinnOS Desktop' },
-      { id: 'proj-2', name: 'API Platform' },
-      { id: 'proj-3', name: 'Onboarding Improvements' },
-    ]);
+    const projects = [
+      { id: 'proj-1', name: 'DjinnOS Desktop', path: '/workspace/djinnos-desktop' },
+      { id: 'proj-2', name: 'API Platform', path: '/workspace/api-platform' },
+      { id: 'proj-3', name: 'Onboarding Improvements', path: '/workspace/onboarding-improvements' },
+    ] satisfies Project[];
+
+    setProjects(projects);
     setSelectedProjectId(selectedId);
   }, [selectedId, setProjects, setSelectedProjectId]);
 

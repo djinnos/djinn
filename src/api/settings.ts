@@ -1,5 +1,5 @@
 import { callMcpTool } from "@/api/mcpClient";
-import type { McpToolOutput } from "@/api/generated/mcp-tools.gen";
+import type { McpToolOutput, ProviderModelsConnectedOutputSchema } from "@/api/generated/mcp-tools.gen";
 
 export type AgentRole = "worker" | "task_reviewer" | "conflict_resolver" | "pm" | "groomer";
 
@@ -131,11 +131,7 @@ export async function saveSettings(settings: SettingsResponse): Promise<void> {
   }
 }
 
-export interface ProviderModel {
-  id: string;
-  name: string;
-  provider_id: string;
-}
+export type ProviderModel = ProviderModelsConnectedOutputSchema.ProviderModelOutput;
 
 export async function fetchProviderModels(): Promise<ProviderModel[]> {
   const response = await callMcpTool("provider_models_connected");
@@ -150,11 +146,7 @@ export async function fetchProviderModels(): Promise<ProviderModel[]> {
     if (seen.has(key)) continue;
 
     seen.add(key);
-    models.push({
-      id: model.id,
-      name: model.name,
-      provider_id: model.provider_id,
-    });
+    models.push(model);
   }
 
   return models;

@@ -15,6 +15,7 @@ import {
   validateProviderApiKey,
   startProviderOAuth,
 } from "@/api/server";
+import type { Provider } from "@/api/server";
 
 describe("ProviderSetupStep", () => {
   beforeEach(() => {
@@ -32,8 +33,8 @@ describe("ProviderSetupStep", () => {
         oauth_supported: false,
         description: "OpenAI provider",
       },
-    ] as any);
-    vi.mocked(validateProviderApiKey).mockResolvedValue({ valid: false, error: "Bad key" } as any);
+    ] satisfies Provider[]);
+    vi.mocked(validateProviderApiKey).mockResolvedValue({ valid: false, error: "Bad key" });
 
     const { container } = render(<ProviderSetupStep />);
 
@@ -61,8 +62,8 @@ describe("ProviderSetupStep", () => {
         oauth_supported: true,
         description: "OAuth provider",
       },
-    ] as any);
-    vi.mocked(startProviderOAuth).mockResolvedValue({ success: true } as any);
+    ] satisfies Provider[]);
+    vi.mocked(startProviderOAuth).mockResolvedValue({ success: true });
 
     const { container } = render(<ProviderSetupStep />);
 

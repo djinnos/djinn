@@ -5,11 +5,13 @@
  * which is stamped client-side.
  */
 
-import type { TaskListOutputSchema, EpicListOutputSchema } from "./generated/mcp-tools.gen";
+import type { TaskListOutputSchema, TaskShowOutputSchema, EpicListOutputSchema } from "./generated/mcp-tools.gen";
 
 export type AcceptanceCriterion = TaskListOutputSchema.AcceptanceCriterionStatus;
 
-export type Task = Omit<TaskListOutputSchema.TaskListItem, "owner"> & {
+export type Project = import("./server").Project;
+
+export type Task = Omit<TaskShowOutputSchema.TaskShowOutput, "owner"> & {
   owner: string | null;
   // Stamped by the desktop app when fetching from a specific project
   project_id?: string | null;
@@ -18,10 +20,3 @@ export type Task = Omit<TaskListOutputSchema.TaskListItem, "owner"> & {
 export type Epic = Omit<EpicListOutputSchema.EpicModel, "owner"> & {
   owner: string | null;
 };
-
-export interface Project {
-  id: string;
-  name: string;
-  path?: string;
-  description?: string;
-}

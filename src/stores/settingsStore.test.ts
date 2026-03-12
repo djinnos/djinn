@@ -7,7 +7,8 @@ vi.mock('@/api/settings', () => ({
 }));
 
 import { useSettingsStore } from './settingsStore';
-import { fetchSettings, fetchProviderModels, saveSettings } from '@/api/settings';
+import { fetchSettings, fetchProviderModels, saveSettings, type SettingsResponse } from '@/api/settings';
+import type { ProviderModelsConnectedOutputSchema } from '@/api/generated/mcp-tools.gen';
 
 describe('settingsStore', () => {
   beforeEach(() => {
@@ -28,7 +29,7 @@ describe('settingsStore', () => {
         model_priorities: { worker: [{ model: 'm1', provider: 'p1' }], task_reviewer: [], conflict_resolver: [], pm: [], groomer: [] },
         session_limits: [{ model: 'm1', provider: 'p1', max_concurrent: 3, current_active: 1 }],
       },
-    } as any);
+    } satisfies SettingsResponse);
     await useSettingsStore.getState().loadSettings();
     expect(useSettingsStore.getState().models[0].model).toBe('m1');
     expect(useSettingsStore.getState().models[0].max_concurrent).toBe(3);
@@ -49,12 +50,20 @@ describe('settingsStore', () => {
   });
 
   it('loads provider models and saves settings', async () => {
-    vi.mocked(fetchProviderModels).mockResolvedValue([{ model: 'm1', provider: 'p1' }] as any);
+    const providerModels = [
+      {
+        id: 'p1/m1',
+        name: 'm1',
+        provider_id: 'p1',
+        tool_call: true,
+      },
+    ] satisfies ProviderModelsConnectedOutputSchema.ProviderModelOutput[];
+    vi.mocked(fetchProviderModels).mockResolvedValue(providerModels);
     await useSettingsStore.getState().loadProviderModels();
     expect(useSettingsStore.getState().availableModels).toHaveLength(1);
 
     useSettingsStore.getState().addModel({ model: 'm1', provider: 'p1' });
-    vi.mocked(saveSettings).mockResolvedValue(undefined as any);
+    vi.mocked(saveSettings).mockResolvedValue(undefined);
     await useSettingsStore.getState().saveSettings();
     expect(saveSettings).toHaveBeenCalled();
   });

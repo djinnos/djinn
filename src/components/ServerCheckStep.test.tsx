@@ -15,7 +15,7 @@ describe("ServerCheckStep", () => {
   });
 
   it("shows loading then success state", async () => {
-    vi.mocked(checkServerHealth).mockResolvedValue(undefined as any);
+    vi.mocked(checkServerHealth).mockResolvedValue({ status: "ok" });
 
     const { container } = render(<ServerCheckStep />);
     const stepRoot = container.firstElementChild as HTMLElement;
@@ -28,7 +28,7 @@ describe("ServerCheckStep", () => {
   it("shows error state and retry", async () => {
     vi.mocked(checkServerHealth)
       .mockRejectedValueOnce(new Error("down"))
-      .mockResolvedValueOnce(undefined as any);
+      .mockResolvedValueOnce({ status: "ok" });
 
     const { container } = render(<ServerCheckStep />);
     const stepRoot = container.firstElementChild as HTMLElement;

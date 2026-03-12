@@ -1,5 +1,5 @@
 import { callMcpTool } from "@/api/mcpClient";
-import type { McpToolOutput } from "@/api/generated/mcp-tools.gen";
+import type { McpToolOutput, ProjectListOutputSchema, ProjectCommandsGetOutputSchema, ProjectCommandsGetOutput } from "@/api/generated/mcp-tools.gen";
 import { getServerPort } from "@/tauri/commands";
 import type { Epic, Task } from "@/api/types";
 import { projectStore } from "@/stores/projectStore";
@@ -151,23 +151,16 @@ export async function saveProviderCredentials(
 
 // Project-related types and API functions
 
-export interface Project {
-  id: string;
-  name: string;
-  path: string;
+export type Project = ProjectListOutputSchema.ProjectInfo & {
   branch?: string;
   auto_merge?: boolean;
   created_at?: string;
   updated_at?: string;
-}
+};
 
 export async function fetchProjects(): Promise<Project[]> {
   const data = await callMcpTool("project_list");
-  return data.projects.map((project) => ({
-    id: project.id,
-    name: project.name,
-    path: project.path,
-  }));
+  return data.projects;
 }
 
 export async function addProject(path: string): Promise<Project> {
@@ -255,16 +248,9 @@ export async function updateProject(projectId: string, updates: { branch?: strin
 
 // Project commands
 
-export interface ProjectCommandSpec {
-  name: string;
-  command: string;
-  timeout_secs?: number;
-}
+export type ProjectCommandSpec = ProjectCommandsGetOutputSchema.ProjectCommandSpec;
 
-export interface ProjectCommands {
-  setup_commands: ProjectCommandSpec[];
-  verification_commands: ProjectCommandSpec[];
-}
+export type ProjectCommands = Pick<ProjectCommandsGetOutput, "setup_commands" | "verification_commands">
 
 export interface CommandValidationError {
   command_name: string;
@@ -283,7 +269,7 @@ export async function fetchProjectCommands(projectPath: string): Promise<Project
 
 export async function saveProjectCommands(
   projectPath: string,
-  commands: { setup_commands?: ProjectCommandSpec[]; verification_commands?: ProjectCommandSpec[] },
+  commands: Partial<ProjectCommands>,
 ): Promise<CommandValidationError[]> {
   const result = await callMcpTool("project_commands_set", {
     project: projectPath,
