@@ -77,9 +77,6 @@ function getStatusBadge(status: string, hasSession: boolean, allAcMet: boolean):
   if (status === "needs_pm_intervention" && !hasSession) {
     return { label: "agent stuck", className: "text-red-400" };
   }
-  if ((status === "needs_pm_intervention" || status === "in_pm_intervention") && hasSession) {
-    return { label: "pm active", className: "text-red-400 animate-pulse" };
-  }
   if (status === "verifying") {
     return { label: "verifying", className: "text-yellow-400 animate-pulse" };
   }
