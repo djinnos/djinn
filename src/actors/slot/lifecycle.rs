@@ -1063,8 +1063,25 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         }
     };
 
+    // ── Fetch verification commands for the prompt ─────────────────────────
+    let verification_commands = {
+        let repo =
+            ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
+        repo.get_by_path(&project_path)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|p| {
+                helpers::format_command_details(&p.verification_commands)
+            })
+    };
+
     // ── Build prompt ──────────────────────────────────────────────────────
-    let system_prompt = crate::agent::prompts::render_project_prompt(agent_type, &project_path);
+    let system_prompt = crate::agent::prompts::render_project_prompt(
+        agent_type,
+        &project_path,
+        verification_commands.as_deref(),
+    );
 
     let context_window = app_state
         .catalog()

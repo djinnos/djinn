@@ -18,6 +18,9 @@ Use `shell` to read the relevant files in the workspace. Focus on files related 
 
 For each acceptance criterion, find evidence in the code:
 
+- Read relevant files, check imports, function signatures, module structure.
+- **If a criterion references a specific command** (e.g. "cargo modules dependencies confirms X"), **run it via `shell`** and check the output. You have shell access — use it for any task-specific verification that goes beyond code inspection.
+
 ```
 ✓ Criterion 1 - MET: {file:line}
 ✗ Criterion 2 - NOT MET: {what's missing}
