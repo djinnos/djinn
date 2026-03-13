@@ -196,9 +196,13 @@ impl SessionSpan {
     }
 
     /// Record the system prompt as metadata on the session trace.
+    ///
+    /// Uses `langfuse.trace.metadata.system_prompt` so it appears in the
+    /// Langfuse trace metadata panel. The plain `gen_ai.system_prompt`
+    /// attribute is not mapped by Langfuse.
     pub fn record_system_prompt(&self, prompt: &str) {
         self.cx.span().set_attribute(KeyValue::new(
-            "gen_ai.system_prompt",
+            "langfuse.trace.metadata.system_prompt",
             truncate(prompt, 20_000),
         ));
     }
