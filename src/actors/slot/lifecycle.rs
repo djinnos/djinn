@@ -1020,6 +1020,13 @@ pub async fn run_project_lifecycle(
         return_free!();
     }
 
+    let _ = app_state.events().send(crate::events::DjinnEvent::SessionDispatched {
+        project_id: project_id.clone(),
+        task_id: task_id.clone(),
+        model_id: model_id.clone(),
+        agent_type: agent_type.as_str().to_string(),
+    });
+
     tracing::info!(
         task_id = %task_id,
         project_id = %project_id,
