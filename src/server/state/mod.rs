@@ -188,7 +188,7 @@ impl AppState {
         use crate::models::{Model, Provider};
 
         // Load custom providers from DB → merge into in-memory catalog.
-        let repo = CustomProviderRepository::new(self.db().clone());
+        let repo = CustomProviderRepository::new(self.db().clone(), self.events().clone());
         match repo.list().await {
             Ok(providers) => {
                 for cp in providers {

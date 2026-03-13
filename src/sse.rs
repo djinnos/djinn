@@ -140,6 +140,20 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             id: None,
             project_id: Some(project_id),
         },
+        DjinnEvent::CustomProviderUpserted(v) => Envelope {
+            entity_type: "custom_provider",
+            action: "updated",
+            data: serde_json::to_value(v).ok(),
+            id: None,
+            project_id: None,
+        },
+        DjinnEvent::CustomProviderDeleted { id } => Envelope {
+            entity_type: "custom_provider",
+            action: "deleted",
+            data: None,
+            id: Some(id),
+            project_id: None,
+        },
         DjinnEvent::CredentialCreated(v) => Envelope {
             entity_type: "credential",
             action: "created",
