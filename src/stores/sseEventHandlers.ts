@@ -63,8 +63,12 @@ export function initSSEEventHandlers(): () => void {
   // Only apply events for the currently selected project to avoid cross-project flicker.
   taskCreatedUnsub = subscribe("task_created", (event: SSEEvent) => {
     const task = normalizeSSEPayload(unwrapPayload(event.data)) as unknown as Task;
+    if (!task.id || !task.title) {
+      console.warn("[SSE] task_created with missing id/title, skipping:", task);
+      return;
+    }
     const selectedProject = projectStore.getState().getSelectedProject();
-    if (selectedProject && task.project_id && task.project_id !== selectedProject.id) return;
+    if (selectedProject && task.project_id !== selectedProject.id) return;
     taskStore.getState().addTask(task);
     queryClient.setQueryData(["tasks"], (current: Task[] | undefined) =>
       current ? [...current, task] : [task]
@@ -73,8 +77,9 @@ export function initSSEEventHandlers(): () => void {
 
   taskUpdatedUnsub = subscribe("task_updated", (event: SSEEvent) => {
     const task = normalizeSSEPayload(unwrapPayload(event.data)) as unknown as Task;
+    if (!task.id) return;
     const selectedProject = projectStore.getState().getSelectedProject();
-    if (selectedProject && task.project_id && task.project_id !== selectedProject.id) return;
+    if (selectedProject && task.project_id !== selectedProject.id) return;
 
     // SSE task.updated payloads don't include active_session or session_count
     // (those are only added by MCP task_list/task_show). Preserve the values
@@ -86,14 +91,18 @@ export function initSSEEventHandlers(): () => void {
       "in_task_review", "needs_pm_intervention", "in_pm_intervention",
     ]);
     const existing = taskStore.getState().getTask(task.id);
-    if (existing) {
-      const isInFlight = IN_FLIGHT.has(task.status);
-      if (!("active_session" in task)) {
-        task.active_session = isInFlight ? existing.active_session : undefined;
-      }
-      if (!("session_count" in task)) task.session_count = existing.session_count;
-      if (!("duration_seconds" in task)) task.duration_seconds = existing.duration_seconds;
+    if (!existing) {
+      // Don't create tasks from update events — wait for a full task_created or snapshot
+      console.warn("[SSE] task_updated for unknown task, skipping:", task.id);
+      return;
     }
+
+    const isInFlight = IN_FLIGHT.has(task.status);
+    if (!("active_session" in task)) {
+      task.active_session = isInFlight ? existing.active_session : undefined;
+    }
+    if (!("session_count" in task)) task.session_count = existing.session_count;
+    if (!("duration_seconds" in task)) task.duration_seconds = existing.duration_seconds;
 
     taskStore.getState().updateTask(task);
     queryClient.setQueryData(["tasks"], (current: Task[] | undefined) =>
