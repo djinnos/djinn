@@ -61,7 +61,7 @@ pub struct PoolStatus {
     pub running_tasks: Vec<RunningTaskInfo>,
 }
 
-pub type Reply<T> = oneshot::Sender<Result<T, PoolError>>;
+pub(super) type Reply<T> = oneshot::Sender<Result<T, PoolError>>;
 
 pub enum PoolMessage {
     Dispatch {
@@ -111,7 +111,7 @@ pub enum PoolMessage {
     },
 }
 
-pub fn now_unix_string() -> String {
+pub(super) fn now_unix_string() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

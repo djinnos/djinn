@@ -12,7 +12,7 @@ use crate::server::AppState;
 use super::super::{ModelSlotConfig, SlotEvent, SlotHandle, SlotPoolConfig, SlotState};
 use super::types::{now_unix_string, PoolError, PoolMessage, SlotFactory};
 
-pub struct SlotPool {
+pub(super) struct SlotPool {
     pub(super) receiver: mpsc::Receiver<PoolMessage>,
     event_rx: mpsc::Receiver<SlotEvent>,
     event_tx: mpsc::Sender<SlotEvent>,
@@ -120,7 +120,7 @@ impl SlotPool {
             .ok_or(PoolError::SlotNotFound { slot_id })
     }
 
-    pub async fn run(mut self) {
+    pub(super) async fn run(mut self) {
         tracing::info!("SlotPool started");
         loop {
             tokio::select! {
