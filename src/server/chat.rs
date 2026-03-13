@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::path::PathBuf;
 
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -253,7 +252,6 @@ pub(super) async fn completions_handler(
     let mcp = DjinnMcpServer::new(state.clone());
     let tool_schemas = mcp.all_tool_schemas();
 
-    let _worktree_path = req.project.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
     tokio::spawn(async move {
