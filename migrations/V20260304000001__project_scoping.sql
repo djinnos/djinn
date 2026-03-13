@@ -37,6 +37,7 @@ CREATE TABLE epics_new (
     status      TEXT NOT NULL DEFAULT 'open'
                      CHECK(status IN ('open', 'closed')),
     owner       TEXT NOT NULL DEFAULT '',
+    memory_refs TEXT NOT NULL DEFAULT '[]',
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     closed_at   TEXT,
@@ -45,7 +46,7 @@ CREATE TABLE epics_new (
 
 INSERT INTO epics_new (
     id, project_id, short_id, title, description, emoji, color, status,
-    owner, created_at, updated_at, closed_at
+    owner, memory_refs, created_at, updated_at, closed_at
 )
 SELECT
     e.id,
@@ -57,6 +58,7 @@ SELECT
     e.color,
     e.status,
     e.owner,
+    COALESCE(e.memory_refs, '[]'),
     e.created_at,
     e.updated_at,
     e.closed_at

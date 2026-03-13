@@ -437,7 +437,7 @@ async fn call_epic_update(
     let owner = epic.owner.as_str();
 
     let updated = repo
-        .update(&epic.id, title, description, emoji, color, owner)
+        .update(&epic.id, title, description, emoji, color, owner, None)
         .await
         .map_err(|e| e.to_string())?;
 
