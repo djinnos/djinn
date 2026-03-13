@@ -11,7 +11,6 @@ import { epicStore } from "./epicStore";
 import { projectStore } from "./projectStore";
 import { queryClient } from "@/lib/queryClient";
 import { projectSessionStore } from "./projectSessionStore";
-import { fetchProjects } from "@/api/server";
 import type { Task, Epic } from "@/api/types";
 
 /**
@@ -248,17 +247,16 @@ export function initSSEEventHandlers(): () => void {
     }
   });
 
-  const invalidateSettingsLikeData = () => {
+  const customProviderCreatedUnsub = subscribe("custom_provider_created", () => {
     queryClient.invalidateQueries({ queryKey: ["providers"] });
-    queryClient.invalidateQueries({ queryKey: ["settings"] });
-  };
+  });
 
-  const projectChangedUnsub = subscribe("project_changed", () => {
-    invalidateSettingsLikeData();
-    // Refetch project list so the ProjectSelector updates when projects are added/removed
-    fetchProjects()
-      .then((projects) => projectStore.getState().setProjects(projects))
-      .catch((err) => console.error("Failed to refetch projects after SSE event:", err));
+  const customProviderUpdatedUnsub = subscribe("custom_provider_updated", () => {
+    queryClient.invalidateQueries({ queryKey: ["providers"] });
+  });
+
+  const customProviderDeletedUnsub = subscribe("custom_provider_deleted", () => {
+    queryClient.invalidateQueries({ queryKey: ["providers"] });
   });
 
   // Return cleanup function
@@ -269,11 +267,13 @@ export function initSSEEventHandlers(): () => void {
     epicCreatedUnsub?.();
     epicUpdatedUnsub?.();
     epicDeletedUnsub?.();
-    projectChangedUnsub?.();
     sessionDispatchedUnsub?.();
     sessionStartedUnsub?.();
     sessionEndedUnsub?.();
     syncCompletedUnsub?.();
+    customProviderCreatedUnsub?.();
+    customProviderUpdatedUnsub?.();
+    customProviderDeletedUnsub?.();
   };
 }
 

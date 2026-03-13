@@ -19,7 +19,10 @@ export type SSEEventType =
   | "session_dispatched"
   | "session_started"
   | "session_ended"
-  | "sync_completed";
+  | "sync_completed"
+  | "custom_provider_created"
+  | "custom_provider_updated"
+  | "custom_provider_deleted";
 
 export type ConnectionStatus = "connected" | "reconnecting" | "error";
 

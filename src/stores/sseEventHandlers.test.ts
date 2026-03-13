@@ -5,6 +5,7 @@ import { taskStore } from './taskStore';
 import { epicStore } from './epicStore';
 import { projectStore } from './projectStore';
 import { projectSessionStore } from './projectSessionStore';
+import { queryClient } from '@/lib/queryClient';
 
 vi.mock('@/lib/queryClient', () => ({
   queryClient: {
@@ -23,6 +24,7 @@ describe('sseEventHandlers', () => {
     epicStore.getState().clearEpics();
     projectStore.setState({ selectedProjectPath: null, projects: [] });
     projectSessionStore.getState().clearProjectSessions();
+    vi.mocked(queryClient.invalidateQueries).mockClear();
   });
 
   it('routes task created/updated/deleted to taskStore', () => {
@@ -52,9 +54,22 @@ describe('sseEventHandlers', () => {
     expect(epicStore.getState().getEpic('e1')).toBeUndefined();
     cleanup();
   });
+
+  it('invalidates providers query for custom provider lifecycle events', () => {
+    const cleanup = initSSEEventHandlers();
+
+    sseStore.getState().emit({ type: 'custom_provider_created', data: { data: { id: 'cp1' } }, timestamp: 1 });
+    sseStore.getState().emit({ type: 'custom_provider_updated', data: { data: { id: 'cp1' } }, timestamp: 2 });
+    sseStore.getState().emit({ type: 'custom_provider_deleted', data: { data: { id: 'cp1' } }, timestamp: 3 });
+
+    expect(queryClient.invalidateQueries).toHaveBeenCalledTimes(3);
+    expect(queryClient.invalidateQueries).toHaveBeenNthCalledWith(1, { queryKey: ['providers'] });
+    expect(queryClient.invalidateQueries).toHaveBeenNthCalledWith(2, { queryKey: ['providers'] });
+    expect(queryClient.invalidateQueries).toHaveBeenNthCalledWith(3, { queryKey: ['providers'] });
+
+    cleanup();
+  });
 });
-
-
 
 it('tracks project-scoped session lifecycle when task_id is null', () => {
   const cleanup = initSSEEventHandlers();
