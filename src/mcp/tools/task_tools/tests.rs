@@ -39,7 +39,7 @@ async fn task_create_success_shape() {
 #[tokio::test]
 async fn task_create_error_validation() {
     let db = create_test_db();
-    let app = create_test_app_with_db(db);
+    let app = create_test_app_with_db(db.clone());
     let sid = initialize_mcp_session(&app).await;
 
     // Empty title triggers a validation error.
@@ -60,7 +60,7 @@ async fn task_show_found_and_not_found_shapes() {
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
-    let app = create_test_app_with_db(db);
+    let app = create_test_app_with_db(db.clone());
     let sid = initialize_mcp_session(&app).await;
 
     let ok_payload = mcp_call_tool(
@@ -143,7 +143,7 @@ async fn task_list_filters_and_pagination() {
         .await
         .unwrap();
 
-    let app = create_test_app_with_db(db);
+    let app = create_test_app_with_db(db.clone());
     let sid = initialize_mcp_session(&app).await;
 
     let by_status = mcp_call_tool(
@@ -254,7 +254,7 @@ async fn task_count_plain_and_grouped() {
         .unwrap();
     let _t2 = create_test_task(&db, &project.id, &epic.id).await;
 
-    let app = create_test_app_with_db(db);
+    let app = create_test_app_with_db(db.clone());
     let sid = initialize_mcp_session(&app).await;
 
     let plain = mcp_call_tool(&app, &sid, "task_count", json!({"project": project.path})).await;
@@ -292,7 +292,7 @@ async fn task_ready_lists_open_unblocked() {
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
     let _ = create_test_task(&db, &project.id, &epic.id).await;
-    let app = create_test_app_with_db(db);
+    let app = create_test_app_with_db(db.clone());
     let sid = initialize_mcp_session(&app).await;
 
     let payload = mcp_call_tool(&app, &sid, "task_ready", json!({"project": project.path})).await;
@@ -307,7 +307,7 @@ async fn task_comment_activity_blockers_blocked_memory_refs_shapes() {
     let blocker = create_test_task(&db, &project.id, &epic.id).await;
     let blocked = create_test_task(&db, &project.id, &epic.id).await;
 
-    let app = create_test_app_with_db(db);
+    let app = create_test_app_with_db(db.clone());
     let sid = initialize_mcp_session(&app).await;
 
     let updated = mcp_call_tool(
