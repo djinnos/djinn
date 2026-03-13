@@ -2,7 +2,6 @@ pub(crate) mod compaction;
 pub mod config;
 pub(crate) mod extension;
 pub mod message;
-pub(crate) mod roles;
 pub mod oauth;
 pub(crate) mod output_parser;
 pub mod prompts;
@@ -27,7 +26,13 @@ pub enum AgentType {
 
 impl AgentType {
     pub fn as_str(&self) -> &'static str {
-        roles::config_for(*self).name
+        match self {
+            Self::Worker => "worker",
+            Self::ConflictResolver => "conflict_resolver",
+            Self::TaskReviewer => "task_reviewer",
+            Self::PM => "pm",
+            Self::Groomer => "groomer",
+        }
     }
 
     /// Determine the agent type from a task's status string.
@@ -48,29 +53,12 @@ impl AgentType {
     /// `ConflictResolver` shares the `"worker"` model pool, so both map to
     /// `"worker"`.
     pub fn dispatch_role(&self) -> &'static str {
-        roles::config_for(*self).dispatch_role
-    }
-
-
-
-    pub fn preserves_session(&self) -> bool {
-        roles::config_for(*self).preserves_session
-    }
-
-    pub fn is_project_scoped(&self) -> bool {
-        roles::config_for(*self).is_project_scoped
-    }
-
-    pub fn mid_session_compaction_prompt(&self) -> &'static str {
-        roles::config_for(*self).mid_session_compaction_prompt
-    }
-
-    pub fn pre_resume_compaction_prompt(&self) -> &'static str {
-        roles::config_for(*self).pre_resume_compaction_prompt
-    }
-
-    pub fn tool_schemas(&self) -> Vec<serde_json::Value> {
-        (roles::config_for(*self).tool_schemas)()
+        match self {
+            Self::Worker | Self::ConflictResolver => "worker",
+            Self::TaskReviewer => "task_reviewer",
+            Self::PM => "pm",
+            Self::Groomer => "groomer",
+        }
     }
 
     /// The transition action to claim/start a task for this agent type, given
