@@ -258,6 +258,7 @@ pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &A
             task_id = %task_id,
             record_id = %paused.id,
             error = %e,
+            error = %e,
             "failed to interrupt paused worker session after reviewer rejection"
         );
     } else {
@@ -413,4 +414,246 @@ async fn is_stale_review_cycle(
     }
 
     extract_met_pattern(current_ac_json) == extract_met_pattern(&snapshot_json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::repositories::task::TaskRepository;
+    use crate::models::task::Task;
+    use crate::test_helpers;
+
+    fn ac(items: &[bool]) -> String {
+        serde_json::to_string(
+            &items
+                .iter()
+                .map(|met| serde_json::json!({"description": "x", "met": met}))
+                .collect::<Vec<_>>(),
+        )
+        .expect("serialize AC json")
+    }
+
+    fn parsed_output_with_feedback(feedback: &str) -> ParsedAgentOutput {
+        let mut out = ParsedAgentOutput::new(AgentType::TaskReviewer);
+        out.reviewer_feedback = Some(feedback.to_string());
+        out
+    }
+
+    async fn create_task_with_ac(app: &AppState, ac_json: &str) -> Task {
+        let project = test_helpers::create_test_project(app.db()).await;
+        let epic = test_helpers::create_test_epic(app.db(), &project.id).await;
+        let task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
+
+        sqlx::query("UPDATE tasks SET acceptance_criteria = ?1 WHERE id = ?2")
+            .bind(ac_json)
+            .bind(&task.id)
+            .execute(app.db().pool())
+            .await
+            .expect("update AC");
+
+        TaskRepository::new(app.db().clone(), app.events().clone())
+            .get(&task.id)
+            .await
+            .expect("read task")
+            .expect("task exists")
+    }
+
+    #[test]
+    fn all_acceptance_criteria_met_cases() {
+        assert!(!all_acceptance_criteria_met("[]"));
+        assert!(all_acceptance_criteria_met(&ac(&[true, true])));
+        assert!(!all_acceptance_criteria_met(&ac(&[true, false])));
+        assert!(!all_acceptance_criteria_met("{not json}"));
+        assert!(all_acceptance_criteria_met(&ac(&[true])));
+        assert!(!all_acceptance_criteria_met(&ac(&[false, true, false])));
+    }
+}
+
+#[cfg(test)]
+mod transition_tests {
+    use super::*;
+    use crate::db::repositories::task::TaskRepository;
+    use crate::models::task::TransitionAction;
+    use crate::test_helpers;
+
+    async fn set_task_status(app: &AppState, task_id: &str, status: &str) {
+        sqlx::query("UPDATE tasks SET status = ?1 WHERE id = ?2")
+            .bind(status)
+            .bind(task_id)
+            .execute(app.db().pool())
+            .await
+            .expect("update task status");
+    }
+
+    async fn set_task_ac(app: &AppState, task_id: &str, ac_json: &str) {
+        sqlx::query("UPDATE tasks SET acceptance_criteria = ?1 WHERE id = ?2")
+            .bind(ac_json)
+            .bind(task_id)
+            .execute(app.db().pool())
+            .await
+            .expect("update AC");
+    }
+
+    async fn set_continuation_count(app: &AppState, task_id: &str, count: i64) {
+        sqlx::query("UPDATE tasks SET continuation_count = ?1 WHERE id = ?2")
+            .bind(count)
+            .bind(task_id)
+            .execute(app.db().pool())
+            .await
+            .expect("update continuation_count");
+    }
+
+    async fn insert_review_snapshot(app: &AppState, task_id: &str, ac_json: &str) {
+        let payload = serde_json::json!({"to_status":"in_task_review","ac_snapshot":serde_json::from_str::<serde_json::Value>(ac_json).expect("valid ac json")}).to_string();
+        sqlx::query("INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) VALUES (?1, ?2, 'test', 'system', 'status_changed', ?3)")
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(task_id)
+            .bind(payload)
+            .execute(app.db().pool())
+            .await
+            .expect("insert snapshot");
+    }
+
+    fn ac(items: &[bool]) -> String {
+        serde_json::to_string(
+            &items
+                .iter()
+                .map(|met| serde_json::json!({"description": "x", "met": met}))
+                .collect::<Vec<_>>(),
+        )
+        .expect("serialize AC json")
+    }
+
+    fn parsed_output_with_feedback(feedback: &str) -> ParsedAgentOutput {
+        let mut out = ParsedAgentOutput::new(AgentType::TaskReviewer);
+        out.reviewer_feedback = Some(feedback.to_string());
+        out
+    }
+
+    #[tokio::test]
+    async fn is_stale_review_cycle_cases() {
+        let app = test_helpers::test_app_state_in_memory().await;
+        let project = test_helpers::create_test_project(app.db()).await;
+        let epic = test_helpers::create_test_epic(app.db(), &project.id).await;
+        let task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
+
+        let same = ac(&[true, false]);
+        insert_review_snapshot(&app, &task.id, &same).await;
+        assert!(is_stale_review_cycle(&task.id, &same, &app).await);
+
+        let progressed = ac(&[true, true]);
+        assert!(!is_stale_review_cycle(&task.id, &progressed, &app).await);
+
+        let task2 = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
+        assert!(!is_stale_review_cycle(&task2.id, &same, &app).await);
+
+        let empty = "[]".to_string();
+        insert_review_snapshot(&app, &task2.id, &empty).await;
+        assert!(is_stale_review_cycle(&task2.id, &empty, &app).await);
+
+        let task3 = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
+        let three = ac(&[true, false, true]);
+        let five = ac(&[true, false, true, false, true]);
+        insert_review_snapshot(&app, &task3.id, &three).await;
+        assert!(!is_stale_review_cycle(&task3.id, &five, &app).await);
+    }
+
+    #[tokio::test]
+    async fn success_transition_agent_variants_and_stale_threshold() {
+        let app = test_helpers::test_app_state_in_memory().await;
+        let project = test_helpers::create_test_project(app.db()).await;
+        let epic = test_helpers::create_test_epic(app.db(), &project.id).await;
+
+        let worker_task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
+        let out = ParsedAgentOutput::new(AgentType::Worker);
+        assert_eq!(
+            success_transition(&worker_task.id, AgentType::Worker, &out, &app).await,
+            Some((TransitionAction::SubmitVerification, None))
+        );
+        let conflict_out = ParsedAgentOutput::new(AgentType::ConflictResolver);
+        assert_eq!(
+            success_transition(
+                &worker_task.id,
+                AgentType::ConflictResolver,
+                &conflict_out,
+                &app
+            )
+            .await,
+            Some((TransitionAction::SubmitVerification, None))
+        );
+
+        let pm_task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
+        set_task_status(&app, &pm_task.id, "in_pm_intervention").await;
+        let pm_out = ParsedAgentOutput::new(AgentType::PM);
+        assert_eq!(
+            success_transition(&pm_task.id, AgentType::PM, &pm_out, &app).await,
+            Some((
+                TransitionAction::PmInterventionRelease,
+                Some("PM session ended without completing intervention".to_string())
+            ))
+        );
+
+        let pm_done_task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
+        set_task_status(&app, &pm_done_task.id, "done").await;
+        assert_eq!(
+            success_transition(&pm_done_task.id, AgentType::PM, &pm_out, &app).await,
+            None
+        );
+
+        let groomer_out = ParsedAgentOutput::new(AgentType::Groomer);
+        assert_eq!(
+            success_transition(&worker_task.id, AgentType::Groomer, &groomer_out, &app).await,
+            None
+        );
+
+        let reviewer_task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
+        set_task_ac(&app, &reviewer_task.id, &ac(&[true, false])).await;
+        insert_review_snapshot(&app, &reviewer_task.id, &ac(&[true, true])).await;
+        let reviewer_out = parsed_output_with_feedback("needs work");
+        assert_eq!(
+            success_transition(
+                &reviewer_task.id,
+                AgentType::TaskReviewer,
+                &reviewer_out,
+                &app
+            )
+            .await,
+            Some((TransitionAction::TaskReviewReject, Some("needs work".to_string())))
+        );
+
+        let stale_task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
+        let stale_ac = ac(&[false]);
+        set_task_ac(&app, &stale_task.id, &stale_ac).await;
+        set_continuation_count(&app, &stale_task.id, 0).await;
+        insert_review_snapshot(&app, &stale_task.id, &stale_ac).await;
+        assert_eq!(
+            success_transition(&stale_task.id, AgentType::TaskReviewer, &reviewer_out, &app).await,
+            Some((
+                TransitionAction::TaskReviewRejectStale,
+                Some("needs work".to_string())
+            ))
+        );
+
+        let escalate_task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
+        set_task_ac(&app, &escalate_task.id, &stale_ac).await;
+        set_continuation_count(&app, &escalate_task.id, 2).await;
+        insert_review_snapshot(&app, &escalate_task.id, &stale_ac).await;
+        let escalation = success_transition(
+            &escalate_task.id,
+            AgentType::TaskReviewer,
+            &reviewer_out,
+            &app,
+        )
+        .await;
+        assert!(matches!(escalation, Some((TransitionAction::Escalate, _))));
+
+        let missing = success_transition(
+            "00000000-0000-0000-0000-000000000000",
+            AgentType::TaskReviewer,
+            &reviewer_out,
+            &app,
+        )
+        .await;
+        assert!(matches!(missing, Some((TransitionAction::ReleaseTaskReview, _))));
+    }
 }
