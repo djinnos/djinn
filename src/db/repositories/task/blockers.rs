@@ -51,6 +51,21 @@ impl TaskRepository {
             }
         }
         tx.commit().await?;
+
+        if let Some(task) = self.get(task_id).await? {
+            let _ = self.events.send(DjinnEvent::TaskUpdated {
+                task,
+                from_sync: false,
+            });
+        }
+
+        if let Some(task) = self.get(blocking_id).await? {
+            let _ = self.events.send(DjinnEvent::TaskUpdated {
+                task,
+                from_sync: false,
+            });
+        }
+
         Ok(())
     }
 
@@ -61,6 +76,21 @@ impl TaskRepository {
             .bind(blocking_id)
             .execute(self.db.pool())
             .await?;
+
+        if let Some(task) = self.get(task_id).await? {
+            let _ = self.events.send(DjinnEvent::TaskUpdated {
+                task,
+                from_sync: false,
+            });
+        }
+
+        if let Some(task) = self.get(blocking_id).await? {
+            let _ = self.events.send(DjinnEvent::TaskUpdated {
+                task,
+                from_sync: false,
+            });
+        }
+
         Ok(())
     }
 
