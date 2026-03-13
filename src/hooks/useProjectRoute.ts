@@ -2,9 +2,8 @@
  * useProjectRoute — Syncs URL params to projectStore and derives navigation helpers.
  *
  * URL patterns:
- *   /kanban, /epics, /chat       → ALL_PROJECTS view
+ *   /kanban, /chat               → ALL_PROJECTS view
  *   /projects/:projectId/kanban  → specific project view
- *   /projects/:projectId/epics   → specific project view
  *   /projects/:projectId/chat    → specific project view
  *   /task/:taskId                → task session (no project change)
  *   /settings/*                  → settings (no project change)
@@ -27,7 +26,6 @@ function parseProjectIdFromPath(pathname: string): string | undefined {
 /** Derive the current view from the pathname */
 function parseViewFromPath(pathname: string): ProjectView | null {
   if (pathname.includes("/chat")) return "chat";
-  if (pathname.includes("/epics")) return "epics";
   if (pathname.includes("/kanban") || pathname === "/") return "kanban";
   return null;
 }

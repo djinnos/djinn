@@ -42,7 +42,7 @@ function TitlebarButton({
 
 const VIEW_LABELS: Record<string, string> = {
   kanban: "Kanban",
-  epics: "Epics",
+  chat: "Chat",
 };
 
 function Breadcrumb() {

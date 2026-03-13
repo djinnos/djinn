@@ -10,7 +10,6 @@ import { ProjectSetupStep } from "@/components/ProjectSetupStep";
 import { Sidebar } from "@/components/Sidebar";
 import { Titlebar } from "@/components/Titlebar";
 import { KanbanPage } from "@/pages/KanbanPage";
-import { RoadmapPage } from "@/pages/RoadmapPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { TaskSessionPage } from "@/pages/TaskSessionPage";
 import { ChatPage } from "@/pages/ChatPage";
@@ -68,13 +67,11 @@ function MainLayout() {
           <Routes>
             {/* Global views (All Projects) */}
             <Route path="/kanban" element={<KanbanPage />} />
-            <Route path="/epics" element={<RoadmapPage />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/chat/:sessionId" element={<ChatPage />} />
 
             {/* Project-scoped views */}
             <Route path="/projects/:projectId/kanban" element={<KanbanPage />} />
-            <Route path="/projects/:projectId/epics" element={<RoadmapPage />} />
             <Route path="/projects/:projectId/chat" element={<ChatPage />} />
             <Route path="/projects/:projectId/chat/:sessionId" element={<ChatPage />} />
 
