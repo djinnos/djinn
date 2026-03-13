@@ -63,6 +63,7 @@ A task is ready only when a worker can execute without guessing core requirement
 - Description states required behavior and constraints.
 - Design identifies key implementation approach and touchpoints.
 - ADR references are included when architectural choices or existing decisions apply.
+- Every task MUST include at least one acceptance criterion before it is marked ready for dispatch. If AC are missing or empty, add them during grooming and keep the task in backlog until this is fixed.
 
 ## Throughput
 
