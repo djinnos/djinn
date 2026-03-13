@@ -341,7 +341,7 @@ pub async fn run_task_lifecycle(
                         &app_state,
                     )
                     .await;
-                    let failed = results.last().filter(|r| r.exit_code != 0);
+                    let failed = results.iter().find(|r| r.exit_code != 0);
                     if let Some(failure) = failed {
                         let reason = format!(
                             "Setup command '{}' failed (exit {})\nstdout: {}\nstderr: {}",
