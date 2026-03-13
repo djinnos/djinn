@@ -1,6 +1,7 @@
 use serde_json::json;
 
-use crate::db::TaskRepository;
+use crate::db::repositories::task::TaskRepository;
+use tokio::sync::broadcast;
 use crate::test_helpers::{
     create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
     create_test_task, initialize_mcp_session, mcp_call_tool,
@@ -27,6 +28,12 @@ async fn task_create_success_shape() {
     assert_eq!(payload["status"], "backlog");
     assert_eq!(payload["title"], "Create task contract test");
     assert_eq!(payload["epic_id"], epic.id);
+
+    let repo = TaskRepository::new(db.clone(), broadcast::channel(16).0);
+    let created = repo.get(payload["id"].as_str().unwrap()).await.unwrap().unwrap();
+    assert_eq!(created.title, "Create task contract test");
+    assert_eq!(created.status, "backlog");
+    assert_eq!(created.epic_id, epic.id);
 }
 
 #[tokio::test]
@@ -183,6 +190,10 @@ async fn task_update_partial_and_error_shape() {
     .await;
     assert_eq!(ok["title"], "updated");
 
+    let repo = TaskRepository::new(db.clone(), broadcast::channel(16).0);
+    let updated = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(updated.title, "updated");
+
     let err = mcp_call_tool(
         &app,
         &sid,
@@ -210,6 +221,10 @@ async fn task_transition_valid_and_invalid() {
     )
     .await;
     assert_eq!(ok["status"], "open");
+
+    let repo = TaskRepository::new(db.clone(), broadcast::channel(16).0);
+    let transitioned = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(transitioned.status, "open");
 
     let bad = mcp_call_tool(
         &app,

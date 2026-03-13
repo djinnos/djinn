@@ -2,11 +2,14 @@
 mod tests {
     use serde_json::json;
 
-    use crate::test_helpers::{create_test_app, initialize_mcp_session, mcp_call_tool};
+    use crate::db::repositories::credential::CredentialRepository;
+    use crate::test_helpers::{create_test_app_with_db, create_test_db, initialize_mcp_session, mcp_call_tool};
+    use tokio::sync::broadcast;
 
     #[tokio::test]
     async fn credential_set_success_shape() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let app = create_test_app_with_db(db.clone());
         let session_id = initialize_mcp_session(&app).await;
 
         let res = mcp_call_tool(
@@ -21,11 +24,25 @@ mod tests {
         assert_eq!(res["success"], true);
         assert_eq!(res["key_name"], "ANTHROPIC_API_KEY");
         assert!(res["id"].as_str().unwrap_or_default().len() > 8);
+
+        let row: Option<Vec<u8>> = sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = ?1")
+            .bind("ANTHROPIC_API_KEY")
+            .fetch_optional(db.pool())
+            .await
+            .unwrap();
+        let ciphertext = row.expect("missing credential row");
+        assert!(!ciphertext.is_empty());
+        assert_ne!(ciphertext, b"secret-1");
+
+        let repo = CredentialRepository::new(db.clone(), broadcast::channel(16).0);
+        let decrypted = repo.get_decrypted("ANTHROPIC_API_KEY").await.unwrap().unwrap();
+        assert_eq!(decrypted, "secret-1");
     }
 
     #[tokio::test]
     async fn credential_list_hides_secrets() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let app = create_test_app_with_db(db.clone());
         let session_id = initialize_mcp_session(&app).await;
 
         let _ = mcp_call_tool(
@@ -45,7 +62,8 @@ mod tests {
 
     #[tokio::test]
     async fn credential_delete_removes_credential() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let app = create_test_app_with_db(db.clone());
         let session_id = initialize_mcp_session(&app).await;
 
         let _ = mcp_call_tool(

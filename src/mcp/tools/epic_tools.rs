@@ -922,6 +922,8 @@ impl DjinnMcpServer {
 mod tests {
     use serde_json::json;
 
+    use crate::db::repositories::epic::EpicRepository;
+    use tokio::sync::broadcast;
     use crate::test_helpers::{
         create_test_app, create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
         create_test_task, initialize_mcp_session, mcp_call_tool,
@@ -947,6 +949,11 @@ mod tests {
         assert!(result["short_id"].as_str().is_some());
         assert_eq!(result["status"], "open");
         assert_eq!(result["title"], "New Epic");
+
+        let repo = EpicRepository::new(db.clone(), broadcast::channel(16).0);
+        let created = repo.get(result["id"].as_str().unwrap()).await.unwrap().unwrap();
+        assert_eq!(created.title, "New Epic");
+        assert_eq!(created.status, "open");
     }
 
     #[tokio::test]
@@ -1082,6 +1089,13 @@ mod tests {
         assert_eq!(result["description"], "Updated description");
         assert_eq!(result["color"], "#800080");
         assert_eq!(result["emoji"], "🚀");
+
+        let repo = EpicRepository::new(db.clone(), broadcast::channel(16).0);
+        let updated = repo.get(&epic.id).await.unwrap().unwrap();
+        assert_eq!(updated.title, "Updated Epic");
+        assert_eq!(updated.description, "Updated description");
+        assert_eq!(updated.color, "#800080");
+        assert_eq!(updated.emoji, "🚀");
     }
 
     #[tokio::test]
@@ -1205,6 +1219,10 @@ mod tests {
         assert!(result.get("error").is_none());
         assert_eq!(result["ok"], true);
         assert_eq!(result["deleted_task_count"], 2);
+
+        let epic_repo = EpicRepository::new(db.clone(), broadcast::channel(16).0);
+        let deleted_epic = epic_repo.get(&epic.id).await.expect("query epic");
+        assert!(deleted_epic.is_none(), "epic should be deleted from DB");
 
         let tasks_result = mcp_call_tool(
             &app,
