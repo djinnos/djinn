@@ -3,7 +3,7 @@ use crate::db::EpicRepository;
 use crate::models::{TaskStatus, TransitionAction};
 use crate::test_helpers;
 
-async fn make_epic(db: &Database, tx: broadcast::Sender<DjinnEvent>) -> crate::models::Epic {
+async fn make_epic(db: &Database, tx: broadcast::Sender<DjinnEventEnvelope>) -> crate::models::Epic {
     EpicRepository::new(db.clone(), tx)
         .create("Test Epic", "", "", "", "", None)
         .await
@@ -107,13 +107,12 @@ async fn create_emits_event() {
     repo.create(&epic.id, "Event Task", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
-    match rx.recv().await.unwrap() {
-        DjinnEvent::TaskCreated {
-            task: t,
-            from_sync: false,
-        } => assert_eq!(t.title, "Event Task"),
-        _ => panic!("expected TaskCreated"),
-    }
+    let envelope = rx.recv().await.unwrap();
+    assert_eq!(envelope.entity_type, "task");
+    assert_eq!(envelope.action, "created");
+    assert!(!envelope.from_sync);
+    let t: Task = serde_json::from_value(envelope.payload["task"].clone()).unwrap();
+    assert_eq!(t.title, "Event Task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -136,16 +135,13 @@ async fn update_emits_event() {
         .unwrap();
     assert_eq!(updated.title, "New");
 
-    match rx.recv().await.unwrap() {
-        DjinnEvent::TaskUpdated {
-            task: t,
-            from_sync: false,
-        } => {
-            assert_eq!(t.id, task.id);
-            assert_eq!(t.title, "New");
-        }
-        _ => panic!("expected TaskUpdated"),
-    }
+    let envelope = rx.recv().await.unwrap();
+    assert_eq!(envelope.entity_type, "task");
+    assert_eq!(envelope.action, "updated");
+    assert!(!envelope.from_sync);
+    let t: Task = serde_json::from_value(envelope.payload["task"].clone()).unwrap();
+    assert_eq!(t.id, task.id);
+    assert_eq!(t.title, "New");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -179,16 +175,13 @@ async fn transition_emits_event_start() {
         .await
         .unwrap();
 
-    match rx.recv().await.unwrap() {
-        DjinnEvent::TaskUpdated {
-            task: t,
-            from_sync: false,
-        } => {
-            assert_eq!(t.id, task.id);
-            assert_eq!(t.status, "in_progress");
-        }
-        _ => panic!("expected TaskUpdated"),
-    }
+    let envelope = rx.recv().await.unwrap();
+    assert_eq!(envelope.entity_type, "task");
+    assert_eq!(envelope.action, "updated");
+    assert!(!envelope.from_sync);
+    let t: Task = serde_json::from_value(envelope.payload["task"].clone()).unwrap();
+    assert_eq!(t.id, task.id);
+    assert_eq!(t.status, "in_progress");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -209,17 +202,14 @@ async fn transition_emits_event_close_with_closed_at() {
         .await
         .unwrap();
 
-    match rx.recv().await.unwrap() {
-        DjinnEvent::TaskUpdated {
-            task: t,
-            from_sync: false,
-        } => {
-            assert_eq!(t.id, task.id);
-            assert_eq!(t.status, "closed");
-            assert!(t.closed_at.is_some());
-        }
-        _ => panic!("expected TaskUpdated"),
-    }
+    let envelope = rx.recv().await.unwrap();
+    assert_eq!(envelope.entity_type, "task");
+    assert_eq!(envelope.action, "updated");
+    assert!(!envelope.from_sync);
+    let t: Task = serde_json::from_value(envelope.payload["task"].clone()).unwrap();
+    assert_eq!(t.id, task.id);
+    assert_eq!(t.status, "closed");
+    assert!(t.closed_at.is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -250,17 +240,14 @@ async fn transition_emits_event_reopen() {
     .await
     .unwrap();
 
-    match rx.recv().await.unwrap() {
-        DjinnEvent::TaskUpdated {
-            task: t,
-            from_sync: false,
-        } => {
-            assert_eq!(t.id, task.id);
-            assert_eq!(t.status, "open");
-            assert!(t.closed_at.is_none());
-        }
-        _ => panic!("expected TaskUpdated"),
-    }
+    let envelope = rx.recv().await.unwrap();
+    assert_eq!(envelope.entity_type, "task");
+    assert_eq!(envelope.action, "updated");
+    assert!(!envelope.from_sync);
+    let t: Task = serde_json::from_value(envelope.payload["task"].clone()).unwrap();
+    assert_eq!(t.id, task.id);
+    assert_eq!(t.status, "open");
+    assert!(t.closed_at.is_none());
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn set_status_transitions() {
@@ -499,10 +486,10 @@ async fn delete_task_emits_event() {
     let _ = rx.recv().await.unwrap();
 
     repo.delete(&task.id).await.unwrap();
-    match rx.recv().await.unwrap() {
-        DjinnEvent::TaskDeleted { id } => assert_eq!(id, task.id),
-        _ => panic!("expected TaskDeleted"),
-    }
+    let envelope = rx.recv().await.unwrap();
+    assert_eq!(envelope.entity_type, "task");
+    assert_eq!(envelope.action, "deleted");
+    assert_eq!(envelope.payload["id"].as_str().unwrap(), task.id);
 }
 
 // ── State machine tests ───────────────────────────────────────────────────
@@ -1348,14 +1335,11 @@ async fn increment_continuation_count_emits_task_updated_event() {
 
     repo.increment_continuation_count(&task.id).await.unwrap();
 
-    match rx.recv().await.unwrap() {
-        DjinnEvent::TaskUpdated {
-            task: t,
-            from_sync: false,
-        } => {
-            assert_eq!(t.id, task.id);
-            assert_eq!(t.continuation_count, task.continuation_count + 1);
-        }
-        _ => panic!("expected TaskUpdated"),
-    }
+    let envelope = rx.recv().await.unwrap();
+    assert_eq!(envelope.entity_type, "task");
+    assert_eq!(envelope.action, "updated");
+    assert!(!envelope.from_sync);
+    let t: Task = serde_json::from_value(envelope.payload["task"].clone()).unwrap();
+    assert_eq!(t.id, task.id);
+    assert_eq!(t.continuation_count, task.continuation_count + 1);
 }

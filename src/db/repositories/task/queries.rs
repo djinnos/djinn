@@ -194,7 +194,7 @@ impl TaskRepository {
             let _ = self.events.send(DjinnEvent::TaskUpdated {
                 task: t.clone(),
                 from_sync: false,
-            });
+            }.into());
         }
         Ok(task)
     }
@@ -478,7 +478,7 @@ impl TaskRepository {
             let _ = events_tx.send(DjinnEvent::TaskUpdated {
                 task: task.clone(),
                 from_sync: false,
-            });
+            }.into());
         }
 
         let healed_short_ids: Vec<&str> = healed.iter().map(|t| t.short_id.as_str()).collect();

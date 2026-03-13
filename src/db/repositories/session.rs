@@ -2,7 +2,7 @@ use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::DjinnEvent;
+use crate::events::DjinnEventEnvelope;
 use crate::models::{SessionRecord, SessionStatus};
 
 /// Column list shared by all session SELECT queries.
@@ -11,11 +11,11 @@ const SESSION_COLS: &str = "id, project_id, task_id, model_id, agent_type, start
 
 pub struct SessionRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEvent>,
+    events: broadcast::Sender<DjinnEventEnvelope>,
 }
 
 impl SessionRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
+    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
         Self { db, events }
     }
 
@@ -27,9 +27,20 @@ impl SessionRepository {
         .bind(id)
         .fetch_one(self.db.pool())
         .await?;
-        let _ = self
-            .events
-            .send(DjinnEvent::SessionUpdated(session.clone()));
+        let action = match session.status.as_str() {
+            "completed" => "completed",
+            "interrupted" => "interrupted",
+            "failed" => "failed",
+            _ => "updated",
+        };
+        let _ = self.events.send(DjinnEventEnvelope {
+            entity_type: "session",
+            action,
+            payload: serde_json::to_value(&session).unwrap_or_default(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        });
         Ok(session)
     }
 
@@ -68,9 +79,14 @@ impl SessionRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self
-            .events
-            .send(DjinnEvent::SessionCreated(session.clone()));
+        let _ = self.events.send(DjinnEventEnvelope {
+            entity_type: "session",
+            action: "started",
+            payload: serde_json::to_value(&session).unwrap_or_default(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        });
         Ok(session)
     }
 
@@ -317,7 +333,7 @@ mod tests {
     use crate::test_helpers;
 
     async fn create_task(
-        repo_events: broadcast::Sender<DjinnEvent>,
+        repo_events: broadcast::Sender<DjinnEventEnvelope>,
         db: Database,
     ) -> (String, String) {
         let epic_repo = EpicRepository::new(db.clone(), repo_events.clone());
@@ -356,7 +372,9 @@ mod tests {
 
         let mut created_seen = false;
         for _ in 0..8 {
-            if let DjinnEvent::SessionCreated(s) = rx.recv().await.unwrap() {
+            let envelope = rx.recv().await.unwrap();
+            if envelope.entity_type == "session" && envelope.action == "started" {
+                let s: crate::models::SessionRecord = envelope.parse_payload().unwrap();
                 assert_eq!(s.id, created.id);
                 created_seen = true;
                 break;
@@ -375,7 +393,9 @@ mod tests {
 
         let mut updated_seen = false;
         for _ in 0..8 {
-            if let DjinnEvent::SessionUpdated(s) = rx.recv().await.unwrap() {
+            let envelope = rx.recv().await.unwrap();
+            if envelope.entity_type == "session" && envelope.action == "completed" {
+                let s: crate::models::SessionRecord = envelope.parse_payload().unwrap();
                 assert_eq!(s.id, created.id);
                 updated_seen = true;
                 break;
@@ -422,11 +442,13 @@ mod tests {
 
         let mut updated_ids = std::collections::HashSet::new();
         for _ in 0..2 {
-            if let DjinnEvent::SessionUpdated(session) = rx.recv().await.unwrap() {
-                assert_eq!(session.status, "interrupted");
-                assert!(session.ended_at.is_some());
-                updated_ids.insert(session.id);
-            }
+            let envelope = rx.recv().await.unwrap();
+            assert_eq!(envelope.entity_type, "session");
+            assert_eq!(envelope.action, "interrupted");
+            let session: crate::models::SessionRecord = envelope.parse_payload().unwrap();
+            assert_eq!(session.status, "interrupted");
+            assert!(session.ended_at.is_some());
+            updated_ids.insert(session.id);
         }
 
         assert!(updated_ids.contains(&first.id));

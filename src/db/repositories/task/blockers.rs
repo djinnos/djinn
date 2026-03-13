@@ -55,14 +55,14 @@ impl TaskRepository {
             let _ = self.events.send(DjinnEvent::TaskUpdated {
                 task,
                 from_sync: false,
-            });
+            }.into());
         }
 
         if let Some(task) = self.get(blocking_id).await? {
             let _ = self.events.send(DjinnEvent::TaskUpdated {
                 task,
                 from_sync: false,
-            });
+            }.into());
         }
 
         Ok(())
@@ -80,14 +80,14 @@ impl TaskRepository {
             let _ = self.events.send(DjinnEvent::TaskUpdated {
                 task,
                 from_sync: false,
-            });
+            }.into());
         }
 
         if let Some(task) = self.get(blocking_id).await? {
             let _ = self.events.send(DjinnEvent::TaskUpdated {
                 task,
                 from_sync: false,
-            });
+            }.into());
         }
 
         Ok(())
@@ -153,7 +153,7 @@ impl TaskRepository {
             let _ = self.events.send(DjinnEvent::TaskUpdated {
                 task: t,
                 from_sync: false,
-            });
+            }.into());
         }
         Ok(())
     }

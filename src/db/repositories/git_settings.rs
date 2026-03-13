@@ -8,16 +8,16 @@ use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::DjinnEvent;
+use crate::events::{DjinnEvent, DjinnEventEnvelope};
 use crate::models::GitSettings;
 
 pub struct GitSettingsRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEvent>,
+    events: broadcast::Sender<DjinnEventEnvelope>,
 }
 
 impl GitSettingsRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
+    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
         Self { db, events }
     }
 
@@ -77,7 +77,7 @@ impl GitSettingsRepository {
             settings: GitSettings {
                 target_branch: branch.to_owned(),
             },
-        });
+        }.into());
         Ok(())
     }
 
@@ -99,7 +99,7 @@ impl GitSettingsRepository {
             settings: GitSettings {
                 target_branch: branch.to_owned(),
             },
-        });
+        }.into());
         Ok(())
     }
 }

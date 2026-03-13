@@ -4,8 +4,6 @@ use crate::models::Epic;
 use crate::models::GitSettings;
 use crate::models::Note;
 use crate::models::Project;
-use crate::models::SessionRecord;
-use crate::models::Setting;
 use crate::models::Task;
 use serde::de::DeserializeOwned;
 
@@ -18,10 +16,7 @@ use serde::de::DeserializeOwned;
 ///   - `Created` / `Updated` variants carry the full entity clone.
 ///   - `Deleted` variants carry only the `id` string.
 #[derive(Clone, Debug, serde::Serialize)]
-pub enum DjinnEvent {
-    // Settings
-    SettingUpdated(Setting),
-
+pub(crate) enum DjinnEvent {
     // Projects
     ProjectCreated(Project),
     ProjectUpdated(Project),
@@ -94,9 +89,6 @@ pub enum DjinnEvent {
         model_id: String,
         agent_type: String,
     },
-    SessionCreated(SessionRecord),
-    SessionUpdated(SessionRecord),
-
     /// Periodic token usage snapshot emitted after each agent turn.
     /// `usage_pct` is `tokens_in / context_window` (0.0 when context_window unknown).
     SessionTokenUpdate {
@@ -114,13 +106,6 @@ pub enum DjinnEvent {
         task_id: String,
         agent_type: String,
         message: serde_json::Value,
-    },
-
-    /// Emitted when a message is stored in the session_messages table.
-    SessionMessageInserted {
-        session_id: String,
-        task_id: String,
-        role: String,
     },
 
     // Sync lifecycle (SYNC-13)
@@ -188,7 +173,7 @@ impl From<DjinnEvent> for DjinnEventEnvelope {
     fn from(event: DjinnEvent) -> Self {
         let entity_type = event.entity_type();
         let action = event.action();
-        let from_sync = event.from_sync();
+        let from_sync = event.is_from_sync();
 
         let id = match &event {
             DjinnEvent::ProjectDeleted { id }
@@ -209,7 +194,6 @@ impl From<DjinnEvent> for DjinnEventEnvelope {
         };
 
         let payload = match event {
-            DjinnEvent::SettingUpdated(setting) => serde_json::to_value(setting),
             DjinnEvent::ProjectCreated(project) => serde_json::to_value(project),
             DjinnEvent::ProjectUpdated(project) => serde_json::to_value(project),
             DjinnEvent::ProjectDeleted { id } => {
@@ -257,8 +241,6 @@ impl From<DjinnEvent> for DjinnEventEnvelope {
                 "model_id": model_id,
                 "agent_type": agent_type,
             })),
-            DjinnEvent::SessionCreated(session_record) => serde_json::to_value(session_record),
-            DjinnEvent::SessionUpdated(session_record) => serde_json::to_value(session_record),
             DjinnEvent::SessionTokenUpdate {
                 session_id,
                 task_id,
@@ -284,15 +266,6 @@ impl From<DjinnEvent> for DjinnEventEnvelope {
                 "task_id": task_id,
                 "agent_type": agent_type,
                 "message": message,
-            })),
-            DjinnEvent::SessionMessageInserted {
-                session_id,
-                task_id,
-                role,
-            } => serde_json::to_value(serde_json::json!({
-                "session_id": session_id,
-                "task_id": task_id,
-                "role": role,
             })),
             DjinnEvent::SyncCompleted {
                 channel,
@@ -342,9 +315,8 @@ impl From<DjinnEvent> for DjinnEventEnvelope {
 }
 
 impl DjinnEvent {
-    pub fn entity_type(&self) -> &'static str {
+    fn entity_type(&self) -> &'static str {
         match self {
-            DjinnEvent::SettingUpdated(_) => "setting",
             DjinnEvent::ProjectCreated(_)
             | DjinnEvent::ProjectUpdated(_)
             | DjinnEvent::ProjectDeleted { .. } => "project",
@@ -366,20 +338,16 @@ impl DjinnEvent {
             | DjinnEvent::CredentialUpdated(_)
             | DjinnEvent::CredentialDeleted { .. } => "credential",
             DjinnEvent::SessionDispatched { .. }
-            | DjinnEvent::SessionCreated(_)
-            | DjinnEvent::SessionUpdated(_)
             | DjinnEvent::SessionTokenUpdate { .. }
             | DjinnEvent::SessionMessage { .. } => "session",
-            DjinnEvent::SessionMessageInserted { .. } => "session_message",
             DjinnEvent::SyncCompleted { .. } => "sync",
             DjinnEvent::ProjectHealthChanged { .. } => "project",
             DjinnEvent::ActivityLogged { .. } => "activity",
         }
     }
 
-    pub fn action(&self) -> &'static str {
+    fn action(&self) -> &'static str {
         match self {
-            DjinnEvent::SettingUpdated(_) => "updated",
             DjinnEvent::ProjectCreated(_) => "created",
             DjinnEvent::ProjectUpdated(_) => "updated",
             DjinnEvent::ProjectDeleted { .. } => "deleted",
@@ -400,16 +368,8 @@ impl DjinnEvent {
             DjinnEvent::CredentialUpdated(_) => "updated",
             DjinnEvent::CredentialDeleted { .. } => "deleted",
             DjinnEvent::SessionDispatched { .. } => "dispatched",
-            DjinnEvent::SessionCreated(_) => "started",
-            DjinnEvent::SessionUpdated(v) => match v.status.as_str() {
-                "completed" => "completed",
-                "interrupted" => "interrupted",
-                "failed" => "failed",
-                _ => "updated",
-            },
             DjinnEvent::SessionTokenUpdate { .. } => "token_update",
             DjinnEvent::SessionMessage { .. } => "message",
-            DjinnEvent::SessionMessageInserted { .. } => "inserted",
             DjinnEvent::SyncCompleted { .. } => "completed",
             DjinnEvent::ProjectHealthChanged { healthy: true, .. } => "health_ok",
             DjinnEvent::ProjectHealthChanged { healthy: false, .. } => "health_error",
@@ -417,7 +377,7 @@ impl DjinnEvent {
         }
     }
 
-    pub fn from_sync(&self) -> bool {
+    fn is_from_sync(&self) -> bool {
         match self {
             DjinnEvent::TaskCreated { from_sync, .. }
             | DjinnEvent::TaskUpdated { from_sync, .. } => *from_sync,
@@ -521,8 +481,14 @@ mod tests {
             value: "bar".into(),
             updated_at: "2025-01-01T00:00:00Z".into(),
         };
-        let event = DjinnEvent::SettingUpdated(setting.clone());
-        let envelope = DjinnEventEnvelope::from(event);
+        let envelope = DjinnEventEnvelope {
+            entity_type: "setting",
+            action: "updated",
+            payload: serde_json::to_value(&setting).unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        };
 
         assert_eq!(envelope.entity_type(), "setting");
         assert_eq!(envelope.action(), "updated");

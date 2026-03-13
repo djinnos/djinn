@@ -15,7 +15,7 @@ use crate::db::NoteRepository;
 use crate::db::ProjectRepository;
 use crate::db::SettingsRepository;
 use crate::db::connection::Database;
-use crate::events::DjinnEvent;
+use crate::events::DjinnEventEnvelope;
 use crate::provider::{CatalogService, HealthTracker};
 use crate::sync::SyncManager;
 
@@ -34,7 +34,7 @@ pub struct AppState {
 struct Inner {
     pub db: Database,
     pub cancel: CancellationToken,
-    pub events: broadcast::Sender<DjinnEvent>,
+    pub events: broadcast::Sender<DjinnEventEnvelope>,
     pub git_actors: Mutex<HashMap<PathBuf, GitActorHandle>>,
     /// models.dev catalog + custom providers (in-memory, refreshed on startup).
     pub catalog: CatalogService,
@@ -100,7 +100,7 @@ impl AppState {
         &self.inner.cancel
     }
 
-    pub fn events(&self) -> &broadcast::Sender<DjinnEvent> {
+    pub fn events(&self) -> &broadcast::Sender<DjinnEventEnvelope> {
         &self.inner.events
     }
 

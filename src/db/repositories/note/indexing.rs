@@ -56,12 +56,12 @@ impl NoteRepository {
                             project_id,
                         )
                         .await?;
-                    let _ = self.events.send(DjinnEvent::NoteUpdated(updated));
+                    let _ = self.events.send(DjinnEvent::NoteUpdated(updated).into());
                     summary.updated += 1;
                 }
                 None => {
                     let created = self.insert_index_entry(project_id, &scanned_note).await?;
-                    let _ = self.events.send(DjinnEvent::NoteCreated(created));
+                    let _ = self.events.send(DjinnEvent::NoteCreated(created).into());
                     summary.created += 1;
                 }
             }

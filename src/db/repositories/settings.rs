@@ -2,16 +2,16 @@ use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::DjinnEvent;
+use crate::events::DjinnEventEnvelope;
 use crate::models::Setting;
 
 pub struct SettingsRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEvent>,
+    events: broadcast::Sender<DjinnEventEnvelope>,
 }
 
 impl SettingsRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
+    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
         Self { db, events }
     }
 
@@ -56,9 +56,14 @@ impl SettingsRepository {
         .await?;
 
         // Emit event — ignore send error (no receivers is fine).
-        let _ = self
-            .events
-            .send(DjinnEvent::SettingUpdated(setting.clone()));
+        let _ = self.events.send(DjinnEventEnvelope {
+            entity_type: "setting",
+            action: "updated",
+            payload: serde_json::to_value(&setting).unwrap_or_default(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        });
         Ok(setting)
     }
 
@@ -71,11 +76,19 @@ impl SettingsRepository {
             .await?;
         let deleted = res.rows_affected() > 0;
         if deleted {
-            let _ = self.events.send(DjinnEvent::SettingUpdated(Setting {
-                key: key.to_string(),
-                value: String::new(),
-                updated_at: String::new(),
-            }));
+            let _ = self.events.send(DjinnEventEnvelope {
+                entity_type: "setting",
+                action: "updated",
+                payload: serde_json::to_value(Setting {
+                    key: key.to_string(),
+                    value: String::new(),
+                    updated_at: String::new(),
+                })
+                .unwrap_or_default(),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            });
         }
         Ok(deleted)
     }
@@ -108,14 +121,12 @@ mod tests {
 
         repo.set("lang", "en").await.unwrap();
 
-        let event = rx.recv().await.unwrap();
-        match event {
-            DjinnEvent::SettingUpdated(s) => {
-                assert_eq!(s.key, "lang");
-                assert_eq!(s.value, "en");
-            }
-            _ => panic!("expected SettingUpdated event"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "setting");
+        assert_eq!(envelope.action, "updated");
+        let s: Setting = envelope.parse_payload().unwrap();
+        assert_eq!(s.key, "lang");
+        assert_eq!(s.value, "en");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

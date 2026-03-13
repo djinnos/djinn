@@ -15,4 +15,5 @@ pub struct Epic {
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
+    pub memory_refs: String,
 }

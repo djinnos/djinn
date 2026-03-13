@@ -3,16 +3,16 @@ use tokio::sync::broadcast;
 use crate::agent::message::{Conversation, Message, Role};
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::DjinnEvent;
+use crate::events::DjinnEventEnvelope;
 use crate::models::SessionMessage;
 
 pub struct SessionMessageRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEvent>,
+    events: broadcast::Sender<DjinnEventEnvelope>,
 }
 
 impl SessionMessageRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
+    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
         Self { db, events }
     }
 
@@ -48,10 +48,17 @@ impl SessionMessageRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEvent::SessionMessageInserted {
-            session_id: session_id.to_owned(),
-            task_id: task_id.to_owned(),
-            role: role.to_owned(),
+        let _ = self.events.send(DjinnEventEnvelope {
+            entity_type: "session_message",
+            action: "inserted",
+            payload: serde_json::json!({
+                "session_id": session_id,
+                "task_id": task_id,
+                "role": role,
+            }),
+            id: None,
+            project_id: None,
+            from_sync: false,
         });
 
         Ok(msg)
@@ -87,10 +94,17 @@ impl SessionMessageRepository {
             .execute(self.db.pool())
             .await?;
 
-            let _ = self.events.send(DjinnEvent::SessionMessageInserted {
-                session_id: session_id.to_owned(),
-                task_id: task_id.to_owned(),
-                role: role.to_owned(),
+            let _ = self.events.send(DjinnEventEnvelope {
+                entity_type: "session_message",
+                action: "inserted",
+                payload: serde_json::json!({
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "role": role,
+                }),
+                id: None,
+                project_id: None,
+                from_sync: false,
             });
         }
 
@@ -176,10 +190,10 @@ mod tests {
     use crate::db::SessionRepository;
     use crate::db::TaskRepository;
     use crate::db::connection::Database;
-    use crate::events::DjinnEvent;
+    use crate::events::DjinnEventEnvelope;
     use tokio::sync::broadcast;
 
-    async fn make_test_db() -> (Database, broadcast::Sender<DjinnEvent>) {
+    async fn make_test_db() -> (Database, broadcast::Sender<DjinnEventEnvelope>) {
         let db = Database::open_in_memory().expect("in-memory db");
         db.ensure_initialized().await.expect("migrate");
         let (tx, _rx) = broadcast::channel(64);
@@ -188,7 +202,7 @@ mod tests {
 
     async fn create_session(
         db: Database,
-        tx: broadcast::Sender<DjinnEvent>,
+        tx: broadcast::Sender<DjinnEventEnvelope>,
     ) -> (String, String, String) {
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
         let epic = epic_repo
@@ -268,8 +282,8 @@ mod tests {
         let mut found = false;
         for _ in 0..16 {
             match rx.try_recv() {
-                Ok(DjinnEvent::SessionMessageInserted { role, .. }) => {
-                    assert_eq!(role, "user");
+                Ok(envelope) if envelope.entity_type == "session_message" && envelope.action == "inserted" => {
+                    assert_eq!(envelope.payload["role"].as_str().unwrap(), "user");
                     found = true;
                     break;
                 }

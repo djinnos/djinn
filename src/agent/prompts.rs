@@ -57,6 +57,10 @@ pub struct TaskContext {
     // ── Activity log ─────────────────────────────────────────────────────
     /// Pre-formatted activity log (comments, transitions) for the task.
     pub activity: Option<String>,
+
+    // ── Epic context ─────────────────────────────────────────────────────
+    /// Epic context section for PM agents (title, description, memory_refs, sibling tasks).
+    pub epic_context: Option<String>,
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -162,6 +166,12 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
     out = out.replace("{{setup_commands_section}}", &setup_section);
     out = out.replace("{{verification_section}}", &verification_section);
 
+    let epic_context_section = match &ctx.epic_context {
+        Some(text) if !text.trim().is_empty() => format!("## Epic Context\n\n{text}\n"),
+        _ => String::new(),
+    };
+    out = out.replace("{{epic_context_section}}", &epic_context_section);
+
     let activity_section = match &ctx.activity {
         Some(log) if !log.trim().is_empty() => format!(
             "### Activity Log\n\nKey feedback and recent history from previous sessions. Use `task_activity_list` with filters for full details.\n\n{log}\n"
@@ -258,6 +268,7 @@ mod tests {
             setup_commands: None,
             verification_commands: None,
             activity: None,
+            epic_context: None,
         }
     }
 

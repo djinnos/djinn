@@ -42,6 +42,7 @@ pub struct EpicModel {
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
+    pub memory_refs: Vec<String>,
 }
 
 impl From<&Epic> for EpicModel {
@@ -58,6 +59,7 @@ impl From<&Epic> for EpicModel {
             created_at: e.created_at.clone(),
             updated_at: e.updated_at.clone(),
             closed_at: e.closed_at.clone(),
+            memory_refs: parse_string_array(&e.memory_refs),
         }
     }
 }
@@ -244,6 +246,8 @@ pub struct EpicCreateParams {
     pub emoji: Option<String>,
     pub color: Option<String>,
     pub owner: Option<String>,
+    /// Memory reference URLs for this epic (e.g. ADR paths).
+    pub memory_refs: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -278,6 +282,8 @@ pub struct EpicUpdateParams {
     pub emoji: Option<String>,
     pub color: Option<String>,
     pub owner: Option<String>,
+    /// Memory reference URLs for this epic (e.g. ADR paths).
+    pub memory_refs: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -381,6 +387,10 @@ impl DjinnMcpServer {
             }
         };
 
+        let memory_refs_json = p.memory_refs
+            .as_ref()
+            .map(|refs| serde_json::to_string(refs).unwrap_or_else(|_| "[]".to_string()));
+
         let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
@@ -392,7 +402,7 @@ impl DjinnMcpServer {
             }
         };
         match repo
-            .create_for_project(&project_id, crate::db::repositories::epic::EpicCreateInput { title: &title, description, emoji, color, owner: &owner, memory_refs: None })
+            .create_for_project(&project_id, crate::db::repositories::epic::EpicCreateInput { title: &title, description, emoji, color, owner: &owner, memory_refs: memory_refs_json.as_deref() })
             .await
         {
             Ok(epic) => Json(EpicSingleResponse {
@@ -595,8 +605,14 @@ impl DjinnMcpServer {
             epic.owner.clone()
         };
 
+        let memory_refs_str = if let Some(ref refs) = p.memory_refs {
+            serde_json::to_string(refs).unwrap_or_else(|_| "[]".to_string())
+        } else {
+            epic.memory_refs.clone()
+        };
+
         match repo
-             .update(&epic.id, crate::db::repositories::epic::EpicUpdateInput { title: &title, description, emoji, color, owner: &owner, memory_refs: None })
+             .update(&epic.id, crate::db::repositories::epic::EpicUpdateInput { title: &title, description, emoji, color, owner: &owner, memory_refs: Some(&memory_refs_str) })
             .await
         {
             Ok(updated) => Json(EpicSingleResponse {
@@ -1358,5 +1374,43 @@ mod tests {
         let groups = result["groups"].as_array().cloned().unwrap_or_default();
         assert!(groups.iter().any(|g| g["key"] == "open"));
         assert!(groups.iter().any(|g| g["key"] == "closed"));
+    }
+
+    #[tokio::test]
+    async fn epic_create_with_memory_refs_roundtrip() {
+        let db = create_test_db();
+        let app = create_test_app_with_db(db.clone());
+        let project = create_test_project(&db).await;
+        let session_id = initialize_mcp_session(&app).await;
+
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_create",
+            json!({
+                "project": project.path,
+                "title": "Refs Epic",
+                "memory_refs": ["decisions/adr-029"]
+            }),
+        )
+        .await;
+
+        assert!(result.get("error").is_none(), "create error: {:?}", result);
+        let refs = result["memory_refs"].as_array().expect("memory_refs should be array");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0], "decisions/adr-029");
+
+        // Verify via epic_show
+        let show_result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_show",
+            json!({"project": project.path, "id": result["short_id"].as_str().unwrap()}),
+        )
+        .await;
+
+        assert!(show_result.get("error").is_none());
+        let show_refs = show_result["memory_refs"].as_array().expect("memory_refs in show");
+        assert_eq!(show_refs, &[json!("decisions/adr-029")]);
     }
 }

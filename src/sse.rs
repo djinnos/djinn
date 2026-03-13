@@ -7,7 +7,6 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::db::connection::default_db_path;
-use crate::events::DjinnEventEnvelope;
 use crate::server::AppState;
 
 pub async fn events_handler(
@@ -17,8 +16,7 @@ pub async fn events_handler(
     let cancel = state.cancel().clone();
 
     let event_stream = BroadcastStream::new(rx).filter_map(|result| match result {
-        Ok(evt) => {
-            let envelope: DjinnEventEnvelope = evt.into();
+        Ok(envelope) => {
             let event_name = format!("{}.{}", envelope.entity_type, envelope.action);
             serde_json::to_string(&envelope)
                 .ok()

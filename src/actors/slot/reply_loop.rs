@@ -331,7 +331,7 @@ pub(super) async fn run_reply_loop(
                                         "role": "assistant",
                                         "text": text,
                                     }),
-                                });
+                                }.into());
                                 turn_text.push_str(&text);
                             }
                             StreamEvent::Delta(tool_use @ ContentBlock::ToolUse { .. }) => {
@@ -358,7 +358,7 @@ pub(super) async fn run_reply_loop(
                                     tokens_out: total_tokens_out as i64,
                                     context_window,
                                     usage_pct,
-                                });
+                                }.into());
                             }
                             StreamEvent::Done => {
                                 break;
@@ -499,7 +499,7 @@ pub(super) async fn run_reply_loop(
                 task_id: task_id.to_owned(),
                 agent_type: role_name.to_owned(),
                 message: serialize_message(&assistant_msg),
-            });
+            }.into());
 
             conversation.push(assistant_msg);
 

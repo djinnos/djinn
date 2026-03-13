@@ -1,16 +1,16 @@
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::DjinnEvent;
+use crate::events::{DjinnEvent, DjinnEventEnvelope};
 use crate::models::{CustomProvider, SeedModel};
 use tokio::sync::broadcast;
 
 pub struct CustomProviderRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEvent>,
+    events: broadcast::Sender<DjinnEventEnvelope>,
 }
 
 impl CustomProviderRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
+    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
         Self { db, events }
     }
 
@@ -70,7 +70,7 @@ impl CustomProviderRepository {
         .await?;
         let _ = self
             .events
-            .send(DjinnEvent::CustomProviderUpserted(provider.clone()));
+            .send(DjinnEvent::CustomProviderUpserted(provider.clone()).into());
         Ok(())
     }
 
@@ -85,7 +85,7 @@ impl CustomProviderRepository {
         if deleted {
             let _ = self
                 .events
-                .send(DjinnEvent::CustomProviderDeleted { id: id.to_string() });
+                .send(DjinnEvent::CustomProviderDeleted { id: id.to_string() }.into());
         }
         Ok(deleted)
     }

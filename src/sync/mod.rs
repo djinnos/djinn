@@ -99,7 +99,7 @@ pub struct SyncResult {
 struct Inner {
     states: Mutex<HashMap<String, ChannelState>>,
     db: Database,
-    events_tx: broadcast::Sender<DjinnEvent>,
+    events_tx: broadcast::Sender<DjinnEventEnvelope>,
 }
 
 /// Cheap-to-clone handle to the sync manager. Held in `AppState`.
@@ -109,7 +109,7 @@ pub struct SyncManager {
 }
 
 impl SyncManager {
-    pub fn new(db: Database, events_tx: broadcast::Sender<DjinnEvent>) -> Self {
+    pub fn new(db: Database, events_tx: broadcast::Sender<DjinnEventEnvelope>) -> Self {
         let mut states = HashMap::new();
         for ch in REGISTERED_CHANNELS {
             states.insert(ch.name.to_string(), ChannelState::default());
@@ -156,8 +156,7 @@ impl SyncManager {
                 tokio::select! {
                     result = events_rx.recv() => {
                         match result {
-                            Ok(evt) => {
-                                let envelope: DjinnEventEnvelope = evt.into();
+                            Ok(envelope) => {
                                 if envelope.entity_type == "task" && !envelope.from_sync {
                                     pending = true;
                                 }
@@ -324,7 +323,7 @@ impl SyncManager {
                             direction: "export".to_string(),
                             count,
                             error: None,
-                        });
+                        }.into());
                         results.push(SyncResult {
                             channel: def.name.to_string(),
                             ok: true,
@@ -348,7 +347,7 @@ impl SyncManager {
                             direction: "export".to_string(),
                             count: 0,
                             error: Some(e.to_string()),
-                        });
+                        }.into());
                         tracing::warn!(
                             channel = def.name,
                             project = project.name,
@@ -416,7 +415,7 @@ impl SyncManager {
                             direction: "import".to_string(),
                             count,
                             error: None,
-                        });
+                        }.into());
                         results.push(SyncResult {
                             channel: def.name.to_string(),
                             ok: true,
@@ -442,7 +441,7 @@ impl SyncManager {
                             direction: "import".to_string(),
                             count: 0,
                             error: Some(e.to_string()),
-                        });
+                        }.into());
                         results.push(SyncResult {
                             channel: def.name.to_string(),
                             ok: false,
@@ -787,12 +786,10 @@ mod tests {
         assert!(changed, "upsert_peer should insert new task");
 
         // The emitted event must have from_sync == true.
-        match rx.recv().await.unwrap() {
-            DjinnEvent::TaskUpdated { from_sync, .. } => {
-                assert!(from_sync, "upsert_peer must emit from_sync: true");
-            }
-            other => panic!("expected TaskUpdated, got: {other:?}"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "task");
+        assert_eq!(envelope.action, "updated");
+        assert!(envelope.from_sync, "upsert_peer must emit from_sync: true");
     }
 
     #[test]

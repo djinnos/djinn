@@ -4,16 +4,16 @@ use uuid::Uuid;
 use crate::crypto;
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::DjinnEvent;
+use crate::events::{DjinnEvent, DjinnEventEnvelope};
 use crate::models::Credential;
 
 pub struct CredentialRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEvent>,
+    events: broadcast::Sender<DjinnEventEnvelope>,
 }
 
 impl CredentialRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
+    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
         Self { db, events }
     }
 
@@ -68,11 +68,11 @@ impl CredentialRepository {
         if is_new {
             let _ = self
                 .events
-                .send(DjinnEvent::CredentialCreated(cred.clone()));
+                .send(DjinnEvent::CredentialCreated(cred.clone()).into());
         } else {
             let _ = self
                 .events
-                .send(DjinnEvent::CredentialUpdated(cred.clone()));
+                .send(DjinnEvent::CredentialUpdated(cred.clone()).into());
         }
 
         Ok(cred)
@@ -107,7 +107,7 @@ impl CredentialRepository {
         }
 
         if let Some(id) = deleted_id {
-            let _ = self.events.send(DjinnEvent::CredentialDeleted { id });
+            let _ = self.events.send(DjinnEvent::CredentialDeleted { id }.into());
             Ok(true)
         } else {
             Ok(false)
@@ -134,7 +134,7 @@ impl CredentialRepository {
             .await?;
 
         for id in ids {
-            let _ = self.events.send(DjinnEvent::CredentialDeleted { id });
+            let _ = self.events.send(DjinnEvent::CredentialDeleted { id }.into());
         }
 
         Ok(result.rows_affected())
@@ -195,13 +195,15 @@ mod tests {
             .await
             .unwrap();
         let ev1 = rx.recv().await.unwrap();
-        assert!(matches!(ev1, DjinnEvent::CredentialCreated(_)));
+        assert_eq!(ev1.entity_type, "credential");
+        assert_eq!(ev1.action, "created");
 
         repo.set("anthropic", "ANTHROPIC_API_KEY", "key-v2")
             .await
             .unwrap();
         let ev2 = rx.recv().await.unwrap();
-        assert!(matches!(ev2, DjinnEvent::CredentialUpdated(_)));
+        assert_eq!(ev2.entity_type, "credential");
+        assert_eq!(ev2.action, "updated");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -238,7 +240,9 @@ mod tests {
         assert!(deleted);
 
         let ev = rx.recv().await.unwrap();
-        assert!(matches!(ev, DjinnEvent::CredentialDeleted { id } if id == cred.id));
+        assert_eq!(ev.entity_type, "credential");
+        assert_eq!(ev.action, "deleted");
+        assert_eq!(ev.payload["id"].as_str().unwrap(), cred.id);
 
         let list = repo.list().await.unwrap();
         assert!(list.is_empty());

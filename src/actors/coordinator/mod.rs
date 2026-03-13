@@ -7,7 +7,7 @@
 // Main loop (AGENT-07): tokio::select! over four arms:
 //   1. CancellationToken — graceful shutdown.
 //   2. mpsc message channel — API calls from MCP tools.
-//   3. broadcast::Receiver<DjinnEvent> — react to open-task events.
+//   3. broadcast::Receiver<DjinnEventEnvelope> — react to open-task events.
 //   4. 30-second Interval tick — stuck detection safety net (AGENT-08).
 
 use std::collections::{HashMap, HashSet};
@@ -26,7 +26,7 @@ use crate::db::GitSettingsRepository;
 use crate::db::ProjectRepository;
 use crate::db::connection::Database;
 use crate::db::{ReadyQuery, TaskRepository};
-use crate::events::DjinnEvent;
+use crate::events::{DjinnEvent, DjinnEventEnvelope};
 use crate::provider::catalog::CatalogService;
 use crate::provider::health::HealthTracker;
 
@@ -161,12 +161,12 @@ enum CoordinatorMessage {
 struct CoordinatorActor {
     // Ryhl core
     receiver: mpsc::Receiver<CoordinatorMessage>,
-    events: broadcast::Receiver<DjinnEvent>,
+    events: broadcast::Receiver<DjinnEventEnvelope>,
     cancel: CancellationToken,
     tick: Interval,
     // Dependencies
     db: Database,
-    events_tx: broadcast::Sender<DjinnEvent>,
+    events_tx: broadcast::Sender<DjinnEventEnvelope>,
     pool: SlotPoolHandle,
     #[cfg_attr(test, allow(dead_code))]
     catalog: CatalogService,
@@ -207,7 +207,7 @@ impl CoordinatorActor {
     fn new(
         receiver: mpsc::Receiver<CoordinatorMessage>,
         self_sender: mpsc::Sender<CoordinatorMessage>,
-        events_tx: broadcast::Sender<DjinnEvent>,
+        events_tx: broadcast::Sender<DjinnEventEnvelope>,
         cancel: CancellationToken,
         db: Database,
         pool: SlotPoolHandle,
@@ -439,7 +439,7 @@ impl CoordinatorActor {
                         project_id: project_id.clone(),
                         healthy,
                         error,
-                    });
+                    }.into());
                 }
                 self.publish_status();
                 // If project just became healthy and dispatch is enabled, trigger a dispatch pass.
@@ -453,10 +453,10 @@ impl CoordinatorActor {
 
     async fn handle_event_result(
         &mut self,
-        result: Result<DjinnEvent, broadcast::error::RecvError>,
+        result: Result<DjinnEventEnvelope, broadcast::error::RecvError>,
     ) {
         match result {
-            Ok(evt) => self.handle_event(evt).await,
+            Ok(envelope) => self.handle_event(envelope).await,
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!(
                     missed = n,
@@ -473,8 +473,7 @@ impl CoordinatorActor {
         }
     }
 
-    async fn handle_event(&mut self, evt: DjinnEvent) {
-        let envelope: crate::events::DjinnEventEnvelope = evt.into();
+    async fn handle_event(&mut self, envelope: DjinnEventEnvelope) {
         match (envelope.entity_type, envelope.action) {
             // A task became dispatch-ready for any role → check dispatch.
             // is_project_dispatch_enabled() handles global-pause + per-project
@@ -639,7 +638,7 @@ impl CoordinatorHandle {
     /// Spawn the `CoordinatorActor` and return a handle to it.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
-        events_tx: broadcast::Sender<DjinnEvent>,
+        events_tx: broadcast::Sender<DjinnEventEnvelope>,
         cancel: CancellationToken,
         db: Database,
         pool: SlotPoolHandle,
@@ -860,7 +859,7 @@ mod tests {
     use crate::server::AppState;
     use crate::test_helpers;
 
-    fn spawn_coordinator(db: &Database, tx: &broadcast::Sender<DjinnEvent>) -> CoordinatorHandle {
+    fn spawn_coordinator(db: &Database, tx: &broadcast::Sender<DjinnEventEnvelope>) -> CoordinatorHandle {
         let cancel = CancellationToken::new();
         let app_state = AppState::new(db.clone(), cancel.clone());
         let sessions_dir = std::env::temp_dir().join(format!(
@@ -902,7 +901,7 @@ mod tests {
         )
     }
 
-    async fn make_epic(db: &Database, tx: broadcast::Sender<DjinnEvent>) -> crate::models::Epic {
+    async fn make_epic(db: &Database, tx: broadcast::Sender<DjinnEventEnvelope>) -> crate::models::Epic {
         EpicRepository::new(db.clone(), tx)
             .create("Epic", "", "", "", "", None)
             .await
