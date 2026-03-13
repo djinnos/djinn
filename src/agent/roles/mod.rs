@@ -100,7 +100,7 @@ pub struct ConflictResolverRole;
 
 impl AgentRole for WorkerRole {
     fn config(&self) -> RoleConfig {
-        AgentType::Worker.role_config()
+        WORKER_CONFIG
     }
 
     fn render_prompt(&self, ctx: &AgentContext<'_>) -> String {
@@ -110,7 +110,7 @@ impl AgentRole for WorkerRole {
 
 impl AgentRole for TaskReviewerRole {
     fn config(&self) -> RoleConfig {
-        AgentType::TaskReviewer.role_config()
+        TASK_REVIEWER_CONFIG
     }
 
     fn render_prompt(&self, ctx: &AgentContext<'_>) -> String {
@@ -120,7 +120,7 @@ impl AgentRole for TaskReviewerRole {
 
 impl AgentRole for PmRole {
     fn config(&self) -> RoleConfig {
-        AgentType::PM.role_config()
+        PM_CONFIG
     }
 
     fn render_prompt(&self, ctx: &AgentContext<'_>) -> String {
@@ -130,7 +130,7 @@ impl AgentRole for PmRole {
 
 impl AgentRole for GroomerRole {
     fn config(&self) -> RoleConfig {
-        AgentType::Groomer.role_config()
+        GROOMER_CONFIG
     }
 
     fn render_prompt(&self, ctx: &AgentContext<'_>) -> String {
@@ -140,7 +140,7 @@ impl AgentRole for GroomerRole {
 
 impl AgentRole for ConflictResolverRole {
     fn config(&self) -> RoleConfig {
-        AgentType::ConflictResolver.role_config()
+        CONFLICT_RESOLVER_CONFIG
     }
 
     fn render_prompt(&self, ctx: &AgentContext<'_>) -> String {
