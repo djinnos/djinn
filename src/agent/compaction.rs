@@ -173,6 +173,31 @@ Wrap reasoning in `<analysis>` tags:
 
 > No new ideas unless user confirmed"#;
 
+
+pub(crate) fn prompt_pre_worker() -> &'static str {
+    PRE_RESUME_WORKER_PROMPT
+}
+
+pub(crate) fn prompt_mid_worker() -> &'static str {
+    MID_SESSION_WORKER_PROMPT
+}
+
+pub(crate) fn prompt_reviewer() -> &'static str {
+    REVIEWER_PROMPT
+}
+
+pub(crate) fn prompt_conflict_resolver() -> &'static str {
+    CONFLICT_RESOLVER_PROMPT
+}
+
+pub(crate) fn prompt_mid_generic() -> &'static str {
+    GENERIC_PROMPT
+}
+
+pub(crate) fn prompt_pre_generic() -> &'static str {
+    GENERIC_PROMPT
+}
+
 // ─── Public helpers ───────────────────────────────────────────────────────────
 
 /// Return `true` if the accumulated input tokens have reached the compaction
