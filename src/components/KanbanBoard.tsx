@@ -330,7 +330,7 @@ export function KanbanBoard({
                 className={cn(
                   "flex h-7 w-7 items-center justify-center rounded-md transition-colors",
                   isActive
-                    ? "bg-muted"
+                    ? "bg-primary/20 ring-1 ring-primary/40"
                     : "hover:bg-muted/50"
                 )}
               >
@@ -339,12 +339,22 @@ export function KanbanBoard({
                   size={16}
                   className={cn(
                     "shrink-0 transition-colors",
-                    isActive ? config.activeColor : noFilters ? config.activeColor : config.color
+                    isActive ? "text-primary" : noFilters ? config.activeColor : config.color
                   )}
                 />
               </button>
             );
           })}
+          {priorityFilters.length > 0 && (
+            <button
+              type="button"
+              title="Clear priority filter"
+              onClick={() => setPriorityFilters([])}
+              className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground/70 hover:text-foreground transition-colors"
+            >
+              <span className="text-xs leading-none">✕</span>
+            </button>
+          )}
         </div>
 
         <Combobox

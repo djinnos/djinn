@@ -350,10 +350,12 @@ export async function fetchKanbanSnapshot(
     return { projectPath: null, tasks: [], epics: [] };
   }
 
-  const [taskList, epicList] = await Promise.all([
+  // Fetch first page of tasks + all epics in parallel
+  const PAGE_SIZE = 200;
+  const [firstTaskPage, epicList] = await Promise.all([
     callMcpTool("task_list", {
       project: resolvedProjectPath,
-      limit: 500,
+      limit: PAGE_SIZE,
       offset: 0,
     }),
     callMcpTool("epic_list", {
@@ -363,9 +365,26 @@ export async function fetchKanbanSnapshot(
     }),
   ]);
 
+  // Paginate remaining tasks if the server has more (server caps at ~200 per page)
+  const allTasks: Task[] = [...(firstTaskPage.tasks as unknown as Task[])];
+  if (firstTaskPage.has_more) {
+    let offset = allTasks.length;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const page = await callMcpTool("task_list", {
+        project: resolvedProjectPath,
+        limit: PAGE_SIZE,
+        offset,
+      });
+      allTasks.push(...(page.tasks as unknown as Task[]));
+      if (!page.has_more) break;
+      offset += (page.tasks as unknown[]).length;
+    }
+  }
+
   // Stamp each task with the project it belongs to (needed for all-projects view)
   const projectId = projectStore.getState().projects.find((p) => p.path === resolvedProjectPath)?.id ?? null;
-  const tasks = (taskList.tasks as unknown as Task[]).map((t) => ({ ...t, project_id: projectId }));
+  const tasks = allTasks.map((t) => ({ ...t, project_id: projectId }));
 
   return {
     projectPath: resolvedProjectPath,
