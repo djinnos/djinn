@@ -132,4 +132,13 @@ pub enum DjinnEvent {
         healthy: bool,
         error: Option<String>,
     },
+
+    // Task activity stream
+    ActivityLogged {
+        task_id: Option<String>,
+        action: String,
+        actor: String,
+        actor_role: String,
+        payload: serde_json::Value,
+    },
 }
