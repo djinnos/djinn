@@ -21,7 +21,7 @@ const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../agent/prompts/chat.md");
 const MAX_TOOL_ITERATIONS: usize = 20;
 
 #[derive(Debug, Deserialize)]
-pub struct ChatCompletionRequest {
+pub(super) struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
@@ -31,7 +31,7 @@ pub struct ChatCompletionRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ChatMessage {
+pub(super) struct ChatMessage {
     pub role: String,
     #[serde(default)]
     pub content: String,
@@ -69,7 +69,7 @@ fn sse_json_event<T: Serialize>(event: &str, payload: &T) -> Event {
     })
 }
 
-pub async fn completions_handler(
+pub(super) async fn completions_handler(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (axum::http::StatusCode, String)> {

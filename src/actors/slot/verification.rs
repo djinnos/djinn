@@ -21,7 +21,7 @@ const VERIFICATION_ESCALATION_THRESHOLD: i64 = 3;
 /// 5. On fail: logs the failure as an activity comment, transitions to `open` (VerificationFail)
 /// 6. Cleans up the worktree
 /// 7. Triggers redispatch for the project
-pub fn spawn_verification(
+pub(crate) fn spawn_verification(
     task_id: String,
     project_path: String,
     app_state: AppState,

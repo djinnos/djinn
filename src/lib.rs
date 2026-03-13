@@ -1,3 +1,5 @@
+#![warn(unreachable_pub)]
+
 pub mod actors;
 pub mod agent;
 pub mod commands;

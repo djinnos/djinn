@@ -9,7 +9,7 @@ use crate::db::TaskRepository;
 use crate::server::AppState;
 
 #[derive(Debug)]
-pub enum SlotCommand {
+pub(crate) enum SlotCommand {
     /// Run a task lifecycle in this slot.
     RunTask {
         task_id: String,
