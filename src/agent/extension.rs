@@ -1518,6 +1518,7 @@ pub(crate) fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
 
     if matches!(agent_type, AgentType::PM | AgentType::Groomer) {
         for value in [
+            serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
             serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
             serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
             serde_json::to_value(tool_task_delete_branch())
