@@ -8,7 +8,6 @@
 
 use futures::StreamExt;
 
-use crate::agent::AgentType;
 use crate::agent::message::{Conversation, Message, Role};
 use crate::agent::provider::{LlmProvider, StreamEvent};
 use crate::db::SessionMessageRepository;
@@ -22,38 +21,48 @@ pub(crate) const COMPACTION_THRESHOLD: f64 = 0.8;
 // ─── Compaction context ──────────────────────────────────────────────────────
 
 /// Describes *why* compaction is happening, so the prompt can be tailored.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum CompactionContext {
     /// Mid-session compaction: context window threshold reached while working.
-    MidSession(AgentType),
+    MidSession(String),
     /// Pre-resume compaction: compacting before re-prompting with reviewer feedback.
-    PreResume(AgentType),
+    PreResume(String),
 }
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────
 
 /// Build the compaction prompt based on context.
-fn compaction_prompt(ctx: CompactionContext) -> &'static str {
+fn compaction_prompt(ctx: &CompactionContext) -> &'static str {
     match ctx {
-        CompactionContext::PreResume(AgentType::Worker) => PRE_RESUME_WORKER_PROMPT,
-        CompactionContext::MidSession(AgentType::Worker) => MID_SESSION_WORKER_PROMPT,
-        CompactionContext::MidSession(AgentType::TaskReviewer)
-        | CompactionContext::PreResume(AgentType::TaskReviewer) => REVIEWER_PROMPT,
-        CompactionContext::MidSession(AgentType::ConflictResolver)
-        | CompactionContext::PreResume(AgentType::ConflictResolver) => CONFLICT_RESOLVER_PROMPT,
+        CompactionContext::PreResume(role) if role == "worker" => PRE_RESUME_WORKER_PROMPT,
+        CompactionContext::MidSession(role) if role == "worker" => MID_SESSION_WORKER_PROMPT,
+        CompactionContext::MidSession(role) | CompactionContext::PreResume(role)
+            if role == "task_reviewer" => REVIEWER_PROMPT,
+        CompactionContext::MidSession(role) | CompactionContext::PreResume(role)
+            if role == "conflict_resolver" => CONFLICT_RESOLVER_PROMPT,
         _ => GENERIC_PROMPT,
     }
 }
 
 /// Build the system instruction for the summariser based on context.
-fn summariser_system(ctx: CompactionContext) -> &'static str {
+fn summariser_system(ctx: &CompactionContext) -> &'static str {
     match ctx {
-        CompactionContext::PreResume(AgentType::Worker) => SUMMARISER_SYSTEM_WORKER_PRE_RESUME,
-        CompactionContext::MidSession(AgentType::Worker) => SUMMARISER_SYSTEM_WORKER_MID_SESSION,
-        CompactionContext::MidSession(AgentType::TaskReviewer)
-        | CompactionContext::PreResume(AgentType::TaskReviewer) => SUMMARISER_SYSTEM_TASK_REVIEWER,
-        CompactionContext::MidSession(AgentType::ConflictResolver)
-        | CompactionContext::PreResume(AgentType::ConflictResolver) => SUMMARISER_SYSTEM_CONFLICT_RESOLVER,
+        CompactionContext::PreResume(role) if role == "worker" => {
+            SUMMARISER_SYSTEM_WORKER_PRE_RESUME
+        }
+        CompactionContext::MidSession(role) if role == "worker" => {
+            SUMMARISER_SYSTEM_WORKER_MID_SESSION
+        }
+        CompactionContext::MidSession(role) | CompactionContext::PreResume(role)
+            if role == "task_reviewer" =>
+        {
+            SUMMARISER_SYSTEM_TASK_REVIEWER
+        }
+        CompactionContext::MidSession(role) | CompactionContext::PreResume(role)
+            if role == "conflict_resolver" =>
+        {
+            SUMMARISER_SYSTEM_CONFLICT_RESOLVER
+        }
         _ => SUMMARISER_SYSTEM_GENERIC,
     }
 }
@@ -236,7 +245,7 @@ pub(crate) async fn compact_conversation(
         });
 
     // 3. Ask the LLM to summarise.
-    match do_compact(provider, &conversation.messages, ctx).await {
+    match do_compact(provider, &conversation.messages, &ctx).await {
         Ok(summary) => {
             // 4. Replace conversation.
             let mut new_messages: Vec<Message> = Vec::new();
@@ -327,7 +336,7 @@ pub(crate) async fn compact_conversation(
 async fn do_compact(
     provider: &dyn LlmProvider,
     messages: &[Message],
-    ctx: CompactionContext,
+    ctx: &CompactionContext,
 ) -> anyhow::Result<String> {
     // Progressive removal percentages (middle-out).
     const REMOVAL_PERCENTAGES: &[u32] = &[0, 10, 20, 50, 100];
@@ -886,9 +895,9 @@ mod tests {
 
     #[test]
     fn compaction_prompt_varies_by_context() {
-        let worker_resume = compaction_prompt(CompactionContext::PreResume(AgentType::Worker));
-        let worker_mid = compaction_prompt(CompactionContext::MidSession(AgentType::Worker));
-        let reviewer = compaction_prompt(CompactionContext::MidSession(AgentType::TaskReviewer));
+        let worker_resume = compaction_prompt(&CompactionContext::PreResume("worker".to_string()));
+        let worker_mid = compaction_prompt(&CompactionContext::MidSession("worker".to_string()));
+        let reviewer = compaction_prompt(&CompactionContext::MidSession("task_reviewer".to_string()));
 
         // Each context gets a different prompt
         assert!(worker_resume.contains("rejected or needs fixes"));
@@ -1143,15 +1152,15 @@ mod tests {
     #[test]
     fn prompts_exist_for_expected_compaction_contexts() {
         let contexts = [
-            CompactionContext::MidSession(AgentType::Worker),
-            CompactionContext::PreResume(AgentType::Worker),
-            CompactionContext::MidSession(AgentType::TaskReviewer),
-            CompactionContext::MidSession(AgentType::ConflictResolver),
+            CompactionContext::MidSession("worker".to_string()),
+            CompactionContext::PreResume("worker".to_string()),
+            CompactionContext::MidSession("task_reviewer".to_string()),
+            CompactionContext::MidSession("conflict_resolver".to_string()),
         ];
 
         for ctx in contexts {
-            let prompt = compaction_prompt(ctx);
-            let system = summariser_system(ctx);
+            let prompt = compaction_prompt(&ctx);
+            let system = summariser_system(&ctx);
             assert!(!prompt.is_empty());
             assert!(!system.is_empty());
         }

@@ -598,7 +598,7 @@ pub async fn run_task_lifecycle(
                     resume_id,
                     &task_id,
                     &app_state,
-                    crate::agent::compaction::CompactionContext::PreResume(agent_type),
+                    crate::agent::compaction::CompactionContext::PreResume(agent_type.as_str().to_string()),
                     context_window,
                 )
                 .await;
@@ -709,7 +709,7 @@ pub async fn run_task_lifecycle(
         &current_session_id,
         &project_path,
         &worktree_path,
-        agent_type,
+        agent_type.as_str(),
         &cancel,
         &pause,
         &app_state,
@@ -1167,7 +1167,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         &current_session_id,
         &project_path,
         &project_dir, // worktree = project dir (no worktree for groomer)
-        agent_type,
+        agent_type.as_str(),
         &cancel,
         &pause,
         &app_state,
