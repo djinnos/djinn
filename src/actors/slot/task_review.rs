@@ -87,6 +87,33 @@ pub(crate) async fn merge_and_transition(
         }
     };
 
+    // Run verification gate before merge.  This rebases the task branch onto
+    // the latest main and runs setup+verification commands on the result,
+    // catching semantic conflicts that textual merge wouldn't detect.
+    let project_path_str = project_dir.to_string_lossy().to_string();
+    if let Err(feedback) =
+        super::verification::run_verification_gate(task_id, &project_path_str, app_state).await
+    {
+        tracing::warn!(
+            task_id = %task_id,
+            "pre-merge verification failed; releasing task"
+        );
+        let payload = serde_json::json!({ "body": feedback }).to_string();
+        let _ = repo
+            .log_activity(
+                Some(task_id),
+                "agent-supervisor",
+                "verification",
+                "comment",
+                &payload,
+            )
+            .await;
+        return Some((
+            actions.release.clone(),
+            Some(format!("pre-merge verification failed: {feedback}")),
+        ));
+    }
+
     let base_branch = format!("task/{}", task.short_id);
     let merge_target = default_target_branch(&task.project_id, app_state).await;
     let commit_type = if task.issue_type == "task" {
