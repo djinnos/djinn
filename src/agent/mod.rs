@@ -7,7 +7,6 @@ pub mod oauth;
 pub(crate) mod output_parser;
 pub mod prompts;
 pub mod provider;
-pub mod roles;
 pub mod sandbox;
 // ─── Agent type ───────────────────────────────────────────────────────────────
 
