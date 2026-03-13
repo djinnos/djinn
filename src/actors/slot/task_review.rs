@@ -290,10 +290,24 @@ pub(crate) async fn success_transition(
             Some((TransitionAction::SubmitVerification, None))
         }
         AgentType::PM => {
-            // PM session ended without the agent explicitly calling pm_intervention_complete.
-            // Release back to needs_pm_intervention so it gets re-dispatched.
+            // Check if the PM already transitioned the task via tools during
+            // its session (e.g. pm_intervention_complete, force_close).  If the
+            // task is no longer in_pm_intervention, the PM acted — no fallback
+            // transition needed.
+            let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+            if let Ok(Some(task)) = repo.get(task_id).await
+                && task.status != "in_pm_intervention"
+            {
+                tracing::info!(
+                    task_id = %task_id,
+                    current_status = %task.status,
+                    "PM agent: task already transitioned by PM tools — no fallback needed"
+                );
+                return None;
+            }
+            // PM session ended without acting — release back so it gets re-dispatched.
             tracing::warn!(task_id = %task_id, "PM agent: session ended without explicit completion → releasing back to needs_pm_intervention");
-            Some((TransitionAction::PmInterventionRelease, None))
+            Some((TransitionAction::PmInterventionRelease, Some("PM session ended without completing intervention".to_string())))
         }
         AgentType::Groomer => {
             // Groomer has no lifecycle transition wiring yet.
