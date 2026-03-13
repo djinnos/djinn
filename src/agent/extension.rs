@@ -86,8 +86,9 @@ where
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
-        "write" => call_write(&call.arguments, worktree_path).await,
-        "edit" => call_edit(&call.arguments, worktree_path).await,
+        "read" => call_read(state, &call.arguments, worktree_path).await,
+        "write" => call_write(state, &call.arguments, worktree_path).await,
+        "edit" => call_edit(state, &call.arguments, worktree_path).await,
         other => Err(format!("unknown djinn frontend tool: {other}")),
     }
 }
@@ -222,6 +223,14 @@ struct EditParams {
     path: String,
     old_text: String,
     new_text: String,
+}
+
+#[derive(Deserialize)]
+struct ReadParams {
+    #[serde(alias = "path")]
+    file_path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
 }
 
 /// Normalize `Some("")` → `None`. OpenAI models often send empty strings
@@ -852,7 +861,77 @@ async fn call_shell(
     }))
 }
 
+async fn call_read(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    worktree_path: &Path,
+) -> Result<serde_json::Value, String> {
+    let p: ReadParams = parse_args(arguments)?;
+    let path = resolve_path(&p.file_path, worktree_path);
+    ensure_path_within_worktree(&path, worktree_path)?;
+
+    let bytes = tokio::fs::read(&path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            let parent = path.parent().unwrap_or(worktree_path);
+            let suggestions = std::fs::read_dir(parent)
+                .ok()
+                .into_iter()
+                .flat_map(|it| it.filter_map(Result::ok))
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|name| !name.is_empty())
+                .take(10)
+                .collect::<Vec<_>>();
+            if suggestions.is_empty() {
+                format!("file not found: {}", path.display())
+            } else {
+                format!("file not found: {}. similar filenames: {}", path.display(), suggestions.join(", "))
+            }
+        } else {
+            format!("read failed: {e}")
+        }
+    })?;
+
+    if bytes.contains(&0) {
+        return Err(format!("refusing to read binary file: {}", path.display()));
+    }
+
+    let text = String::from_utf8(bytes).map_err(|_| format!("refusing to read binary file: {}", path.display()))?;
+    let all_lines: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if line.chars().count() > 2000 {
+                line.chars().take(2000).collect::<String>()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+
+    let offset = p.offset.unwrap_or(0);
+    let limit = p.limit.unwrap_or(2000).min(2000);
+    let start = offset.min(all_lines.len());
+    let end = start.saturating_add(limit).min(all_lines.len());
+
+    let mut numbered = String::new();
+    for (i, line) in all_lines[start..end].iter().enumerate() {
+        let line_no = start + i + 1;
+        numbered.push_str(&format!("{:>6}\t{}\n", line_no, line));
+    }
+
+    state.file_time().read(&worktree_path.display().to_string(), &path).await?;
+
+    Ok(serde_json::json!({
+        "path": path.display().to_string(),
+        "offset": start,
+        "limit": limit,
+        "total_lines": all_lines.len(),
+        "has_more": end < all_lines.len(),
+        "content": numbered,
+    }))
+}
+
 async fn call_write(
+    state: &AppState,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
@@ -861,6 +940,8 @@ async fn call_write(
 
     // Ensure path is within worktree
     ensure_path_within_worktree(&path, worktree_path)?;
+
+    state.file_time().assert(&worktree_path.display().to_string(), &path).await?;
 
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -879,6 +960,7 @@ async fn call_write(
 }
 
 async fn call_edit(
+    state: &AppState,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
@@ -887,6 +969,8 @@ async fn call_edit(
 
     // Ensure path is within worktree
     ensure_path_within_worktree(&path, worktree_path)?;
+
+    state.file_time().assert(&worktree_path.display().to_string(), &path).await?;
 
     let content = tokio::fs::read_to_string(&path)
         .await
@@ -939,7 +1023,7 @@ fn resolve_path(raw: &str, base: &std::path::Path) -> PathBuf {
 fn is_tool_allowed_for_agent(agent_type: AgentType, name: &str) -> bool {
     match name {
         "task_show" | "task_list" | "task_activity_list" | "task_comment_add" | "memory_read"
-        | "memory_search" | "shell" | "task_create" => true,
+        | "memory_search" | "shell" | "read" | "task_create" => true,
         "write" | "edit" => matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver),
         "request_pm" => matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver),
         "task_update_ac" => matches!(agent_type, AgentType::TaskReviewer),
@@ -1566,6 +1650,22 @@ fn tool_shell() -> RmcpTool {
     )
 }
 
+fn tool_read() -> RmcpTool {
+    RmcpTool::new(
+        "read".to_string(),
+        "Read a file with line numbers and pagination. Rejects binary files.".to_string(),
+        object!({
+            "type": "object",
+            "properties": {
+                "file_path": { "type": "string" },
+                "offset": { "type": "integer", "minimum": 0 },
+                "limit": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["file_path"]
+        }),
+    )
+}
+
 fn tool_write() -> RmcpTool {
     RmcpTool::new(
         "write".to_string(),
@@ -1784,6 +1884,7 @@ pub(crate) fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
     ];
 
     tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
+    tool_values.push(serde_json::to_value(tool_read()).expect("serialize tool_read"));
 
     if matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver) {
         tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
@@ -1848,6 +1949,8 @@ pub(crate) async fn call_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::create_test_db;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn floor_char_boundary_ascii() {
@@ -1904,7 +2007,8 @@ mod tests {
                 .clone(),
         );
 
-        let result = call_write(&args, worktree.path()).await;
+        let state = AppState::new(create_test_db(), CancellationToken::new());
+        let result = call_write(&state, &args, worktree.path()).await;
         assert!(result.is_err());
         let err = result.err().unwrap_or_default();
         assert!(err.contains("outside worktree"));

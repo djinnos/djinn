@@ -14,6 +14,7 @@ use crate::db::SettingsRepository;
 use crate::db::connection::Database;
 use crate::events::DjinnEvent;
 use crate::provider::{CatalogService, HealthTracker};
+use crate::agent::file_time::FileTime;
 use crate::agent::roles::RoleRegistry;
 use crate::sync::SyncManager;
 
@@ -55,6 +56,8 @@ struct Inner {
     /// Used by the coordinator to distinguish genuinely stuck `verifying` tasks
     /// (orphaned after server restart) from ones with a live pipeline.
     pub verifying_tasks: crate::actors::coordinator::VerificationTracker,
+    /// Per-session file read timestamps used to enforce read-before-edit/write.
+    pub file_time: FileTime,
 }
 
 impl AppState {
@@ -81,6 +84,7 @@ impl AppState {
                 pool: Mutex::new(None),
                 sync_user_id,
                 verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
+                file_time: FileTime::new(),
             }),
         }
     }
@@ -144,6 +148,10 @@ impl AppState {
             .lock()
             .expect("poisoned")
             .contains(task_id)
+    }
+
+    pub fn file_time(&self) -> &FileTime {
+        &self.inner.file_time
     }
 
     pub async fn coordinator(&self) -> Option<CoordinatorHandle> {
