@@ -43,7 +43,7 @@ const PRIORITY_CONFIG: Record<number, { icon: typeof NoSignalIcon; color: string
 };
 
 function PriorityBadge({ priority }: { priority: number }) {
-  const config = PRIORITY_CONFIG[Math.min(Math.max(priority, 0), 3)];
+  const config = PRIORITY_CONFIG[Math.min(Math.max(priority ?? 3, 0), 3)];
   return (
     <HugeiconsIcon
       icon={config.icon}
@@ -382,7 +382,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           {task.title}
         </h4>
 
-        {task.labels.length > 0 && (
+        {task.labels?.length > 0 && (
           <div className="flex flex-wrap gap-1">
             {task.labels.map((label: string) => (
               <span

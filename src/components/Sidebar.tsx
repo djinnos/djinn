@@ -205,11 +205,13 @@ function ProjectListItem({
 
   return (
     <div className="group/project relative flex items-center">
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
         onClick={onClick}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
         className={cn(
-          'flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors',
+          'flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors cursor-pointer',
           isCollapsed ? 'justify-center px-0' : '',
           isSelected
             ? 'bg-white/[0.07] text-foreground font-medium'
@@ -230,7 +232,7 @@ function ProjectListItem({
             )}
           </>
         )}
-      </button>
+      </div>
     </div>
   );
 }
