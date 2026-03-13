@@ -321,7 +321,7 @@ mod tests {
         db: Database,
     ) -> (String, String) {
         let epic_repo = EpicRepository::new(db.clone(), repo_events.clone());
-        let epic = epic_repo.create("Epic", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("Epic", "", "", "", "", None).await.unwrap();
 
         let task_repo = TaskRepository::new(db, repo_events);
         let task = task_repo

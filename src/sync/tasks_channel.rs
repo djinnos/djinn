@@ -511,7 +511,7 @@ mod tests {
 
         // Create a project and task via DB.
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task = task_repo
@@ -545,7 +545,7 @@ mod tests {
         let p2 = project_repo.create("proj-b", "/tmp/b").await.unwrap();
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         task_repo
@@ -599,7 +599,7 @@ mod tests {
 
         // Create an epic so FK checks pass.
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         // Manually write a JSONL file into the sync worktree (simulating a peer).
         let wt = ensure_worktree(&repo).await.unwrap();
@@ -632,7 +632,7 @@ mod tests {
 
         // Create task.
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task = task_repo
             .create(&epic.id, "Round Trip", "", "", "task", 0, "", Some("open"))
@@ -666,7 +666,7 @@ mod tests {
 
         // Create an epic.
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         // Create 3 tasks locally, all owned by peer "alice".
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
@@ -718,7 +718,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         // Create a task and close it.
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
@@ -761,7 +761,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         // Task owned by alice, but empty file means reconciliation skipped.
@@ -804,7 +804,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task1 = task_repo
@@ -844,7 +844,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         // Create local task owned by alice.
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
@@ -888,7 +888,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         // Create a closed task.
@@ -936,7 +936,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(64);
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         // Write a peer task directly into worktree.
         let wt = ensure_worktree(&repo).await.unwrap();
@@ -969,7 +969,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let wt = ensure_worktree(&repo).await.unwrap();
         let good_task = make_test_task("5555-6666-7777-8888", &epic.project_id, "Good");
@@ -995,7 +995,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let wt = ensure_worktree(&repo).await.unwrap();
 
@@ -1036,7 +1036,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let wt = ensure_worktree(&repo).await.unwrap();
 
@@ -1078,7 +1078,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let wt = ensure_worktree(&repo).await.unwrap();
 
@@ -1127,7 +1127,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let wt = ensure_worktree(&repo).await.unwrap();
 
@@ -1180,7 +1180,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(64);
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let wt = ensure_worktree(&repo).await.unwrap();
 

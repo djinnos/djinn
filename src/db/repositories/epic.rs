@@ -108,12 +108,14 @@ impl EpicRepository {
         emoji: &str,
         color: &str,
         owner: &str,
+        memory_refs: Option<&str>,
     ) -> Result<Epic> {
         let project_id = self.ensure_default_project_id().await?;
-        self.create_for_project(&project_id, title, description, emoji, color, owner)
+        self.create_for_project(&project_id, title, description, emoji, color, owner, memory_refs)
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_for_project(
         &self,
         project_id: &str,
@@ -122,6 +124,7 @@ impl EpicRepository {
         emoji: &str,
         color: &str,
         owner: &str,
+        _memory_refs: Option<&str>,
     ) -> Result<Epic> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
@@ -153,6 +156,7 @@ impl EpicRepository {
         Ok(epic)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
         id: &str,
@@ -161,6 +165,7 @@ impl EpicRepository {
         emoji: &str,
         color: &str,
         owner: &str,
+        _memory_refs: Option<&str>,
     ) -> Result<Epic> {
         self.db.ensure_initialized().await?;
         sqlx::query(
@@ -529,7 +534,7 @@ mod tests {
         let repo = EpicRepository::new(db, tx);
 
         let epic = repo
-            .create("My Epic", "", "🚀", "#8b5cf6", "user@example.com")
+            .create("My Epic", "", "🚀", "#8b5cf6", "user@example.com", None)
             .await
             .unwrap();
         assert_eq!(epic.title, "My Epic");
@@ -546,7 +551,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
-        let epic = repo.create("Lookup", "", "", "", "").await.unwrap();
+        let epic = repo.create("Lookup", "", "", "", "", None).await.unwrap();
         let found = repo.get_by_short_id(&epic.short_id).await.unwrap().unwrap();
         assert_eq!(found.id, epic.id);
     }
@@ -557,7 +562,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
-        repo.create("Event Epic", "", "", "", "").await.unwrap();
+        repo.create("Event Epic", "", "", "", "", None).await.unwrap();
         match rx.recv().await.unwrap() {
             DjinnEvent::EpicCreated(e) => assert_eq!(e.title, "Event Epic"),
             _ => panic!("expected EpicCreated"),
@@ -570,11 +575,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
-        let epic = repo.create("Old", "", "", "", "").await.unwrap();
+        let epic = repo.create("Old", "", "", "", "", None).await.unwrap();
         let _ = rx.recv().await.unwrap();
 
         let updated = repo
-            .update(&epic.id, "New", "desc", "🎯", "#fff", "")
+            .update(&epic.id, "New", "desc", "🎯", "#fff", "", None)
             .await
             .unwrap();
         assert_eq!(updated.title, "New");
@@ -591,7 +596,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
-        let epic = repo.create("Closeable", "", "", "", "").await.unwrap();
+        let epic = repo.create("Closeable", "", "", "", "", None).await.unwrap();
         let _ = rx.recv().await.unwrap();
         let closed = repo.close(&epic.id).await.unwrap();
         assert_eq!(closed.status, "closed");
@@ -613,7 +618,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
-        let epic = repo.create("Reopen", "", "", "", "").await.unwrap();
+        let epic = repo.create("Reopen", "", "", "", "", None).await.unwrap();
         let _ = rx.recv().await.unwrap();
         repo.close(&epic.id).await.unwrap();
         let _ = rx.recv().await.unwrap();
@@ -637,7 +642,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
-        let epic = repo.create("Delete me", "", "", "", "").await.unwrap();
+        let epic = repo.create("Delete me", "", "", "", "", None).await.unwrap();
         let _ = rx.recv().await.unwrap();
 
         repo.delete(&epic.id).await.unwrap();
@@ -655,7 +660,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
-        let epic = repo.create("Resolve", "", "", "", "").await.unwrap();
+        let epic = repo.create("Resolve", "", "", "", "", None).await.unwrap();
 
         let by_id = repo.resolve(&epic.id).await.unwrap().unwrap();
         assert_eq!(by_id.id, epic.id);
@@ -672,7 +677,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
-        let epic = repo.create("Reopen", "", "", "", "").await.unwrap();
+        let epic = repo.create("Reopen", "", "", "", "", None).await.unwrap();
         repo.close(&epic.id).await.unwrap();
 
         let reopened = repo.reopen(&epic.id).await.unwrap();
@@ -686,7 +691,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
-        let epic = repo.create("Open", "", "", "", "").await.unwrap();
+        let epic = repo.create("Open", "", "", "", "", None).await.unwrap();
         assert!(repo.reopen(&epic.id).await.is_err());
     }
 
@@ -697,7 +702,7 @@ mod tests {
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
         let task_repo = crate::db::TaskRepository::new(db, tx);
 
-        let epic = epic_repo.create("Counts", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("Counts", "", "", "", "", None).await.unwrap();
         task_repo
             .create(&epic.id, "T1", "", "", "task", 0, "", None)
             .await
@@ -725,7 +730,7 @@ mod tests {
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
         let task_repo = crate::db::TaskRepository::new(db, tx);
 
-        let epic = epic_repo.create("Delete", "", "", "", "").await.unwrap();
+        let epic = epic_repo.create("Delete", "", "", "", "", None).await.unwrap();
         task_repo
             .create(&epic.id, "T1", "", "", "task", 0, "", None)
             .await

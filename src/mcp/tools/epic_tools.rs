@@ -392,7 +392,7 @@ impl DjinnMcpServer {
             }
         };
         match repo
-            .create_for_project(&project_id, &title, description, emoji, color, &owner)
+            .create_for_project(&project_id, &title, description, emoji, color, &owner, None)
             .await
         {
             Ok(epic) => Json(EpicSingleResponse {
@@ -596,7 +596,7 @@ impl DjinnMcpServer {
         };
 
         match repo
-            .update(&epic.id, &title, description, emoji, color, &owner)
+            .update(&epic.id, &title, description, emoji, color, &owner, None)
             .await
         {
             Ok(updated) => Json(EpicSingleResponse {

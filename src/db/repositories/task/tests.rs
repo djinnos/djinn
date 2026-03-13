@@ -5,7 +5,7 @@ use crate::test_helpers;
 
 async fn make_epic(db: &Database, tx: broadcast::Sender<DjinnEvent>) -> crate::models::Epic {
     EpicRepository::new(db.clone(), tx)
-        .create("Test Epic", "", "", "", "")
+        .create("Test Epic", "", "", "", "", None)
         .await
         .unwrap()
 }
@@ -64,7 +64,7 @@ async fn creating_task_reopens_closed_epic() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-    let epic = epic_repo.create("Test Epic", "", "", "", "").await.unwrap();
+    let epic = epic_repo.create("Test Epic", "", "", "", "", None).await.unwrap();
     epic_repo.close(&epic.id).await.unwrap();
 
     let repo = TaskRepository::new(db.clone(), tx);
