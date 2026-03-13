@@ -419,9 +419,6 @@ async fn is_stale_review_cycle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::repositories::task::TaskRepository;
-    use crate::models::task::Task;
-    use crate::test_helpers;
 
     fn ac(items: &[bool]) -> String {
         serde_json::to_string(
@@ -431,31 +428,6 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .expect("serialize AC json")
-    }
-
-    fn parsed_output_with_feedback(feedback: &str) -> ParsedAgentOutput {
-        let mut out = ParsedAgentOutput::new(AgentType::TaskReviewer);
-        out.reviewer_feedback = Some(feedback.to_string());
-        out
-    }
-
-    async fn create_task_with_ac(app: &AppState, ac_json: &str) -> Task {
-        let project = test_helpers::create_test_project(app.db()).await;
-        let epic = test_helpers::create_test_epic(app.db(), &project.id).await;
-        let task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
-
-        sqlx::query("UPDATE tasks SET acceptance_criteria = ?1 WHERE id = ?2")
-            .bind(ac_json)
-            .bind(&task.id)
-            .execute(app.db().pool())
-            .await
-            .expect("update AC");
-
-        TaskRepository::new(app.db().clone(), app.events().clone())
-            .get(&task.id)
-            .await
-            .expect("read task")
-            .expect("task exists")
     }
 
     #[test]
@@ -472,7 +444,6 @@ mod tests {
 #[cfg(test)]
 mod transition_tests {
     use super::*;
-    use crate::db::repositories::task::TaskRepository;
     use crate::models::task::TransitionAction;
     use crate::test_helpers;
 
@@ -594,7 +565,7 @@ mod transition_tests {
         );
 
         let pm_done_task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
-        set_task_status(&app, &pm_done_task.id, "done").await;
+        set_task_status(&app, &pm_done_task.id, "closed").await;
         assert_eq!(
             success_transition(&pm_done_task.id, AgentType::PM, &pm_out, &app).await,
             None

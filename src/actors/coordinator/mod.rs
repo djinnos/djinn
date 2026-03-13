@@ -984,6 +984,9 @@ mod tests {
             .create(&epic.id, "Review me", "", "", "task", 0 , "", Some("open"))
             .await
             .unwrap();
+        repo.update(&task.id, "Review me", "", "", 0, "", "", r#"[{"description":"default","met":false}]"#)
+            .await
+            .unwrap();
         repo.transition(
             &task.id,
             TransitionAction::Start,

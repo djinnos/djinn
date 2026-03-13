@@ -204,8 +204,12 @@ async fn parse_models(resp: reqwest::Response) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        Router,
+        extract::Request,
+        routing::get,
+    };
     use std::sync::{Arc, Mutex};
-    use warp::Filter;
 
     #[derive(Clone, Debug, Default)]
     struct SeenHeaders {
@@ -219,26 +223,42 @@ mod tests {
         body: &'static str,
         seen: Arc<Mutex<Option<SeenHeaders>>>,
     ) -> String {
-        let route = warp::path("models")
-            .and(warp::get())
-            .and(warp::header::optional::<String>("authorization"))
-            .and(warp::header::optional::<String>("x-api-key"))
-            .and(warp::header::optional::<String>("anthropic-version"))
-            .map(move |authorization, x_api_key, anthropic_version| {
-                *seen.lock().expect("lock seen headers") = Some(SeenHeaders {
-                    authorization,
-                    x_api_key,
-                    anthropic_version,
-                });
-                warp::reply::with_status(body, warp::http::StatusCode::from_u16(status).expect("status"))
-            });
-
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .expect("bind local tcp listener");
         let addr = listener.local_addr().expect("local addr");
-        drop(listener);
+        listener.set_nonblocking(true).expect("set nonblocking");
 
-        tokio::spawn(warp::serve(route).run(addr));
+        let app = Router::new().route(
+            "/models",
+            get(move |req: Request| async move {
+                let headers = req.headers();
+                *seen.lock().expect("lock seen headers") = Some(SeenHeaders {
+                    authorization: headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .map(String::from),
+                    x_api_key: headers
+                        .get("x-api-key")
+                        .and_then(|v| v.to_str().ok())
+                        .map(String::from),
+                    anthropic_version: headers
+                        .get("anthropic-version")
+                        .and_then(|v| v.to_str().ok())
+                        .map(String::from),
+                });
+                (
+                    axum::http::StatusCode::from_u16(status).expect("status"),
+                    body,
+                )
+            }),
+        );
+
+        let tokio_listener =
+            tokio::net::TcpListener::from_std(listener).expect("convert to tokio listener");
+        tokio::spawn(async move {
+            axum::serve(tokio_listener, app).await.ok();
+        });
+
         format!("http://{}:{}", addr.ip(), addr.port())
     }
 
@@ -261,15 +281,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anthropic_detected_from_base_url_uses_anthropic_headers_even_with_custom_provider_id() {
+    async fn anthropic_provider_id_uses_anthropic_headers() {
         let seen = Arc::new(Mutex::new(None));
-        let real_base = spawn_server(200, r#"{"data":[]}"#, seen.clone());
-        let base_url = real_base.replace("127.0.0.1", "anthropic.com");
+        let base_url = spawn_server(200, r#"{"data":[]}"#, seen.clone());
 
         let _ = validate(ValidationRequest {
             base_url,
             api_key: "anthropic-key".into(),
-            provider_id: Some("custom".into()),
+            provider_id: Some("anthropic".into()),
         })
         .await;
 

@@ -40,6 +40,14 @@ pub fn create_test_app_with_db(db: Database) -> axum::Router {
     server::router(state)
 }
 
+/// Create an `AppState` backed by an in-memory database (for unit tests that
+/// need state but not a full Axum router).
+pub async fn test_app_state_in_memory() -> AppState {
+    let db = create_test_db();
+    let cancel = CancellationToken::new();
+    AppState::new(db, cancel)
+}
+
 fn test_events() -> broadcast::Sender<DjinnEvent> {
     let (tx, _rx) = broadcast::channel(256);
     tx
@@ -86,7 +94,19 @@ pub async fn create_test_task(db: &Database, project_id: &str, epic_id: &str) ->
         .await
         .expect("failed to create test task");
     assert_eq!(task.status, "backlog");
-    task
+    // Ensure tasks have AC so Start transitions succeed in tests.
+    repo.update(
+        &task.id,
+        &task.title,
+        &task.description,
+        &task.design,
+        task.priority,
+        &task.owner,
+        &task.labels,
+        r#"[{"description":"default test criterion","met":false}]"#,
+    )
+    .await
+    .expect("failed to set test task acceptance criteria")
 }
 
 pub async fn create_test_session(db: &Database, project_id: &str, task_id: &str) -> SessionRecord {

@@ -14,7 +14,10 @@ async fn make_epic(
 }
 
 async fn open_task(repo: &TaskRepository, epic_id: &str) -> Task {
-    repo.create(epic_id, "T", "", "", "task", 0 , "", Some("open"))
+    let task = repo.create(epic_id, "T", "", "", "task", 0 , "", Some("open"))
+        .await
+        .unwrap();
+    repo.update(&task.id, "T", "", "", 0, "", "", r#"[{"description":"default","met":false}]"#)
         .await
         .unwrap()
 }
@@ -130,10 +133,14 @@ async fn transition_emits_event_start() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "T", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap();
+    repo.update(&task.id, "T", "", "", 0, "", "", r#"[{"description":"default","met":false}]"#)
+        .await
+        .unwrap();
+    let _ = rx.recv().await.unwrap(); // drain TaskUpdated event from update
 
     repo.transition(&task.id, TransitionAction::Start, "", "system", None, None)
         .await
@@ -321,14 +328,17 @@ async fn start_blocked_by_unresolved_blocker() {
     let epic = make_epic(&db, tx.clone()).await;
     let repo = TaskRepository::new(db, tx);
 
+    let ac = r#"[{"description":"default","met":false}]"#;
     let t1 = repo
         .create(&epic.id, "T1", "", "", "task", 0 , "", Some("open"))
         .await
         .unwrap();
+    repo.update(&t1.id, "T1", "", "", 0, "", "", ac).await.unwrap();
     let t2 = repo
         .create(&epic.id, "T2", "", "", "task", 1 , "", Some("open"))
         .await
         .unwrap();
+    repo.update(&t2.id, "T2", "", "", 1, "", "", ac).await.unwrap();
 
     // t2 blocked by t1 (which is open = unresolved)
     repo.add_blocker(&t2.id, &t1.id).await.unwrap();
@@ -753,17 +763,13 @@ async fn start_blocked_when_acceptance_criteria_empty() {
     let updated = repo
         .update(
             &task.id,
-            None,
-            None,
-            None,
-            None,
-            Some("[]"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &task.title,
+            &task.description,
+            &task.design,
+            task.priority,
+            &task.owner,
+            &task.labels,
+            "[]",
         )
         .await
         .unwrap();
@@ -788,17 +794,13 @@ async fn start_allows_when_acceptance_criteria_present() {
     let updated = repo
         .update(
             &task.id,
-            None,
-            None,
-            None,
-            None,
-            Some(r#"[{"criterion":"can start"}]"#),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &task.title,
+            &task.description,
+            &task.design,
+            task.priority,
+            &task.owner,
+            &task.labels,
+            r#"[{"criterion":"can start"}]"#,
         )
         .await
         .unwrap();
