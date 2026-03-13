@@ -77,13 +77,13 @@ describe('Sidebar component', () => {
     });
 
     const projectBetaLabel = screen.getByText('Project Beta');
-    const activeProjectButton = projectBetaLabel.closest('button');
+    const activeProjectButton = projectBetaLabel.closest('[role="button"]');
     expect(activeProjectButton).not.toBeNull();
     expect(activeProjectButton?.className).toContain('bg-white/[0.07]');
     expect(activeProjectButton?.className).toContain('font-medium');
 
     const projectAlphaLabel = screen.getByText('Project Alpha');
-    const inactiveProjectButton = projectAlphaLabel.closest('button');
+    const inactiveProjectButton = projectAlphaLabel.closest('[role="button"]');
     expect(inactiveProjectButton).not.toBeNull();
     expect(inactiveProjectButton?.className).toContain('text-muted-foreground');
   });
