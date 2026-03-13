@@ -1,5 +1,14 @@
 import "@testing-library/jest-dom/vitest"
 
+// jsdom doesn't provide Web Streams API — polyfill so eventsource-parser (and anything
+// else using TransformStream/ReadableStream/WritableStream) can load without crashing.
+if (typeof globalThis.TransformStream === "undefined") {
+  const streams = await import("node:stream/web");
+  globalThis.TransformStream = streams.TransformStream as typeof globalThis.TransformStream;
+  globalThis.ReadableStream = streams.ReadableStream as typeof globalThis.ReadableStream;
+  globalThis.WritableStream = streams.WritableStream as typeof globalThis.WritableStream;
+}
+
 // jsdom does not implement scrollIntoView; make it safe for components using autoscroll effects
 if (!Element.prototype.scrollIntoView) {
   Object.defineProperty(Element.prototype, "scrollIntoView", {
