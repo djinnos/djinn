@@ -36,149 +36,100 @@ describe("AuthGate", () => {
   });
 
   describe("loading state", () => {
-    it("shows loading text while checking authentication", () => {
-      // fetchState won't resolve — keeps loading
-      mockInvoke.mockReturnValue(new Promise(() => {}));
-
+    it("shows loading text while waiting for backend events", () => {
       renderAuthGate();
 
       expect(screen.getByText("Checking authentication...")).toBeInTheDocument();
       expect(screen.queryByTestId("protected")).not.toBeInTheDocument();
     });
 
+    it("does not call fetchState eagerly on mount", () => {
+      renderAuthGate();
+
+      // No invoke calls should happen on mount — state is event-driven
+      expect(mockInvoke).not.toHaveBeenCalledWith("auth_get_state");
+    });
+
     it("does not show sign-in screen while loading", () => {
-      mockInvoke.mockReturnValue(new Promise(() => {}));
-
       renderAuthGate();
 
       expect(screen.queryByText("Sign in required")).not.toBeInTheDocument();
     });
   });
 
-  describe("unauthenticated state", () => {
-    it("shows sign-in screen when not authenticated", async () => {
+  describe("fallback timer", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("calls fetchState after 5s if still loading", async () => {
       mockInvoke.mockResolvedValueOnce({ isAuthenticated: false, user: null });
 
       renderAuthGate();
 
-      await waitFor(() => {
-        expect(screen.getByText("Sign in required")).toBeInTheDocument();
+      // Before timer fires, no fetch
+      expect(mockInvoke).not.toHaveBeenCalled();
+
+      // Advance past 5s fallback and flush all pending promises
+      await act(async () => {
+        vi.advanceTimersByTime(5000);
       });
-    });
 
-    it("shows default message when no error", async () => {
-      mockInvoke.mockResolvedValueOnce({ isAuthenticated: false, user: null });
+      expect(mockInvoke).toHaveBeenCalledWith("auth_get_state");
+    }, 10000);
 
+    it("does not call fetchState if event arrived before timeout", async () => {
       renderAuthGate();
 
-      await waitFor(() => {
-        expect(screen.getByText("Please sign in to continue to Djinn.")).toBeInTheDocument();
-      });
-    });
-
-    it("shows error message when error exists", async () => {
-      mockInvoke.mockRejectedValueOnce(new Error("Connection refused"));
-
-      renderAuthGate();
-
-      await waitFor(() => {
-        expect(screen.getByText(/Connection refused/)).toBeInTheDocument();
-      });
-    });
-
-    it("does not render children when unauthenticated", async () => {
-      mockInvoke.mockResolvedValueOnce({ isAuthenticated: false, user: null });
-
-      renderAuthGate();
-
-      await waitFor(() => {
-        expect(screen.getByText("Sign in required")).toBeInTheDocument();
-      });
-      expect(screen.queryByTestId("protected")).not.toBeInTheDocument();
-    });
-
-    it("shows sign-in button", async () => {
-      mockInvoke.mockResolvedValueOnce({ isAuthenticated: false, user: null });
-
-      renderAuthGate();
-
-      await waitFor(() => {
-        expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
-      });
-    });
-
-    it("calls login when sign-in button is clicked", async () => {
-      mockInvoke
-        .mockResolvedValueOnce({ isAuthenticated: false, user: null }) // fetchState
-        .mockResolvedValueOnce(undefined); // login
-
-      const user = userEvent.setup();
-      renderAuthGate();
-
-      await waitFor(() => {
-        expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      // Backend event arrives before timeout — sync state update
+      act(() => {
+        emitTauriEvent("auth:login-required", {});
       });
 
-      await user.click(screen.getByRole("button", { name: "Sign in" }));
+      // Verify store updated (isLoading = false)
+      expect(useAuthStore.getState().isLoading).toBe(false);
 
-      expect(mockInvoke).toHaveBeenCalledWith("auth_login");
-    });
+      // Advance past timeout — should not fetch since isLoading is now false
+      await act(async () => {
+        vi.advanceTimersByTime(5000);
+      });
+
+      expect(mockInvoke).not.toHaveBeenCalledWith("auth_get_state");
+    }, 10000);
   });
 
-  describe("authenticated state", () => {
-    it("renders children when authenticated", async () => {
-      mockInvoke.mockResolvedValueOnce({
-        isAuthenticated: true,
-        user: MOCK_USER,
-      });
-
+  describe("event-driven auth state", () => {
+    it("shows sign-in on auth:login-required event", async () => {
       renderAuthGate();
 
-      await waitFor(() => {
-        expect(screen.getByTestId("protected")).toBeInTheDocument();
+      act(() => {
+        emitTauriEvent("auth:login-required", {});
       });
-    });
-
-    it("does not show sign-in screen when authenticated", async () => {
-      mockInvoke.mockResolvedValueOnce({
-        isAuthenticated: true,
-        user: MOCK_USER,
-      });
-
-      renderAuthGate();
-
-      await waitFor(() => {
-        expect(screen.getByTestId("protected")).toBeInTheDocument();
-      });
-      expect(screen.queryByText("Sign in required")).not.toBeInTheDocument();
-    });
-
-    it("does not show loading text when authenticated", async () => {
-      mockInvoke.mockResolvedValueOnce({
-        isAuthenticated: true,
-        user: MOCK_USER,
-      });
-
-      renderAuthGate();
-
-      await waitFor(() => {
-        expect(screen.getByTestId("protected")).toBeInTheDocument();
-      });
-      expect(screen.queryByText("Checking authentication...")).not.toBeInTheDocument();
-    });
-  });
-
-  describe("Tauri event handling", () => {
-    it("updates state on auth:state-changed event", async () => {
-      mockInvoke.mockResolvedValueOnce({ isAuthenticated: false, user: null });
-
-      renderAuthGate();
 
       await waitFor(() => {
         expect(screen.getByText("Sign in required")).toBeInTheDocument();
       });
+    });
 
-      // Simulate Tauri emitting auth state change
+    it("shows sign-in on auth:silent-refresh-failed event", async () => {
+      renderAuthGate();
+
+      act(() => {
+        emitTauriEvent("auth:silent-refresh-failed", { reason: "token_expired" });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("Sign in required")).toBeInTheDocument();
+      });
+    });
+
+    it("shows children on auth:state-changed with authenticated state", async () => {
+      renderAuthGate();
+
       act(() => {
         emitTauriEvent("auth:state-changed", {
           isAuthenticated: true,
@@ -191,14 +142,91 @@ describe("AuthGate", () => {
       });
     });
 
+    it("shows default message when no error", async () => {
+      renderAuthGate();
+
+      act(() => {
+        emitTauriEvent("auth:login-required", {});
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("Please sign in to continue to Djinn.")).toBeInTheDocument();
+      });
+    });
+
+    it("shows error message when error exists", async () => {
+      useAuthStore.setState({ error: "Connection refused" });
+
+      renderAuthGate();
+
+      act(() => {
+        emitTauriEvent("auth:login-required", {});
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("Connection refused")).toBeInTheDocument();
+      });
+    });
+
+    it("does not render children when unauthenticated", async () => {
+      renderAuthGate();
+
+      act(() => {
+        emitTauriEvent("auth:login-required", {});
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("Sign in required")).toBeInTheDocument();
+      });
+      expect(screen.queryByTestId("protected")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("sign-in button", () => {
+    it("shows sign-in button when unauthenticated", async () => {
+      renderAuthGate();
+
+      act(() => {
+        emitTauriEvent("auth:login-required", {});
+      });
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      });
+    });
+
+    it("calls login when sign-in button is clicked", async () => {
+      mockInvoke.mockResolvedValueOnce(undefined); // login
+
+      const user = userEvent.setup();
+      renderAuthGate();
+
+      act(() => {
+        emitTauriEvent("auth:login-required", {});
+      });
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+      expect(mockInvoke).toHaveBeenCalledWith("auth_login");
+    });
+  });
+
+  describe("callback handling", () => {
     it("handles auth:callback-received by exchanging code", async () => {
       const MOCK_CONFIG = { clientId: "test_client", redirectUri: "http://localhost:19876/auth/callback" };
       mockInvoke
-        .mockResolvedValueOnce({ isAuthenticated: false, user: null }) // fetchState
         .mockResolvedValueOnce(MOCK_CONFIG) // getOAuthConfig
         .mockResolvedValueOnce(MOCK_USER); // exchangeAuthCode
 
       renderAuthGate();
+
+      act(() => {
+        emitTauriEvent("auth:login-required", {});
+      });
 
       await waitFor(() => {
         expect(screen.getByText("Sign in required")).toBeInTheDocument();
@@ -224,12 +252,15 @@ describe("AuthGate", () => {
 
     it("sets error on auth:callback-received exchange failure", async () => {
       mockInvoke
-        .mockResolvedValueOnce({ isAuthenticated: false, user: null }) // fetchState
         .mockResolvedValueOnce({ clientId: "c", redirectUri: "r" }) // getOAuthConfig
         .mockRejectedValueOnce(new Error("invalid_grant")); // exchangeAuthCode
 
       const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       renderAuthGate();
+
+      act(() => {
+        emitTauriEvent("auth:login-required", {});
+      });
 
       await waitFor(() => {
         expect(screen.getByText("Sign in required")).toBeInTheDocument();
@@ -248,18 +279,24 @@ describe("AuthGate", () => {
       });
       consoleSpy.mockRestore();
     });
+  });
 
+  describe("silent refresh", () => {
     it("refetches state on auth:silent-refresh-success", async () => {
-      mockInvoke
-        .mockResolvedValueOnce({ isAuthenticated: false, user: null }) // initial fetchState
-        .mockResolvedValueOnce({ isAuthenticated: true, user: MOCK_USER }); // refetch after refresh
+      mockInvoke.mockResolvedValueOnce({ isAuthenticated: true, user: MOCK_USER });
 
       renderAuthGate();
+
+      // First transition to unauthenticated via event
+      act(() => {
+        emitTauriEvent("auth:login-required", {});
+      });
 
       await waitFor(() => {
         expect(screen.getByText("Sign in required")).toBeInTheDocument();
       });
 
+      // Silent refresh succeeds — triggers fetchState
       act(() => {
         emitTauriEvent("auth:silent-refresh-success", {});
       });
@@ -268,45 +305,18 @@ describe("AuthGate", () => {
         expect(screen.getByTestId("protected")).toBeInTheDocument();
       });
     });
+  });
 
-    it("shows sign-in on auth:login-required", async () => {
-      // Start in loading state (fetchState never resolves)
-      mockInvoke.mockReturnValue(new Promise(() => {}));
-
-      renderAuthGate();
-
-      expect(screen.getByText("Checking authentication...")).toBeInTheDocument();
-
-      act(() => {
-        emitTauriEvent("auth:login-required", {});
-      });
-
-      await waitFor(() => {
-        expect(screen.getByText("Sign in required")).toBeInTheDocument();
-      });
-    });
-
-    it("shows sign-in on auth:silent-refresh-failed", async () => {
-      mockInvoke.mockReturnValue(new Promise(() => {}));
-
-      renderAuthGate();
-
-      act(() => {
-        emitTauriEvent("auth:silent-refresh-failed", { reason: "token_expired" });
-      });
-
-      await waitFor(() => {
-        expect(screen.getByText("Sign in required")).toBeInTheDocument();
-      });
-    });
-
+  describe("state transitions", () => {
     it("transitions from authenticated to unauthenticated on state-changed", async () => {
-      mockInvoke.mockResolvedValueOnce({
-        isAuthenticated: true,
-        user: MOCK_USER,
-      });
-
       renderAuthGate();
+
+      act(() => {
+        emitTauriEvent("auth:state-changed", {
+          isAuthenticated: true,
+          user: MOCK_USER,
+        });
+      });
 
       await waitFor(() => {
         expect(screen.getByTestId("protected")).toBeInTheDocument();
@@ -327,9 +337,14 @@ describe("AuthGate", () => {
 
   describe("cleanup", () => {
     it("unsubscribes event listeners on unmount", async () => {
-      mockInvoke.mockResolvedValueOnce({ isAuthenticated: true, user: MOCK_USER });
-
       const { unmount } = renderAuthGate();
+
+      act(() => {
+        emitTauriEvent("auth:state-changed", {
+          isAuthenticated: true,
+          user: MOCK_USER,
+        });
+      });
 
       await waitFor(() => {
         expect(screen.getByTestId("protected")).toBeInTheDocument();
@@ -351,11 +366,6 @@ describe("AuthGate", () => {
 
   describe("children rendering", () => {
     it("renders complex children tree when authenticated", async () => {
-      mockInvoke.mockResolvedValueOnce({
-        isAuthenticated: true,
-        user: MOCK_USER,
-      });
-
       renderWithProviders(
         <AuthGate>
           <div data-testid="level-1">
@@ -366,6 +376,13 @@ describe("AuthGate", () => {
         </AuthGate>,
       );
 
+      act(() => {
+        emitTauriEvent("auth:state-changed", {
+          isAuthenticated: true,
+          user: MOCK_USER,
+        });
+      });
+
       await waitFor(() => {
         expect(screen.getByTestId("level-1")).toBeInTheDocument();
         expect(screen.getByTestId("level-2")).toBeInTheDocument();
@@ -374,17 +391,19 @@ describe("AuthGate", () => {
     });
 
     it("renders multiple children", async () => {
-      mockInvoke.mockResolvedValueOnce({
-        isAuthenticated: true,
-        user: MOCK_USER,
-      });
-
       renderWithProviders(
         <AuthGate>
           <div data-testid="child-1">First</div>
           <div data-testid="child-2">Second</div>
         </AuthGate>,
       );
+
+      act(() => {
+        emitTauriEvent("auth:state-changed", {
+          isAuthenticated: true,
+          user: MOCK_USER,
+        });
+      });
 
       await waitFor(() => {
         expect(screen.getByTestId("child-1")).toBeInTheDocument();

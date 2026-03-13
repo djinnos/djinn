@@ -129,7 +129,10 @@ pub fn run() {
                     token_refresh::RefreshResult::Success(_state) => {
                         log::info!("Silent authentication successful on startup");
                         // Populate AUTH_SESSION and emit auth:state-changed event
-                        let _ = commands::populate_session_after_silent_refresh(&silent_auth_app).await;
+                        if let Err(e) = commands::populate_session_after_silent_refresh(&silent_auth_app).await {
+                            log::error!("Failed to populate session after silent refresh: {}", e);
+                            let _ = silent_auth_app.emit("auth:login-required", ());
+                        }
                     }
                     token_refresh::RefreshResult::NoToken => {
                         log::info!("No refresh token available, user needs to login");

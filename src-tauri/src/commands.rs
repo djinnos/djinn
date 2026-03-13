@@ -371,7 +371,9 @@ pub async fn exchange_auth_code(
     // Store refresh token
     if let Some(refresh_token) = token_response.refresh_token.as_deref() {
         store_token(refresh_token).await?;
-        log::info!("Stored refresh token in secure storage");
+        log::info!("Stored refresh token in secure storage ({} chars)", refresh_token.len());
+    } else {
+        log::warn!("Clerk did NOT return a refresh_token — session will not persist across restarts. Verify offline_access scope is enabled in the Clerk dashboard.");
     }
 
     // Update new token state with expiry tracking

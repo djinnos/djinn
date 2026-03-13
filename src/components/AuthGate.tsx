@@ -9,16 +9,20 @@ export function AuthGate({ children }: { children: ReactNode }) {
     useAuthStore();
 
   useEffect(() => {
-    fetchState();
-
     const listeners: Array<() => void> = [];
+
+    // Don't call fetchState() eagerly — the backend drives initial state via
+    // events (auth:state-changed, auth:login-required, auth:silent-refresh-failed).
+    // This avoids the race where fetchState() returns { isAuthenticated: false }
+    // before the silent refresh has completed.
 
     listen<{ isAuthenticated: boolean; user: AuthUser | null }>("auth:state-changed", (event) => {
       const state = event.payload;
       setState(state);
       if (state.isAuthenticated && state.user?.email) {
+        const { email, sub } = state.user;
         import("@/api/server").then(({ setUserIdentity }) =>
-          setUserIdentity(state.user!.email!, state.user!.sub),
+          setUserIdentity(email, sub),
         );
       }
     }).then((u) => listeners.push(u));
@@ -54,7 +58,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
       useAuthStore.setState({ isLoading: false, isAuthenticated: false });
     }).then((u) => listeners.push(u));
 
+    // Fallback: if no backend event arrives within 5s (e.g. event fired before
+    // listeners registered), poll the backend directly.
+    const fallbackTimer = setTimeout(() => {
+      if (useAuthStore.getState().isLoading) {
+        fetchState();
+      }
+    }, 5000);
+
     return () => {
+      clearTimeout(fallbackTimer);
       listeners.forEach((unlisten) => unlisten());
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
