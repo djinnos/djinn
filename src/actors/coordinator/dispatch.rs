@@ -1,6 +1,78 @@
 use super::*;
 
+/// Result of a single `try_dispatch_to_pool` attempt.
+enum DispatchOutcome {
+    /// Successfully dispatched to a slot.
+    Dispatched,
+    /// All candidate models are at capacity.
+    AtCapacity,
+    /// No healthy model could accept the dispatch (non-capacity errors).
+    Failed,
+    /// The slot pool actor is dead — caller should abort.
+    PoolDead,
+}
+
 impl CoordinatorActor {
+    /// Shared model-resolution → health-check → pool-dispatch loop used by
+    /// both regular task dispatch and groomer dispatch.
+    ///
+    /// `dispatch_fn` receives `(&SlotPoolHandle, &str)` — the pool handle and
+    /// model_id — and returns the pool dispatch future's result.
+    async fn try_dispatch_to_pool<F, Fut>(
+        &self,
+        label: &str,
+        model_ids: &[String],
+        dispatch_fn: F,
+    ) -> DispatchOutcome
+    where
+        F: Fn(&SlotPoolHandle, &str) -> Fut,
+        Fut: std::future::Future<Output = Result<(), PoolError>>,
+    {
+        let mut any_at_capacity = false;
+
+        for model_id in model_ids {
+            if !self.health.is_available(model_id) {
+                tracing::debug!(
+                    model_id = %model_id,
+                    label,
+                    "CoordinatorActor: model unavailable by health tracker"
+                );
+                continue;
+            }
+
+            match dispatch_fn(&self.pool, model_id).await {
+                Ok(()) => return DispatchOutcome::Dispatched,
+                Err(PoolError::AtCapacity { .. }) => {
+                    any_at_capacity = true;
+                    tracing::debug!(
+                        model_id = %model_id,
+                        label,
+                        "CoordinatorActor: model at capacity, trying next model"
+                    );
+                }
+                Err(PoolError::ActorDead) => {
+                    tracing::error!("CoordinatorActor: slot pool actor dead, aborting dispatch");
+                    return DispatchOutcome::PoolDead;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        model_id = %model_id,
+                        label,
+                        error = %e,
+                        "CoordinatorActor: dispatch failed"
+                    );
+                    return DispatchOutcome::Failed;
+                }
+            }
+        }
+
+        if any_at_capacity {
+            DispatchOutcome::AtCapacity
+        } else {
+            DispatchOutcome::Failed
+        }
+    }
+
     /// Find all ready tasks (open, no unresolved blockers, non-epic) and dispatch
     /// those that don't already have an active session.
     pub(super) async fn dispatch_ready_tasks(&mut self, project_filter: Option<&str>) {
@@ -120,76 +192,57 @@ impl CoordinatorActor {
                 continue;
             };
 
-            let mut dispatched = false;
-            let mut role_at_capacity = false;
-            for model_id in model_ids {
-                if !self.health.is_available(model_id) {
-                    tracing::debug!(
-                        model_id = %model_id,
+            let task_id = task.id.clone();
+            let project_path_owned = project_path.clone();
+            let outcome = self
+                .try_dispatch_to_pool(&task.short_id, model_ids, |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = task_id.clone();
+                    let pp = project_path_owned.clone();
+                    let mid = model_id.to_owned();
+                    async move { pool.dispatch(&tid, &pp, &mid).await }
+                })
+                .await;
+
+            match outcome {
+                DispatchOutcome::Dispatched => {
+                    tracing::info!(
                         task_id = %task.short_id,
-                        "CoordinatorActor: model unavailable by health tracker"
+                        task_uuid = %task.id,
+                        project_id = %task.project_id,
+                        status = %task.status,
+                        priority = task.priority,
+                        role,
+                        project_path,
+                        "CoordinatorActor: task dispatched"
                     );
-                    continue;
+                    self.last_dispatched
+                        .insert(task.id.clone(), StdInstant::now());
+                    self.dispatched += 1;
                 }
-
-                match self.pool.dispatch(&task.id, &project_path, model_id).await {
-                    Ok(()) => {
-                        tracing::info!(
-                            task_id = %task.short_id,
-                            task_uuid = %task.id,
-                            project_id = %task.project_id,
-                            status = %task.status,
-                            priority = task.priority,
-                            role,
-                            model_id = %model_id,
-                            project_path,
-                            "CoordinatorActor: task dispatched"
-                        );
-                        self.last_dispatched
-                            .insert(task.id.clone(), StdInstant::now());
-                        self.dispatched += 1;
-                        dispatched = true;
-                        break;
-                    }
-                    Err(PoolError::AtCapacity { .. }) => {
-                        role_at_capacity = true;
-                        tracing::debug!(
-                            task_id = %task.short_id,
-                            model_id = %model_id,
-                            "CoordinatorActor: model at capacity, trying next model"
-                        );
-                    }
-                    Err(PoolError::ActorDead) => {
-                        tracing::error!(
-                            "CoordinatorActor: slot pool actor dead, aborting dispatch"
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            model_id = %model_id,
-                            error = %e,
-                            "CoordinatorActor: dispatch failed"
-                        );
-                        break;
-                    }
-                }
-            }
-
-            if !dispatched {
-                tracing::debug!(
-                    task_id = %task.short_id,
-                    task_uuid = %task.id,
-                    project_id = %task.project_id,
-                    role,
-                    status = %task.status,
-                    candidate_models = model_ids.len(),
-                    role_at_capacity,
-                    "CoordinatorActor: no model with available capacity for task"
-                );
-                if role_at_capacity {
+                DispatchOutcome::AtCapacity => {
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        task_uuid = %task.id,
+                        project_id = %task.project_id,
+                        role,
+                        status = %task.status,
+                        candidate_models = model_ids.len(),
+                        "CoordinatorActor: all models at capacity for role"
+                    );
                     exhausted_roles.insert(role);
+                }
+                DispatchOutcome::PoolDead => return,
+                DispatchOutcome::Failed => {
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        task_uuid = %task.id,
+                        project_id = %task.project_id,
+                        role,
+                        status = %task.status,
+                        candidate_models = model_ids.len(),
+                        "CoordinatorActor: no model could accept dispatch"
+                    );
                 }
             }
         }
@@ -399,6 +452,30 @@ impl CoordinatorActor {
             tracing::debug!(project_id = %project_id, "Groomer dispatch: skipped — project dispatch disabled");
             return false;
         }
+
+        // Use the same cooldown key scheme as regular tasks.
+        let groomer_key = format!("project:{project_id}:groomer");
+        // Detect rapid failure for groomer sessions.
+        if let Some(last) = self.last_dispatched.get(&groomer_key)
+            && last.elapsed() < RAPID_FAILURE_THRESHOLD
+        {
+            tracing::warn!(
+                project_id = %project_id,
+                elapsed_ms = last.elapsed().as_millis(),
+                cooldown_secs = DISPATCH_COOLDOWN.as_secs(),
+                "Groomer dispatch: rapid failure detected, adding cooldown"
+            );
+            self.dispatch_cooldowns
+                .insert(groomer_key.clone(), StdInstant::now());
+        }
+        if self.dispatch_cooldowns.contains_key(&groomer_key) {
+            tracing::debug!(
+                project_id = %project_id,
+                "Groomer dispatch: skipped — in cooldown"
+            );
+            return false;
+        }
+
         let count = self.backlog_count(project_id).await;
         if count == 0 {
             tracing::debug!(project_id = %project_id, "Groomer dispatch: skipped — backlog empty");
@@ -414,25 +491,40 @@ impl CoordinatorActor {
             tracing::warn!(project_id = %project_id, "Groomer dispatch: project path not found");
             return false;
         };
-        for model_id in model_ids {
-            if !self.health.is_available(&model_id) {
-                continue;
+
+        let pid = project_id.to_owned();
+        let pp = project_path.clone();
+        let outcome = self
+            .try_dispatch_to_pool(
+                &format!("groomer:{project_id}"),
+                &model_ids,
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let pid = pid.clone();
+                    let pp = pp.clone();
+                    let mid = model_id.to_owned();
+                    async move {
+                        pool.dispatch_project(&pid, &pp, "groomer", &mid).await
+                    }
+                },
+            )
+            .await;
+
+        match outcome {
+            DispatchOutcome::Dispatched => {
+                tracing::info!(
+                    project_id = %project_id,
+                    project_path,
+                    "Groomer dispatch: dispatched"
+                );
+                self.active_groomer_sessions.insert(project_id.to_string());
+                self.last_dispatched
+                    .insert(groomer_key, StdInstant::now());
+                self.dispatched += 1;
+                true
             }
-            match self
-                .pool
-                .dispatch_project(project_id, &project_path, "groomer", &model_id)
-                .await
-            {
-                Ok(()) => {
-                    self.active_groomer_sessions.insert(project_id.to_string());
-                    self.dispatched += 1;
-                    return true;
-                }
-                Err(PoolError::AtCapacity { .. }) => continue,
-                Err(_) => break,
-            }
+            _ => false,
         }
-        false
     }
 
     pub(super) async fn ensure_groomer_dispatch(&mut self, project_filter: Option<&str>) {
@@ -466,6 +558,39 @@ impl CoordinatorActor {
                     let _ = self.dispatch_groomer_for_project(&project_id).await;
                 }
             }
+        }
+    }
+
+    /// Interrupt all active groomer sessions for the given projects and clear
+    /// their tracking state. Called on pause to ensure background maintenance
+    /// work stops immediately — groomers are system-initiated, not user work.
+    pub(super) async fn interrupt_groomers(&mut self, project_filter: Option<&str>) {
+        let projects: Vec<String> = match project_filter {
+            Some(pid) => {
+                if self.active_groomer_sessions.contains(pid) {
+                    vec![pid.to_owned()]
+                } else {
+                    return;
+                }
+            }
+            None => self.active_groomer_sessions.iter().cloned().collect(),
+        };
+
+        for project_id in &projects {
+            let groomer_task_id = format!("project:{project_id}:groomer");
+            if let Err(e) = self.pool.kill_session(&groomer_task_id).await {
+                tracing::debug!(
+                    project_id = %project_id,
+                    error = %e,
+                    "CoordinatorActor: failed to kill groomer session on pause (may have already finished)"
+                );
+            } else {
+                tracing::info!(
+                    project_id = %project_id,
+                    "CoordinatorActor: interrupted groomer session on pause"
+                );
+            }
+            self.active_groomer_sessions.remove(project_id);
         }
     }
 }

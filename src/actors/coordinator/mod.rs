@@ -345,6 +345,9 @@ impl CoordinatorActor {
                     count = self.paused_projects.len(),
                     "CoordinatorActor: paused all projects"
                 );
+                // Always interrupt groomers — they are system-initiated background
+                // maintenance, not user work, so they should stop on any pause.
+                self.interrupt_groomers(None).await;
                 self.publish_status();
                 if interrupt_active && let Err(e) = self.pool.interrupt_all(&reason).await {
                     tracing::warn!(error = %e, "CoordinatorActor: failed to interrupt sessions on pause");
@@ -356,6 +359,9 @@ impl CoordinatorActor {
                 reason,
             } => {
                 self.paused_projects.insert(project_id.clone());
+                // Always interrupt groomers — they are system-initiated background
+                // maintenance, not user work, so they should stop on any pause.
+                self.interrupt_groomers(Some(&project_id)).await;
                 self.publish_status();
                 if interrupt_active
                     && let Err(e) = self.pool.interrupt_project(&project_id, &reason).await
