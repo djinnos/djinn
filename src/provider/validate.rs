@@ -113,8 +113,7 @@ pub async fn validate(req: ValidationRequest) -> ValidationResult {
         request = request.header("Authorization", format!("Bearer {}", req.api_key));
     }
 
-    let resp = match request.send().await
-    {
+    let resp = match request.send().await {
         Ok(r) => r,
         Err(e) if e.is_timeout() => {
             return ValidationResult {
@@ -199,5 +198,142 @@ async fn parse_models(resp: reqwest::Response) -> Vec<String> {
             .map(|m| m.id)
             .collect(),
         Err(_) => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use warp::Filter;
+
+    #[derive(Clone, Debug, Default)]
+    struct SeenHeaders {
+        authorization: Option<String>,
+        x_api_key: Option<String>,
+        anthropic_version: Option<String>,
+    }
+
+    fn spawn_server(
+        status: u16,
+        body: &'static str,
+        seen: Arc<Mutex<Option<SeenHeaders>>>,
+    ) -> String {
+        let route = warp::path("models")
+            .and(warp::get())
+            .and(warp::header::optional::<String>("authorization"))
+            .and(warp::header::optional::<String>("x-api-key"))
+            .and(warp::header::optional::<String>("anthropic-version"))
+            .map(move |authorization, x_api_key, anthropic_version| {
+                *seen.lock().expect("lock seen headers") = Some(SeenHeaders {
+                    authorization,
+                    x_api_key,
+                    anthropic_version,
+                });
+                warp::reply::with_status(body, warp::http::StatusCode::from_u16(status).expect("status"))
+            });
+
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("bind local tcp listener");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+
+        tokio::spawn(warp::serve(route).run(addr));
+        format!("http://{}:{}", addr.ip(), addr.port())
+    }
+
+    #[tokio::test]
+    async fn rate_limit_429_returns_ok_true_and_rate_limit_kind() {
+        let seen = Arc::new(Mutex::new(None));
+        let base_url = spawn_server(429, "too many requests", seen);
+
+        let result = validate(ValidationRequest {
+            base_url,
+            api_key: "k123".into(),
+            provider_id: Some("openai".into()),
+        })
+        .await;
+
+        assert!(result.ok);
+        assert_eq!(result.error_kind, ErrorKind::RateLimit);
+        assert_eq!(result.http_status, 429);
+        assert!(result.models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn anthropic_detected_from_base_url_uses_anthropic_headers_even_with_custom_provider_id() {
+        let seen = Arc::new(Mutex::new(None));
+        let real_base = spawn_server(200, r#"{"data":[]}"#, seen.clone());
+        let base_url = real_base.replace("127.0.0.1", "anthropic.com");
+
+        let _ = validate(ValidationRequest {
+            base_url,
+            api_key: "anthropic-key".into(),
+            provider_id: Some("custom".into()),
+        })
+        .await;
+
+        let headers = seen.lock().expect("seen lock").clone().expect("captured headers");
+        assert_eq!(headers.x_api_key.as_deref(), Some("anthropic-key"));
+        assert_eq!(headers.anthropic_version.as_deref(), Some("2023-06-01"));
+        assert!(headers.authorization.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_json_on_200_keeps_ok_true_with_empty_models() {
+        let seen = Arc::new(Mutex::new(None));
+        let base_url = spawn_server(200, "{not-json", seen);
+
+        let result = validate(ValidationRequest {
+            base_url,
+            api_key: "k123".into(),
+            provider_id: Some("openai".into()),
+        })
+        .await;
+
+        assert!(result.ok);
+        assert_eq!(result.error_kind, ErrorKind::None);
+        assert!(result.models.is_empty());
+        assert_eq!(result.http_status, 200);
+    }
+
+    #[tokio::test]
+    async fn bare_model_names_are_returned_as_is() {
+        let seen = Arc::new(Mutex::new(None));
+        let base_url = spawn_server(
+            200,
+            r#"{"data":[{"id":"gpt-4o"},{"id":"anthropic/claude-opus-4-6"},{"id":""}]}"#,
+            seen,
+        );
+
+        let result = validate(ValidationRequest {
+            base_url,
+            api_key: "k123".into(),
+            provider_id: Some("openai".into()),
+        })
+        .await;
+
+        assert_eq!(
+            result.models,
+            vec!["gpt-4o".to_string(), "anthropic/claude-opus-4-6".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_base_url_forms_single_models_path() {
+        let seen = Arc::new(Mutex::new(None));
+        let mut base_url = spawn_server(200, r#"{"data":[]}"#, seen);
+        base_url.push('/');
+
+        let result = validate(ValidationRequest {
+            base_url,
+            api_key: "k123".into(),
+            provider_id: Some("openai".into()),
+        })
+        .await;
+
+        assert!(result.ok);
+        assert_eq!(result.http_status, 200);
+        assert!(result.models.is_empty());
     }
 }
