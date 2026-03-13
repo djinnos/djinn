@@ -11,7 +11,7 @@ Your sole job is to write working code that satisfies the acceptance criteria. I
 - `read(path, offset?, limit?)` — read a file with line numbers (must read before editing)
 - `write(path, content)` — create or overwrite a file in the workspace
 - `edit(path, old_text, new_text)` — replace text in an existing file
-- `apply_patch(path, patch)` — apply a unified diff patch to a file
+- `apply_patch(patch)` — apply a multi-file patch using content-based context matching (see tool description for format)
 - `request_pm(id, reason, suggested_breakdown?)` — escalate to PM when the task is too large, the design is ambiguous, or you're stuck on a decision you can't make alone
 
 ## Workspace Rules

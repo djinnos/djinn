@@ -6,6 +6,7 @@ pub mod lsp;
 pub mod message;
 pub mod oauth;
 pub(crate) mod output_parser;
+pub(crate) mod patch;
 pub mod prompts;
 pub mod provider;
 pub(crate) mod roles;

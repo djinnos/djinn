@@ -91,6 +91,7 @@ where
         "write" => call_write(state, &call.arguments, worktree_path).await,
         "edit" => call_edit(state, &call.arguments, worktree_path).await,
         "apply_patch" => call_apply_patch(state, &call.arguments, worktree_path).await,
+        "lsp" => call_lsp(state, &call.arguments, worktree_path).await,
         other => Err(format!("unknown djinn frontend tool: {other}")),
     }
 }
@@ -228,7 +229,6 @@ struct EditParams {
 
 #[derive(Deserialize)]
 struct ApplyPatchParams {
-    path: String,
     patch: String,
 }
 
@@ -970,51 +970,387 @@ async fn call_write(
     // Ensure path is within worktree
     ensure_path_within_worktree(&path, worktree_path)?;
 
-    if path.exists() {
-        state
-            .file_time()
-            .assert(&worktree_path.display().to_string(), &path)
-            .await
-            .map_err(|e| match e.as_str() {
-                _ if e.starts_with("file must be read before modification in this session:") => {
-                    format!(
-                        "You must read the file {} before overwriting it. Use the read tool first",
-                        path.display()
-                    )
-                }
-                _ if e.starts_with("file was modified since last read in this session:") => {
-                    format!(
-                        "File {} has been modified since last read. Please read it again.",
-                        path.display()
-                    )
-                }
-                _ => e,
-            })?;
-    }
-
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("create dirs failed: {e}"))?;
-    }
-    tokio::fs::write(&path, &p.content)
-        .await
-        .map_err(|e| format!("write failed: {e}"))?;
-
     state
         .file_time()
-        .read(&worktree_path.display().to_string(), &path)
-        .await?;
+        .with_lock(&path, async {
+            if path.exists() {
+                state
+                    .file_time()
+                    .assert(&worktree_path.display().to_string(), &path)
+                    .await
+                    .map_err(|e| match e.as_str() {
+                        _ if e.starts_with(
+                            "file must be read before modification in this session:",
+                        ) =>
+                        {
+                            format!(
+                                "You must read the file {} before overwriting it. Use the read tool first",
+                                path.display()
+                            )
+                        }
+                        _ if e.starts_with(
+                            "file was modified since last read in this session:",
+                        ) =>
+                        {
+                            format!(
+                                "File {} has been modified since last read. Please read it again.",
+                                path.display()
+                            )
+                        }
+                        _ => e,
+                    })?;
+            }
 
-    state.lsp().touch_file(worktree_path, &path, true).await;
-    let diag_xml = format_diagnostics_xml(state.lsp().diagnostics().await);
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| format!("create dirs failed: {e}"))?;
+            }
+            tokio::fs::write(&path, &p.content)
+                .await
+                .map_err(|e| format!("write failed: {e}"))?;
 
-    Ok(serde_json::json!({
-        "ok": true,
-        "path": path.display().to_string(),
-        "bytes": p.content.len(),
-        "diagnostics": diag_xml,
-    }))
+            state
+                .file_time()
+                .read(&worktree_path.display().to_string(), &path)
+                .await?;
+
+            state.lsp().touch_file(worktree_path, &path, true).await;
+            let diag_xml = format_diagnostics_xml(state.lsp().diagnostics().await);
+
+            Ok(serde_json::json!({
+                "ok": true,
+                "path": path.display().to_string(),
+                "bytes": p.content.len(),
+                "diagnostics": diag_xml,
+            }))
+        })
+        .await
+}
+
+/// Multi-layer fuzzy string replacement for the edit tool.
+///
+/// Tries matching strategies in order of strictness:
+/// 1. Exact match
+/// 2. Line-trimmed match (trailing whitespace stripped per line)
+/// 3. Whitespace-normalized match (runs of whitespace collapsed to single space)
+/// 4. Indentation-flexible match (leading whitespace stripped per line)
+///
+/// Returns `(new_content, optional_match_note)`.
+fn fuzzy_replace(
+    content: &str,
+    old_text: &str,
+    new_text: &str,
+    path: &Path,
+) -> Result<(String, Option<String>), String> {
+    // Layer 1: Exact match
+    let count = content.matches(old_text).count();
+    if count == 1 {
+        return Ok((content.replacen(old_text, new_text, 1), None));
+    }
+    if count > 1 {
+        return Err(format!(
+            "old_text appears {count} times in file (must be unique): {}",
+            path.display()
+        ));
+    }
+
+    // Layer 2: Line-trimmed match (trim trailing whitespace per line)
+    if let Some(result) = try_line_trimmed_match(content, old_text, new_text) {
+        return match result {
+            FuzzyResult::Unique(new_content) => Ok((
+                new_content,
+                Some("(matched after trimming trailing whitespace)".to_string()),
+            )),
+            FuzzyResult::Ambiguous(n) => Err(format!(
+                "old_text appears {n} times after trimming trailing whitespace \
+                 (must be unique): {}",
+                path.display()
+            )),
+        };
+    }
+
+    // Layer 3: Whitespace-normalized match
+    if let Some(result) = try_whitespace_normalized_match(content, old_text, new_text) {
+        return match result {
+            FuzzyResult::Unique(new_content) => Ok((
+                new_content,
+                Some("(matched with whitespace normalization)".to_string()),
+            )),
+            FuzzyResult::Ambiguous(n) => Err(format!(
+                "old_text appears {n} times after whitespace normalization \
+                 (must be unique): {}",
+                path.display()
+            )),
+        };
+    }
+
+    // Layer 4: Indentation-flexible match
+    if let Some(result) = try_indentation_flexible_match(content, old_text, new_text) {
+        return match result {
+            FuzzyResult::Unique(new_content) => Ok((
+                new_content,
+                Some("(matched with flexible indentation)".to_string()),
+            )),
+            FuzzyResult::Ambiguous(n) => Err(format!(
+                "old_text appears {n} times after stripping indentation \
+                 (must be unique): {}",
+                path.display()
+            )),
+        };
+    }
+
+    Err(format!("old_text not found in file: {}", path.display()))
+}
+
+enum FuzzyResult {
+    Unique(String),
+    Ambiguous(usize),
+}
+
+/// Trim trailing whitespace from each line, then find the match.
+fn try_line_trimmed_match(
+    content: &str,
+    old_text: &str,
+    new_text: &str,
+) -> Option<FuzzyResult> {
+    let trimmed_content: String = content
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let trimmed_old: String = old_text
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let count = trimmed_content.matches(&trimmed_old as &str).count();
+    if count == 0 {
+        return None;
+    }
+    if count > 1 {
+        return Some(FuzzyResult::Ambiguous(count));
+    }
+
+    let start = trimmed_content.find(&trimmed_old)?;
+    let end = start + trimmed_old.len();
+
+    let (orig_start, orig_end) =
+        map_trimmed_to_original(content, &trimmed_content, start, end);
+    let mut result = String::with_capacity(content.len());
+    result.push_str(&content[..orig_start]);
+    result.push_str(new_text);
+    result.push_str(&content[orig_end..]);
+    Some(FuzzyResult::Unique(result))
+}
+
+/// Map byte positions from a trimmed version back to the original content.
+fn map_trimmed_to_original(
+    original: &str,
+    trimmed: &str,
+    trimmed_start: usize,
+    trimmed_end: usize,
+) -> (usize, usize) {
+    let orig_lines: Vec<&str> = original.split('\n').collect();
+    let trimmed_lines: Vec<&str> = trimmed.split('\n').collect();
+
+    let mut orig_offset = 0usize;
+    let mut trimmed_offset = 0usize;
+    let mut result_start = 0usize;
+    let mut result_end = 0usize;
+    let mut found_start = false;
+    let mut found_end = false;
+
+    for (i, (orig_line, trimmed_line)) in
+        orig_lines.iter().zip(trimmed_lines.iter()).enumerate()
+    {
+        let newline: usize = usize::from(i < orig_lines.len() - 1);
+
+        if !found_start
+            && trimmed_start < trimmed_offset + trimmed_line.len() + newline
+        {
+            let offset_in_line = trimmed_start - trimmed_offset;
+            result_start = orig_offset + offset_in_line;
+            found_start = true;
+        }
+
+        if !found_end
+            && trimmed_end <= trimmed_offset + trimmed_line.len() + newline
+        {
+            let offset_in_line = trimmed_end - trimmed_offset;
+            let clamped = offset_in_line.min(orig_line.len() + newline);
+            result_end = orig_offset + clamped;
+            found_end = true;
+        }
+
+        orig_offset += orig_line.len() + newline;
+        trimmed_offset += trimmed_line.len() + newline;
+
+        if found_start && found_end {
+            break;
+        }
+    }
+
+    (result_start, result_end)
+}
+
+/// Collapse all runs of spaces/tabs to a single space, then find the match.
+fn try_whitespace_normalized_match(
+    content: &str,
+    old_text: &str,
+    new_text: &str,
+) -> Option<FuzzyResult> {
+    let (norm_content, content_map) = normalize_whitespace_with_map(content);
+    let (norm_old, _) = normalize_whitespace_with_map(old_text);
+
+    let count = norm_content.matches(&norm_old as &str).count();
+    if count == 0 {
+        return None;
+    }
+    if count > 1 {
+        return Some(FuzzyResult::Ambiguous(count));
+    }
+
+    let norm_start = norm_content.find(&norm_old)?;
+    let norm_end = norm_start + norm_old.len();
+
+    let orig_start = content_map[norm_start];
+    let orig_end = if norm_end >= content_map.len() {
+        content.len()
+    } else {
+        content_map[norm_end]
+    };
+
+    let mut result = String::with_capacity(content.len());
+    result.push_str(&content[..orig_start]);
+    result.push_str(new_text);
+    result.push_str(&content[orig_end..]);
+    Some(FuzzyResult::Unique(result))
+}
+
+/// Normalize whitespace: collapse runs of spaces/tabs to a single space.
+/// Returns (normalized_string, map from normalized byte index to original byte
+/// index).
+fn normalize_whitespace_with_map(s: &str) -> (String, Vec<usize>) {
+    let mut normalized = String::with_capacity(s.len());
+    let mut map: Vec<usize> = Vec::with_capacity(s.len());
+    let mut in_ws = false;
+    let bytes = s.as_bytes();
+
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' || b == b'\r' {
+            in_ws = false;
+            normalized.push(b as char);
+            map.push(i);
+        } else if b == b' ' || b == b'\t' {
+            if !in_ws {
+                normalized.push(' ');
+                map.push(i);
+                in_ws = true;
+            }
+        } else {
+            in_ws = false;
+            normalized.push(b as char);
+            map.push(i);
+        }
+    }
+
+    (normalized, map)
+}
+
+/// Strip leading whitespace from each line, match, then apply edit preserving
+/// the file's original indentation.
+fn try_indentation_flexible_match(
+    content: &str,
+    old_text: &str,
+    new_text: &str,
+) -> Option<FuzzyResult> {
+    let stripped_content: String = content
+        .lines()
+        .map(|l| l.trim_start())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let stripped_old: String = old_text
+        .lines()
+        .map(|l| l.trim_start())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if stripped_old.is_empty() {
+        return None;
+    }
+
+    let count = stripped_content.matches(&stripped_old as &str).count();
+    if count == 0 {
+        return None;
+    }
+    if count > 1 {
+        return Some(FuzzyResult::Ambiguous(count));
+    }
+
+    let stripped_start = stripped_content.find(&stripped_old)?;
+
+    let match_start_line = stripped_content[..stripped_start]
+        .chars()
+        .filter(|&c| c == '\n')
+        .count();
+    let old_line_count =
+        stripped_old.chars().filter(|&c| c == '\n').count() + 1;
+
+    let content_lines: Vec<&str> = content.lines().collect();
+
+    let mut orig_start = 0usize;
+    for line in &content_lines[..match_start_line] {
+        orig_start += line.len() + 1;
+    }
+    let mut orig_end = orig_start;
+    for (i, line) in content_lines[match_start_line..]
+        .iter()
+        .enumerate()
+        .take(old_line_count)
+    {
+        orig_end += line.len();
+        if match_start_line + i + 1 < content_lines.len() {
+            orig_end += 1;
+        }
+    }
+    orig_end = orig_end.min(content.len());
+
+    let first_orig_line = content_lines[match_start_line];
+    let base_indent: &str = &first_orig_line
+        [..first_orig_line.len() - first_orig_line.trim_start().len()];
+
+    let new_lines: Vec<&str> = new_text.lines().collect();
+    let first_new_indent = new_lines
+        .first()
+        .map_or(0, |l| l.len() - l.trim_start().len());
+    let reindented: String = new_lines
+        .iter()
+        .map(|line| {
+            if line.is_empty() {
+                String::new()
+            } else {
+                let this_indent = line.len() - line.trim_start().len();
+                let relative = this_indent.saturating_sub(first_new_indent);
+                let extra: String = " ".repeat(relative);
+                format!("{base_indent}{extra}{}", line.trim_start())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let needs_trailing_newline =
+        content[..orig_end].ends_with('\n') && !reindented.ends_with('\n');
+
+    let mut result = String::with_capacity(content.len());
+    result.push_str(&content[..orig_start]);
+    result.push_str(&reindented);
+    if needs_trailing_newline {
+        result.push('\n');
+    }
+    result.push_str(&content[orig_end..]);
+    Some(FuzzyResult::Unique(result))
 }
 
 async fn call_edit(
@@ -1030,58 +1366,62 @@ async fn call_edit(
 
     state
         .file_time()
-        .assert(&worktree_path.display().to_string(), &path)
-        .await
-        .map_err(|e| match e.as_str() {
-            _ if e.starts_with("file must be read before modification in this session:") => {
-                format!(
-                    "You must read the file {} before editing it. Use the read tool first",
-                    path.display()
-                )
+        .with_lock(&path, async {
+            state
+                .file_time()
+                .assert(&worktree_path.display().to_string(), &path)
+                .await
+                .map_err(|e| match e.as_str() {
+                    _ if e.starts_with(
+                        "file must be read before modification in this session:",
+                    ) =>
+                    {
+                        format!(
+                            "You must read the file {} before editing it. Use the read tool first",
+                            path.display()
+                        )
+                    }
+                    _ if e.starts_with(
+                        "file was modified since last read in this session:",
+                    ) =>
+                    {
+                        format!(
+                            "File {} has been modified since last read. Please read it again.",
+                            path.display()
+                        )
+                    }
+                    _ => e,
+                })?;
+
+            let content = tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| format!("read failed: {e}"))?;
+
+            let (new_content, match_note) =
+                fuzzy_replace(&content, &p.old_text, &p.new_text, &path)?;
+            tokio::fs::write(&path, &new_content)
+                .await
+                .map_err(|e| format!("write failed: {e}"))?;
+
+            state
+                .file_time()
+                .read(&worktree_path.display().to_string(), &path)
+                .await?;
+
+            state.lsp().touch_file(worktree_path, &path, true).await;
+            let diag_xml = format_diagnostics_xml(state.lsp().diagnostics().await);
+
+            let mut result = serde_json::json!({
+                "ok": true,
+                "path": path.display().to_string(),
+                "diagnostics": diag_xml,
+            });
+            if let Some(note) = match_note {
+                result["match_note"] = serde_json::Value::String(note);
             }
-            _ if e.starts_with("file was modified since last read in this session:") => {
-                format!(
-                    "File {} has been modified since last read. Please read it again.",
-                    path.display()
-                )
-            }
-            _ => e,
-        })?;
-
-    let content = tokio::fs::read_to_string(&path)
+            Ok(result)
+        })
         .await
-        .map_err(|e| format!("read failed: {e}"))?;
-
-    let count = content.matches(&p.old_text as &str).count();
-    if count == 0 {
-        return Err(format!("old_text not found in file: {}", path.display()));
-    }
-    if count > 1 {
-        return Err(format!(
-            "old_text appears {} times in file (must be unique): {}",
-            count,
-            path.display()
-        ));
-    }
-
-    let new_content = content.replacen(&p.old_text as &str, &p.new_text, 1);
-    tokio::fs::write(&path, &new_content)
-        .await
-        .map_err(|e| format!("write failed: {e}"))?;
-
-    state
-        .file_time()
-        .read(&worktree_path.display().to_string(), &path)
-        .await?;
-
-    state.lsp().touch_file(worktree_path, &path, true).await;
-    let diag_xml = format_diagnostics_xml(state.lsp().diagnostics().await);
-
-    Ok(serde_json::json!({
-        "ok": true,
-        "path": path.display().to_string(),
-        "diagnostics": diag_xml,
-    }))
 }
 
 async fn call_apply_patch(
@@ -1090,81 +1430,151 @@ async fn call_apply_patch(
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
     let p: ApplyPatchParams = parse_args(arguments)?;
-    let path = resolve_path(&p.path, worktree_path);
 
-    ensure_path_within_worktree(&path, worktree_path)?;
+    // Parse the custom patch format
+    let parsed = super::patch::parse_patch(&p.patch)?;
 
-    state
-        .file_time()
-        .assert(&worktree_path.display().to_string(), &path)
-        .await
-        .map_err(|e| match e.as_str() {
-            _ if e.starts_with("file must be read before modification in this session:") => {
-                format!(
-                    "You must read the file {} before editing it. Use the read tool first",
-                    path.display()
-                )
+    let worktree_key = worktree_path.display().to_string();
+
+    // Validate all paths are within worktree and assert FileTime for updates/deletes
+    for op in &parsed.operations {
+        let raw_path = op.path();
+        let resolved = resolve_path(raw_path, worktree_path);
+        ensure_path_within_worktree(&resolved, worktree_path)?;
+
+        match op {
+            super::patch::FileOp::Update { .. } | super::patch::FileOp::Delete { .. } => {
+                state
+                    .file_time()
+                    .assert(&worktree_key, &resolved)
+                    .await
+                    .map_err(|e| {
+                        if e.starts_with(
+                            "file must be read before modification in this session:",
+                        ) {
+                            format!(
+                                "You must read the file {} before editing it. \
+                                 Use the read tool first",
+                                resolved.display()
+                            )
+                        } else if e.starts_with(
+                            "file was modified since last read in this session:",
+                        ) {
+                            format!(
+                                "File {} has been modified since last read. \
+                                 Please read it again.",
+                                resolved.display()
+                            )
+                        } else {
+                            e
+                        }
+                    })?;
             }
-            _ if e.starts_with("file was modified since last read in this session:") => {
-                format!(
-                    "File {} has been modified since last read. Please read it again.",
-                    path.display()
-                )
+            super::patch::FileOp::Add { .. } => {
+                // New files don't need FileTime assertion
             }
-            _ => e,
-        })?;
-
-    let mut cmd = tokio::process::Command::new("apply_patch");
-    cmd.current_dir(worktree_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to spawn apply_patch: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(p.patch.as_bytes())
-            .await
-            .map_err(|e| format!("failed to write patch to stdin: {e}"))?;
-    }
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("failed to wait for apply_patch: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "apply_patch failed for {}: {}{}{}",
-            path.display(),
-            stderr,
-            if !stderr.is_empty() && !stdout.is_empty() {
-                "
-"
-            } else {
-                ""
-            },
-            stdout
-        ));
+        }
     }
 
-    state
-        .file_time()
-        .read(&worktree_path.display().to_string(), &path)
-        .await?;
+    // Apply all patch operations
+    let results = super::patch::apply_patch(&parsed, worktree_path).await?;
 
-    state.lsp().touch_file(worktree_path, &path, true).await;
+    // Update FileTime and notify LSP for each affected file
+    let mut affected = Vec::new();
+    for (file_path, action) in &results {
+        if *action != "deleted" {
+            state
+                .file_time()
+                .read(&worktree_key, file_path)
+                .await?;
+            state
+                .lsp()
+                .touch_file(worktree_path, file_path, true)
+                .await;
+        }
+        affected.push(serde_json::json!({
+            "path": file_path.display().to_string(),
+            "action": action,
+        }));
+    }
+
     let diag_xml = format_diagnostics_xml(state.lsp().diagnostics().await);
 
     Ok(serde_json::json!({
         "ok": true,
-        "path": path.display().to_string(),
+        "files": affected,
         "diagnostics": diag_xml,
     }))
+}
+
+#[derive(Deserialize)]
+struct LspParams {
+    operation: String,
+    file_path: String,
+    line: Option<u32>,
+    character: Option<u32>,
+}
+
+async fn call_lsp(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    worktree_path: &Path,
+) -> Result<serde_json::Value, String> {
+    let p: LspParams = parse_args(arguments)?;
+    let path = resolve_path(&p.file_path, worktree_path);
+
+    match p.operation.as_str() {
+        "hover" => {
+            let line = p.line.ok_or("line is required for hover")?;
+            let character = p.character.ok_or("character is required for hover")?;
+            // LSP uses 0-based positions; accept 1-based from agents
+            let result = state
+                .lsp()
+                .hover(
+                    worktree_path,
+                    &path,
+                    line.saturating_sub(1),
+                    character.saturating_sub(1),
+                )
+                .await?;
+            Ok(serde_json::json!({ "operation": "hover", "result": result }))
+        }
+        "definition" => {
+            let line = p.line.ok_or("line is required for definition")?;
+            let character = p.character.ok_or("character is required for definition")?;
+            let result = state
+                .lsp()
+                .go_to_definition(
+                    worktree_path,
+                    &path,
+                    line.saturating_sub(1),
+                    character.saturating_sub(1),
+                )
+                .await?;
+            Ok(serde_json::json!({ "operation": "definition", "result": result }))
+        }
+        "references" => {
+            let line = p.line.ok_or("line is required for references")?;
+            let character = p.character.ok_or("character is required for references")?;
+            let result = state
+                .lsp()
+                .find_references(
+                    worktree_path,
+                    &path,
+                    line.saturating_sub(1),
+                    character.saturating_sub(1),
+                )
+                .await?;
+            Ok(serde_json::json!({ "operation": "references", "result": result }))
+        }
+        "symbols" => {
+            let result = state.lsp().document_symbols(worktree_path, &path).await?;
+            Ok(serde_json::json!({ "operation": "symbols", "result": result }))
+        }
+        other => Err(format!(
+            "unknown LSP operation: {other}. Use: hover, definition, references, or symbols"
+        )),
+    }
 }
 
 fn resolve_path(raw: &str, base: &std::path::Path) -> PathBuf {
@@ -2036,6 +2446,7 @@ pub(crate) fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
 
     tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
     tool_values.push(serde_json::to_value(tool_read()).expect("serialize tool_read"));
+    tool_values.push(serde_json::to_value(tool_lsp()).expect("serialize tool_lsp"));
 
     if matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver) {
         tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
@@ -2224,13 +2635,64 @@ mod tests {
 fn tool_apply_patch() -> RmcpTool {
     RmcpTool::new(
         "apply_patch".to_string(),
-        "Apply a unified diff patch to a file. Path must be within the task worktree.".to_string(),
+        concat!(
+            "Apply a patch to one or more files using a custom LLM-friendly format. ",
+            "Uses content-based context matching (not line numbers). Format:\n\n",
+            "*** Begin Patch\n",
+            "*** Update File: path/to/file.rs\n",
+            "@@ context_line_from_file @@\n",
+            " context line (unchanged)\n",
+            "-old line to remove\n",
+            "+new line to add\n",
+            " context line (unchanged)\n\n",
+            "*** Add File: path/to/new_file.rs\n",
+            "+line 1\n",
+            "+line 2\n\n",
+            "*** Delete File: path/to/old_file.rs\n",
+            "*** End Patch\n\n",
+            "Rules: ' ' prefix = context (must match file), '-' = delete, '+' = add. ",
+            "The @@ line text is searched in the file to locate each chunk. ",
+            "Multiple @@ chunks per file are allowed. ",
+            "Files being updated or deleted must be read first.",
+        )
+        .to_string(),
         object!({
             "type": "object",
-            "required": ["path", "patch"],
+            "required": ["patch"],
             "properties": {
-                "path": {"type": "string", "description": "Absolute or worktree-relative file path"},
-                "patch": {"type": "string", "description": "Unified diff patch content"}
+                "patch": {"type": "string", "description": "Patch content in the custom format (see tool description)"}
+            }
+        }),
+    )
+}
+
+fn tool_lsp() -> RmcpTool {
+    RmcpTool::new(
+        "lsp".to_string(),
+        "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols). Line and character are 1-based.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["operation", "file_path"],
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["hover", "definition", "references", "symbols"],
+                    "description": "LSP operation to perform"
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute or worktree-relative file path"
+                },
+                "line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-based line number (required for hover, definition, references)"
+                },
+                "character": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-based column number (required for hover, definition, references)"
+                }
             }
         }),
     )
