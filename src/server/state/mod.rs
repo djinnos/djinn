@@ -9,6 +9,7 @@ use crate::actors::coordinator::CoordinatorHandle;
 use crate::actors::git::{GitActorHandle, GitError};
 use crate::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use crate::agent::file_time::FileTime;
+use crate::agent::lsp::LspManager;
 use crate::agent::roles::RoleRegistry;
 use crate::db::NoteRepository;
 use crate::db::ProjectRepository;
@@ -58,6 +59,7 @@ struct Inner {
     pub verifying_tasks: crate::actors::coordinator::VerificationTracker,
     /// Per-session file read timestamps used to enforce read-before-edit/write.
     pub file_time: FileTime,
+    pub lsp: LspManager,
 }
 
 impl AppState {
@@ -85,6 +87,7 @@ impl AppState {
                 sync_user_id,
                 verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 file_time: FileTime::new(),
+                lsp: LspManager::new(),
             }),
         }
     }
@@ -152,6 +155,10 @@ impl AppState {
 
     pub fn file_time(&self) -> &FileTime {
         &self.inner.file_time
+    }
+
+    pub fn lsp(&self) -> &LspManager {
+        &self.inner.lsp
     }
 
     pub async fn coordinator(&self) -> Option<CoordinatorHandle> {
