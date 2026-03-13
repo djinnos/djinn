@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::ProjectRepository;
 use crate::db::connection::Database;
-use crate::events::DjinnEvent;
+use crate::events::{DjinnEvent, DjinnEventEnvelope};
 use backoff::BackoffState;
 pub use tasks_channel::TaskSyncError;
 
@@ -156,10 +156,12 @@ impl SyncManager {
                 tokio::select! {
                     result = events_rx.recv() => {
                         match result {
-                            Ok(evt) if evt.entity_type() == "task" && !evt.from_sync() => {
-                                pending = true;
+                            Ok(evt) => {
+                                let envelope: DjinnEventEnvelope = evt.into();
+                                if envelope.entity_type == "task" && !envelope.from_sync {
+                                    pending = true;
+                                }
                             }
-                            Ok(_) => {}
                             Err(broadcast::error::RecvError::Lagged(_)) => {
                                 // We missed some events; schedule a sync anyway.
                                 pending = true;

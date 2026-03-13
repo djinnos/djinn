@@ -476,13 +476,15 @@ impl CoordinatorActor {
     }
 
     async fn handle_event(&mut self, evt: DjinnEvent) {
-        match &evt {
+        let envelope: crate::events::DjinnEventEnvelope = evt.into();
+        match (envelope.entity_type, envelope.action) {
             // A task became dispatch-ready for any role → check dispatch.
             // is_project_dispatch_enabled() handles global-pause + per-project
             // resume, so we don't bail early here — a project-resumed project
             // must still react to events even when globally paused.
             // New projects start paused — must be explicitly resumed.
-            DjinnEvent::ProjectCreated(p) => {
+            ("project", "created") => {
+                let Some(p) = envelope.parse_payload::<crate::models::Project>() else { return; };
                 self.paused_projects.insert(p.id.clone());
                 tracing::info!(
                     project_id = %p.id,
@@ -490,7 +492,9 @@ impl CoordinatorActor {
                 );
                 self.publish_status();
             }
-            DjinnEvent::TaskCreated { task, .. } | DjinnEvent::TaskUpdated { task, .. } => {
+            ("task", "created") | ("task", "updated") => {
+                let Some(task_payload) = envelope.payload.as_object().and_then(|m| m.get("task")).cloned() else { return; };
+                let Some(task) = serde_json::from_value::<crate::models::Task>(task_payload).ok() else { return; };
                 if task.status == "backlog" {
                     self.mark_backlog_event(&task.project_id);
                 }
@@ -507,7 +511,8 @@ impl CoordinatorActor {
                     self.dispatch_ready_tasks(Some(&task.project_id)).await;
                 }
             }
-            DjinnEvent::SessionUpdated(session) => {
+            ("session", "updated") => {
+                let Some(session) = envelope.parse_payload::<crate::models::SessionRecord>() else { return; };
                 if session.agent_type == "groomer"
                     && matches!(session.status.as_str(), "completed" | "interrupted")
                 {

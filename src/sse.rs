@@ -7,6 +7,7 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::db::connection::default_db_path;
+use crate::events::DjinnEventEnvelope;
 use crate::server::AppState;
 
 pub async fn events_handler(
@@ -17,8 +18,9 @@ pub async fn events_handler(
 
     let event_stream = BroadcastStream::new(rx).filter_map(|result| match result {
         Ok(evt) => {
-            let event_name = format!("{}.{}", evt.entity_type(), evt.action());
-            serde_json::to_string(&evt)
+            let envelope: DjinnEventEnvelope = evt.into();
+            let event_name = format!("{}.{}", envelope.entity_type, envelope.action);
+            serde_json::to_string(&envelope)
                 .ok()
                 .map(|data| Ok::<Event, Infallible>(Event::default().event(event_name).data(data)))
         }
@@ -62,14 +64,15 @@ fn is_wsl() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::events::DjinnEvent;
+    use crate::events::{DjinnEvent, DjinnEventEnvelope};
 
     #[test]
     fn sse_event_name_uses_entity_type_and_action() {
         let evt = DjinnEvent::TaskDeleted {
             id: "t1".to_string(),
         };
-        let event_name = format!("{}.{}", evt.entity_type(), evt.action());
+        let envelope: DjinnEventEnvelope = evt.into();
+        let event_name = format!("{}.{}", envelope.entity_type, envelope.action);
         assert_eq!(event_name, "task.deleted");
     }
 
@@ -78,10 +81,13 @@ mod tests {
         let evt = DjinnEvent::TaskDeleted {
             id: "t1".to_string(),
         };
-        let json = serde_json::to_value(&evt).expect("serialize event");
+        let envelope: DjinnEventEnvelope = evt.into();
+        let json = serde_json::to_value(&envelope).expect("serialize envelope");
 
+        assert_eq!(json.get("entity_type").and_then(|v| v.as_str()), Some("task"));
+        assert_eq!(json.get("action").and_then(|v| v.as_str()), Some("deleted"));
         assert_eq!(
-            json.get("TaskDeleted")
+            json.get("payload")
                 .and_then(|v| v.get("id"))
                 .and_then(|v| v.as_str()),
             Some("t1")
