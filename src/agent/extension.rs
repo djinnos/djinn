@@ -1936,7 +1936,7 @@ async fn call_task_reset_counters(
     let _ = state.events().send(crate::events::DjinnEvent::TaskUpdated {
         task: updated.clone(),
         from_sync: false,
-    });
+    }.into());
     Ok(
         serde_json::json!({ "ok": true, "task_id": task.short_id, "reopen_count": 0, "continuation_count": 0 }),
     )

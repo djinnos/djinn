@@ -5,7 +5,7 @@ use sqlx::SqlitePool;
 use crate::db::EpicRepository;
 use crate::db::connection::Database;
 use crate::error::{Error, Result};
-use crate::events::DjinnEvent;
+use crate::events::{DjinnEvent, DjinnEventEnvelope};
 use crate::models::{ActivityEntry, Task, TaskStatus, TransitionAction, compute_transition};
 
 mod activity;
@@ -136,11 +136,11 @@ impl Default for ReadyQuery {
 
 pub struct TaskRepository {
     pub(super) db: Database,
-    pub(super) events: broadcast::Sender<DjinnEvent>,
+    pub(super) events: broadcast::Sender<DjinnEventEnvelope>,
 }
 
 impl TaskRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
+    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
         Self { db, events }
     }
 

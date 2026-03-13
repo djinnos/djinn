@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::db::NoteRepository;
 use crate::db::ProjectRepository;
 use crate::db::connection::Database;
-use crate::events::{DjinnEvent, DjinnEventEnvelope};
+use crate::events::DjinnEventEnvelope;
 
 /// Debounce window — reindex fires this long after the last file change.
 const DEBOUNCE: Duration = Duration::from_secs(2);
@@ -19,7 +19,7 @@ struct WatcherState {
     /// Per-project debounced watcher keyed by project path.
     watchers: HashMap<PathBuf, Debouncer<notify::RecommendedWatcher>>,
     db: Database,
-    events_tx: tokio::sync::broadcast::Sender<DjinnEvent>,
+    events_tx: tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
 }
 
 /// Spawn a background task that watches `.djinn/` directories for all registered
@@ -28,7 +28,7 @@ struct WatcherState {
 /// Dynamically adds/removes watches when `ProjectCreated`/`ProjectDeleted` events fire.
 pub fn spawn_kb_watchers(
     db: Database,
-    events_tx: tokio::sync::broadcast::Sender<DjinnEvent>,
+    events_tx: tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
     cancel: CancellationToken,
 ) {
     let state = Arc::new(Mutex::new(WatcherState {
@@ -67,8 +67,7 @@ pub fn spawn_kb_watchers(
                 }
                 recv = events_rx.recv() => {
                     match recv {
-                        Ok(evt) => {
-                            let envelope: DjinnEventEnvelope = evt.into();
+                        Ok(envelope) => {
                             if envelope.entity_type == "project" && envelope.action == "created" {
                                 let Some(project) = envelope.parse_payload::<crate::models::Project>() else { continue; };
                                 let mut guard = state_clone.lock().await;

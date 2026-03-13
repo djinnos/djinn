@@ -2,7 +2,7 @@ use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::DjinnEvent;
+use crate::events::{DjinnEvent, DjinnEventEnvelope};
 use crate::models::Project;
 
 #[derive(Clone, Debug, serde::Serialize, sqlx::FromRow)]
@@ -15,11 +15,11 @@ pub struct ProjectConfig {
 
 pub struct ProjectRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEvent>,
+    events: broadcast::Sender<DjinnEventEnvelope>,
 }
 
 impl ProjectRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
+    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
         Self { db, events }
     }
 
@@ -142,7 +142,7 @@ impl ProjectRepository {
 
         let _ = self
             .events
-            .send(DjinnEvent::ProjectCreated(project.clone()));
+            .send(DjinnEvent::ProjectCreated(project.clone()).into());
         Ok(project)
     }
 
@@ -163,7 +163,7 @@ impl ProjectRepository {
 
         let _ = self
             .events
-            .send(DjinnEvent::ProjectUpdated(project.clone()));
+            .send(DjinnEvent::ProjectUpdated(project.clone()).into());
         Ok(project)
     }
 
@@ -191,7 +191,7 @@ impl ProjectRepository {
 
         let _ = self
             .events
-            .send(DjinnEvent::ProjectUpdated(project.clone()));
+            .send(DjinnEvent::ProjectUpdated(project.clone()).into());
         Ok(project)
     }
 
@@ -253,7 +253,7 @@ impl ProjectRepository {
         let _ = self.events.send(DjinnEvent::ProjectConfigUpdated {
             project_id: id.to_owned(),
             config: config.clone(),
-        });
+        }.into());
         Ok(Some(config))
     }
 
@@ -323,7 +323,7 @@ impl ProjectRepository {
 
         let _ = self
             .events
-            .send(DjinnEvent::ProjectDeleted { id: id.to_owned() });
+            .send(DjinnEvent::ProjectDeleted { id: id.to_owned() }.into());
         Ok(())
     }
 }
@@ -356,11 +356,11 @@ mod tests {
 
         repo.create("proj", "/tmp/proj").await.unwrap();
 
-        let event = rx.recv().await.unwrap();
-        match event {
-            DjinnEvent::ProjectCreated(p) => assert_eq!(p.name, "proj"),
-            _ => panic!("expected ProjectCreated event"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "project");
+        assert_eq!(envelope.action, "created");
+        let p: Project = envelope.parse_payload().unwrap();
+        assert_eq!(p.name, "proj");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -376,10 +376,11 @@ mod tests {
         assert_eq!(updated.name, "new");
         assert_eq!(updated.path, "/new");
 
-        match rx.recv().await.unwrap() {
-            DjinnEvent::ProjectUpdated(p) => assert_eq!(p.name, "new"),
-            _ => panic!("expected ProjectUpdated event"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "project");
+        assert_eq!(envelope.action, "updated");
+        let p: Project = envelope.parse_payload().unwrap();
+        assert_eq!(p.name, "new");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -394,10 +395,10 @@ mod tests {
         repo.delete(&project.id).await.unwrap();
         assert!(repo.get(&project.id).await.unwrap().is_none());
 
-        match rx.recv().await.unwrap() {
-            DjinnEvent::ProjectDeleted { id } => assert_eq!(id, project.id),
-            _ => panic!("expected ProjectDeleted event"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "project");
+        assert_eq!(envelope.action, "deleted");
+        assert_eq!(envelope.payload["id"].as_str().unwrap(), project.id);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

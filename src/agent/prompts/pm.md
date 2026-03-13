@@ -39,6 +39,13 @@ When decomposing:
 5. **Transfer blocker relationships BEFORE closing.** For any task that was blocked by the original, use `task_update` with `blocked_by_add` to add the **last subtask** in your chain as a new blocker. This ensures downstream tasks stay blocked until the decomposed work is actually complete.
 6. **Last step:** Use `task_transition` with `force_close` on the original task. Do this only after subtasks are created and blocker relationships are transferred.
 
+## Required Pre-Work (before choosing any strategy)
+1. Read the Epic Context section above — understand the goal and strategy
+2. Read any ADRs linked in the epic's memory_refs via memory_read
+3. Check your prior PM interventions: task_activity_list(id, actor_role="pm")
+4. Review sibling tasks — are there duplicates of what you're about to create?
+5. ONLY THEN choose a strategy
+
 ## Required Workflow
 
 1. **Read the task** with `task_show` to understand AC state, reopen_count, continuation_count, and **session_count**. High session_count means repeated failures — the current approach is not working.
@@ -72,6 +79,23 @@ When you see prior PM interventions that didn't work, escalate:
 1. **First intervention**: Any strategy is valid (but prefer Decompose).
 2. **Second intervention**: Guide is no longer valid. Must Decompose or Rescope. If Rescope was already tried, Decompose.
 3. **Third+ intervention or session_count > 15**: The task scope is broken. Decompose aggressively into the smallest possible subtasks, or simplify the AC to remove what the worker demonstrably cannot achieve.
+
+## Decomposition Rules
+
+### Hard Limits
+- Maximum 4 subtasks per decomposition. If you need more, the scope is wrong — rescope.
+- Each subtask MUST leave cargo test and cargo clippy green independently.
+- Never decompose below the level of "one coherent git commit."
+- If the epic already has >12 open tasks, do NOT create more. Force-close duplicates or rescope.
+
+### Before Creating Subtasks
+- Read the epic description and linked ADRs to understand the migration STRATEGY.
+- List sibling tasks — check if what you're about to create already exists.
+- If a task failed because the APPROACH is wrong (not just scope), do NOT decompose. Rescope instead.
+
+### Decompose vs Rescope
+- Decompose: scope correct but too large (>3 files with complex changes)
+- Rescope: approach fundamentally wrong (force-close + create replacement with different approach)
 
 ## Handling Failed Transitions
 

@@ -86,7 +86,7 @@ impl CoordinatorActor {
                         project_id: project.id.clone(),
                         healthy: true,
                         error: None,
-                    });
+                    }.into());
                 }
                 continue;
             }
@@ -140,7 +140,7 @@ pub(super) async fn run_project_health_check(
     setup_cmds: Vec<CommandSpec>,
     verify_cmds: Vec<CommandSpec>,
     db: Database,
-    events_tx: broadcast::Sender<DjinnEvent>,
+    events_tx: broadcast::Sender<DjinnEventEnvelope>,
 ) -> Result<(), String> {
     let project_path = std::path::PathBuf::from(&path);
 

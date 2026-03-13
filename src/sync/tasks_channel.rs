@@ -14,9 +14,10 @@ use std::path::{Path, PathBuf};
 
 use tokio::sync::broadcast;
 
+use crate::events::DjinnEventEnvelope;
+
 use crate::db::TaskRepository;
 use crate::db::connection::Database;
-use crate::events::DjinnEvent;
 use crate::models::Task;
 
 /// The sync branch name.
@@ -141,7 +142,7 @@ pub async fn export(
     project_id: &str,
     user_id: &str,
     db: &Database,
-    events: &broadcast::Sender<DjinnEvent>,
+    events: &broadcast::Sender<DjinnEventEnvelope>,
 ) -> Result<usize> {
     let wt = ensure_worktree(project).await?;
 
@@ -262,7 +263,7 @@ pub async fn import(
     project: &Path,
     project_id: &str,
     db: &Database,
-    events: &broadcast::Sender<DjinnEvent>,
+    events: &broadcast::Sender<DjinnEventEnvelope>,
 ) -> Result<usize> {
     // Two-phase pull (SYNC-08): cheap SHA check before expensive fetch.
     let settings = crate::db::SettingsRepository::new(db.clone(), events.clone());
@@ -401,8 +402,12 @@ pub async fn import(
     let repo = TaskRepository::new(db.clone(), events.clone());
     for id in &upserted_ids {
         if let Ok(Some(task)) = repo.get(id).await {
-            let _ = events.send(DjinnEvent::TaskUpdated {
-                task,
+            let _ = events.send(DjinnEventEnvelope {
+                entity_type: "task",
+                action: "updated",
+                payload: serde_json::json!({ "task": task, "from_sync": true }),
+                id: None,
+                project_id: None,
                 from_sync: true,
             });
         }
@@ -424,7 +429,6 @@ mod tests {
     use super::*;
     use crate::db::EpicRepository;
     use crate::db::TaskRepository;
-    use crate::events::DjinnEventEnvelope;
     use crate::models::TransitionAction;
 
     /// Create a temp dir with a git repo + bare "origin" remote.
@@ -955,8 +959,7 @@ mod tests {
         assert_eq!(count, 1);
 
         // Check that the emitted event has from_sync=true.
-        let evt = rx.recv().await.unwrap();
-        let envelope: DjinnEventEnvelope = evt.into();
+        let envelope = rx.recv().await.unwrap();
         assert_eq!(envelope.entity_type, "task");
         assert_eq!(envelope.action, "updated");
         assert!(envelope.from_sync, "import should emit from_sync: true");
@@ -1210,8 +1213,7 @@ mod tests {
 
         // Verify events have from_sync=true.
         let mut event_count = 0;
-        while let Ok(evt) = rx.try_recv() {
-            let envelope: DjinnEventEnvelope = evt.into();
+        while let Ok(envelope) = rx.try_recv() {
             if envelope.entity_type == "task" && envelope.action == "updated" {
                 assert!(
                     envelope.from_sync,

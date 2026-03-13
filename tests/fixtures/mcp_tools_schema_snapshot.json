@@ -259,6 +259,12 @@
           "id": {
             "type": "string"
           },
+          "memory_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "owner": {
             "type": "string"
           },
@@ -362,6 +368,14 @@
             "nullable": true,
             "type": "string"
           },
+          "memory_refs": {
+            "description": "Memory reference URLs for this epic (e.g. ADR paths).",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
           "owner": {
             "nullable": true,
             "type": "string"
@@ -407,6 +421,12 @@
           },
           "id": {
             "type": "string"
+          },
+          "memory_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "owner": {
             "type": "string"
@@ -533,6 +553,12 @@
               "id": {
                 "type": "string"
               },
+              "memory_refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "owner": {
                 "type": "string"
               },
@@ -559,7 +585,8 @@
               "status",
               "owner",
               "created_at",
-              "updated_at"
+              "updated_at",
+              "memory_refs"
             ],
             "type": "object"
           }
@@ -648,6 +675,12 @@
           "id": {
             "type": "string"
           },
+          "memory_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "owner": {
             "type": "string"
           },
@@ -722,6 +755,12 @@
           "in_progress_count": {
             "format": "int64",
             "type": "integer"
+          },
+          "memory_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "open_count": {
             "format": "int64",
@@ -985,6 +1024,14 @@
             "description": "Epic UUID or short_id.",
             "type": "string"
           },
+          "memory_refs": {
+            "description": "Memory reference URLs for this epic (e.g. ADR paths).",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
           "owner": {
             "nullable": true,
             "type": "string"
@@ -1031,6 +1078,12 @@
           },
           "id": {
             "type": "string"
+          },
+          "memory_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "owner": {
             "type": "string"

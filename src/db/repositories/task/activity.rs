@@ -41,7 +41,7 @@ impl TaskRepository {
             actor_role: actor_role.to_owned(),
             payload: serde_json::from_str(payload)
                 .unwrap_or(serde_json::Value::String(payload.to_owned())),
-        });
+        }.into());
         Ok(entry)
     }
 

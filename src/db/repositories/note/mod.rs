@@ -6,7 +6,7 @@ use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
 use crate::error::{Error, Result};
-use crate::events::DjinnEvent;
+use crate::events::{DjinnEvent, DjinnEventEnvelope};
 use crate::models::{
     BrokenLink, GraphEdge, GraphNode, GraphResponse, HealthReport, Note, NoteCompact,
     NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
@@ -33,11 +33,11 @@ const NOTE_SELECT_WHERE_ID: &str = "SELECT id, project_id, permalink, title, fil
 
 pub struct NoteRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEvent>,
+    events: broadcast::Sender<DjinnEventEnvelope>,
 }
 
 impl NoteRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
+    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
         Self { db, events }
     }
 }
@@ -53,7 +53,7 @@ mod tests {
 
     async fn make_project(
         db: &Database,
-        tx: broadcast::Sender<DjinnEvent>,
+        tx: broadcast::Sender<DjinnEventEnvelope>,
         path: &Path,
     ) -> crate::models::Project {
         ProjectRepository::new(db.clone(), tx)
@@ -177,10 +177,11 @@ mod tests {
         assert_eq!(updated.content, "new content");
         assert_eq!(updated.tags, r#"["updated"]"#);
 
-        match rx.recv().await.unwrap() {
-            DjinnEvent::NoteUpdated(n) => assert_eq!(n.content, "new content"),
-            _ => panic!("expected NoteUpdated"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "note");
+        assert_eq!(envelope.action, "updated");
+        let n: Note = envelope.parse_payload().unwrap();
+        assert_eq!(n.content, "new content");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -210,10 +211,10 @@ mod tests {
         assert!(repo.get(&note.id).await.unwrap().is_none());
         assert!(!Path::new(&file_path).exists());
 
-        match rx.recv().await.unwrap() {
-            DjinnEvent::NoteDeleted { id } => assert_eq!(id, note.id),
-            _ => panic!("expected NoteDeleted"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "note");
+        assert_eq!(envelope.action, "deleted");
+        assert_eq!(envelope.payload["id"].as_str().unwrap(), note.id);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -376,10 +377,11 @@ mod tests {
         .await
         .unwrap();
 
-        match rx.recv().await.unwrap() {
-            DjinnEvent::NoteCreated(n) => assert_eq!(n.title, "Event Note"),
-            _ => panic!("expected NoteCreated"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "note");
+        assert_eq!(envelope.action, "created");
+        let n: Note = envelope.parse_payload().unwrap();
+        assert_eq!(n.title, "Event Note");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

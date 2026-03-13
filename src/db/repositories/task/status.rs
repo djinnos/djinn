@@ -145,7 +145,7 @@ impl TaskRepository {
         let _ = self.events.send(DjinnEvent::TaskUpdated {
             task: task.clone(),
             from_sync: false,
-        });
+        }.into());
 
         // Blocker resolution: when a task reaches post-merge/closed states, notify any tasks
         // it was blocking that are now fully unblocked, so coordinators can dispatch them.
@@ -186,7 +186,7 @@ impl TaskRepository {
         let _ = self.events.send(DjinnEvent::TaskUpdated {
             task: task.clone(),
             from_sync: false,
-        });
+        }.into());
         Ok(task)
     }
 
@@ -219,7 +219,7 @@ impl TaskRepository {
         let _ = self.events.send(DjinnEvent::TaskUpdated {
             task: task.clone(),
             from_sync: false,
-        });
+        }.into());
         Ok(task)
     }
 }

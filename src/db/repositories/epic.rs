@@ -3,7 +3,7 @@ use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
 use crate::error::{Error, Result};
-use crate::events::DjinnEvent;
+use crate::events::{DjinnEvent, DjinnEventEnvelope};
 use crate::models::Epic;
 
 // ── Query / result types ─────────────────────────────────────────────────────
@@ -71,11 +71,11 @@ pub type EpicUpdateInput<'a> = EpicCreateInput<'a>;
 
 pub struct EpicRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEvent>,
+    events: broadcast::Sender<DjinnEventEnvelope>,
 }
 
 impl EpicRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
+    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
         Self { db, events }
     }
 
@@ -83,7 +83,7 @@ impl EpicRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Epic>(
             "SELECT id, project_id, short_id, title, description, emoji, color, status,
-                        owner, created_at, updated_at, closed_at
+                        owner, created_at, updated_at, closed_at, memory_refs, memory_refs
                  FROM epics ORDER BY created_at",
         )
         .fetch_all(self.db.pool())
@@ -94,7 +94,7 @@ impl EpicRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Epic>(
             "SELECT id, project_id, short_id, title, description, emoji, color, status,
-                        owner, created_at, updated_at, closed_at
+                        owner, created_at, updated_at, closed_at, memory_refs, memory_refs
                  FROM epics WHERE id = ?1",
         )
         .bind(id)
@@ -106,7 +106,7 @@ impl EpicRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Epic>(
             "SELECT id, project_id, short_id, title, description, emoji, color, status,
-                        owner, created_at, updated_at, closed_at
+                        owner, created_at, updated_at, closed_at, memory_refs, memory_refs
                  FROM epics WHERE short_id = ?1",
         )
         .bind(short_id)
@@ -147,8 +147,8 @@ impl EpicRepository {
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
         sqlx::query(
-            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )
         .bind(&id)
         .bind(project_id)
@@ -158,18 +158,19 @@ impl EpicRepository {
         .bind(input.emoji)
         .bind(input.color)
         .bind(input.owner)
+        .bind(input.memory_refs.unwrap_or("[]"))
         .execute(self.db.pool())
         .await?;
         let epic: Epic = sqlx::query_as(
             "SELECT id, project_id, short_id, title, description, emoji, color, status,
-                    owner, created_at, updated_at, closed_at
+                    owner, created_at, updated_at, closed_at, memory_refs
              FROM epics WHERE id = ?1",
         )
         .bind(&id)
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEvent::EpicCreated(epic.clone()));
+        let _ = self.events.send(DjinnEvent::EpicCreated(epic.clone()).into());
         Ok(epic)
     }
 
@@ -177,7 +178,7 @@ impl EpicRepository {
         self.db.ensure_initialized().await?;
         sqlx::query(
             "UPDATE epics SET title = ?2, description = ?3, emoji = ?4,
-                    color = ?5, owner = ?6,
+                    color = ?5, owner = ?6, memory_refs = ?7,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1",
         )
@@ -187,18 +188,19 @@ impl EpicRepository {
         .bind(input.emoji)
         .bind(input.color)
         .bind(input.owner)
+        .bind(input.memory_refs.unwrap_or("[]"))
         .execute(self.db.pool())
         .await?;
         let epic: Epic = sqlx::query_as(
             "SELECT id, project_id, short_id, title, description, emoji, color, status,
-                    owner, created_at, updated_at, closed_at
+                    owner, created_at, updated_at, closed_at, memory_refs
              FROM epics WHERE id = ?1",
         )
         .bind(id)
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEvent::EpicUpdated(epic.clone()));
+        let _ = self.events.send(DjinnEvent::EpicUpdated(epic.clone()).into());
         Ok(epic)
     }
 
@@ -215,14 +217,14 @@ impl EpicRepository {
         .await?;
         let epic: Epic = sqlx::query_as(
             "SELECT id, project_id, short_id, title, description, emoji, color, status,
-                    owner, created_at, updated_at, closed_at
+                    owner, created_at, updated_at, closed_at, memory_refs
              FROM epics WHERE id = ?1",
         )
         .bind(id)
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEvent::EpicUpdated(epic.clone()));
+        let _ = self.events.send(DjinnEvent::EpicUpdated(epic.clone()).into());
         Ok(epic)
     }
 
@@ -235,7 +237,7 @@ impl EpicRepository {
 
         let _ = self
             .events
-            .send(DjinnEvent::EpicDeleted { id: id.to_owned() });
+            .send(DjinnEvent::EpicDeleted { id: id.to_owned() }.into());
         Ok(())
     }
 
@@ -246,7 +248,7 @@ impl EpicRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Epic>(
             "SELECT id, project_id, short_id, title, description, emoji, color, status,
-                    owner, created_at, updated_at, closed_at
+                    owner, created_at, updated_at, closed_at, memory_refs
              FROM epics WHERE id = ?1 OR short_id = ?1",
         )
         .bind(id_or_short)
@@ -263,7 +265,7 @@ impl EpicRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Epic>(
             "SELECT id, project_id, short_id, title, description, emoji, color, status,
-                    owner, created_at, updated_at, closed_at
+                    owner, created_at, updated_at, closed_at, memory_refs
              FROM epics WHERE project_id = ?1 AND (id = ?2 OR short_id = ?2)",
         )
         .bind(project_id)
@@ -297,14 +299,14 @@ impl EpicRepository {
         .await?;
         let epic: Epic = sqlx::query_as(
             "SELECT id, project_id, short_id, title, description, emoji, color, status,
-                    owner, created_at, updated_at, closed_at
+                    owner, created_at, updated_at, closed_at, memory_refs
              FROM epics WHERE id = ?1",
         )
         .bind(id)
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEvent::EpicUpdated(epic.clone()));
+        let _ = self.events.send(DjinnEvent::EpicUpdated(epic.clone()).into());
         Ok(epic)
     }
 
@@ -357,7 +359,7 @@ impl EpicRepository {
 
         let sql = format!(
             "SELECT id, project_id, short_id, title, description, emoji, color, status,
-                    owner, created_at, updated_at, closed_at
+                    owner, created_at, updated_at, closed_at, memory_refs
              FROM epics WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
         );
         let mut epic_q = sqlx::query_as::<_, Epic>(&sql);
@@ -572,10 +574,11 @@ mod tests {
         repo.create("Event Epic", "", "", "", "", None)
             .await
             .unwrap();
-        match rx.recv().await.unwrap() {
-            DjinnEvent::EpicCreated(e) => assert_eq!(e.title, "Event Epic"),
-            _ => panic!("expected EpicCreated"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "epic");
+        assert_eq!(envelope.action, "created");
+        let e: Epic = envelope.parse_payload().unwrap();
+        assert_eq!(e.title, "Event Epic");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -593,10 +596,11 @@ mod tests {
             .unwrap();
         assert_eq!(updated.title, "New");
 
-        match rx.recv().await.unwrap() {
-            DjinnEvent::EpicUpdated(e) => assert_eq!(e.title, "New"),
-            _ => panic!("expected EpicUpdated"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "epic");
+        assert_eq!(envelope.action, "updated");
+        let e: Epic = envelope.parse_payload().unwrap();
+        assert_eq!(e.title, "New");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -614,14 +618,13 @@ mod tests {
         assert_eq!(closed.status, "closed");
         assert!(closed.closed_at.is_some());
 
-        match rx.recv().await.unwrap() {
-            DjinnEvent::EpicUpdated(e) => {
-                assert_eq!(e.id, epic.id);
-                assert_eq!(e.status, "closed");
-                assert!(e.closed_at.is_some());
-            }
-            _ => panic!("expected EpicUpdated"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "epic");
+        assert_eq!(envelope.action, "updated");
+        let e: Epic = envelope.parse_payload().unwrap();
+        assert_eq!(e.id, epic.id);
+        assert_eq!(e.status, "closed");
+        assert!(e.closed_at.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -638,14 +641,13 @@ mod tests {
         let reopened = repo.reopen(&epic.id).await.unwrap();
         assert_eq!(reopened.status, "open");
 
-        match rx.recv().await.unwrap() {
-            DjinnEvent::EpicUpdated(e) => {
-                assert_eq!(e.id, epic.id);
-                assert_eq!(e.status, "open");
-                assert!(e.closed_at.is_none());
-            }
-            _ => panic!("expected EpicUpdated"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "epic");
+        assert_eq!(envelope.action, "updated");
+        let e: Epic = envelope.parse_payload().unwrap();
+        assert_eq!(e.id, epic.id);
+        assert_eq!(e.status, "open");
+        assert!(e.closed_at.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -663,10 +665,10 @@ mod tests {
         repo.delete(&epic.id).await.unwrap();
         assert!(repo.get(&epic.id).await.unwrap().is_none());
 
-        match rx.recv().await.unwrap() {
-            DjinnEvent::EpicDeleted { id } => assert_eq!(id, epic.id),
-            _ => panic!("expected EpicDeleted"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "epic");
+        assert_eq!(envelope.action, "deleted");
+        assert_eq!(envelope.payload["id"].as_str().unwrap(), epic.id);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

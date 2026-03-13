@@ -15,7 +15,7 @@ use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
 use crate::db::TaskRepository;
 use crate::db::connection::Database;
-use crate::events::DjinnEvent;
+use crate::events::DjinnEventEnvelope;
 use crate::models::Epic;
 use crate::models::Note;
 use crate::models::Project;
@@ -49,7 +49,7 @@ pub async fn test_app_state_in_memory() -> AppState {
     AppState::new(db, cancel)
 }
 
-pub fn test_events() -> broadcast::Sender<DjinnEvent> {
+pub fn test_events() -> broadcast::Sender<DjinnEventEnvelope> {
     let (tx, _rx) = broadcast::channel(256);
     tx
 }

@@ -16,7 +16,7 @@ use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
 use crate::db::repositories::task::TaskRepository;
-use crate::events::DjinnEvent;
+use crate::events::{DjinnEvent, DjinnEventEnvelope};
 use crate::models::task::Task;
 
 /// The sync branch name.
@@ -139,7 +139,7 @@ pub async fn export(
     project_id: &str,
     user_id: &str,
     db: &Database,
-    events: &broadcast::Sender<DjinnEvent>,
+    events: &broadcast::Sender<DjinnEventEnvelope>,
 ) -> Result<usize> {
     let wt = ensure_worktree(project).await?;
 
@@ -256,7 +256,7 @@ pub async fn import(
     project: &Path,
     project_id: &str,
     db: &Database,
-    events: &broadcast::Sender<DjinnEvent>,
+    events: &broadcast::Sender<DjinnEventEnvelope>,
 ) -> Result<usize> {
     // Two-phase pull (SYNC-08): cheap SHA check before expensive fetch.
     let settings = crate::db::repositories::settings::SettingsRepository::new(
@@ -385,7 +385,7 @@ pub async fn import(
     let repo = TaskRepository::new(db.clone(), events.clone());
     for id in &upserted_ids {
         if let Ok(Some(task)) = repo.get(id).await {
-            let _ = events.send(DjinnEvent::TaskUpdated { task, from_sync: true });
+            let _ = events.send(DjinnEvent::TaskUpdated { task, from_sync: true }.into());
         }
     }
 
@@ -889,13 +889,10 @@ mod tests {
         assert_eq!(count, 1);
 
         // Check that the emitted event has from_sync=true.
-        let evt = rx.recv().await.unwrap();
-        match evt {
-            DjinnEvent::TaskUpdated { from_sync, .. } => {
-                assert!(from_sync, "import should emit from_sync: true");
-            }
-            other => panic!("expected TaskUpdated, got: {other:?}"),
-        }
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "task");
+        assert_eq!(envelope.action, "updated");
+        assert!(envelope.from_sync, "import should emit from_sync: true");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1135,9 +1132,9 @@ mod tests {
 
         // Verify events have from_sync=true.
         let mut event_count = 0;
-        while let Ok(evt) = rx.try_recv() {
-            if let DjinnEvent::TaskUpdated { from_sync, .. } = evt {
-                assert!(from_sync, "events from peer import should have from_sync=true");
+        while let Ok(envelope) = rx.try_recv() {
+            if envelope.entity_type == "task" && envelope.action == "updated" {
+                assert!(envelope.from_sync, "events from peer import should have from_sync=true");
                 event_count += 1;
             }
         }

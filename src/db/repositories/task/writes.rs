@@ -86,7 +86,7 @@ impl TaskRepository {
         let _ = self.events.send(DjinnEvent::TaskCreated {
             task: task.clone(),
             from_sync: false,
-        });
+        }.into());
         Ok(task)
     }
 
@@ -129,7 +129,7 @@ impl TaskRepository {
         let _ = self.events.send(DjinnEvent::TaskCreated {
             task: task.clone(),
             from_sync: false,
-        });
+        }.into());
         Ok(task)
     }
 
@@ -172,7 +172,7 @@ impl TaskRepository {
         let _ = self.events.send(DjinnEvent::TaskUpdated {
             task: task.clone(),
             from_sync: false,
-        });
+        }.into());
         Ok(task)
     }
 
@@ -185,7 +185,7 @@ impl TaskRepository {
 
         let _ = self
             .events
-            .send(DjinnEvent::TaskDeleted { id: id.to_owned() });
+            .send(DjinnEvent::TaskDeleted { id: id.to_owned() }.into());
         Ok(())
     }
 
@@ -210,7 +210,7 @@ impl TaskRepository {
         let _ = self.events.send(DjinnEvent::TaskUpdated {
             task: task.clone(),
             from_sync: false,
-        });
+        }.into());
         Ok(task)
     }
 
@@ -233,7 +233,7 @@ impl TaskRepository {
         let _ = self.events.send(DjinnEvent::TaskUpdated {
             task,
             from_sync: false,
-        });
+        }.into());
 
         Ok(())
     }
@@ -258,7 +258,7 @@ impl TaskRepository {
         let _ = self.events.send(DjinnEvent::TaskUpdated {
             task: task.clone(),
             from_sync: false,
-        });
+        }.into());
         Ok(task)
     }
 }

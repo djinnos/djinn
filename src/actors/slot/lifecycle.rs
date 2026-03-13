@@ -127,7 +127,7 @@ pub async fn run_task_lifecycle(
             task_id: task.id.clone(),
             model_id: model_id.clone(),
             agent_type: agent_type.as_str().to_string(),
-        });
+        }.into());
 
     // ── Parse model ID and load credentials ───────────────────────────────────
     let (catalog_provider_id, model_name) = match parse_model_id(&model_id) {
@@ -506,6 +506,43 @@ pub async fn run_task_lifecycle(
         _ => None,
     };
 
+    // ── Build epic context for PM agents ────────────────────────────────────
+    let epic_context = if agent_type == AgentType::PM {
+        if let Some(ref epic_id) = task.epic_id {
+            let epic_repo = crate::db::EpicRepository::new(app_state.db().clone(), app_state.events().clone());
+            let task_repo_ctx = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+            match epic_repo.get(epic_id).await {
+                Ok(Some(epic)) => {
+                    let mut ctx_lines = vec![
+                        format!("**Epic:** {} ({})", epic.title, epic.short_id),
+                        format!("**Description:** {}", epic.description),
+                        format!("**Memory refs:** {}", epic.memory_refs),
+                    ];
+                    // Load sibling tasks
+                    if let Ok(result) = task_repo_ctx.list_filtered(crate::db::ListQuery {
+                        parent: Some(epic_id.clone()),
+                        limit: 50,
+                        ..Default::default()
+                    }).await {
+                        let open = result.tasks.iter().filter(|t| t.status != "closed").count();
+                        let closed = result.tasks.iter().filter(|t| t.status == "closed").count();
+                        ctx_lines.push(format!("\n### Sibling Tasks ({open} open, {closed} closed)"));
+                        for t in &result.tasks {
+                            let status_marker = if t.status == "closed" { "closed" } else { &t.status };
+                            ctx_lines.push(format!("- [{}] {}: {}", status_marker, t.short_id, t.title));
+                        }
+                    }
+                    Some(ctx_lines.join("\n"))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let system_prompt = render_prompt(
         agent_type,
         &task,
@@ -523,6 +560,7 @@ pub async fn run_task_lifecycle(
             setup_commands: prompt_setup_commands,
             verification_commands: prompt_verification_commands,
             activity: activity_text,
+            epic_context,
         },
     );
 
@@ -1025,7 +1063,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
             task_id: task_id.clone(),
             model_id: model_id.clone(),
             agent_type: agent_type.as_str().to_string(),
-        });
+        }.into());
 
     tracing::info!(
         task_id = %task_id,

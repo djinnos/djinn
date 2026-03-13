@@ -307,7 +307,7 @@ impl TaskRepository {
             let _ = self.events.send(DjinnEvent::TaskUpdated {
                 task: updated,
                 from_sync: true,
-            });
+            }.into());
         }
         Ok(changed)
     }
