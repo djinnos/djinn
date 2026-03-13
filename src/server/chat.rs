@@ -17,6 +17,7 @@ use crate::agent::message::{ContentBlock, Conversation, Message, Role};
 use crate::agent::provider::{create_provider, StreamEvent};
 use crate::server::AppState;
 
+const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../agent/prompts/chat.md");
 const MAX_TOOL_ITERATIONS: usize = 20;
 
 #[derive(Debug, Deserialize)]
@@ -151,9 +152,11 @@ pub async fn completions_handler(
     let provider = create_provider(provider_config);
 
     let mut conversation = Conversation::new();
-    if let Some(system) = req.system.filter(|s| !s.trim().is_empty()) {
-        conversation.push(Message::system(system));
+    let mut system_prompt = DJINN_CHAT_SYSTEM_PROMPT.trim().to_string();
+    if let Some(client_system) = req.system.filter(|s| !s.trim().is_empty()) {
+        system_prompt = format!("{system_prompt}\n\n{client_system}");
     }
+    conversation.push(Message::system(system_prompt));
 
     for m in req.messages {
         let role = match m.role.as_str() {
