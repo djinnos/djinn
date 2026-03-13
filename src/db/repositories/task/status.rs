@@ -46,6 +46,12 @@ impl TaskRepository {
         // For Start: block if any unresolved blockers exist.
         // A blocker is unresolved if its blocking task has not reached post-merge states.
         if action == TransitionAction::Start {
+            let ac = current.acceptance_criteria.trim();
+            if ac.is_empty() || ac == "[]" {
+                return Err(Error::InvalidTransition(
+                    "task has no acceptance criteria".into(),
+                ));
+            }
             let count: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM blockers b
                  JOIN tasks bt ON b.blocking_task_id = bt.id

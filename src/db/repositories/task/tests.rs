@@ -741,6 +741,77 @@ async fn reopen_clears_closed_at_and_increments_reopen() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_blocked_when_acceptance_criteria_empty() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let epic = make_epic(&db, tx.clone()).await;
+    let repo = TaskRepository::new(db, tx);
+
+    let task = open_task(&repo, &epic.id).await;
+
+    // Explicitly set AC to empty array; start should be rejected.
+    let updated = repo
+        .update(
+            &task.id,
+            None,
+            None,
+            None,
+            None,
+            Some("[]"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.acceptance_criteria, "[]");
+
+    let err = repo
+        .transition(&task.id, TransitionAction::Start, "", "system", None, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidTransition(msg) if msg == "task has no acceptance criteria"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_allows_when_acceptance_criteria_present() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let epic = make_epic(&db, tx.clone()).await;
+    let repo = TaskRepository::new(db, tx);
+
+    let task = open_task(&repo, &epic.id).await;
+
+    let updated = repo
+        .update(
+            &task.id,
+            None,
+            None,
+            None,
+            None,
+            Some(r#"[{"criterion":"can start"}]"#),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_ne!(updated.acceptance_criteria, "[]");
+
+    let started = repo
+        .transition(&task.id, TransitionAction::Start, "", "system", None, None)
+        .await
+        .unwrap();
+    assert_eq!(started.status, "in_progress");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_blocked_by_unresolved_blockers() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
