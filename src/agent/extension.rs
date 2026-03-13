@@ -39,6 +39,7 @@ async fn dispatch_tool_call<T>(
     state: &AppState,
     tool_call: &T,
     worktree_path: &Path,
+    agent_type: Option<AgentType>,
 ) -> Result<serde_json::Value, String>
 where
     T: Serialize,
@@ -53,6 +54,15 @@ where
         let path_str = worktree_path.to_string_lossy();
         repo.resolve(&path_str).await.ok().flatten()
     };
+
+    if let Some(agent_type) = agent_type
+        && !is_tool_allowed_for_agent(agent_type, &call.name)
+    {
+        return Err(format!(
+            "tool `{}` is not allowed for agent type {:?}",
+            call.name, agent_type
+        ));
+    }
 
     match call.name.as_str() {
         "task_list" => call_task_list(state, &call.arguments, project_id.as_deref()).await,
@@ -694,9 +704,8 @@ async fn call_write(
     let path = resolve_path(&p.path, worktree_path);
 
     // Ensure path is within worktree
-    if !path.starts_with(worktree_path) {
-        return Err(format!("path is outside worktree: {}", path.display()));
-    }
+    ensure_path_within_worktree(&path, worktree_path)?;
+
 
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -722,9 +731,8 @@ async fn call_edit(
     let path = resolve_path(&p.path, worktree_path);
 
     // Ensure path is within worktree
-    if !path.starts_with(worktree_path) {
-        return Err(format!("path is outside worktree: {}", path.display()));
-    }
+    ensure_path_within_worktree(&path, worktree_path)?;
+
 
     let content = tokio::fs::read_to_string(&path)
         .await
@@ -774,6 +782,40 @@ fn resolve_path(raw: &str, base: &std::path::Path) -> PathBuf {
     out
 }
 
+
+fn is_tool_allowed_for_agent(agent_type: AgentType, name: &str) -> bool {
+    match name {
+        "task_show" | "task_list" | "task_activity_list" | "task_comment_add" | "memory_read"
+        | "memory_search" | "shell" | "task_create" => true,
+        "write" | "edit" => matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver),
+        "task_update_ac" => matches!(agent_type, AgentType::TaskReviewer),
+        "task_update" | "task_transition" | "task_delete_branch" | "task_archive_activity"
+        | "task_reset_counters" | "task_kill_session" | "task_blocked_list" => {
+            matches!(agent_type, AgentType::PM | AgentType::Groomer)
+        }
+        _ => false,
+    }
+}
+
+fn ensure_path_within_worktree(path: &Path, worktree_path: &Path) -> Result<(), String> {
+    let canonical_base = std::fs::canonicalize(worktree_path)
+        .map_err(|e| format!("failed to canonicalize worktree path: {e}"))?;
+
+    let candidate = if path.exists() {
+        std::fs::canonicalize(path).map_err(|e| format!("failed to canonicalize path: {e}"))?
+    } else {
+        let parent = path.parent().unwrap_or(path);
+        let canonical_parent = std::fs::canonicalize(parent)
+            .map_err(|e| format!("failed to canonicalize parent path: {e}"))?;
+        canonical_parent.join(path.file_name().unwrap_or_default())
+    };
+
+    if !candidate.starts_with(&canonical_base) {
+        return Err(format!("path is outside worktree: {}", path.display()));
+    }
+
+    Ok(())
+}
 fn parse_args<T>(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<T, String>
@@ -1814,7 +1856,7 @@ pub(crate) async fn call_tool(
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
     let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
-    dispatch_tool_call(state, &synthetic, worktree_path).await
+    dispatch_tool_call(state, &synthetic, worktree_path, None).await
 }
 
 #[cfg(test)]
@@ -1855,5 +1897,47 @@ mod tests {
     fn floor_char_boundary_zero() {
         assert_eq!(floor_char_boundary("hello", 0), 0);
     }
+
+    #[tokio::test]
+    async fn write_rejects_symlink_escape_outside_worktree() {
+        use tempfile::tempdir;
+
+        let worktree = tempdir().expect("temp worktree");
+        let outside = tempdir().expect("outside dir");
+        let link = worktree.path().join("escape-link");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &link).expect("create symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(outside.path(), &link).expect("create symlink");
+
+        let args = Some(
+            serde_json::json!({"path":"escape-link/pwned.txt","content":"owned"})
+                .as_object()
+                .expect("obj")
+                .clone(),
+        );
+
+        let result = call_write(&args, worktree.path()).await;
+        assert!(result.is_err());
+        let err = result.err().unwrap_or_default();
+        assert!(err.contains("outside worktree"));
+        assert!(!outside.path().join("pwned.txt").exists());
+    }
+
+    #[test]
+    fn worker_cannot_use_pm_only_tool() {
+        assert!(!is_tool_allowed_for_agent(AgentType::Worker, "task_transition"));
+        assert!(is_tool_allowed_for_agent(AgentType::PM, "task_transition"));
+    }
+
+    #[test]
+    fn shell_timeout_defaults_and_minimum() {
+        let none_timeout: Option<u64> = None;
+        assert_eq!(none_timeout.unwrap_or(120_000).max(1000), 120_000);
+        let zero_timeout = Some(0_u64);
+        assert_eq!(zero_timeout.unwrap_or(120_000).max(1000), 1000);
+    }
+
 }
 
