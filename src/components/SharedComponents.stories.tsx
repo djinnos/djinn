@@ -22,7 +22,7 @@ const withRouter = (Story: any) => (
   </MemoryRouter>
 );
 
-const SidebarState = ({ collapsed = false, section = 'kanban' }: { collapsed?: boolean; section?: 'kanban' | 'epics' | 'settings' }) => {
+const SidebarState = ({ collapsed = false, section = 'kanban' }: { collapsed?: boolean; section?: 'kanban' | 'chat' | 'settings' }) => {
   const setCollapsed = useSidebarStore((s) => s.setCollapsed);
   const setActiveSection = useSidebarStore((s) => s.setActiveSection);
 

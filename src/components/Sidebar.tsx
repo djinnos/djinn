@@ -9,7 +9,6 @@ import {
   Pause,
   Loader2,
   ChevronDown,
-  Layers,
   FolderOpen,
   Plus,
   MessageSquare,
@@ -296,9 +295,7 @@ export function Sidebar() {
 
   // Sync active section from URL
   useEffect(() => {
-    if (location.pathname.includes('/epics')) {
-      setActiveSection('epics');
-    } else if (location.pathname.includes('/chat')) {
+    if (location.pathname.includes('/chat')) {
       setActiveSection('chat');
     } else if (location.pathname.startsWith('/settings')) {
       setActiveSection('settings');
@@ -319,17 +316,13 @@ export function Sidebar() {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
 
     switch (e.key.toLowerCase()) {
-      case 'k':
-        e.preventDefault();
-        navigateToView('kanban');
-        break;
-      case 'e':
-        e.preventDefault();
-        navigateToView('epics');
-        break;
       case 'c':
         e.preventDefault();
         navigateToView('chat');
+        break;
+      case 'k':
+        e.preventDefault();
+        navigateToView('kanban');
         break;
       case 's':
         e.preventDefault();
@@ -392,6 +385,14 @@ export function Sidebar() {
       {/* Navigation */}
       <nav className="flex-1 p-2 space-y-1 overflow-y-auto">
         <NavItem
+          icon={<MessageSquare className="h-4 w-4" />}
+          label="Chat"
+          hotkey="C"
+          isActive={activeSection === 'chat'}
+          isCollapsed={isCollapsed}
+          onClick={() => navigateToView('chat')}
+        />
+        <NavItem
           icon={<HugeiconsIcon icon={KanbanIcon} className="h-4 w-4" />}
           label="Kanban"
           hotkey="K"
@@ -399,46 +400,31 @@ export function Sidebar() {
           isCollapsed={isCollapsed}
           onClick={() => navigateToView('kanban')}
         />
-        <NavItem
-          icon={<Layers className="h-4 w-4" />}
-          label="Epics"
-          hotkey="E"
-          isActive={activeSection === 'epics'}
-          isCollapsed={isCollapsed}
-          onClick={() => navigateToView('epics')}
-        />
-
-        <NavItem
-          icon={<MessageSquare className="h-4 w-4" />}
-          label="Chat"
-          hotkey="c"
-          isActive={activeSection === 'chat'}
-          isCollapsed={isCollapsed}
-          onClick={() => navigateToView('chat')}
-        />
-
-        <NavItem
-          icon={<Settings className="h-4 w-4" />}
-          label="Settings"
-          hotkey="S"
-          isActive={activeSection === 'settings'}
-          isCollapsed={isCollapsed}
-          onClick={() => navigate('/settings')}
-        />
 
         {/* Projects Section */}
         <div className="pt-2">
-          <button
-            type="button"
-            onClick={() => setProjectsExpanded(!projectsExpanded)}
-            className={cn(
-              "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors text-muted-foreground hover:bg-white/[0.04]",
-              isCollapsed && "justify-center px-0"
+          <div className={cn("flex w-full items-center", isCollapsed ? "justify-center" : "")}>
+            <button
+              type="button"
+              onClick={() => setProjectsExpanded(!projectsExpanded)}
+              className={cn(
+                "flex flex-1 items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors text-muted-foreground hover:bg-white/[0.04]",
+                isCollapsed && "justify-center px-0"
+              )}
+            >
+              <ChevronDown className={cn("h-3 w-3 shrink-0 transition-transform", !projectsExpanded && "-rotate-90")} />
+              {!isCollapsed && <span className="font-medium">Projects</span>}
+            </button>
+            {!isCollapsed && (
+              <button
+                type="button"
+                className="flex h-6 w-6 items-center justify-center rounded-md transition-colors text-muted-foreground hover:bg-white/10 hover:text-foreground shrink-0 mr-1"
+                title="New Project"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
             )}
-          >
-            <ChevronDown className={cn("h-3 w-3 shrink-0 transition-transform", !projectsExpanded && "-rotate-90")} />
-            {!isCollapsed && <span className="font-medium">Projects</span>}
-          </button>
+          </div>
 
           {projectsExpanded && (
             <div className="mt-1 space-y-0.5">
@@ -469,18 +455,17 @@ export function Sidebar() {
         </div>
       </nav>
 
-      {/* Footer */}
-      {!isCollapsed && (
-        <div className="border-t p-3">
-          <button
-            type="button"
-            className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm transition-colors text-muted-foreground hover:bg-white/[0.04] hover:text-foreground"
-          >
-            <Plus className="h-4 w-4" />
-            <span>New Project</span>
-          </button>
-        </div>
-      )}
+      {/* Settings at bottom */}
+      <div className="border-t p-2">
+        <NavItem
+          icon={<Settings className="h-4 w-4" />}
+          label="Settings"
+          hotkey="S"
+          isActive={activeSection === 'settings'}
+          isCollapsed={isCollapsed}
+          onClick={() => navigate('/settings')}
+        />
+      </div>
     </aside>
   );
 }
