@@ -1,6 +1,7 @@
 pub(crate) mod compaction;
 pub mod config;
 pub(crate) mod extension;
+pub mod file_time;
 pub mod message;
 pub mod oauth;
 pub(crate) mod output_parser;
