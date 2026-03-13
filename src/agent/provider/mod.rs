@@ -130,7 +130,7 @@ pub trait LlmProvider: Send + Sync {
                         Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
                     >,
                 > + Send
-            + 'a,
+                + 'a,
         >,
     >;
 }
@@ -141,9 +141,9 @@ pub trait LlmProvider: Send + Sync {
 pub fn create_provider(config: ProviderConfig) -> Box<dyn LlmProvider> {
     match config.format_family {
         FormatFamily::OpenAI => Box::new(format::openai::OpenAIProvider::new(config)),
-        FormatFamily::OpenAIResponses => {
-            Box::new(format::openai_responses::OpenAIResponsesProvider::new(config))
-        }
+        FormatFamily::OpenAIResponses => Box::new(
+            format::openai_responses::OpenAIResponsesProvider::new(config),
+        ),
         FormatFamily::Anthropic => Box::new(format::anthropic::AnthropicProvider::new(config)),
         FormatFamily::Google => Box::new(format::google::GoogleProvider::new(config)),
     }

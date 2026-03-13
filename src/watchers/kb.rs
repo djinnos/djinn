@@ -7,9 +7,9 @@ use notify_debouncer_mini::{DebouncedEventKind, Debouncer, new_debouncer};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::connection::Database;
 use crate::db::NoteRepository;
 use crate::db::ProjectRepository;
+use crate::db::connection::Database;
 use crate::events::DjinnEvent;
 
 /// Debounce window — reindex fires this long after the last file change.
@@ -49,10 +49,7 @@ pub fn spawn_kb_watchers(
                         let path = PathBuf::from(&project.path);
                         add_watch(&mut guard, &project.id, &path);
                     }
-                    tracing::info!(
-                        count = guard.watchers.len(),
-                        "KB file watchers initialized"
-                    );
+                    tracing::info!(count = guard.watchers.len(), "KB file watchers initialized");
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to list projects for KB watcher setup");
@@ -119,59 +116,69 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
     let project_id = project_id.to_string();
     let project_path_owned = project_path.to_path_buf();
 
-    let debouncer = new_debouncer(DEBOUNCE, move |res: Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>| {
-        match res {
-            Ok(events) => {
-                // Only reindex if at least one .md file was affected.
-                let has_md = events.iter().any(|e| {
-                    e.kind == DebouncedEventKind::Any
+    let debouncer = new_debouncer(
+        DEBOUNCE,
+        move |res: Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>| {
+            match res {
+                Ok(events) => {
+                    // Only reindex if at least one .md file was affected.
+                    let has_md = events.iter().any(|e| {
+                        e.kind == DebouncedEventKind::Any
                         && e.path.extension().and_then(|ext| ext.to_str()) == Some("md")
                         // Skip worktrees subdirectory
                         && !path_contains_segment(&e.path, "worktrees")
-                });
-                if !has_md {
-                    return;
-                }
+                    });
+                    if !has_md {
+                        return;
+                    }
 
-                let db = db.clone();
-                let events_tx = events_tx.clone();
-                let project_id = project_id.clone();
-                let project_path = project_path_owned.clone();
+                    let db = db.clone();
+                    let events_tx = events_tx.clone();
+                    let project_id = project_id.clone();
+                    let project_path = project_path_owned.clone();
 
-                // Spawn reindex on the tokio runtime.
-                tokio::spawn(async move {
-                    let note_repo = NoteRepository::new(db, events_tx);
-                    match note_repo.reindex_from_disk(&project_id, &project_path).await {
-                        Ok(summary) => {
-                            if summary.created > 0 || summary.updated > 0 || summary.deleted > 0 {
-                                tracing::info!(
+                    // Spawn reindex on the tokio runtime.
+                    tokio::spawn(async move {
+                        let note_repo = NoteRepository::new(db, events_tx);
+                        match note_repo
+                            .reindex_from_disk(&project_id, &project_path)
+                            .await
+                        {
+                            Ok(summary) => {
+                                if summary.created > 0 || summary.updated > 0 || summary.deleted > 0
+                                {
+                                    tracing::info!(
+                                        project = %project_path.display(),
+                                        created = summary.created,
+                                        updated = summary.updated,
+                                        deleted = summary.deleted,
+                                        "KB watcher triggered reindex"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
                                     project = %project_path.display(),
-                                    created = summary.created,
-                                    updated = summary.updated,
-                                    deleted = summary.deleted,
-                                    "KB watcher triggered reindex"
+                                    error = %e,
+                                    "KB watcher reindex failed"
                                 );
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                project = %project_path.display(),
-                                error = %e,
-                                "KB watcher reindex failed"
-                            );
-                        }
-                    }
-                });
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "KB file watcher error");
+                }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "KB file watcher error");
-            }
-        }
-    });
+        },
+    );
 
     match debouncer {
         Ok(mut debouncer) => {
-            if let Err(e) = debouncer.watcher().watch(&djinn_dir, notify::RecursiveMode::Recursive) {
+            if let Err(e) = debouncer
+                .watcher()
+                .watch(&djinn_dir, notify::RecursiveMode::Recursive)
+            {
                 tracing::warn!(
                     path = %djinn_dir.display(),
                     error = %e,

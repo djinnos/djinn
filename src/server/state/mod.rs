@@ -8,10 +8,10 @@ use tokio_util::sync::CancellationToken;
 use crate::actors::coordinator::CoordinatorHandle;
 use crate::actors::git::{GitActorHandle, GitError};
 use crate::actors::slot::{SlotPoolConfig, SlotPoolHandle};
-use crate::db::connection::Database;
 use crate::db::NoteRepository;
 use crate::db::ProjectRepository;
 use crate::db::SettingsRepository;
+use crate::db::connection::Database;
 use crate::events::DjinnEvent;
 use crate::provider::{CatalogService, HealthTracker};
 use crate::sync::SyncManager;
@@ -118,17 +118,29 @@ impl AppState {
 
     /// Register a task as having an in-flight verification pipeline.
     pub fn register_verification(&self, task_id: &str) {
-        self.inner.verifying_tasks.lock().expect("poisoned").insert(task_id.to_string());
+        self.inner
+            .verifying_tasks
+            .lock()
+            .expect("poisoned")
+            .insert(task_id.to_string());
     }
 
     /// Deregister a task's verification pipeline (completed or crashed).
     pub fn deregister_verification(&self, task_id: &str) {
-        self.inner.verifying_tasks.lock().expect("poisoned").remove(task_id);
+        self.inner
+            .verifying_tasks
+            .lock()
+            .expect("poisoned")
+            .remove(task_id);
     }
 
     /// Check whether a task has a live verification pipeline.
     pub fn has_verification(&self, task_id: &str) -> bool {
-        self.inner.verifying_tasks.lock().expect("poisoned").contains(task_id)
+        self.inner
+            .verifying_tasks
+            .lock()
+            .expect("poisoned")
+            .contains(task_id)
     }
 
     pub async fn coordinator(&self) -> Option<CoordinatorHandle> {

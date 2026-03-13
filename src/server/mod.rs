@@ -330,7 +330,10 @@ mod tests {
             "settings_get",
             "system_ping",
         ] {
-            assert!(names.contains(required), "missing required tool schema: {required}");
+            assert!(
+                names.contains(required),
+                "missing required tool schema: {required}"
+            );
         }
     }
 
@@ -342,7 +345,11 @@ mod tests {
         let names = mcp
             .all_tool_schemas()
             .into_iter()
-            .filter_map(|v| v.get("name").and_then(serde_json::Value::as_str).map(str::to_string))
+            .filter_map(|v| {
+                v.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
             .collect::<std::collections::HashSet<_>>();
 
         assert!(names.contains("credential_set"));
@@ -646,8 +653,6 @@ mod tests {
         );
     }
 
-
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_contract_board_health_empty_board_returns_zero_counts() {
         let app = test_helpers::create_test_app();
@@ -673,15 +678,24 @@ mod tests {
         .await;
 
         assert_eq!(
-            health["stale_tasks"].as_array().map(|v| v.len()).unwrap_or_default(),
+            health["stale_tasks"]
+                .as_array()
+                .map(|v| v.len())
+                .unwrap_or_default(),
             0
         );
         assert_eq!(
-            health["epic_stats"].as_array().map(|v| v.len()).unwrap_or_default(),
+            health["epic_stats"]
+                .as_array()
+                .map(|v| v.len())
+                .unwrap_or_default(),
             0
         );
         assert_eq!(
-            health["review_queue"].as_array().map(|v| v.len()).unwrap_or_default(),
+            health["review_queue"]
+                .as_array()
+                .map(|v| v.len())
+                .unwrap_or_default(),
             0
         );
     }
@@ -739,13 +753,10 @@ mod tests {
         let epic = test_helpers::create_test_epic(&db, &project.id).await;
         let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
 
-        let repo = crate::db::TaskRepository::new(
-            db.clone(),
-            {
-                let (tx, _rx) = broadcast::channel(256);
-                tx
-            },
-        );
+        let repo = crate::db::TaskRepository::new(db.clone(), {
+            let (tx, _rx) = broadcast::channel(256);
+            tx
+        });
         repo.set_status(&task.id, "in_progress").await.unwrap();
         sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1")
             .bind(&task.id)
@@ -761,7 +772,13 @@ mod tests {
         )
         .await;
 
-        assert!(health["stale_tasks"].as_array().map(|a| a.len()).unwrap_or(0) >= 1);
+        assert!(
+            health["stale_tasks"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0)
+                >= 1
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 use tokio::sync::broadcast;
 
-use crate::db::connection::Database;
 use crate::db::TaskRepository;
+use crate::db::connection::Database;
 use crate::events::DjinnEvent;
 use crate::models::Task;
 
@@ -111,7 +111,11 @@ pub async fn ensure_worktree(project: &Path) -> Result<PathBuf> {
         git(project, &["worktree", "add", &wt_str, BRANCH]).await?;
     } else {
         // Create an orphan branch with an initial empty commit.
-        git(project, &["worktree", "add", "--orphan", "-b", BRANCH, &wt_str]).await?;
+        git(
+            project,
+            &["worktree", "add", "--orphan", "-b", BRANCH, &wt_str],
+        )
+        .await?;
         // The initial commit makes the branch a proper ref so push works.
         let _ = git(
             &wt,
@@ -167,7 +171,11 @@ pub async fn export(
                 let _ = git(&wt, &["add", "-A"]).await;
                 let _ = git(
                     &wt,
-                    &["commit", "-m", &format!("djinn: migrate local.jsonl → {filename}")],
+                    &[
+                        "commit",
+                        "-m",
+                        &format!("djinn: migrate local.jsonl → {filename}"),
+                    ],
                 )
                 .await;
             }
@@ -259,16 +267,17 @@ pub async fn import(
     events: &broadcast::Sender<DjinnEvent>,
 ) -> Result<usize> {
     // Two-phase pull (SYNC-08): cheap SHA check before expensive fetch.
-    let settings = crate::db::SettingsRepository::new(
-        db.clone(),
-        events.clone(),
-    );
+    let settings = crate::db::SettingsRepository::new(db.clone(), events.clone());
     let sha_key = sha_settings_key(project_id);
     let remote_sha = ls_remote_sha(project).await;
     if let Some(ref sha) = remote_sha {
         let stored = settings.get(&sha_key).await.ok().flatten();
         if stored.as_ref().map(|s| &s.value) == Some(sha) {
-            tracing::trace!(sha, project_id, "two-phase pull: SHA unchanged, skipping import");
+            tracing::trace!(
+                sha,
+                project_id,
+                "two-phase pull: SHA unchanged, skipping import"
+            );
             return Ok(0);
         }
     }
@@ -337,7 +346,11 @@ pub async fn import(
     // Upsert into local DB within a single transaction (SYNC-10).
     // Events are collected and emitted only after commit succeeds.
     // Peer reconciliation also runs within this transaction (SYNC-14).
-    let mut tx = db.pool().begin().await.map_err(|e| TaskSyncError::Database(e.to_string()))?;
+    let mut tx = db
+        .pool()
+        .begin()
+        .await
+        .map_err(|e| TaskSyncError::Database(e.to_string()))?;
     let mut upserted = 0usize;
     let mut upserted_ids: Vec<String> = Vec::new();
 
@@ -361,7 +374,9 @@ pub async fn import(
             continue;
         }
         let task_ids_vec: Vec<String> = task_ids.iter().cloned().collect();
-        match TaskRepository::reconcile_peer_in_tx(&mut tx, peer_user_id, task_ids_vec.as_slice()).await {
+        match TaskRepository::reconcile_peer_in_tx(&mut tx, peer_user_id, task_ids_vec.as_slice())
+            .await
+        {
             Ok(count) => {
                 tracing::debug!(
                     peer = %peer_user_id,
@@ -375,7 +390,9 @@ pub async fn import(
         }
     }
 
-    tx.commit().await.map_err(|e| TaskSyncError::Database(e.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|e| TaskSyncError::Database(e.to_string()))?;
 
     // Persist SHA only after successful commit (SYNC-07 + SYNC-08 + SYNC-10).
     if let Some(sha) = remote_sha {
@@ -386,7 +403,10 @@ pub async fn import(
     let repo = TaskRepository::new(db.clone(), events.clone());
     for id in &upserted_ids {
         if let Ok(Some(task)) = repo.get(id).await {
-            let _ = events.send(DjinnEvent::TaskUpdated { task, from_sync: true });
+            let _ = events.send(DjinnEvent::TaskUpdated {
+                task,
+                from_sync: true,
+            });
         }
     }
 
@@ -496,7 +516,7 @@ mod tests {
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task = task_repo
-            .create(&epic.id, "My Task", "", "", "task", 0 , "", Some("open"))
+            .create(&epic.id, "My Task", "", "", "task", 0, "", Some("open"))
             .await
             .unwrap();
 
@@ -521,8 +541,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         // Create two projects with tasks.
-        let project_repo =
-            crate::db::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
         let p1 = project_repo.create("proj-a", "/tmp/a").await.unwrap();
         let p2 = project_repo.create("proj-b", "/tmp/b").await.unwrap();
 
@@ -531,11 +550,31 @@ mod tests {
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         task_repo
-            .create_in_project(&p1.id, Some(&epic.id), "Task A", "", "", "task", 0 , "", Some("open"))
+            .create_in_project(
+                &p1.id,
+                Some(&epic.id),
+                "Task A",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                Some("open"),
+            )
             .await
             .unwrap();
         task_repo
-            .create_in_project(&p2.id, Some(&epic.id), "Task B", "", "", "task", 0 , "", Some("open"))
+            .create_in_project(
+                &p2.id,
+                Some(&epic.id),
+                "Task B",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                Some("open"),
+            )
             .await
             .unwrap();
 
@@ -567,7 +606,9 @@ mod tests {
         let wt = ensure_worktree(&repo).await.unwrap();
         let task = make_test_task("aaaa-bbbb-cccc-dddd", &epic.project_id, "Peer Task");
         let jsonl = serde_json::to_string(&task).unwrap();
-        tokio::fs::write(wt.join("peer1.jsonl"), &jsonl).await.unwrap();
+        tokio::fs::write(wt.join("peer1.jsonl"), &jsonl)
+            .await
+            .unwrap();
         git(&wt, &["add", "peer1.jsonl"]).await.unwrap();
         git(&wt, &["commit", "-m", "peer sync"]).await.unwrap();
 
@@ -595,7 +636,7 @@ mod tests {
         let epic = epic_repo.create("E1", "", "", "", "").await.unwrap();
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task = task_repo
-            .create(&epic.id, "Round Trip", "", "", "task", 0 , "", Some("open"))
+            .create(&epic.id, "Round Trip", "", "", "task", 0, "", Some("open"))
             .await
             .unwrap();
 
@@ -652,7 +693,9 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap()
             .join("\n");
-        tokio::fs::write(wt.join("alice.jsonl"), &jsonl).await.unwrap();
+        tokio::fs::write(wt.join("alice.jsonl"), &jsonl)
+            .await
+            .unwrap();
         git(&wt, &["add", "alice.jsonl"]).await.unwrap();
         git(&wt, &["commit", "-m", "peer update"]).await.unwrap();
 
@@ -685,7 +728,14 @@ mod tests {
             .await
             .unwrap();
         task_repo
-            .transition(&task1.id, TransitionAction::ForceClose, "test", "user", Some("other_reason"), None)
+            .transition(
+                &task1.id,
+                TransitionAction::ForceClose,
+                "test",
+                "user",
+                Some("other_reason"),
+                None,
+            )
             .await
             .unwrap();
 
@@ -737,13 +787,15 @@ mod tests {
 
         let fetched_alice = task_repo.get(&task_alice.id).await.unwrap().unwrap();
         assert_eq!(
-            fetched_alice.status,
-            "backlog",
+            fetched_alice.status, "backlog",
             "alice's task should remain backlog (empty file = no reconciliation)"
         );
 
         let fetched_bob = task_repo.get(&task_bob.id).await.unwrap().unwrap();
-        assert_eq!(fetched_bob.status, "backlog", "bob's task should remain backlog");
+        assert_eq!(
+            fetched_bob.status, "backlog",
+            "bob's task should remain backlog"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -807,7 +859,9 @@ mod tests {
         let mut peer_task = make_test_task("peer-task-id", &epic.project_id, "Peer Task");
         peer_task.owner = "alice".to_string();
         let jsonl = serde_json::to_string(&peer_task).unwrap();
-        tokio::fs::write(wt.join("alice.jsonl"), &jsonl).await.unwrap();
+        tokio::fs::write(wt.join("alice.jsonl"), &jsonl)
+            .await
+            .unwrap();
         git(&wt, &["add", "alice.jsonl"]).await.unwrap();
         git(&wt, &["commit", "-m", "peer"]).await.unwrap();
 
@@ -822,7 +876,10 @@ mod tests {
         // Verify local task was closed (reconciliation happened).
         let local_fetched = task_repo.get(&task_local.id).await.unwrap().unwrap();
         assert_eq!(local_fetched.status, "closed");
-        assert_eq!(local_fetched.close_reason, Some("peer_reconciled".to_string()));
+        assert_eq!(
+            local_fetched.close_reason,
+            Some("peer_reconciled".to_string())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -841,7 +898,14 @@ mod tests {
             .await
             .unwrap();
         task_repo
-            .transition(&task_closed.id, TransitionAction::ForceClose, "test", "user", Some("manually_closed"), None)
+            .transition(
+                &task_closed.id,
+                TransitionAction::ForceClose,
+                "test",
+                "user",
+                Some("manually_closed"),
+                None,
+            )
             .await
             .unwrap();
 
@@ -879,7 +943,9 @@ mod tests {
         let wt = ensure_worktree(&repo).await.unwrap();
         let task = make_test_task("1111-2222-3333-4444", &epic.project_id, "Sync Event Task");
         let jsonl = serde_json::to_string(&task).unwrap();
-        tokio::fs::write(wt.join("peer2.jsonl"), &jsonl).await.unwrap();
+        tokio::fs::write(wt.join("peer2.jsonl"), &jsonl)
+            .await
+            .unwrap();
         git(&wt, &["add", "peer2.jsonl"]).await.unwrap();
         git(&wt, &["commit", "-m", "peer"]).await.unwrap();
 
@@ -945,18 +1011,12 @@ mod tests {
         new.short_id = "s-same".to_string(); // same short_id
 
         // Peer A has old version, Peer B has new version.
-        tokio::fs::write(
-            wt.join("peerA.jsonl"),
-            serde_json::to_string(&old).unwrap(),
-        )
-        .await
-        .unwrap();
-        tokio::fs::write(
-            wt.join("peerB.jsonl"),
-            serde_json::to_string(&new).unwrap(),
-        )
-        .await
-        .unwrap();
+        tokio::fs::write(wt.join("peerA.jsonl"), serde_json::to_string(&old).unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(wt.join("peerB.jsonl"), serde_json::to_string(&new).unwrap())
+            .await
+            .unwrap();
         git(&wt, &["add", "."]).await.unwrap();
         git(&wt, &["commit", "-m", "peers"]).await.unwrap();
 
@@ -1003,7 +1063,9 @@ mod tests {
         // Store it manually in settings (simulating what import does).
         let settings_repo = SettingsRepository::new(db.clone(), tx.clone());
         let sha_key = sha_settings_key(&epic.project_id);
-        let _ = settings_repo.set(&sha_key, remote_sha.as_ref().unwrap()).await;
+        let _ = settings_repo
+            .set(&sha_key, remote_sha.as_ref().unwrap())
+            .await;
 
         // Second import with unchanged SHA should skip.
         let count2 = import(&repo, &epic.project_id, &db, &tx).await.unwrap();
@@ -1043,11 +1105,18 @@ mod tests {
 
         // Verify SHA was stored in settings.
         let stored = settings_repo.get(&sha_key).await.unwrap();
-        assert!(stored.is_some(), "SHA should be stored after successful import");
+        assert!(
+            stored.is_some(),
+            "SHA should be stored after successful import"
+        );
 
         // Get remote SHA and verify it matches.
         let remote_sha = ls_remote_sha(&repo).await;
-        assert_eq!(stored.map(|s| s.value), remote_sha, "stored SHA should match remote");
+        assert_eq!(
+            stored.map(|s| s.value),
+            remote_sha,
+            "stored SHA should match remote"
+        );
     }
 
     // ── SYNC-10: Transaction wrapping and rollback tests ─────────────────────────
@@ -1071,7 +1140,9 @@ mod tests {
             .await
             .unwrap();
         git(&wt, &["add", "peer.jsonl"]).await.unwrap();
-        git(&wt, &["commit", "-m", "rollback commit"]).await.unwrap();
+        git(&wt, &["commit", "-m", "rollback commit"])
+            .await
+            .unwrap();
         git(&wt, &["push", "origin", BRANCH]).await.unwrap();
 
         // First, import successfully to get the task in the DB.
@@ -1098,7 +1169,11 @@ mod tests {
         // Verify SHA is unchanged.
         let sha_after = settings_repo.get(&sha_key).await.ok().flatten();
         assert!(sha_after.is_some(), "SHA should still exist");
-        assert_eq!(sha_after.unwrap().value, sha_before, "SHA should not be updated on rollback");
+        assert_eq!(
+            sha_after.unwrap().value,
+            sha_before,
+            "SHA should not be updated on rollback"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1120,7 +1195,9 @@ mod tests {
             serde_json::to_string(&task1).unwrap(),
             serde_json::to_string(&task2).unwrap()
         );
-        tokio::fs::write(wt.join("peer.jsonl"), &content).await.unwrap();
+        tokio::fs::write(wt.join("peer.jsonl"), &content)
+            .await
+            .unwrap();
         git(&wt, &["add", "peer.jsonl"]).await.unwrap();
         git(&wt, &["commit", "-m", "events"]).await.unwrap();
 
@@ -1138,7 +1215,10 @@ mod tests {
         let mut event_count = 0;
         while let Ok(evt) = rx.try_recv() {
             if let DjinnEvent::TaskUpdated { from_sync, .. } = evt {
-                assert!(from_sync, "events from peer import should have from_sync=true");
+                assert!(
+                    from_sync,
+                    "events from peer import should have from_sync=true"
+                );
                 event_count += 1;
             }
         }

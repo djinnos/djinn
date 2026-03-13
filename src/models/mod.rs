@@ -9,17 +9,20 @@ pub mod session_message;
 pub mod settings;
 pub mod task;
 
-pub use credential::{Credential};
-pub use epic::{Epic};
-pub use git_settings::{GitSettings};
-pub use note::{Note, NoteSearchResult, NoteCompact, GitLogEntry, HealthReport, StaleFolder, BuildContextResponse, ReindexSummary, GraphNode, GraphEdge, GraphResponse, BrokenLink, OrphanNote};
-pub use project::{Project};
-pub use provider::{Provider, Pricing, Model, SeedModel, CustomProvider};
+pub use credential::Credential;
+pub use epic::Epic;
+pub use git_settings::GitSettings;
+pub use note::{
+    BrokenLink, BuildContextResponse, GitLogEntry, GraphEdge, GraphNode, GraphResponse,
+    HealthReport, Note, NoteCompact, NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
+};
+pub use project::Project;
+pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
 pub use session::{SessionRecord, SessionStatus};
-pub use session_message::{SessionMessage};
-pub use settings::{Setting, DjinnSettings};
+pub use session_message::SessionMessage;
+pub use settings::{DjinnSettings, Setting};
 pub use task::{
-    compute_transition, ActivityEntry, Task, TaskStatus, TransitionAction, TransitionApply,
+    ActivityEntry, Task, TaskStatus, TransitionAction, TransitionApply, compute_transition,
 };
 
 /// Parse a JSON array string (e.g. `'["a","b"]'`) into a `Vec<String>`.

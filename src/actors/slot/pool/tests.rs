@@ -18,7 +18,11 @@ enum RunnerSignal {
     Paused(String),
 }
 
-fn test_app_state() -> (crate::server::AppState, tokio_util::sync::CancellationToken, TempDir) {
+fn test_app_state() -> (
+    crate::server::AppState,
+    tokio_util::sync::CancellationToken,
+    TempDir,
+) {
     let db = test_helpers::create_test_db();
     let cancel = tokio_util::sync::CancellationToken::new();
     let app_state = crate::server::AppState::new(db, cancel.clone());
@@ -60,45 +64,31 @@ fn test_slot_factory(
     runtime: Duration,
     signal_tx: mpsc::UnboundedSender<RunnerSignal>,
 ) -> SlotFactory {
-    Arc::new(
-        move |slot_id, model_id, event_tx, app_state, cancel| {
-            let signal_tx = signal_tx.clone();
-            let runner: super::super::actor::TestLifecycleRunner = Arc::new(
-                move |task_id,
-                      _project_path,
-                      _model_id,
-                      _app_state,
-                      kill,
-                      pause| {
-                    let signal_tx = signal_tx.clone();
-                    Box::pin(async move {
-                        let _ = signal_tx.send(RunnerSignal::Started(task_id.clone()));
-                        tokio::select! {
-                            _ = tokio::time::sleep(runtime) => {
-                                let _ = signal_tx.send(RunnerSignal::Completed(task_id));
-                            }
-                            _ = kill.cancelled() => {
-                                let _ = signal_tx.send(RunnerSignal::Killed(task_id));
-                            }
-                            _ = pause.cancelled() => {
-                                let _ = signal_tx.send(RunnerSignal::Paused(task_id));
-                            }
+    Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
+        let signal_tx = signal_tx.clone();
+        let runner: super::super::actor::TestLifecycleRunner = Arc::new(
+            move |task_id, _project_path, _model_id, _app_state, kill, pause| {
+                let signal_tx = signal_tx.clone();
+                Box::pin(async move {
+                    let _ = signal_tx.send(RunnerSignal::Started(task_id.clone()));
+                    tokio::select! {
+                        _ = tokio::time::sleep(runtime) => {
+                            let _ = signal_tx.send(RunnerSignal::Completed(task_id));
                         }
-                        Ok(())
-                    })
-                },
-            );
+                        _ = kill.cancelled() => {
+                            let _ = signal_tx.send(RunnerSignal::Killed(task_id));
+                        }
+                        _ = pause.cancelled() => {
+                            let _ = signal_tx.send(RunnerSignal::Paused(task_id));
+                        }
+                    }
+                    Ok(())
+                })
+            },
+        );
 
-            SlotHandle::spawn_with_test_runner(
-                slot_id,
-                model_id,
-                event_tx,
-                app_state,
-                cancel,
-                runner,
-            )
-        },
-    )
+        SlotHandle::spawn_with_test_runner(slot_id, model_id, event_tx, app_state, cancel, runner)
+    })
 }
 
 async fn wait_until_no_sessions(pool: &SlotPoolHandle, task_ids: &[String]) {

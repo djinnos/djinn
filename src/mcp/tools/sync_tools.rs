@@ -355,7 +355,9 @@ mod tests {
         let sid = initialize_mcp_session(&app).await;
 
         let payload = mcp_call_tool(&app, &sid, "task_sync_status", json!({})).await;
-        let channels = payload["channels"].as_array().expect("channels should be an array");
+        let channels = payload["channels"]
+            .as_array()
+            .expect("channels should be an array");
         assert!(!channels.is_empty(), "expected at least one channel status");
         assert!(
             channels[0].get("enabled").is_some(),
@@ -377,7 +379,10 @@ mod tests {
         .await;
 
         assert!(payload.get("error").and_then(|v| v.as_str()).is_some());
-        assert!(payload.get("ok").is_none(), "unexpected ok in error payload: {payload}");
+        assert!(
+            payload.get("ok").is_none(),
+            "unexpected ok in error payload: {payload}"
+        );
     }
 
     #[tokio::test]
@@ -394,7 +399,10 @@ mod tests {
         .await;
 
         assert!(payload.get("error").and_then(|v| v.as_str()).is_some());
-        assert!(payload.get("ok").is_none(), "unexpected ok in error payload: {payload}");
+        assert!(
+            payload.get("ok").is_none(),
+            "unexpected ok in error payload: {payload}"
+        );
     }
 
     #[tokio::test]

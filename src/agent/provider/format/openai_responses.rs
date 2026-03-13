@@ -2,7 +2,7 @@ use async_stream::stream;
 use futures::StreamExt;
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::pin::Pin;
 
 use crate::agent::message::{ContentBlock, Conversation};
@@ -42,11 +42,14 @@ impl OpenAIResponsesProvider {
             let tools_spec: Vec<Value> = tools
                 .iter()
                 .map(|tool| {
-                    let name = tool.get("name")
+                    let name = tool
+                        .get("name")
                         .or_else(|| tool.get("function").and_then(|f| f.get("name")));
-                    let description = tool.get("description")
+                    let description = tool
+                        .get("description")
                         .or_else(|| tool.get("function").and_then(|f| f.get("description")));
-                    let parameters = tool.get("inputSchema")
+                    let parameters = tool
+                        .get("inputSchema")
                         .or_else(|| tool.get("input_schema"))
                         .or_else(|| tool.get("function").and_then(|f| f.get("parameters")))
                         .cloned()
@@ -149,21 +152,13 @@ enum ResponsesStreamEvent {
         response: ResponseMetadata,
     },
     #[serde(rename = "response.output_text.delta")]
-    OutputTextDelta {
-        delta: String,
-    },
+    OutputTextDelta { delta: String },
     #[serde(rename = "response.output_item.done")]
-    OutputItemDone {
-        item: OutputItemInfo,
-    },
+    OutputItemDone { item: OutputItemInfo },
     #[serde(rename = "response.completed")]
-    ResponseCompleted {
-        response: ResponseMetadata,
-    },
+    ResponseCompleted { response: ResponseMetadata },
     #[serde(rename = "response.failed")]
-    ResponseFailed {
-        error: Value,
-    },
+    ResponseFailed { error: Value },
     #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallArgumentsDelta {},
     #[serde(rename = "response.function_call_arguments.done")]
@@ -177,9 +172,7 @@ enum ResponsesStreamEvent {
     #[serde(rename = "response.content_part.done")]
     ContentPartDone {},
     #[serde(rename = "error")]
-    Error {
-        error: Value,
-    },
+    Error { error: Value },
     #[serde(rename = "keepalive")]
     Keepalive {},
 }
@@ -247,10 +240,7 @@ fn extract_error_message(error: &Value) -> String {
 ///
 /// `accumulated_items` collects OutputItemDone items across the stream.
 /// Returns zero or more `StreamEvent`s, or a provider error.
-fn parse_responses_line(
-    line: &str,
-    accumulated_items: &mut Vec<OutputItemInfo>,
-) -> ParsedLine {
+fn parse_responses_line(line: &str, accumulated_items: &mut Vec<OutputItemInfo>) -> ParsedLine {
     let event = match parse_stream_event(line) {
         Ok(Some(e)) => e,
         Ok(None) => return ParsedLine::Events(vec![]),
@@ -469,7 +459,10 @@ mod tests {
                     .unwrap_or_else(|| item["role"].as_str().unwrap())
             })
             .collect();
-        assert_eq!(types, vec!["assistant", "function_call", "function_call_output"]);
+        assert_eq!(
+            types,
+            vec!["assistant", "function_call", "function_call_output"]
+        );
 
         // Verify function_call fields
         assert_eq!(input[1]["call_id"], "call_1");

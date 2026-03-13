@@ -2,14 +2,12 @@ use async_stream::stream;
 use futures::StreamExt;
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::pin::Pin;
 
 use crate::agent::message::{ContentBlock, Conversation};
-use crate::agent::provider::{
-    LlmProvider, ProviderConfig, StreamEvent, TokenUsage,
-};
 use crate::agent::provider::client::ApiClient;
+use crate::agent::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
 
 pub struct OpenAIProvider {
     config: ProviderConfig,
@@ -46,7 +44,10 @@ impl OpenAIProvider {
     }
 
     fn effective_url(&self) -> String {
-        format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'))
+        format!(
+            "{}/chat/completions",
+            self.config.base_url.trim_end_matches('/')
+        )
     }
 
     fn extra_headers(&self) -> HeaderMap {
@@ -164,7 +165,9 @@ pub fn parse_openai_line(
         };
 
         // Text content
-        if let Some(text) = delta.content && !text.is_empty() {
+        if let Some(text) = delta.content
+            && !text.is_empty()
+        {
             events.push(StreamEvent::Delta(ContentBlock::Text { text }));
         }
 
@@ -200,7 +203,11 @@ pub fn parse_openai_line(
             && let Some((id, name, args)) = tool_acc.take()
         {
             let input = serde_json::from_str(&args).unwrap_or(Value::Null);
-            events.push(StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }));
+            events.push(StreamEvent::Delta(ContentBlock::ToolUse {
+                id,
+                name,
+                input,
+            }));
         }
     }
 
@@ -265,7 +272,11 @@ pub fn parse_openai_response(body: &str) -> Vec<StreamEvent> {
                         .and_then(|x| x.as_str())
                         .unwrap_or("{}");
                     let input = serde_json::from_str(args_str).unwrap_or(Value::Null);
-                    events.push(StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }));
+                    events.push(StreamEvent::Delta(ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                    }));
                 }
             }
         }
@@ -291,7 +302,7 @@ impl LlmProvider for OpenAIProvider {
                         Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
                     >,
                 > + Send
-            + 'a,
+                + 'a,
         >,
     > {
         let body = self.build_request(conversation, tools);
@@ -323,7 +334,10 @@ impl LlmProvider for OpenAIProvider {
                 Ok(out)
             } else {
                 // Non-streaming path: single POST, parse complete response
-                let response_body = self.client.post_json(&url, body, &auth, extra_headers).await?;
+                let response_body = self
+                    .client
+                    .post_json(&url, body, &auth, extra_headers)
+                    .await?;
                 let events = parse_openai_response(&response_body);
                 let out: Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>> =
                     Box::pin(futures::stream::iter(events.into_iter().map(Ok)));

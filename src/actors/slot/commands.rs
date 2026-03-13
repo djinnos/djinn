@@ -94,13 +94,18 @@ pub(crate) async fn log_commands_run_event(
 
     let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     if let Err(e) = task_repo
-        .log_activity(Some(task_id), "system", "system", "commands_run", &payload.to_string())
+        .log_activity(
+            Some(task_id),
+            "system",
+            "system",
+            "commands_run",
+            &payload.to_string(),
+        )
         .await
     {
         tracing::warn!(task_id = %task_id, phase = %phase, error = %e, "Lifecycle: failed to log commands_run activity");
     }
 }
-
 
 use super::*;
 

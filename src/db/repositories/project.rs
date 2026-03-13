@@ -57,12 +57,10 @@ impl ProjectRepository {
         self.db.ensure_initialized().await?;
         let normalized = project_path.trim_end_matches('/');
         Ok(
-            sqlx::query_scalar::<_, String>(
-                "SELECT id FROM projects WHERE path = ?1",
-            )
-            .bind(normalized)
-            .fetch_optional(self.db.pool())
-            .await?,
+            sqlx::query_scalar::<_, String>("SELECT id FROM projects WHERE path = ?1")
+                .bind(normalized)
+                .fetch_optional(self.db.pool())
+                .await?,
         )
     }
 
@@ -119,12 +117,10 @@ impl ProjectRepository {
     pub async fn get_path(&self, id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
         Ok(
-            sqlx::query_scalar::<_, String>(
-                "SELECT path FROM projects WHERE id = ?1",
-            )
-            .bind(id)
-            .fetch_optional(self.db.pool())
-            .await?,
+            sqlx::query_scalar::<_, String>("SELECT path FROM projects WHERE id = ?1")
+                .bind(id)
+                .fetch_optional(self.db.pool())
+                .await?,
         )
     }
 

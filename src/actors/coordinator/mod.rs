@@ -19,11 +19,12 @@ use tokio::time::{self, Instant, Interval};
 use tokio_util::sync::CancellationToken;
 
 use crate::actors::git::GitActorHandle;
-use crate::actors::slot::{PoolError, SlotPoolHandle};use crate::agent::AgentType;
+use crate::actors::slot::{PoolError, SlotPoolHandle};
+use crate::agent::AgentType;
 use crate::commands::{CommandSpec, run_commands};
-use crate::db::connection::Database;
 use crate::db::GitSettingsRepository;
 use crate::db::ProjectRepository;
+use crate::db::connection::Database;
 use crate::db::{ReadyQuery, TaskRepository};
 use crate::events::DjinnEvent;
 use crate::provider::catalog::CatalogService;
@@ -249,10 +250,7 @@ impl CoordinatorActor {
         // Always start with execution paused for all projects.
         #[cfg(not(test))]
         {
-            let repo = crate::db::ProjectRepository::new(
-                self.db.clone(),
-                self.events_tx.clone(),
-            );
+            let repo = crate::db::ProjectRepository::new(self.db.clone(), self.events_tx.clone());
             if let Ok(projects) = repo.list().await {
                 for p in projects {
                     self.paused_projects.insert(p.id);
@@ -336,10 +334,8 @@ impl CoordinatorActor {
                 reason,
             } => {
                 // Global pause = pause every known project individually.
-                let repo = crate::db::ProjectRepository::new(
-                    self.db.clone(),
-                    self.events_tx.clone(),
-                );
+                let repo =
+                    crate::db::ProjectRepository::new(self.db.clone(), self.events_tx.clone());
                 if let Ok(projects) = repo.list().await {
                     for p in projects {
                         self.paused_projects.insert(p.id);
@@ -440,7 +436,7 @@ impl CoordinatorActor {
                 // If project just became healthy and dispatch is enabled, trigger a dispatch pass.
                 if healthy && self.is_project_dispatch_enabled(&project_id) {
                     self.ensure_groomer_dispatch(Some(&project_id)).await;
-                self.dispatch_ready_tasks(Some(&project_id)).await;
+                    self.dispatch_ready_tasks(Some(&project_id)).await;
                 }
             }
         }
@@ -529,10 +525,8 @@ impl CoordinatorActor {
 
         #[cfg(not(test))]
         {
-            let cred_repo = crate::db::CredentialRepository::new(
-                self.db.clone(),
-                self.events_tx.clone(),
-            );
+            let cred_repo =
+                crate::db::CredentialRepository::new(self.db.clone(), self.events_tx.clone());
             let credentials = match cred_repo.list().await {
                 Ok(credentials) => credentials,
                 Err(_) => return Vec::new(),
@@ -556,17 +550,13 @@ impl CoordinatorActor {
                         // name, or full configured ID.  Internal IDs may be in
                         // HuggingFace form (e.g. "hf:zai-org/GLM-4.7") while
                         // settings store the API form ("synthetic/GLM-4.7").
-                        let exists = self
-                            .catalog
-                            .list_models(provider_id)
-                            .iter()
-                            .any(|m| {
-                                let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
-                                bare == model_name
-                                    || m.id == model_name
-                                    || m.name == model_name
-                                    || m.id == *configured
-                            });
+                        let exists = self.catalog.list_models(provider_id).iter().any(|m| {
+                            let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
+                            bare == model_name
+                                || m.id == model_name
+                                || m.name == model_name
+                                || m.id == *configured
+                        });
                         if exists && seen.insert(configured.clone()) {
                             selected.push(configured.clone());
                         }
@@ -607,8 +597,7 @@ impl CoordinatorActor {
     }
 
     async fn project_path_for_id(&self, project_id: &str) -> Option<String> {
-        let repo =
-            ProjectRepository::new(self.db.clone(), self.events_tx.clone());
+        let repo = ProjectRepository::new(self.db.clone(), self.events_tx.clone());
         repo.get_path(project_id).await.ok().flatten()
     }
 }
@@ -872,13 +861,18 @@ mod tests {
         let catalog = CatalogService::new();
         let health = HealthTracker::new();
         let verification_tracker = VerificationTracker::default();
-        CoordinatorHandle::spawn(tx.clone(), cancel, db.clone(), pool, catalog, health, verification_tracker)
+        CoordinatorHandle::spawn(
+            tx.clone(),
+            cancel,
+            db.clone(),
+            pool,
+            catalog,
+            health,
+            verification_tracker,
+        )
     }
 
-    async fn make_epic(
-        db: &Database,
-        tx: broadcast::Sender<DjinnEvent>,
-    ) -> crate::models::Epic {
+    async fn make_epic(db: &Database, tx: broadcast::Sender<DjinnEvent>) -> crate::models::Epic {
         EpicRepository::new(db.clone(), tx)
             .create("Epic", "", "", "", "")
             .await
@@ -933,7 +927,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let epic = make_epic(&db, tx.clone()).await;
         let repo = TaskRepository::new(db.clone(), tx.clone());
-        repo.create(&epic.id, "T1", "", "", "task", 0 , "", Some("open"))
+        repo.create(&epic.id, "T1", "", "", "task", 0, "", Some("open"))
             .await
             .unwrap();
 
@@ -958,7 +952,7 @@ mod tests {
         let repo = TaskRepository::new(db.clone(), tx.clone());
 
         // Create a ready task (open, no blockers).
-        repo.create(&epic.id, "T1", "", "", "task", 0 , "", Some("open"))
+        repo.create(&epic.id, "T1", "", "", "task", 0, "", Some("open"))
             .await
             .unwrap();
 
@@ -981,12 +975,21 @@ mod tests {
         let repo = TaskRepository::new(db.clone(), tx.clone());
 
         let task = repo
-            .create(&epic.id, "Review me", "", "", "task", 0 , "", Some("open"))
+            .create(&epic.id, "Review me", "", "", "task", 0, "", Some("open"))
             .await
             .unwrap();
-        repo.update(&task.id, "Review me", "", "", 0, "", "", r#"[{"description":"default","met":false}]"#)
-            .await
-            .unwrap();
+        repo.update(
+            &task.id,
+            "Review me",
+            "",
+            "",
+            0,
+            "",
+            "",
+            r#"[{"description":"default","met":false}]"#,
+        )
+        .await
+        .unwrap();
         repo.transition(
             &task.id,
             TransitionAction::Start,
@@ -1031,7 +1034,7 @@ mod tests {
 
         // Manually put a task in_progress (simulating an orphaned session).
         let task = repo
-            .create(&epic.id, "Stuck", "", "", "task", 0 , "", Some("open"))
+            .create(&epic.id, "Stuck", "", "", "task", 0, "", Some("open"))
             .await
             .unwrap();
         repo.set_status(&task.id, "in_progress").await.unwrap();

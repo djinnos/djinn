@@ -25,7 +25,9 @@ impl DjinnMcpServer {
         self.tool_router
             .list_all()
             .into_iter()
-            .map(|tool| serde_json::to_value(tool).expect("MCP tool definitions must serialize to JSON"))
+            .map(|tool| {
+                serde_json::to_value(tool).expect("MCP tool definitions must serialize to JSON")
+            })
             .collect()
     }
 

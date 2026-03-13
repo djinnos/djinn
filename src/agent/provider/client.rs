@@ -220,7 +220,10 @@ impl ApiClient {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
-                        return resp.text().await.map_err(|e| anyhow!("failed to read response body: {e}"));
+                        return resp
+                            .text()
+                            .await
+                            .map_err(|e| anyhow!("failed to read response body: {e}"));
                     }
 
                     let is_retryable = status.as_u16() == 429 || status.is_server_error();
@@ -253,7 +256,11 @@ impl ApiClient {
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         continue;
                     }
-                    return Err(anyhow!("failed to send POST after {} attempts: {}", attempt + 1, e));
+                    return Err(anyhow!(
+                        "failed to send POST after {} attempts: {}",
+                        attempt + 1,
+                        e
+                    ));
                 }
             }
         }

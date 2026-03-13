@@ -5,9 +5,9 @@ use crate::server::AppState;
 
 use super::super::SlotPoolConfig;
 use super::actor::SlotPool;
-use super::types::{PoolError, PoolMessage, PoolStatus, Reply, RunningTaskInfo};
 #[cfg(test)]
 use super::types::SlotFactory;
+use super::types::{PoolError, PoolMessage, PoolStatus, Reply, RunningTaskInfo};
 
 #[derive(Clone)]
 pub struct SlotPoolHandle {
@@ -15,11 +15,7 @@ pub struct SlotPoolHandle {
 }
 
 impl SlotPoolHandle {
-    pub fn spawn(
-        app_state: AppState,
-        cancel: CancellationToken,
-        config: SlotPoolConfig,
-    ) -> Self {
+    pub fn spawn(app_state: AppState, cancel: CancellationToken, config: SlotPoolConfig) -> Self {
         let (sender, receiver) = mpsc::channel(64);
         tokio::spawn(SlotPool::new(receiver, app_state, cancel, config).run());
         Self { sender }
@@ -34,14 +30,7 @@ impl SlotPoolHandle {
     ) -> Self {
         let (sender, receiver) = mpsc::channel(64);
         tokio::spawn(
-            SlotPool::new_with_factory(
-                receiver,
-                app_state,
-                cancel,
-                config,
-                slot_factory,
-            )
-            .run(),
+            SlotPool::new_with_factory(receiver, app_state, cancel, config, slot_factory).run(),
         );
         Self { sender }
     }

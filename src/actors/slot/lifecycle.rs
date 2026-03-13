@@ -16,11 +16,11 @@ fn truncate_utf8(s: &mut String, max_bytes: usize) {
     s.truncate(end);
 }
 
+use crate::agent::AgentType;
 use crate::agent::extension;
 use crate::agent::message::{Conversation, Message};
 use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::provider::create_provider;
-use crate::agent::AgentType;
 use crate::commands::{CommandSpec, run_commands};
 use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
@@ -29,8 +29,10 @@ use crate::models::SessionStatus;
 use crate::models::TransitionAction;
 use crate::server::AppState;
 
-use super::*;
 use super::reply_loop::run_reply_loop;
+use super::task_review::success_transition;
+use super::*;
+use crate::db::repositories::task::transitions::interrupt_paused_worker_session;
 
 /// Standalone async function that runs the full per-task lifecycle:
 /// load -> worktree -> session -> reply loop -> post-session work -> cleanup.
@@ -119,12 +121,14 @@ pub async fn run_task_lifecycle(
 
     // Notify the frontend immediately so it can show the agent avatar while
     // worktree/setup is still running.
-    let _ = app_state.events().send(crate::events::DjinnEvent::SessionDispatched {
-        project_id: task.project_id.clone(),
-        task_id: task.id.clone(),
-        model_id: model_id.clone(),
-        agent_type: agent_type.as_str().to_string(),
-    });
+    let _ = app_state
+        .events()
+        .send(crate::events::DjinnEvent::SessionDispatched {
+            project_id: task.project_id.clone(),
+            task_id: task.id.clone(),
+            model_id: model_id.clone(),
+            agent_type: agent_type.as_str().to_string(),
+        });
 
     // ── Parse model ID and load credentials ───────────────────────────────────
     let (catalog_provider_id, model_name) = match parse_model_id(&model_id) {
@@ -150,15 +154,15 @@ pub async fn run_task_lifecycle(
             return_free!();
         }
     };
-    let provider_credential =
-        match load_provider_credential(&catalog_provider_id, &app_state).await {
-            Ok(cred) => cred,
-            Err(e) => {
-                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");
-                transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
-                return_free!();
-            }
-        };
+    let provider_credential = match load_provider_credential(&catalog_provider_id, &app_state).await
+    {
+        Ok(cred) => cred,
+        Err(e) => {
+            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");
+            transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+            return_free!();
+        }
+    };
 
     // ── Prepare worktree / paused-session resume context ──────────────────────
     let project_dir = PathBuf::from(&project_path);
@@ -320,8 +324,7 @@ pub async fn run_task_lifecycle(
     };
 
     // ── Run setup commands before session ─────────────────────────────────────
-    if let Ok(Some(project)) = project_repo.get(&task.project_id).await
-    {
+    if let Ok(Some(project)) = project_repo.get(&task.project_id).await {
         let setup_specs: Vec<CommandSpec> =
             serde_json::from_str(&project.setup_commands).unwrap_or_default();
         if !setup_specs.is_empty() {
@@ -545,8 +548,7 @@ pub async fn run_task_lifecycle(
             cfg
         }
         ProviderCredential::ApiKey(_key_name, api_key) => {
-            let format_family =
-                format_family_for_provider(&catalog_provider_id, &model_name);
+            let format_family = format_family_for_provider(&catalog_provider_id, &model_name);
             // Prefer the catalog's base_url (handles custom providers like
             // "synthetic"); fall back to the hardcoded defaults for well-known
             // providers that may not carry a base_url in the catalog.
@@ -971,9 +973,7 @@ pub struct ProjectLifecycleParams {
     pub event_tx: mpsc::Sender<SlotEvent>,
 }
 
-pub async fn run_project_lifecycle(
-    params: ProjectLifecycleParams,
-) -> anyhow::Result<()> {
+pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Result<()> {
     let task_id = format!("project:{}:{}", params.project_id, params.agent_type);
     let model_id = params.model_id;
     let app_state = params.app_state;
@@ -983,10 +983,7 @@ pub async fn run_project_lifecycle(
     let project_path = params.project_path;
     let project_id = params.project_id;
 
-    let agent_type: AgentType = params
-        .agent_type
-        .parse()
-        .unwrap_or(AgentType::Groomer);
+    let agent_type: AgentType = params.agent_type.parse().unwrap_or(AgentType::Groomer);
 
     macro_rules! return_free {
         () => {{
@@ -1020,12 +1017,14 @@ pub async fn run_project_lifecycle(
         return_free!();
     }
 
-    let _ = app_state.events().send(crate::events::DjinnEvent::SessionDispatched {
-        project_id: project_id.clone(),
-        task_id: task_id.clone(),
-        model_id: model_id.clone(),
-        agent_type: agent_type.as_str().to_string(),
-    });
+    let _ = app_state
+        .events()
+        .send(crate::events::DjinnEvent::SessionDispatched {
+            project_id: project_id.clone(),
+            task_id: task_id.clone(),
+            model_id: model_id.clone(),
+            agent_type: agent_type.as_str().to_string(),
+        });
 
     tracing::info!(
         task_id = %task_id,
@@ -1055,18 +1054,17 @@ pub async fn run_project_lifecycle(
             return_free!();
         }
     };
-    let provider_credential =
-        match load_provider_credential(&catalog_provider_id, &app_state).await {
-            Ok(cred) => cred,
-            Err(e) => {
-                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");
-                return_free!();
-            }
-        };
+    let provider_credential = match load_provider_credential(&catalog_provider_id, &app_state).await
+    {
+        Ok(cred) => cred,
+        Err(e) => {
+            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");
+            return_free!();
+        }
+    };
 
     // ── Build prompt ──────────────────────────────────────────────────────
-    let system_prompt =
-        crate::agent::prompts::render_project_prompt(agent_type, &project_path);
+    let system_prompt = crate::agent::prompts::render_project_prompt(agent_type, &project_path);
 
     let context_window = app_state
         .catalog()
@@ -1074,8 +1072,7 @@ pub async fn run_project_lifecycle(
         .map(|m| m.context_window)
         .unwrap_or(0);
 
-    let session_repo =
-        SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
 
     // ── Build provider ────────────────────────────────────────────────────
     let telemetry_meta = build_telemetry_meta(agent_type, &task_id);
@@ -1087,8 +1084,7 @@ pub async fn run_project_lifecycle(
             cfg
         }
         ProviderCredential::ApiKey(_key_name, api_key) => {
-            let format_family =
-                format_family_for_provider(&catalog_provider_id, &model_name);
+            let format_family = format_family_for_provider(&catalog_provider_id, &model_name);
             let base_url = app_state
                 .catalog()
                 .list_providers()

@@ -15,9 +15,10 @@ pub(super) async fn board_health_impl(
                 // Surface any project health issues from the coordinator.
                 if let Some(coordinator) = server.state.coordinator().await
                     && let Ok(status) = coordinator.get_status()
-                    && !status.unhealthy_projects.is_empty() {
-                        parsed.project_issues = Some(status.unhealthy_projects);
-                    }
+                    && !status.unhealthy_projects.is_empty()
+                {
+                    parsed.project_issues = Some(status.unhealthy_projects);
+                }
                 Json(ErrorOr::Ok(parsed))
             }
             Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),

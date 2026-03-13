@@ -167,7 +167,8 @@ impl AppState {
         }
 
         // Initialize Langfuse/OTLP telemetry if configured.
-        if let (Some(pk), Some(sk)) = (&settings.langfuse_public_key, &settings.langfuse_secret_key) {
+        if let (Some(pk), Some(sk)) = (&settings.langfuse_public_key, &settings.langfuse_secret_key)
+        {
             let endpoint = settings
                 .langfuse_endpoint
                 .as_deref()

@@ -3,10 +3,7 @@ use crate::db::EpicRepository;
 use crate::models::{TaskStatus, TransitionAction};
 use crate::test_helpers;
 
-async fn make_epic(
-    db: &Database,
-    tx: broadcast::Sender<DjinnEvent>,
-) -> crate::models::Epic {
+async fn make_epic(db: &Database, tx: broadcast::Sender<DjinnEvent>) -> crate::models::Epic {
     EpicRepository::new(db.clone(), tx)
         .create("Test Epic", "", "", "", "")
         .await
@@ -14,12 +11,22 @@ async fn make_epic(
 }
 
 async fn open_task(repo: &TaskRepository, epic_id: &str) -> Task {
-    let task = repo.create(epic_id, "T", "", "", "task", 0 , "", Some("open"))
+    let task = repo
+        .create(epic_id, "T", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
-    repo.update(&task.id, "T", "", "", 0, "", "", r#"[{"description":"default","met":false}]"#)
-        .await
-        .unwrap()
+    repo.update(
+        &task.id,
+        "T",
+        "",
+        "",
+        0,
+        "",
+        "",
+        r#"[{"description":"default","met":false}]"#,
+    )
+    .await
+    .unwrap()
 }
 
 // ── Existing tests ────────────────────────────────────────────────────────
@@ -32,7 +39,16 @@ async fn create_and_get_task() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "My Task", "", "", "task", 0, "user@example.com", Some("open"))
+        .create(
+            &epic.id,
+            "My Task",
+            "",
+            "",
+            "task",
+            0,
+            "user@example.com",
+            Some("open"),
+        )
         .await
         .unwrap();
     assert_eq!(task.title, "My Task");
@@ -53,7 +69,7 @@ async fn creating_task_reopens_closed_epic() {
 
     let repo = TaskRepository::new(db.clone(), tx);
     let _task = repo
-        .create(&epic.id, "New Task", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "New Task", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
 
@@ -70,7 +86,7 @@ async fn short_id_lookup() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "T", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
     let found = repo.get_by_short_id(&task.short_id).await.unwrap().unwrap();
@@ -85,15 +101,17 @@ async fn create_emits_event() {
     let _ = rx.recv().await.unwrap(); // consume EpicCreated
     let repo = TaskRepository::new(db, tx);
 
-    repo.create(&epic.id, "Event Task", "", "", "task", 0 , "", Some("open"))
+    repo.create(&epic.id, "Event Task", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
     match rx.recv().await.unwrap() {
-        DjinnEvent::TaskCreated { task: t, from_sync: false } => assert_eq!(t.title, "Event Task"),
+        DjinnEvent::TaskCreated {
+            task: t,
+            from_sync: false,
+        } => assert_eq!(t.title, "Event Task"),
         _ => panic!("expected TaskCreated"),
     }
 }
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_emits_event() {
@@ -104,7 +122,7 @@ async fn update_emits_event() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "Old", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "Old", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap();
@@ -116,7 +134,10 @@ async fn update_emits_event() {
     assert_eq!(updated.title, "New");
 
     match rx.recv().await.unwrap() {
-        DjinnEvent::TaskUpdated { task: t, from_sync: false } => {
+        DjinnEvent::TaskUpdated {
+            task: t,
+            from_sync: false,
+        } => {
             assert_eq!(t.id, task.id);
             assert_eq!(t.title, "New");
         }
@@ -137,9 +158,18 @@ async fn transition_emits_event_start() {
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap();
-    repo.update(&task.id, "T", "", "", 0, "", "", r#"[{"description":"default","met":false}]"#)
-        .await
-        .unwrap();
+    repo.update(
+        &task.id,
+        "T",
+        "",
+        "",
+        0,
+        "",
+        "",
+        r#"[{"description":"default","met":false}]"#,
+    )
+    .await
+    .unwrap();
     let _ = rx.recv().await.unwrap(); // drain TaskUpdated event from update
 
     repo.transition(&task.id, TransitionAction::Start, "", "system", None, None)
@@ -147,7 +177,10 @@ async fn transition_emits_event_start() {
         .unwrap();
 
     match rx.recv().await.unwrap() {
-        DjinnEvent::TaskUpdated { task: t, from_sync: false } => {
+        DjinnEvent::TaskUpdated {
+            task: t,
+            from_sync: false,
+        } => {
             assert_eq!(t.id, task.id);
             assert_eq!(t.status, "in_progress");
         }
@@ -164,7 +197,7 @@ async fn transition_emits_event_close_with_closed_at() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "T", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap();
@@ -174,7 +207,10 @@ async fn transition_emits_event_close_with_closed_at() {
         .unwrap();
 
     match rx.recv().await.unwrap() {
-        DjinnEvent::TaskUpdated { task: t, from_sync: false } => {
+        DjinnEvent::TaskUpdated {
+            task: t,
+            from_sync: false,
+        } => {
             assert_eq!(t.id, task.id);
             assert_eq!(t.status, "closed");
             assert!(t.closed_at.is_some());
@@ -192,7 +228,7 @@ async fn transition_emits_event_reopen() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "T", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap();
@@ -208,11 +244,14 @@ async fn transition_emits_event_reopen() {
         Some("reopening after verification"),
         None,
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
 
     match rx.recv().await.unwrap() {
-        DjinnEvent::TaskUpdated { task: t, from_sync: false } => {
+        DjinnEvent::TaskUpdated {
+            task: t,
+            from_sync: false,
+        } => {
             assert_eq!(t.id, task.id);
             assert_eq!(t.status, "open");
             assert!(t.closed_at.is_none());
@@ -228,7 +267,7 @@ async fn set_status_transitions() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "T", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
     let updated = repo.set_status(&task.id, "in_progress").await.unwrap();
@@ -247,7 +286,7 @@ async fn reopen_increments_counter() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "T", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
     repo.set_status(&task.id, "closed").await.unwrap();
@@ -263,11 +302,11 @@ async fn blocker_management() {
     let repo = TaskRepository::new(db, tx);
 
     let t1 = repo
-        .create(&epic.id, "T1", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "T1", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
     let t2 = repo
-        .create(&epic.id, "T2", "", "", "task", 1 , "", Some("open"))
+        .create(&epic.id, "T2", "", "", "task", 1, "", Some("open"))
         .await
         .unwrap();
 
@@ -300,15 +339,15 @@ async fn blocker_cycle_detection() {
     let repo = TaskRepository::new(db, tx);
 
     let t1 = repo
-        .create(&epic.id, "T1", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "T1", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
     let t2 = repo
-        .create(&epic.id, "T2", "", "", "task", 1 , "", Some("open"))
+        .create(&epic.id, "T2", "", "", "task", 1, "", Some("open"))
         .await
         .unwrap();
     let t3 = repo
-        .create(&epic.id, "T3", "", "", "task", 2 , "", Some("open"))
+        .create(&epic.id, "T3", "", "", "task", 2, "", Some("open"))
         .await
         .unwrap();
 
@@ -330,15 +369,19 @@ async fn start_blocked_by_unresolved_blocker() {
 
     let ac = r#"[{"description":"default","met":false}]"#;
     let t1 = repo
-        .create(&epic.id, "T1", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "T1", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
-    repo.update(&t1.id, "T1", "", "", 0, "", "", ac).await.unwrap();
+    repo.update(&t1.id, "T1", "", "", 0, "", "", ac)
+        .await
+        .unwrap();
     let t2 = repo
-        .create(&epic.id, "T2", "", "", "task", 1 , "", Some("open"))
+        .create(&epic.id, "T2", "", "", "task", 1, "", Some("open"))
         .await
         .unwrap();
-    repo.update(&t2.id, "T2", "", "", 1, "", "", ac).await.unwrap();
+    repo.update(&t2.id, "T2", "", "", 1, "", "", ac)
+        .await
+        .unwrap();
 
     // t2 blocked by t1 (which is open = unresolved)
     repo.add_blocker(&t2.id, &t1.id).await.unwrap();
@@ -362,11 +405,11 @@ async fn list_ready_excludes_blocked_tasks() {
     let repo = TaskRepository::new(db, tx);
 
     let t1 = repo
-        .create(&epic.id, "T1", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "T1", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
     let t2 = repo
-        .create(&epic.id, "T2", "", "", "task", 1 , "", Some("open"))
+        .create(&epic.id, "T2", "", "", "task", 1, "", Some("open"))
         .await
         .unwrap();
 
@@ -399,7 +442,7 @@ async fn activity_log() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "T", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "T", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
     repo.log_activity(
@@ -425,10 +468,10 @@ async fn list_by_epic() {
     let epic = make_epic(&db, tx.clone()).await;
     let repo = TaskRepository::new(db, tx);
 
-    repo.create(&epic.id, "A", "", "", "task", 1 , "", Some("open"))
+    repo.create(&epic.id, "A", "", "", "task", 1, "", Some("open"))
         .await
         .unwrap();
-    repo.create(&epic.id, "B", "", "", "feature", 0 , "", Some("open"))
+    repo.create(&epic.id, "B", "", "", "feature", 0, "", Some("open"))
         .await
         .unwrap();
 
@@ -447,7 +490,7 @@ async fn delete_task_emits_event() {
     let repo = TaskRepository::new(db, tx);
 
     let task = repo
-        .create(&epic.id, "Del", "", "", "task", 0 , "", Some("open"))
+        .create(&epic.id, "Del", "", "", "task", 0, "", Some("open"))
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap();
@@ -779,7 +822,9 @@ async fn start_blocked_when_acceptance_criteria_empty() {
         .transition(&task.id, TransitionAction::Start, "", "system", None, None)
         .await
         .unwrap_err();
-    assert!(matches!(err, Error::InvalidTransition(msg) if msg == "task has no acceptance criteria"));
+    assert!(
+        matches!(err, Error::InvalidTransition(msg) if msg == "task has no acceptance criteria")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1102,7 +1147,13 @@ async fn reconcile_heals_stale_tasks() {
 
 // ── SYNC-11: Terminal state protection tests ─────────────────────────────
 
-fn make_peer_task(id: &str, project_id: &str, epic_id: &str, status: &str, updated_at: &str) -> Task {
+fn make_peer_task(
+    id: &str,
+    project_id: &str,
+    epic_id: &str,
+    status: &str,
+    updated_at: &str,
+) -> Task {
     Task {
         id: id.to_string(),
         project_id: project_id.to_string(),
@@ -1122,8 +1173,16 @@ fn make_peer_task(id: &str, project_id: &str, epic_id: &str, status: &str, updat
         verification_failure_count: 0,
         created_at: "2026-01-01T00:00:00.000Z".to_string(),
         updated_at: updated_at.to_string(),
-        closed_at: if status == "closed" { Some(updated_at.to_string()) } else { None },
-        close_reason: if status == "closed" { Some("completed".to_string()) } else { None },
+        closed_at: if status == "closed" {
+            Some(updated_at.to_string())
+        } else {
+            None
+        },
+        close_reason: if status == "closed" {
+            Some("completed".to_string())
+        } else {
+            None
+        },
         merge_commit_sha: None,
         memory_refs: "[]".to_string(),
         unresolved_blocker_count: 0,
@@ -1177,7 +1236,10 @@ async fn upsert_peer_closed_updated_by_peer_close() {
     );
     peer.title = "Updated Title From Peer".to_string();
     let changed = repo.upsert_peer(&peer).await.unwrap();
-    assert!(changed, "closed→closed update with newer timestamp should succeed");
+    assert!(
+        changed,
+        "closed→closed update with newer timestamp should succeed"
+    );
 
     let local = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(local.title, "Updated Title From Peer");
@@ -1254,13 +1316,11 @@ async fn list_for_export_excludes_old_closed() {
     repo.set_status(&task.id, "closed").await.unwrap();
 
     // Backdate closed_at to 2 hours ago.
-    sqlx::query(
-        "UPDATE tasks SET closed_at = datetime('now', '-2 hours') WHERE id = ?1",
-    )
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    sqlx::query("UPDATE tasks SET closed_at = datetime('now', '-2 hours') WHERE id = ?1")
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
 
     let exported = repo.list_for_export(None).await.unwrap();
     assert!(
@@ -1286,7 +1346,10 @@ async fn increment_continuation_count_emits_task_updated_event() {
     repo.increment_continuation_count(&task.id).await.unwrap();
 
     match rx.recv().await.unwrap() {
-        DjinnEvent::TaskUpdated { task: t, from_sync: false } => {
+        DjinnEvent::TaskUpdated {
+            task: t,
+            from_sync: false,
+        } => {
             assert_eq!(t.id, task.id);
             assert_eq!(t.continuation_count, task.continuation_count + 1);
         }

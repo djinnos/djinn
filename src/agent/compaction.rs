@@ -8,9 +8,9 @@
 
 use futures::StreamExt;
 
+use crate::agent::AgentType;
 use crate::agent::message::{Conversation, Message, Role};
 use crate::agent::provider::{LlmProvider, StreamEvent};
-use crate::agent::AgentType;
 use crate::db::SessionMessageRepository;
 use crate::server::AppState;
 
@@ -37,8 +37,10 @@ fn compaction_prompt(ctx: CompactionContext) -> &'static str {
     match ctx {
         CompactionContext::PreResume(AgentType::Worker) => PRE_RESUME_WORKER_PROMPT,
         CompactionContext::MidSession(AgentType::Worker) => MID_SESSION_WORKER_PROMPT,
-        CompactionContext::MidSession(AgentType::TaskReviewer) | CompactionContext::PreResume(AgentType::TaskReviewer) => REVIEWER_PROMPT,
-        CompactionContext::MidSession(AgentType::ConflictResolver) | CompactionContext::PreResume(AgentType::ConflictResolver) => CONFLICT_RESOLVER_PROMPT,
+        CompactionContext::MidSession(AgentType::TaskReviewer)
+        | CompactionContext::PreResume(AgentType::TaskReviewer) => REVIEWER_PROMPT,
+        CompactionContext::MidSession(AgentType::ConflictResolver)
+        | CompactionContext::PreResume(AgentType::ConflictResolver) => CONFLICT_RESOLVER_PROMPT,
         _ => GENERIC_PROMPT,
     }
 }
@@ -57,7 +59,8 @@ fn summariser_system(ctx: CompactionContext) -> &'static str {
              Produce a dense, faithful summary that preserves all implementation context \
              so the agent can continue working without re-reading files."
         }
-        CompactionContext::MidSession(AgentType::TaskReviewer) | CompactionContext::PreResume(AgentType::TaskReviewer) => {
+        CompactionContext::MidSession(AgentType::TaskReviewer)
+        | CompactionContext::PreResume(AgentType::TaskReviewer) => {
             "You are summarising a code review session. Produce a dense, faithful summary \
              that preserves the review findings, issues identified, and assessment progress."
         }
@@ -612,8 +615,7 @@ pub(crate) fn deterministic_compact(messages: &[Message], max_chars: usize) -> V
                 let partner = sorted[0];
                 let is_pair = (rest[oldest].role == Role::Assistant
                     && rest[partner].role == Role::User)
-                    || (rest[oldest].role == Role::User
-                        && rest[partner].role == Role::Assistant);
+                    || (rest[oldest].role == Role::User && rest[partner].role == Role::Assistant);
                 if is_pair {
                     accumulated =
                         accumulated.saturating_sub(estimate_message_chars(&rest[partner]));
@@ -782,7 +784,10 @@ mod tests {
 
         // System prompt is always first
         assert_eq!(result[0].role, Role::System);
-        assert_eq!(result[0].text_content(), "System prompt that must be preserved.");
+        assert_eq!(
+            result[0].text_content(),
+            "System prompt that must be preserved."
+        );
 
         // A compaction notice was inserted
         assert!(result[1].text_content().contains("Context compacted"));
@@ -868,10 +873,7 @@ mod tests {
                     .iter()
                     .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
             {
-                assert!(
-                    i > 0,
-                    "ToolResult at index 0 has no preceding ToolUse"
-                );
+                assert!(i > 0, "ToolResult at index 0 has no preceding ToolUse");
                 let prev = &result[i - 1];
                 assert!(
                     prev.role == Role::Assistant
@@ -1043,13 +1045,11 @@ mod tests {
         // from the pre-compaction turn onto the compacted conversation.
         compacted.push(Message {
             role: Role::User,
-            content: vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "call_y2pswqYWoPzF2C3mROIIBbIZ".into(),
-                    content: vec![ContentBlock::text("bash output")],
-                    is_error: false,
-                },
-            ],
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_y2pswqYWoPzF2C3mROIIBbIZ".into(),
+                content: vec![ContentBlock::text("bash output")],
+                is_error: false,
+            }],
             metadata: None,
         });
 

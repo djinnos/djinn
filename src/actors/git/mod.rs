@@ -197,8 +197,8 @@ mod handle;
 mod merge_ops;
 mod worktree;
 
-pub use handle::{get_or_spawn, GitActorHandle};
 use actor::GitActor;
+pub use handle::{GitActorHandle, get_or_spawn};
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 

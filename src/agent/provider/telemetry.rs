@@ -65,7 +65,10 @@ pub fn init(config: &LangfuseConfig) -> anyhow::Result<bool> {
 
     let exporter = SpanExporter::builder()
         .with_http()
-        .with_endpoint(format!("{}/v1/traces", config.endpoint.trim_end_matches('/')))
+        .with_endpoint(format!(
+            "{}/v1/traces",
+            config.endpoint.trim_end_matches('/')
+        ))
         .with_headers(headers)
         .build()?;
 
@@ -237,9 +240,7 @@ impl SessionSpan {
 
     /// Mark the session as failed and end the span.
     pub fn end_error(self, error: &str) {
-        self.cx
-            .span()
-            .set_status(Status::error(error.to_string()));
+        self.cx.span().set_status(Status::error(error.to_string()));
         self.cx.span().end();
     }
 }
@@ -311,10 +312,9 @@ impl LlmSpan {
     /// Record tool calls made in this generation turn.
     pub fn record_tool_calls(&self, tool_names: &[String]) {
         if !tool_names.is_empty() {
-            self.cx.span().set_attribute(KeyValue::new(
-                "gen_ai.tool_calls",
-                tool_names.join(", "),
-            ));
+            self.cx
+                .span()
+                .set_attribute(KeyValue::new("gen_ai.tool_calls", tool_names.join(", ")));
         }
     }
 
@@ -326,9 +326,7 @@ impl LlmSpan {
 
     /// Mark the span as failed with an error message and end it.
     pub fn end_error(self, error: &str) {
-        self.cx
-            .span()
-            .set_status(Status::error(error.to_string()));
+        self.cx.span().set_status(Status::error(error.to_string()));
         self.cx.span().end();
     }
 }
@@ -389,9 +387,7 @@ impl ToolSpan {
 
     /// End the tool span as failed.
     pub fn end_error(self, error: &str) {
-        self.cx
-            .span()
-            .set_status(Status::error(error.to_string()));
+        self.cx.span().set_status(Status::error(error.to_string()));
         self.cx.span().end();
     }
 }

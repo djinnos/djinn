@@ -8,12 +8,12 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
-use crate::db::connection::Database;
 use crate::db::EpicRepository;
 use crate::db::NoteRepository;
 use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
 use crate::db::TaskRepository;
+use crate::db::connection::Database;
 use crate::events::DjinnEvent;
 use crate::models::Epic;
 use crate::models::Note;
@@ -158,7 +158,9 @@ fn parse_sse_json_events(body: &str) -> Vec<Value> {
 
         if line.is_empty() && !data_lines.is_empty() {
             let payload = data_lines.join("\n").trim().to_string();
-            if !payload.is_empty() && let Ok(value) = serde_json::from_str::<Value>(&payload) {
+            if !payload.is_empty()
+                && let Ok(value) = serde_json::from_str::<Value>(&payload)
+            {
                 events.push(value);
             }
             data_lines.clear();
@@ -167,7 +169,9 @@ fn parse_sse_json_events(body: &str) -> Vec<Value> {
 
     if !data_lines.is_empty() {
         let payload = data_lines.join("\n").trim().to_string();
-        if !payload.is_empty() && let Ok(value) = serde_json::from_str::<Value>(&payload) {
+        if !payload.is_empty()
+            && let Ok(value) = serde_json::from_str::<Value>(&payload)
+        {
             events.push(value);
         }
     }
@@ -175,7 +179,13 @@ fn parse_sse_json_events(body: &str) -> Vec<Value> {
     events
 }
 
-async fn mcp_jsonrpc(app: &axum::Router, session_id: &str, id: i64, method: &str, params: Value) -> Value {
+async fn mcp_jsonrpc(
+    app: &axum::Router,
+    session_id: &str,
+    id: i64,
+    method: &str,
+    params: Value,
+) -> Value {
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -228,7 +238,12 @@ pub fn extract_tool_result_payload(result: &Value) -> Value {
     result.clone()
 }
 
-pub async fn mcp_call_tool(app: &axum::Router, session_id: &str, tool_name: &str, params: Value) -> Value {
+pub async fn mcp_call_tool(
+    app: &axum::Router,
+    session_id: &str,
+    tool_name: &str,
+    params: Value,
+) -> Value {
     let event = mcp_jsonrpc(
         app,
         session_id,

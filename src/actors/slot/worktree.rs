@@ -68,11 +68,7 @@ async fn ensure_target_branch_ready(
 
     // No commits at all — bootstrap the repo.
     let current = git
-        .run_command(vec![
-            "symbolic-ref".into(),
-            "--short".into(),
-            "HEAD".into(),
-        ])
+        .run_command(vec!["symbolic-ref".into(), "--short".into(), "HEAD".into()])
         .await
         .map(|o| o.stdout.trim().to_string())
         .unwrap_or_default();

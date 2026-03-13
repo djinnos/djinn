@@ -128,11 +128,10 @@ impl CredentialRepository {
             return Ok(0);
         }
 
-        let result =
-            sqlx::query("DELETE FROM credentials WHERE provider_id = ?1")
-                .bind(provider_id)
-                .execute(self.db.pool())
-                .await?;
+        let result = sqlx::query("DELETE FROM credentials WHERE provider_id = ?1")
+            .bind(provider_id)
+            .execute(self.db.pool())
+            .await?;
 
         for id in ids {
             let _ = self.events.send(DjinnEvent::CredentialDeleted { id });

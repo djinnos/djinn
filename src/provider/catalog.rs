@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::models::{Model, Pricing, Provider};
 use super::builtin::BuiltinProvider;
+use crate::models::{Model, Pricing, Provider};
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -178,12 +178,10 @@ impl CatalogService {
     /// Returns `None` if not found or if the ID is not in the expected format.
     pub fn find_model(&self, full_model_id: &str) -> Option<Model> {
         let (provider_id, model_id) = full_model_id.split_once('/')?;
-        self.list_models(provider_id)
-            .into_iter()
-            .find(|m| {
-                let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
-                bare == model_id || m.id == model_id || m.id == full_model_id
-            })
+        self.list_models(provider_id).into_iter().find(|m| {
+            let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
+            bare == model_id || m.id == model_id || m.id == full_model_id
+        })
     }
 
     // ── Write accessors ───────────────────────────────────────────────────────
@@ -268,11 +266,15 @@ impl CatalogService {
         use super::builtin;
 
         // 1. API-key credentials from the vault.
-        let mut connected: HashSet<String> =
-            vault_credentials.iter().map(|c| c.provider_id.clone()).collect();
+        let mut connected: HashSet<String> = vault_credentials
+            .iter()
+            .map(|c| c.provider_id.clone())
+            .collect();
 
-        let credential_key_names: HashSet<String> =
-            vault_credentials.iter().map(|c| c.key_name.clone()).collect();
+        let credential_key_names: HashSet<String> = vault_credentials
+            .iter()
+            .map(|c| c.key_name.clone())
+            .collect();
 
         // 2. OAuth-connected providers (own keys + merged children).
         for provider in self.list_providers() {

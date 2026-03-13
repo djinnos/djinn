@@ -157,7 +157,9 @@ impl NoteRepository {
             if depth == 1 {
                 sql.push_str(&format!(" AND folder = ?{idx}"));
             } else {
-                sql.push_str(&format!(" AND (folder = ?{idx} OR folder LIKE ?{idx} || '/%')"));
+                sql.push_str(&format!(
+                    " AND (folder = ?{idx} OR folder LIKE ?{idx} || '/%')"
+                ));
             }
             binds.push(f.to_string());
         }

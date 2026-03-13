@@ -2,8 +2,8 @@ use tokio::sync::broadcast;
 
 use sqlx::SqlitePool;
 
-use crate::db::connection::Database;
 use crate::db::EpicRepository;
+use crate::db::connection::Database;
 use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
 use crate::models::{ActivityEntry, Task, TaskStatus, TransitionAction, compute_transition};
@@ -13,6 +13,8 @@ mod blockers;
 mod queries;
 mod reads;
 mod status;
+pub mod transitions;
+mod verification;
 mod writes;
 
 // ── Query / result types ──────────────────────────────────────────────────────

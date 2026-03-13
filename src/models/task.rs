@@ -446,9 +446,7 @@ pub fn compute_transition(
                 from,
                 TaskStatus::Open | TaskStatus::InTaskReview | TaskStatus::Verifying
             ) {
-                return bad(
-                    "escalate is only valid from open, in_task_review, or verifying",
-                );
+                return bad("escalate is only valid from open, in_task_review, or verifying");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::NeedsPmIntervention),
@@ -555,37 +553,61 @@ mod tests {
         match (action, from) {
             (TransitionAction::Accept, TaskStatus::Backlog) => Some(TaskStatus::Open),
             (TransitionAction::Start, TaskStatus::Open) => Some(TaskStatus::InProgress),
-            (TransitionAction::SubmitVerification, TaskStatus::InProgress) => Some(TaskStatus::Verifying),
-            (TransitionAction::VerificationPass, TaskStatus::Verifying) => Some(TaskStatus::NeedsTaskReview),
-            (TransitionAction::VerificationFail, TaskStatus::Verifying) => Some(TaskStatus::Open),
-            (TransitionAction::ReleaseVerification, TaskStatus::Verifying) => Some(TaskStatus::Open),
-            (TransitionAction::SubmitTaskReview, TaskStatus::InProgress | TaskStatus::Verifying) => {
+            (TransitionAction::SubmitVerification, TaskStatus::InProgress) => {
+                Some(TaskStatus::Verifying)
+            }
+            (TransitionAction::VerificationPass, TaskStatus::Verifying) => {
                 Some(TaskStatus::NeedsTaskReview)
             }
-            (TransitionAction::TaskReviewStart, TaskStatus::NeedsTaskReview) => Some(TaskStatus::InTaskReview),
-            (TransitionAction::TaskReviewReject, TaskStatus::InTaskReview) => Some(TaskStatus::Open),
-            (TransitionAction::TaskReviewRejectStale, TaskStatus::InTaskReview) => Some(TaskStatus::Open),
-            (TransitionAction::TaskReviewRejectConflict, TaskStatus::InTaskReview) => Some(TaskStatus::Open),
-            (TransitionAction::TaskReviewApprove, TaskStatus::InTaskReview) => Some(TaskStatus::Closed),
+            (TransitionAction::VerificationFail, TaskStatus::Verifying) => Some(TaskStatus::Open),
+            (TransitionAction::ReleaseVerification, TaskStatus::Verifying) => {
+                Some(TaskStatus::Open)
+            }
+            (
+                TransitionAction::SubmitTaskReview,
+                TaskStatus::InProgress | TaskStatus::Verifying,
+            ) => Some(TaskStatus::NeedsTaskReview),
+            (TransitionAction::TaskReviewStart, TaskStatus::NeedsTaskReview) => {
+                Some(TaskStatus::InTaskReview)
+            }
+            (TransitionAction::TaskReviewReject, TaskStatus::InTaskReview) => {
+                Some(TaskStatus::Open)
+            }
+            (TransitionAction::TaskReviewRejectStale, TaskStatus::InTaskReview) => {
+                Some(TaskStatus::Open)
+            }
+            (TransitionAction::TaskReviewRejectConflict, TaskStatus::InTaskReview) => {
+                Some(TaskStatus::Open)
+            }
+            (TransitionAction::TaskReviewApprove, TaskStatus::InTaskReview) => {
+                Some(TaskStatus::Closed)
+            }
             (TransitionAction::Close, s) if *s != TaskStatus::Closed => Some(TaskStatus::Closed),
             (TransitionAction::Reopen, TaskStatus::Closed) => Some(TaskStatus::Open),
             (TransitionAction::Release, TaskStatus::InProgress) => Some(TaskStatus::Open),
             (TransitionAction::ReleaseTaskReview, TaskStatus::InTaskReview) => {
                 Some(TaskStatus::NeedsTaskReview)
             }
-            (TransitionAction::ForceClose, s) if *s != TaskStatus::Closed => Some(TaskStatus::Closed),
-            (TransitionAction::Escalate, TaskStatus::Open | TaskStatus::InTaskReview | TaskStatus::Verifying) => {
-                Some(TaskStatus::NeedsPmIntervention)
+            (TransitionAction::ForceClose, s) if *s != TaskStatus::Closed => {
+                Some(TaskStatus::Closed)
             }
+            (
+                TransitionAction::Escalate,
+                TaskStatus::Open | TaskStatus::InTaskReview | TaskStatus::Verifying,
+            ) => Some(TaskStatus::NeedsPmIntervention),
             (TransitionAction::PmInterventionStart, TaskStatus::NeedsPmIntervention) => {
                 Some(TaskStatus::InPmIntervention)
             }
             (TransitionAction::PmInterventionRelease, TaskStatus::InPmIntervention) => {
                 Some(TaskStatus::NeedsPmIntervention)
             }
-            (TransitionAction::PmInterventionComplete, TaskStatus::InPmIntervention) => Some(TaskStatus::Open),
+            (TransitionAction::PmInterventionComplete, TaskStatus::InPmIntervention) => {
+                Some(TaskStatus::Open)
+            }
             (TransitionAction::PmApprove, TaskStatus::InPmIntervention) => Some(TaskStatus::Closed),
-            (TransitionAction::PmApproveConflict, TaskStatus::InPmIntervention) => Some(TaskStatus::Open),
+            (TransitionAction::PmApproveConflict, TaskStatus::InPmIntervention) => {
+                Some(TaskStatus::Open)
+            }
             _ => None,
         }
     }
@@ -600,11 +622,24 @@ mod tests {
                 let res = compute_transition(&action, from, None);
                 match expected_status(&action, from) {
                     Some(to) => {
-                        let apply = res.unwrap_or_else(|_| panic!("expected valid {:?} from {:?}", action, from));
-                        assert_eq!(apply.to_status, Some(to), "wrong to_status for {:?} from {:?}", action, from);
+                        let apply = res.unwrap_or_else(|_| {
+                            panic!("expected valid {:?} from {:?}", action, from)
+                        });
+                        assert_eq!(
+                            apply.to_status,
+                            Some(to),
+                            "wrong to_status for {:?} from {:?}",
+                            action,
+                            from
+                        );
                     }
                     None => {
-                        assert!(res.is_err(), "expected invalid {:?} from {:?}", action, from);
+                        assert!(
+                            res.is_err(),
+                            "expected invalid {:?} from {:?}",
+                            action,
+                            from
+                        );
                     }
                 }
             }
@@ -613,7 +648,9 @@ mod tests {
 
     #[test]
     fn user_override_requires_target_and_applies_target() {
-        assert!(compute_transition(&TransitionAction::UserOverride, &TaskStatus::Open, None).is_err());
+        assert!(
+            compute_transition(&TransitionAction::UserOverride, &TaskStatus::Open, None).is_err()
+        );
 
         let closed = compute_transition(
             &TransitionAction::UserOverride,
@@ -660,12 +697,8 @@ mod tests {
         let mut continuation_count = 0;
 
         for _cycle in 1..=3 {
-            let stale = compute_transition(
-                &TransitionAction::TaskReviewRejectStale,
-                &status,
-                None,
-            )
-            .expect("stale reject should be valid from in_task_review");
+            let stale = compute_transition(&TransitionAction::TaskReviewRejectStale, &status, None)
+                .expect("stale reject should be valid from in_task_review");
             assert_eq!(stale.to_status, Some(TaskStatus::Open));
             assert!(stale.increment_continuation);
             continuation_count += 1;
@@ -689,10 +722,13 @@ mod tests {
                 assert_eq!(submit.to_status, Some(TaskStatus::NeedsTaskReview));
                 status = submit.to_status.expect("submit should set status");
 
-                let review_start = compute_transition(&TransitionAction::TaskReviewStart, &status, None)
-                    .expect("needs_task_review should enter in_task_review");
+                let review_start =
+                    compute_transition(&TransitionAction::TaskReviewStart, &status, None)
+                        .expect("needs_task_review should enter in_task_review");
                 assert_eq!(review_start.to_status, Some(TaskStatus::InTaskReview));
-                status = review_start.to_status.expect("task_review_start should set status");
+                status = review_start
+                    .to_status
+                    .expect("task_review_start should set status");
             }
         }
     }

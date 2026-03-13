@@ -333,7 +333,9 @@ impl CoordinatorActor {
                         crate::models::TransitionAction::ReleaseVerification,
                         "coordinator",
                         "system",
-                        Some("orphaned verifying task — verification pipeline lost (server restart)"),
+                        Some(
+                            "orphaned verifying task — verification pipeline lost (server restart)",
+                        ),
                         None,
                     )
                     .await
@@ -366,7 +368,6 @@ impl CoordinatorActor {
     }
 }
 
-
 impl CoordinatorActor {
     pub(super) fn mark_backlog_event(&mut self, project_id: &str) {
         self.backlog_debounce.insert(
@@ -378,7 +379,10 @@ impl CoordinatorActor {
     pub(super) async fn backlog_count(&self, project_id: &str) -> usize {
         let repo = self.task_repo();
         match repo.list_by_status("backlog").await {
-            Ok(tasks) => tasks.into_iter().filter(|t| t.project_id == project_id).count(),
+            Ok(tasks) => tasks
+                .into_iter()
+                .filter(|t| t.project_id == project_id)
+                .count(),
             Err(e) => {
                 tracing::warn!(project_id = %project_id, error = %e, "CoordinatorActor: failed to count backlog tasks");
                 0

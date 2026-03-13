@@ -1,26 +1,32 @@
 use std::convert::Infallible;
 
+use axum::Json;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::Json;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::actors::slot::{
-    auth_method_for_provider, capabilities_for_provider, default_base_url,
-    format_family_for_provider, load_provider_credential, parse_model_id, ProviderCredential,
+    ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,
+    format_family_for_provider, load_provider_credential, parse_model_id,
 };
 use crate::agent::message::{ContentBlock, Conversation, Message, Role};
-use crate::agent::provider::{create_provider, StreamEvent};
-use crate::db::{EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, TaskRepository};
+use crate::agent::provider::{StreamEvent, create_provider};
+use crate::db::{
+    EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, TaskRepository,
+};
 use crate::mcp::server::DjinnMcpServer;
 use crate::server::AppState;
 
 const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../agent/prompts/chat.md");
 const MAX_TOOL_ITERATIONS: usize = 20;
 
-fn compose_system_prompt(base_prompt: &str, project_context: Option<&str>, client_system: Option<&str>) -> String {
+fn compose_system_prompt(
+    base_prompt: &str,
+    project_context: Option<&str>,
+    client_system: Option<&str>,
+) -> String {
     let mut system_prompt = base_prompt.trim().to_string();
     if let Some(project_context) = project_context.filter(|s| !s.trim().is_empty()) {
         system_prompt = format!("{system_prompt}\n\n{project_context}");
@@ -106,7 +112,11 @@ async fn build_project_context_block(state: &AppState, project_ref: &str) -> Opt
         })
         .await
         .ok()
-        .and_then(|v| v.get("total_count").and_then(|n| n.as_i64()).map(|n| n.to_string()))
+        .and_then(|v| {
+            v.get("total_count")
+                .and_then(|n| n.as_i64())
+                .map(|n| n.to_string())
+        })
         .unwrap_or_else(|| "unknown".to_string());
 
     let open_tasks = task_repo
@@ -122,7 +132,11 @@ async fn build_project_context_block(state: &AppState, project_ref: &str) -> Opt
         })
         .await
         .ok()
-        .and_then(|v| v.get("total_count").and_then(|n| n.as_i64()).map(|n| n.to_string()))
+        .and_then(|v| {
+            v.get("total_count")
+                .and_then(|n| n.as_i64())
+                .map(|n| n.to_string())
+        })
         .unwrap_or_else(|| "unknown".to_string());
 
     let brief = note_repo
@@ -140,26 +154,42 @@ async fn build_project_context_block(state: &AppState, project_ref: &str) -> Opt
     ))
 }
 fn sse_json_event<T: Serialize>(event: &str, payload: &T) -> Event {
-    Event::default().event(event).json_data(payload).unwrap_or_else(|_| {
-        Event::default()
-            .event("error")
-            .data("{\"message\":\"serialization error\"}")
-    })
+    Event::default()
+        .event(event)
+        .json_data(payload)
+        .unwrap_or_else(|_| {
+            Event::default()
+                .event("error")
+                .data("{\"message\":\"serialization error\"}")
+        })
 }
 
 pub(super) async fn completions_handler(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
-) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (axum::http::StatusCode, String)> {
+) -> Result<
+    Sse<impl futures::Stream<Item = Result<Event, Infallible>>>,
+    (axum::http::StatusCode, String),
+> {
     if req.model.trim().is_empty() {
-        return Err((axum::http::StatusCode::BAD_REQUEST, "model is required".to_string()));
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "model is required".to_string(),
+        ));
     }
     if req.messages.is_empty() {
-        return Err((axum::http::StatusCode::BAD_REQUEST, "messages must not be empty".to_string()));
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "messages must not be empty".to_string(),
+        ));
     }
 
-    let (provider_id, model_name) = parse_model_id(&req.model)
-        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, format!("invalid model: {e}")))?;
+    let (provider_id, model_name) = parse_model_id(&req.model).map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("invalid model: {e}"),
+        )
+    })?;
 
     let provider_known = state
         .catalog()
@@ -248,7 +278,12 @@ pub(super) async fn completions_handler(
             "user" => Role::User,
             "assistant" => Role::Assistant,
             "tool" => Role::User,
-            _ => return Err((axum::http::StatusCode::BAD_REQUEST, format!("unsupported role: {}", m.role))),
+            _ => {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("unsupported role: {}", m.role),
+                ));
+            }
         };
         conversation.push(Message {
             role,
@@ -265,12 +300,17 @@ pub(super) async fn completions_handler(
         let mut loop_count = 0usize;
         loop {
             if loop_count >= MAX_TOOL_ITERATIONS {
-                tracing::warn!(max_iterations=MAX_TOOL_ITERATIONS, "chat tool loop cap reached");
+                tracing::warn!(
+                    max_iterations = MAX_TOOL_ITERATIONS,
+                    "chat tool loop cap reached"
+                );
                 let _ = tx
                     .send(sse_json_event(
                         "error",
                         &ErrorPayload {
-                            message: format!("tool loop iteration cap reached ({MAX_TOOL_ITERATIONS})"),
+                            message: format!(
+                                "tool loop iteration cap reached ({MAX_TOOL_ITERATIONS})"
+                            ),
                         },
                     ))
                     .await;
@@ -301,9 +341,13 @@ pub(super) async fn completions_handler(
                 match item {
                     Ok(StreamEvent::Delta(ContentBlock::Text { text })) => {
                         turn_text.push_str(&text);
-                        let _ = tx.send(sse_json_event("delta", &DeltaPayload { text })).await;
+                        let _ = tx
+                            .send(sse_json_event("delta", &DeltaPayload { text }))
+                            .await;
                     }
-                    Ok(StreamEvent::Delta(tool @ ContentBlock::ToolUse { .. })) => tool_calls.push(tool),
+                    Ok(StreamEvent::Delta(tool @ ContentBlock::ToolUse { .. })) => {
+                        tool_calls.push(tool)
+                    }
                     Ok(StreamEvent::Done) => break,
                     Ok(_) => {}
                     Err(e) => {
@@ -342,7 +386,9 @@ pub(super) async fn completions_handler(
             loop_count += 1;
             let mut tool_results = Vec::new();
             for tool_call in tool_calls {
-                let ContentBlock::ToolUse { id, name, input } = tool_call else { continue; };
+                let ContentBlock::ToolUse { id, name, input } = tool_call else {
+                    continue;
+                };
                 let _ = tx
                     .send(sse_json_event(
                         "tool_call",
@@ -353,7 +399,8 @@ pub(super) async fn completions_handler(
                     ))
                     .await;
 
-                let args = serde_json::Value::Object(input.as_object().cloned().unwrap_or_default());
+                let args =
+                    serde_json::Value::Object(input.as_object().cloned().unwrap_or_default());
                 match mcp.dispatch_tool(&name, args).await {
                     Ok(value) => {
                         tool_results.push(ContentBlock::ToolResult {
@@ -407,7 +454,7 @@ pub(super) async fn completions_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_system_prompt, DJINN_CHAT_SYSTEM_PROMPT};
+    use super::{DJINN_CHAT_SYSTEM_PROMPT, compose_system_prompt};
     use crate::mcp::server::DjinnMcpServer;
     use crate::server::AppState;
     use crate::test_helpers;
@@ -423,37 +470,60 @@ mod tests {
     async fn dispatch_tool_routes_task_family() {
         let mcp = test_mcp();
         let result = mcp.dispatch_tool("task_list", json!({"project": "/tmp/nonexistent", "issue_type": "task", "status": "open", "label": "", "text": "", "sort": "updated_at", "offset": 0, "limit": 10})).await;
-        assert!(result.is_ok(), "dispatch_tool task_list returned error: {result:?}");
+        assert!(
+            result.is_ok(),
+            "dispatch_tool task_list returned error: {result:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dispatch_tool_routes_epic_family() {
         let mcp = test_mcp();
-        let result = mcp.dispatch_tool("epic_list", json!({"project": "/tmp/nonexistent", "limit": 1})).await;
-        assert!(result.is_ok(), "dispatch_tool epic_list returned error: {result:?}");
+        let result = mcp
+            .dispatch_tool(
+                "epic_list",
+                json!({"project": "/tmp/nonexistent", "limit": 1}),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "dispatch_tool epic_list returned error: {result:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dispatch_tool_routes_memory_family() {
         let mcp = test_mcp();
         let result = mcp
-            .dispatch_tool("memory_search", json!({"project":"/tmp/nonexistent", "query":"x", "limit": 1}))
+            .dispatch_tool(
+                "memory_search",
+                json!({"project":"/tmp/nonexistent", "query":"x", "limit": 1}),
+            )
             .await;
-        assert!(result.is_ok(), "dispatch_tool memory_search returned error: {result:?}");
+        assert!(
+            result.is_ok(),
+            "dispatch_tool memory_search returned error: {result:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dispatch_tool_routes_settings_family() {
         let mcp = test_mcp();
         let result = mcp.dispatch_tool("settings_get", json!({})).await;
-        assert!(result.is_ok(), "dispatch_tool settings_get returned error: {result:?}");
+        assert!(
+            result.is_ok(),
+            "dispatch_tool settings_get returned error: {result:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dispatch_tool_routes_provider_family() {
         let mcp = test_mcp();
         let result = mcp.dispatch_tool("provider_catalog", json!({})).await;
-        assert!(result.is_ok(), "dispatch_tool provider_catalog returned error: {result:?}");
+        assert!(
+            result.is_ok(),
+            "dispatch_tool provider_catalog returned error: {result:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -6,13 +6,13 @@
 //! Tokens are stored encrypted in the credentials DB table. Filesystem cache
 //! (`~/.djinn/oauth/codex.json`) is supported as a migration fallback only.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex as TokioMutex};
+use tokio::sync::{Mutex as TokioMutex, oneshot};
 
 use crate::db::CredentialRepository;
 
@@ -169,7 +169,10 @@ fn generate_pkce() -> PkceChallenge {
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let digest = sha2::Sha256::digest(verifier.as_bytes());
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-    PkceChallenge { verifier, challenge }
+    PkceChallenge {
+        verifier,
+        challenge,
+    }
 }
 
 fn generate_state() -> String {
@@ -323,7 +326,7 @@ fn oauth_callback_router(
     expected_state: String,
     tx: Arc<TokioMutex<Option<oneshot::Sender<Result<String>>>>>,
 ) -> axum::Router {
-    use axum::{extract::Query, response::Html, routing::get, Router};
+    use axum::{Router, extract::Query, response::Html, routing::get};
     use std::collections::HashMap;
 
     Router::new().route(
@@ -372,9 +375,7 @@ fn oauth_callback_router(
     )
 }
 
-async fn spawn_callback_server(
-    app: axum::Router,
-) -> Result<(tokio::task::JoinHandle<()>, u16)> {
+async fn spawn_callback_server(app: axum::Router) -> Result<(tokio::task::JoinHandle<()>, u16)> {
     use std::net::SocketAddr;
     let addr = SocketAddr::from(([127, 0, 0, 1], OAUTH_PORT));
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
@@ -481,25 +482,24 @@ pub async fn run_codex_flow(repo: &CredentialRepository) -> Result<CodexTokens> 
     open_browser(&auth_url);
 
     // 3. Wait for callback (5-minute timeout)
-    let code = match tokio::time::timeout(
-        std::time::Duration::from_secs(OAUTH_TIMEOUT_SECS),
-        rx,
-    )
-    .await
-    {
-        Ok(Ok(result)) => {
-            server_handle.abort();
-            result?
-        }
-        Ok(Err(_)) => {
-            server_handle.abort();
-            return Err(anyhow!("OAuth callback channel closed unexpectedly"));
-        }
-        Err(_) => {
-            server_handle.abort();
-            return Err(anyhow!("OAuth flow timed out after {} seconds", OAUTH_TIMEOUT_SECS));
-        }
-    };
+    let code =
+        match tokio::time::timeout(std::time::Duration::from_secs(OAUTH_TIMEOUT_SECS), rx).await {
+            Ok(Ok(result)) => {
+                server_handle.abort();
+                result?
+            }
+            Ok(Err(_)) => {
+                server_handle.abort();
+                return Err(anyhow!("OAuth callback channel closed unexpectedly"));
+            }
+            Err(_) => {
+                server_handle.abort();
+                return Err(anyhow!(
+                    "OAuth flow timed out after {} seconds",
+                    OAUTH_TIMEOUT_SECS
+                ));
+            }
+        };
 
     // 4. Exchange code for tokens
     let tr = exchange_code(ISSUER, &code, &redirect_uri, &pkce).await?;
@@ -517,23 +517,32 @@ mod tests {
     #[test]
     fn pkce_verifier_is_url_safe() {
         let pkce = generate_pkce();
-        assert!(pkce.verifier.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            pkce.verifier
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
         assert!(!pkce.challenge.is_empty());
     }
 
     #[test]
     fn state_is_url_safe() {
         let state = generate_state();
-        assert!(state.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            state
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
         assert!(!state.is_empty());
     }
 
     #[test]
     fn extract_account_id_from_jwt_payload() {
         // Build a minimal JWT with chatgpt_account_id claim (no signature verification needed)
-        let payload = serde_json::json!({ "chatgpt_account_id": "acct_test123", "exp": 9999999999i64 });
-        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(payload.to_string().as_bytes());
+        let payload =
+            serde_json::json!({ "chatgpt_account_id": "acct_test123", "exp": 9999999999i64 });
+        let encoded =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
         let fake_jwt = format!("header.{}.sig", encoded);
         let id = extract_account_id_unverified(&fake_jwt);
         assert_eq!(id.as_deref(), Some("acct_test123"));

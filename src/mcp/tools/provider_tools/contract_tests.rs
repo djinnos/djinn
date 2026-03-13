@@ -1,5 +1,7 @@
 use crate::db::CredentialRepository;
-use crate::test_helpers::{create_test_app_with_db, create_test_db, initialize_mcp_session, mcp_call_tool};
+use crate::test_helpers::{
+    create_test_app_with_db, create_test_db, initialize_mcp_session, mcp_call_tool,
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_catalog_returns_expected_shape() {
@@ -31,7 +33,12 @@ async fn provider_models_returns_models_for_valid_provider_and_error_for_unknown
     )
     .await;
     assert_eq!(valid["provider_id"], "openai");
-    assert!(valid["models"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
+    assert!(
+        valid["models"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+    );
 
     let unknown = mcp_call_tool(
         &app,
@@ -51,22 +58,29 @@ async fn provider_connected_returns_only_seeded_provider() {
     let app = create_test_app_with_db(db.clone());
     let session_id = initialize_mcp_session(&app).await;
 
-    let cred_repo = CredentialRepository::new(
-        db,
-        {
-            let (tx, _rx) = tokio::sync::broadcast::channel(256);
-            tx
-        },
-    );
+    let cred_repo = CredentialRepository::new(db, {
+        let (tx, _rx) = tokio::sync::broadcast::channel(256);
+        tx
+    });
     cred_repo
         .set("openai", "OPENAI_API_KEY", "sk-test")
         .await
         .unwrap();
 
-    let result = mcp_call_tool(&app, &session_id, "provider_connected", serde_json::json!({})).await;
+    let result = mcp_call_tool(
+        &app,
+        &session_id,
+        "provider_connected",
+        serde_json::json!({}),
+    )
+    .await;
     let providers = result["providers"].as_array().expect("providers array");
     assert!(!providers.is_empty());
-    assert!(providers.iter().all(|p| p["connected"].as_bool().unwrap_or(false)));
+    assert!(
+        providers
+            .iter()
+            .all(|p| p["connected"].as_bool().unwrap_or(false))
+    );
     assert!(providers.iter().any(|p| p["id"] == "openai"));
 }
 
@@ -76,19 +90,22 @@ async fn provider_models_connected_filters_to_connected_provider_models() {
     let app = create_test_app_with_db(db.clone());
     let session_id = initialize_mcp_session(&app).await;
 
-    let cred_repo = CredentialRepository::new(
-        db,
-        {
-            let (tx, _rx) = tokio::sync::broadcast::channel(256);
-            tx
-        },
-    );
+    let cred_repo = CredentialRepository::new(db, {
+        let (tx, _rx) = tokio::sync::broadcast::channel(256);
+        tx
+    });
     cred_repo
         .set("openai", "OPENAI_API_KEY", "sk-test")
         .await
         .unwrap();
 
-    let result = mcp_call_tool(&app, &session_id, "provider_models_connected", serde_json::json!({})).await;
+    let result = mcp_call_tool(
+        &app,
+        &session_id,
+        "provider_models_connected",
+        serde_json::json!({}),
+    )
+    .await;
     let models = result["models"].as_array().expect("models array");
     assert!(!models.is_empty());
     assert!(models.iter().all(|m| m["provider_id"] == "openai"));
@@ -186,7 +203,11 @@ async fn provider_add_custom_and_remove_custom_work() {
     )
     .await;
     assert!(removed["ok"].as_bool().unwrap_or(false));
-    assert!(removed["custom_provider_deleted"].as_bool().unwrap_or(false));
+    assert!(
+        removed["custom_provider_deleted"]
+            .as_bool()
+            .unwrap_or(false)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
