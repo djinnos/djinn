@@ -10,7 +10,7 @@ import { taskStore } from "./taskStore";
 import { epicStore } from "./epicStore";
 import { projectStore } from "./projectStore";
 import { queryClient } from "@/lib/queryClient";
-import { projectSessionStore } from "./projectSessionStore";
+import { fetchProjects } from "@/api/server";
 import type { Task, Epic } from "@/api/types";
 
 /**
@@ -146,32 +146,19 @@ export function initSSEEventHandlers(): () => void {
       task_id?: string;
       agent_type?: string;
       model_id?: string;
-      project_id?: string;
     };
-    if (payload.task_id) {
-      const existing = taskStore.getState().getTask(payload.task_id);
-      if (!existing) return;
-      taskStore.getState().updateTask({
-        ...existing,
-        active_session: {
-          session_id: undefined,
-          agent_type: payload.agent_type,
-          model_id: payload.model_id,
-          started_at: new Date().toISOString(),
-          status: "dispatched",
-        },
-      });
-      return;
-    }
-
-    if (!payload.project_id) return;
-    projectSessionStore.getState().upsertProjectSession({
-      project_id: payload.project_id,
-      session_id: undefined,
-      agent_type: payload.agent_type ?? "",
-      model_id: payload.model_id ?? "",
-      started_at: new Date().toISOString(),
-      status: "dispatched",
+    if (!payload.task_id) return;
+    const existing = taskStore.getState().getTask(payload.task_id);
+    if (!existing) return;
+    taskStore.getState().updateTask({
+      ...existing,
+      active_session: {
+        session_id: undefined,
+        agent_type: payload.agent_type,
+        model_id: payload.model_id,
+        started_at: new Date().toISOString(),
+        status: "dispatched",
+      },
     });
   });
 
@@ -183,51 +170,32 @@ export function initSSEEventHandlers(): () => void {
       model_id?: string;
       started_at?: string;
       status?: string;
-      project_id?: string;
     };
-    if (payload.task_id) {
-      const existing = taskStore.getState().getTask(payload.task_id);
-      if (!existing) return;
-      taskStore.getState().updateTask({
-        ...existing,
-        active_session: {
-          session_id: payload.id,
-          agent_type: payload.agent_type,
-          model_id: payload.model_id,
-          started_at: payload.started_at,
-          status: payload.status,
-        },
-      });
-      return;
-    }
-
-    if (!payload.project_id) return;
-    const existingProjectSession = projectSessionStore.getState().getActiveProjectSession(payload.project_id);
-    projectSessionStore.getState().upsertProjectSession({
-      project_id: payload.project_id,
-      session_id: payload.id,
-      agent_type: payload.agent_type ?? existingProjectSession?.agent_type ?? "",
-      model_id: payload.model_id ?? existingProjectSession?.model_id ?? "",
-      started_at: payload.started_at ?? existingProjectSession?.started_at ?? new Date().toISOString(),
-      status: payload.status ?? existingProjectSession?.status ?? "started",
+    if (!payload.task_id) return;
+    const existing = taskStore.getState().getTask(payload.task_id);
+    if (!existing) return;
+    taskStore.getState().updateTask({
+      ...existing,
+      active_session: {
+        session_id: payload.id,
+        agent_type: payload.agent_type,
+        model_id: payload.model_id,
+        started_at: payload.started_at,
+        status: payload.status,
+      },
     });
   });
 
   const sessionEndedUnsub = subscribe("session_ended", (event: SSEEvent) => {
-    const payload = unwrapPayload(event.data) as { task_id?: string; project_id?: string };
-    if (payload.task_id) {
-      const existing = taskStore.getState().getTask(payload.task_id);
-      if (!existing) return;
-      taskStore.getState().updateTask({
-        ...existing,
-        active_session: undefined,
-        session_count: (existing.session_count ?? 0) + 1,
-      });
-      return;
-    }
-
-    if (!payload.project_id) return;
-    projectSessionStore.getState().removeProjectSession(payload.project_id);
+    const payload = unwrapPayload(event.data) as { task_id?: string };
+    if (!payload.task_id) return;
+    const existing = taskStore.getState().getTask(payload.task_id);
+    if (!existing) return;
+    taskStore.getState().updateTask({
+      ...existing,
+      active_session: undefined,
+      session_count: (existing.session_count ?? 0) + 1,
+    });
   });
 
   // Sync events — when an import brings in new tasks, the individual task.updated
@@ -247,16 +215,12 @@ export function initSSEEventHandlers(): () => void {
     }
   });
 
-  const customProviderCreatedUnsub = subscribe("custom_provider_created", () => {
+  const projectChangedUnsub = subscribe("project_changed", () => {
     queryClient.invalidateQueries({ queryKey: ["providers"] });
-  });
-
-  const customProviderUpdatedUnsub = subscribe("custom_provider_updated", () => {
-    queryClient.invalidateQueries({ queryKey: ["providers"] });
-  });
-
-  const customProviderDeletedUnsub = subscribe("custom_provider_deleted", () => {
-    queryClient.invalidateQueries({ queryKey: ["providers"] });
+    queryClient.invalidateQueries({ queryKey: ["settings"] });
+    fetchProjects()
+      .then((projects) => projectStore.getState().setProjects(projects))
+      .catch((err) => console.error("Failed to refetch projects after SSE event:", err));
   });
 
   // Return cleanup function
@@ -267,13 +231,11 @@ export function initSSEEventHandlers(): () => void {
     epicCreatedUnsub?.();
     epicUpdatedUnsub?.();
     epicDeletedUnsub?.();
+    projectChangedUnsub?.();
     sessionDispatchedUnsub?.();
     sessionStartedUnsub?.();
     sessionEndedUnsub?.();
     syncCompletedUnsub?.();
-    customProviderCreatedUnsub?.();
-    customProviderUpdatedUnsub?.();
-    customProviderDeletedUnsub?.();
   };
 }
 

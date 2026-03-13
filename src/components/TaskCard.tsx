@@ -3,7 +3,7 @@ import workerAvatar from "@/assets/worker.png";
 import taskReviewerAvatar from "@/assets/task_reviewer.png";
 import pmAvatar from "@/assets/pm.png";
 import conflictResolverAvatar from "@/assets/conflict_resolver.png";
-import scribeAvatar from "@/assets/scribe.png";
+
 import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -156,7 +156,7 @@ const AGENT_AVATARS: Record<string, string> = {
   task_reviewer: taskReviewerAvatar,
   conflict_resolver: conflictResolverAvatar,
   pm: pmAvatar,
-  groomer: scribeAvatar,
+
 };
 
 function agentAvatar(agentType?: string): string {
@@ -412,6 +412,19 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
         >
           {task.title}
         </h4>
+
+        {task.labels.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {task.labels.map((label: string) => (
+              <span
+                key={label}
+                className="rounded bg-zinc-700/60 px-1.5 py-0.5 text-[10px] text-zinc-200"
+              >
+                {label}
+              </span>
+            ))}
+          </div>
+        )}
 
         {/* Agent avatar – shown when task has an active session */}
         {task.active_session && (

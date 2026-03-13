@@ -4,8 +4,6 @@ import { sseStore } from './sseStore';
 import { taskStore } from './taskStore';
 import { epicStore } from './epicStore';
 import { projectStore } from './projectStore';
-import { projectSessionStore } from './projectSessionStore';
-import { queryClient } from '@/lib/queryClient';
 
 vi.mock('@/lib/queryClient', () => ({
   queryClient: {
@@ -23,8 +21,6 @@ describe('sseEventHandlers', () => {
     taskStore.getState().clearTasks();
     epicStore.getState().clearEpics();
     projectStore.setState({ selectedProjectPath: null, projects: [] });
-    projectSessionStore.getState().clearProjectSessions();
-    vi.mocked(queryClient.invalidateQueries).mockClear();
   });
 
   it('routes task created/updated/deleted to taskStore', () => {
@@ -54,57 +50,4 @@ describe('sseEventHandlers', () => {
     expect(epicStore.getState().getEpic('e1')).toBeUndefined();
     cleanup();
   });
-
-  it('invalidates providers query for custom provider lifecycle events', () => {
-    const cleanup = initSSEEventHandlers();
-
-    sseStore.getState().emit({ type: 'custom_provider_created', data: { data: { id: 'cp1' } }, timestamp: 1 });
-    sseStore.getState().emit({ type: 'custom_provider_updated', data: { data: { id: 'cp1' } }, timestamp: 2 });
-    sseStore.getState().emit({ type: 'custom_provider_deleted', data: { data: { id: 'cp1' } }, timestamp: 3 });
-
-    expect(queryClient.invalidateQueries).toHaveBeenCalledTimes(3);
-    expect(queryClient.invalidateQueries).toHaveBeenNthCalledWith(1, { queryKey: ['providers'] });
-    expect(queryClient.invalidateQueries).toHaveBeenNthCalledWith(2, { queryKey: ['providers'] });
-    expect(queryClient.invalidateQueries).toHaveBeenNthCalledWith(3, { queryKey: ['providers'] });
-
-    cleanup();
-  });
-});
-
-it('tracks project-scoped session lifecycle when task_id is null', () => {
-  const cleanup = initSSEEventHandlers();
-
-  sseStore.getState().emit({
-    type: 'session_dispatched',
-    data: { data: { task_id: null, project_id: 'p1', agent_type: 'groomer', model_id: 'm1' } },
-    timestamp: 1,
-  });
-
-  const dispatched = projectSessionStore.getState().getActiveProjectSession('p1');
-  expect(dispatched).toBeTruthy();
-  expect(dispatched?.project_id).toBe('p1');
-  expect(dispatched?.session_id).toBeUndefined();
-  expect(dispatched?.agent_type).toBe('groomer');
-  expect(dispatched?.model_id).toBe('m1');
-  expect(dispatched?.status).toBe('dispatched');
-
-  sseStore.getState().emit({
-    type: 'session_started',
-    data: { data: { task_id: null, project_id: 'p1', id: 's1', started_at: '2026-01-01T00:00:00.000Z', status: 'started' } },
-    timestamp: 2,
-  });
-
-  const started = projectSessionStore.getState().getActiveProjectSession('p1');
-  expect(started?.session_id).toBe('s1');
-  expect(started?.started_at).toBe('2026-01-01T00:00:00.000Z');
-  expect(started?.status).toBe('started');
-
-  sseStore.getState().emit({
-    type: 'session_ended',
-    data: { data: { task_id: null, project_id: 'p1' } },
-    timestamp: 3,
-  });
-
-  expect(projectSessionStore.getState().getActiveProjectSession('p1')).toBeUndefined();
-  cleanup();
 });
