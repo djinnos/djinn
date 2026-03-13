@@ -56,6 +56,8 @@ Improve the task and leave it in backlog:
 - Call `task_comment_add(id, body=...)` explaining what was missing and what was improved (or what still needs clarification).
 - Do **not** transition; keep status as backlog.
 
+{{verification_commands}}
+
 ## Quality Bar
 
 A task is ready only when a worker can execute without guessing core requirements:
@@ -64,6 +66,7 @@ A task is ready only when a worker can execute without guessing core requirement
 - Design identifies key implementation approach and touchpoints.
 - ADR references are included when architectural choices or existing decisions apply.
 - Every task MUST include at least one acceptance criterion before it is marked ready for dispatch. If AC are missing or empty, add them during grooming and keep the task in backlog until this is fixed.
+- **NEVER add acceptance criteria for things guaranteed by verification commands** (e.g. "clippy passes", "all tests pass", "code compiles"). The system runs verification commands automatically after every worker session — duplicating them as AC is noise that wastes reviewer attention. AC should capture task-specific behavior that verification commands cannot check.
 
 ## Throughput
 

@@ -65,7 +65,11 @@ pub struct TaskContext {
 ///
 /// Used for agents like the Groomer that operate on an entire column rather
 /// than a single task.
-pub fn render_project_prompt(agent_type: AgentType, project_path: &str) -> String {
+pub fn render_project_prompt(
+    agent_type: AgentType,
+    project_path: &str,
+    verification_commands: Option<&str>,
+) -> String {
     let template = match agent_type {
         AgentType::Groomer => GROOMER_TEMPLATE,
         other => panic!(
@@ -73,7 +77,19 @@ pub fn render_project_prompt(agent_type: AgentType, project_path: &str) -> Strin
             other.as_str()
         ),
     };
-    template.replace("{{project_path}}", project_path)
+    let verification_section = match verification_commands {
+        Some(cmds) if !cmds.trim().is_empty() => format!(
+            "## Project Verification Commands\n\n\
+             The system automatically runs these commands after every worker session. \
+             **Never create acceptance criteria that duplicate these checks** — they are \
+             already guaranteed by the pipeline.\n\n{cmds}\n"
+        ),
+        _ => "## Project Verification Commands\n\nNo verification commands configured.\n"
+            .to_string(),
+    };
+    template
+        .replace("{{project_path}}", project_path)
+        .replace("{{verification_commands}}", &verification_section)
 }
 
 /// Render a system prompt for `agent_type` using data from `task` and `ctx`.
