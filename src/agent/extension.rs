@@ -1488,10 +1488,11 @@ where
     serde_json::from_value(value)
 }
 
-/// Returns the planning-safe subset of MCP tool schemas for chat LLM usage.
+/// Legacy planning-safe subset of MCP tool schemas for agent-only usage.
 ///
-/// This intentionally excludes shell/write/edit and any filesystem-mutating
-/// tools. It includes only project-management tool families requested by design.
+/// Deprecated: chat completions must derive tool schemas from
+/// `DjinnMcpServer::all_tool_schemas()` to avoid schema drift.
+#[deprecated(note = "Chat must use router-derived schemas via DjinnMcpServer::all_tool_schemas")]
 pub fn chat_tool_schemas() -> Vec<RmcpTool> {
     vec![
         // task_*
