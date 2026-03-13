@@ -24,7 +24,7 @@ describe("TaskCard", () => {
 
     expect(screen.getByText(task.title)).toBeInTheDocument();
     expect(screen.getByText(task.short_id)).toBeInTheDocument();
-    expect(screen.getByLabelText(/pipeline: coding/i)).toBeInTheDocument();
+    expect(screen.getByText("setting up")).toBeInTheDocument();
     expect(screen.getByLabelText(`Priority P${task.priority}`)).toBeInTheDocument();
     expect(screen.getByText("1/2")).toBeInTheDocument();
     expect(screen.getByText(/frontend/i)).toBeInTheDocument();

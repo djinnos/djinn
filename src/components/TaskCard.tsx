@@ -71,64 +71,30 @@ function formatCompactDuration(totalSeconds: number): string {
   return `${safeSeconds}s`;
 }
 
-// --- Pipeline dots for in-flight cards ---
+// --- Status badge for in-flight cards ---
 
-type PipelineStage = "coding" | "verifying" | "reviewing";
-
-const PIPELINE_STAGES: PipelineStage[] = ["coding", "verifying", "reviewing"];
-
-function statusToPipelineStage(status: string): PipelineStage | null {
-  if (status === "in_progress") return "coding";
-  if (status === "verifying") return "verifying";
-  if (status === "needs_task_review" || status === "in_task_review") return "reviewing";
-  return null;
-}
-
-const ACTIVELY_WORKING = new Set(["in_progress", "in_task_review", "verifying"]);
-
-function getStatusOverlay(status: string): { label: string; className: string } | null {
-  if (status === "in_pm_intervention") {
-    return { label: "intervening…", className: "text-red-400 animate-pulse" };
-  }
+function getStatusBadge(status: string, hasSession: boolean, allAcMet: boolean): { label: string; className: string } | null {
   if (status === "needs_pm_intervention") {
     return { label: "agent stuck", className: "text-red-400" };
   }
+  if (status === "verifying") {
+    return { label: "verifying", className: "text-yellow-400 animate-pulse" };
+  }
+  if ((status === "needs_task_review" || status === "in_task_review") && !hasSession && allAcMet) {
+    return { label: "merging", className: "text-green-400 animate-pulse" };
+  }
+  if (status === "in_progress" && !hasSession) {
+    return { label: "setting up", className: "text-blue-400 animate-pulse" };
+  }
   return null;
 }
 
-function PipelineIndicator({ status }: { status: string }) {
-  const overlay = getStatusOverlay(status);
-  if (overlay) {
-    return (
-      <span className={cn("text-[10px] font-medium", overlay.className)}>
-        {overlay.label}
-      </span>
-    );
-  }
-
-  const activeStage = statusToPipelineStage(status);
-  if (!activeStage) return null;
-
-  const activeIdx = PIPELINE_STAGES.indexOf(activeStage);
-  const isActive = ACTIVELY_WORKING.has(status);
-
+function StatusBadge({ status, hasSession, allAcMet }: { status: string; hasSession: boolean; allAcMet: boolean }) {
+  const badge = getStatusBadge(status, hasSession, allAcMet);
+  if (!badge) return null;
   return (
-    <span className="text-[10px] tracking-tight" aria-label={`Pipeline: ${activeStage}`}>
-      {PIPELINE_STAGES.map((stage, idx) => (
-        <span
-          key={stage}
-          className={cn(
-            idx < activeIdx
-              ? "text-[#34D399]"
-              : idx === activeIdx && isActive
-                ? "text-[#10B981] animate-pulse"
-                : "text-[#374151]"
-          )}
-          title={stage}
-        >
-          {idx <= activeIdx ? "▰" : "▱"}
-        </span>
-      ))}
+    <span className={cn("text-[10px] font-medium", badge.className)}>
+      {badge.label}
     </span>
   );
 }
@@ -279,13 +245,13 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const [now, setNow] = useState(() => Date.now());
 
   const runningSessionStartMs = useMemo(() => {
-    if (!task.active_session?.started_at || task.status !== "in_progress") {
+    if (!task.active_session?.started_at) {
       return null;
     }
 
     const parsed = Date.parse(task.active_session.started_at);
     return Number.isNaN(parsed) ? null : parsed;
-  }, [task.active_session?.started_at, task.status]);
+  }, [task.active_session?.started_at]);
 
   useEffect(() => {
     if (!runningSessionStartMs) {
@@ -386,8 +352,8 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           {/* Spacer */}
           <div className="flex-1" />
 
-          {/* Pipeline indicator for in-flight */}
-          {isInFlight && <PipelineIndicator status={task.status} />}
+          {/* Status badge for in-flight */}
+          {isInFlight && <StatusBadge status={task.status} hasSession={!!task.active_session} allAcMet={acTotal > 0 && acMet === acTotal} />}
 
           {/* Duration & model for in-flight / done */}
           {shouldShowDuration && (
