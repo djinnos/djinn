@@ -89,6 +89,7 @@ where
         "read" => call_read(state, &call.arguments, worktree_path).await,
         "write" => call_write(state, &call.arguments, worktree_path).await,
         "edit" => call_edit(state, &call.arguments, worktree_path).await,
+        "apply_patch" => call_apply_patch(state, &call.arguments, worktree_path).await,
         other => Err(format!("unknown djinn frontend tool: {other}")),
     }
 }
@@ -159,7 +160,6 @@ struct TaskCreateParams {
     memory_refs: Option<Vec<String>>,
 }
 
-
 #[derive(Deserialize)]
 struct EpicShowParams {
     id: String,
@@ -223,6 +223,12 @@ struct EditParams {
     path: String,
     old_text: String,
     new_text: String,
+}
+
+#[derive(Deserialize)]
+struct ApplyPatchParams {
+    path: String,
+    patch: String,
 }
 
 #[derive(Deserialize)]
@@ -466,11 +472,19 @@ async fn call_epic_tasks(
     let task_repo = TaskRepository::new(state.db().clone(), state.events().clone());
     let limit = p.limit.unwrap_or(50).clamp(1, 200);
     let offset = p.offset.unwrap_or(0).max(0);
-    let mut all = task_repo.list_by_epic(&epic.id).await.map_err(|e| e.to_string())?;
+    let mut all = task_repo
+        .list_by_epic(&epic.id)
+        .await
+        .map_err(|e| e.to_string())?;
     let total = i64::try_from(all.len()).unwrap_or(0);
     let start = usize::try_from(offset).unwrap_or(0).min(all.len());
-    let end = start.saturating_add(usize::try_from(limit).unwrap_or(0)).min(all.len());
-    let tasks = all.drain(start..end).map(|t| task_to_value(&t)).collect::<Vec<_>>();
+    let end = start
+        .saturating_add(usize::try_from(limit).unwrap_or(0))
+        .min(all.len());
+    let tasks = all
+        .drain(start..end)
+        .map(|t| task_to_value(&t))
+        .collect::<Vec<_>>();
     let has_more = i64::try_from(end).unwrap_or(0) < total;
 
     Ok(serde_json::json!({
@@ -705,9 +719,15 @@ async fn call_request_pm(
         body.push_str(&format!("\n\nSuggested breakdown:\n{breakdown}"));
     }
     let payload = serde_json::json!({ "body": body }).to_string();
-    repo.log_activity(Some(&task.id), "worker-agent", "worker", "comment", &payload)
-        .await
-        .map_err(|e| e.to_string())?;
+    repo.log_activity(
+        Some(&task.id),
+        "worker-agent",
+        "worker",
+        "comment",
+        &payload,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     // Escalate to PM intervention queue.
     let updated = repo
@@ -884,7 +904,11 @@ async fn call_read(
             if suggestions.is_empty() {
                 format!("file not found: {}", path.display())
             } else {
-                format!("file not found: {}. similar filenames: {}", path.display(), suggestions.join(", "))
+                format!(
+                    "file not found: {}. similar filenames: {}",
+                    path.display(),
+                    suggestions.join(", ")
+                )
             }
         } else {
             format!("read failed: {e}")
@@ -895,7 +919,8 @@ async fn call_read(
         return Err(format!("refusing to read binary file: {}", path.display()));
     }
 
-    let text = String::from_utf8(bytes).map_err(|_| format!("refusing to read binary file: {}", path.display()))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("refusing to read binary file: {}", path.display()))?;
     let all_lines: Vec<String> = text
         .lines()
         .map(|line| {
@@ -918,7 +943,10 @@ async fn call_read(
         numbered.push_str(&format!("{:>6}\t{}\n", line_no, line));
     }
 
-    state.file_time().read(&worktree_path.display().to_string(), &path).await?;
+    state
+        .file_time()
+        .read(&worktree_path.display().to_string(), &path)
+        .await?;
 
     Ok(serde_json::json!({
         "path": path.display().to_string(),
@@ -941,7 +969,27 @@ async fn call_write(
     // Ensure path is within worktree
     ensure_path_within_worktree(&path, worktree_path)?;
 
-    state.file_time().assert(&worktree_path.display().to_string(), &path).await?;
+    if path.exists() {
+        state
+            .file_time()
+            .assert(&worktree_path.display().to_string(), &path)
+            .await
+            .map_err(|e| match e.as_str() {
+                _ if e.starts_with("file must be read before modification in this session:") => {
+                    format!(
+                        "You must read the file {} before overwriting it. Use the read tool first",
+                        path.display()
+                    )
+                }
+                _ if e.starts_with("file was modified since last read in this session:") => {
+                    format!(
+                        "File {} has been modified since last read. Please read it again.",
+                        path.display()
+                    )
+                }
+                _ => e,
+            })?;
+    }
 
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -951,6 +999,11 @@ async fn call_write(
     tokio::fs::write(&path, &p.content)
         .await
         .map_err(|e| format!("write failed: {e}"))?;
+
+    state
+        .file_time()
+        .read(&worktree_path.display().to_string(), &path)
+        .await?;
 
     Ok(serde_json::json!({
         "ok": true,
@@ -970,7 +1023,25 @@ async fn call_edit(
     // Ensure path is within worktree
     ensure_path_within_worktree(&path, worktree_path)?;
 
-    state.file_time().assert(&worktree_path.display().to_string(), &path).await?;
+    state
+        .file_time()
+        .assert(&worktree_path.display().to_string(), &path)
+        .await
+        .map_err(|e| match e.as_str() {
+            _ if e.starts_with("file must be read before modification in this session:") => {
+                format!(
+                    "You must read the file {} before editing it. Use the read tool first",
+                    path.display()
+                )
+            }
+            _ if e.starts_with("file was modified since last read in this session:") => {
+                format!(
+                    "File {} has been modified since last read. Please read it again.",
+                    path.display()
+                )
+            }
+            _ => e,
+        })?;
 
     let content = tokio::fs::read_to_string(&path)
         .await
@@ -992,6 +1063,90 @@ async fn call_edit(
     tokio::fs::write(&path, &new_content)
         .await
         .map_err(|e| format!("write failed: {e}"))?;
+
+    state
+        .file_time()
+        .read(&worktree_path.display().to_string(), &path)
+        .await?;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "path": path.display().to_string(),
+    }))
+}
+
+async fn call_apply_patch(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    worktree_path: &Path,
+) -> Result<serde_json::Value, String> {
+    let p: ApplyPatchParams = parse_args(arguments)?;
+    let path = resolve_path(&p.path, worktree_path);
+
+    ensure_path_within_worktree(&path, worktree_path)?;
+
+    state
+        .file_time()
+        .assert(&worktree_path.display().to_string(), &path)
+        .await
+        .map_err(|e| match e.as_str() {
+            _ if e.starts_with("file must be read before modification in this session:") => {
+                format!(
+                    "You must read the file {} before editing it. Use the read tool first",
+                    path.display()
+                )
+            }
+            _ if e.starts_with("file was modified since last read in this session:") => {
+                format!(
+                    "File {} has been modified since last read. Please read it again.",
+                    path.display()
+                )
+            }
+            _ => e,
+        })?;
+
+    let mut cmd = tokio::process::Command::new("apply_patch");
+    cmd.current_dir(worktree_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn apply_patch: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin
+            .write_all(p.patch.as_bytes())
+            .await
+            .map_err(|e| format!("failed to write patch to stdin: {e}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("failed to wait for apply_patch: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "apply_patch failed for {}: {}{}{}",
+            path.display(),
+            stderr,
+            if !stderr.is_empty() && !stdout.is_empty() {
+                "
+"
+            } else {
+                ""
+            },
+            stdout
+        ));
+    }
+
+    state
+        .file_time()
+        .read(&worktree_path.display().to_string(), &path)
+        .await?;
 
     Ok(serde_json::json!({
         "ok": true,
@@ -1024,7 +1179,9 @@ fn is_tool_allowed_for_agent(agent_type: AgentType, name: &str) -> bool {
     match name {
         "task_show" | "task_list" | "task_activity_list" | "task_comment_add" | "memory_read"
         | "memory_search" | "shell" | "read" | "task_create" => true,
-        "write" | "edit" => matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver),
+        "write" | "edit" | "apply_patch" => {
+            matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver)
+        }
         "request_pm" => matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver),
         "task_update_ac" => matches!(agent_type, AgentType::TaskReviewer),
         "task_update"
@@ -1408,7 +1565,6 @@ async fn call_task_kill_session(
         "message": "Paused session interrupted and conversation deleted. Next dispatch will start a fresh session."
     }))
 }
-
 
 fn tool_epic_show() -> RmcpTool {
     RmcpTool::new(
@@ -1890,6 +2046,8 @@ pub(crate) fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
         tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
         tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
         tool_values
+            .push(serde_json::to_value(tool_apply_patch()).expect("serialize tool_apply_patch"));
+        tool_values
             .push(serde_json::to_value(tool_request_pm()).expect("serialize tool_request_pm"));
     }
 
@@ -2066,4 +2224,19 @@ mod tests {
         assert!(groomer.iter().any(|n| n == "task_create"));
         assert!(groomer.iter().any(|n| n == "task_transition"));
     }
+}
+
+fn tool_apply_patch() -> RmcpTool {
+    RmcpTool::new(
+        "apply_patch".to_string(),
+        "Apply a unified diff patch to a file. Path must be within the task worktree.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["path", "patch"],
+            "properties": {
+                "path": {"type": "string", "description": "Absolute or worktree-relative file path"},
+                "patch": {"type": "string", "description": "Unified diff patch content"}
+            }
+        }),
+    )
 }

@@ -7,8 +7,8 @@ pub mod oauth;
 pub(crate) mod output_parser;
 pub mod prompts;
 pub mod provider;
-pub mod sandbox;
 pub(crate) mod roles;
+pub mod sandbox;
 
 // ─── Agent type ───────────────────────────────────────────────────────────────
 
@@ -179,7 +179,10 @@ mod tests {
             agent_type.mid_session_compaction_system_prompt(),
             cfg.compaction.mid_session_system
         );
-        assert_eq!(agent_type.pre_resume_compaction_prompt(), cfg.compaction.pre_resume);
+        assert_eq!(
+            agent_type.pre_resume_compaction_prompt(),
+            cfg.compaction.pre_resume
+        );
         assert_eq!(
             agent_type.pre_resume_compaction_system_prompt(),
             cfg.compaction.pre_resume_system
@@ -208,10 +211,7 @@ mod tests {
 
     #[test]
     fn for_task_status_covers_all_expected_paths() {
-        assert_eq!(
-            AgentType::for_task_status("open", false),
-            AgentType::Worker
-        );
+        assert_eq!(AgentType::for_task_status("open", false), AgentType::Worker);
         assert_eq!(
             AgentType::for_task_status("open", true),
             AgentType::ConflictResolver
@@ -270,7 +270,10 @@ mod tests {
 
     #[test]
     fn release_action_for_all_variants() {
-        assert_eq!(AgentType::Worker.release_action(), TransitionAction::Release);
+        assert_eq!(
+            AgentType::Worker.release_action(),
+            TransitionAction::Release
+        );
         assert_eq!(
             AgentType::ConflictResolver.release_action(),
             TransitionAction::Release
@@ -283,6 +286,9 @@ mod tests {
             AgentType::PM.release_action(),
             TransitionAction::PmInterventionRelease
         );
-        assert_eq!(AgentType::Groomer.release_action(), TransitionAction::Release);
+        assert_eq!(
+            AgentType::Groomer.release_action(),
+            TransitionAction::Release
+        );
     }
 }

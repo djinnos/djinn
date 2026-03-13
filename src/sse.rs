@@ -84,7 +84,10 @@ mod tests {
         let envelope: DjinnEventEnvelope = evt.into();
         let json = serde_json::to_value(&envelope).expect("serialize envelope");
 
-        assert_eq!(json.get("entity_type").and_then(|v| v.as_str()), Some("task"));
+        assert_eq!(
+            json.get("entity_type").and_then(|v| v.as_str()),
+            Some("task")
+        );
         assert_eq!(json.get("action").and_then(|v| v.as_str()), Some("deleted"));
         assert_eq!(
             json.get("payload")

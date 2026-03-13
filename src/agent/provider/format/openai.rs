@@ -99,7 +99,10 @@ impl OpenAIProvider {
                 messages.push(assistant_msg);
             } else if text_blocks.len() == 1 {
                 // Simple single text — use string content form
-                let text = text_blocks[0].get("text").and_then(|t| t.as_str()).unwrap_or("");
+                let text = text_blocks[0]
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
                 messages.push(json!({"role": role, "content": text}));
             } else {
                 // Multiple text blocks — use array content form

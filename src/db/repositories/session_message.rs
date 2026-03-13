@@ -191,7 +191,10 @@ mod tests {
         tx: broadcast::Sender<DjinnEvent>,
     ) -> (String, String, String) {
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("Epic", "", "", "", "", None).await.unwrap();
+        let epic = epic_repo
+            .create("Epic", "", "", "", "", None)
+            .await
+            .unwrap();
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task = task_repo

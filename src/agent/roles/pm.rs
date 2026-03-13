@@ -1,7 +1,6 @@
 use crate::agent::compaction::{GENERIC_PROMPT, SUMMARISER_SYSTEM_GENERIC};
 use crate::agent::extension;
 
-
 use super::{CompactionPrompts, RoleConfig};
 
 pub(crate) const PM_CONFIG: RoleConfig = RoleConfig {

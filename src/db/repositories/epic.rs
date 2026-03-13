@@ -111,8 +111,16 @@ impl EpicRepository {
         memory_refs: Option<&str>,
     ) -> Result<Epic> {
         let project_id = self.ensure_default_project_id().await?;
-        self.create_for_project(&project_id, title, description, emoji, color, owner, memory_refs)
-            .await
+        self.create_for_project(
+            &project_id,
+            title,
+            description,
+            emoji,
+            color,
+            owner,
+            memory_refs,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -562,7 +570,9 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
-        repo.create("Event Epic", "", "", "", "", None).await.unwrap();
+        repo.create("Event Epic", "", "", "", "", None)
+            .await
+            .unwrap();
         match rx.recv().await.unwrap() {
             DjinnEvent::EpicCreated(e) => assert_eq!(e.title, "Event Epic"),
             _ => panic!("expected EpicCreated"),
@@ -596,7 +606,10 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
-        let epic = repo.create("Closeable", "", "", "", "", None).await.unwrap();
+        let epic = repo
+            .create("Closeable", "", "", "", "", None)
+            .await
+            .unwrap();
         let _ = rx.recv().await.unwrap();
         let closed = repo.close(&epic.id).await.unwrap();
         assert_eq!(closed.status, "closed");
@@ -642,7 +655,10 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(256);
         let repo = EpicRepository::new(db, tx);
 
-        let epic = repo.create("Delete me", "", "", "", "", None).await.unwrap();
+        let epic = repo
+            .create("Delete me", "", "", "", "", None)
+            .await
+            .unwrap();
         let _ = rx.recv().await.unwrap();
 
         repo.delete(&epic.id).await.unwrap();
@@ -702,7 +718,10 @@ mod tests {
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
         let task_repo = crate::db::TaskRepository::new(db, tx);
 
-        let epic = epic_repo.create("Counts", "", "", "", "", None).await.unwrap();
+        let epic = epic_repo
+            .create("Counts", "", "", "", "", None)
+            .await
+            .unwrap();
         task_repo
             .create(&epic.id, "T1", "", "", "task", 0, "", None)
             .await
@@ -730,7 +749,10 @@ mod tests {
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
         let task_repo = crate::db::TaskRepository::new(db, tx);
 
-        let epic = epic_repo.create("Delete", "", "", "", "", None).await.unwrap();
+        let epic = epic_repo
+            .create("Delete", "", "", "", "", None)
+            .await
+            .unwrap();
         task_repo
             .create(&epic.id, "T1", "", "", "task", 0, "", None)
             .await

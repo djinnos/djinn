@@ -159,9 +159,7 @@ pub(super) enum GitMessage {
         respond_to: Reply<bool>,
     },
     /// Check if the repo has any commits (git2 read — no process spawn).
-    HasCommits {
-        respond_to: Reply<bool>,
-    },
+    HasCommits { respond_to: Reply<bool> },
     /// Create local `task/{short_id}` from `target_branch` (GIT-01).
     CreateBranch {
         short_id: String,

@@ -1,8 +1,5 @@
-use crate::agent::compaction::{
-    CONFLICT_RESOLVER_PROMPT, SUMMARISER_SYSTEM_CONFLICT_RESOLVER,
-};
+use crate::agent::compaction::{CONFLICT_RESOLVER_PROMPT, SUMMARISER_SYSTEM_CONFLICT_RESOLVER};
 use crate::agent::extension;
-
 
 use super::{CompactionPrompts, RoleConfig};
 

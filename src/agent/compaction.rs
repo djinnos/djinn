@@ -37,9 +37,15 @@ fn compaction_prompt(ctx: &CompactionContext) -> &'static str {
         CompactionContext::PreResume(role) if role == "worker" => PRE_RESUME_WORKER_PROMPT,
         CompactionContext::MidSession(role) if role == "worker" => MID_SESSION_WORKER_PROMPT,
         CompactionContext::MidSession(role) | CompactionContext::PreResume(role)
-            if role == "task_reviewer" => REVIEWER_PROMPT,
+            if role == "task_reviewer" =>
+        {
+            REVIEWER_PROMPT
+        }
         CompactionContext::MidSession(role) | CompactionContext::PreResume(role)
-            if role == "conflict_resolver" => CONFLICT_RESOLVER_PROMPT,
+            if role == "conflict_resolver" =>
+        {
+            CONFLICT_RESOLVER_PROMPT
+        }
         _ => GENERIC_PROMPT,
     }
 }
@@ -172,12 +178,13 @@ Wrap reasoning in `<analysis>` tags:
 
 > No new ideas unless user confirmed"#;
 
-
 pub(crate) const SUMMARISER_SYSTEM_WORKER_PRE_RESUME: &str = "You are summarising a coding agent's work session that is about to receive reviewer feedback. Produce a dense, faithful summary focused on what was implemented, what files were changed, and what the current state of the code is. Do NOT include any statements about work being complete or done — the reviewer has determined it is not.";
 pub(crate) const SUMMARISER_SYSTEM_WORKER_MID_SESSION: &str = "You are summarising a coding agent's in-progress work session. Produce a dense, faithful summary that preserves all implementation context so the agent can continue working without re-reading files.";
 pub(crate) const SUMMARISER_SYSTEM_TASK_REVIEWER: &str = "You are summarising a code review session. Produce a dense, faithful summary that preserves the review findings, issues identified, and assessment progress.";
-pub(crate) const SUMMARISER_SYSTEM_CONFLICT_RESOLVER: &str = "You are a conversation summariser. Produce a dense, faithful summary.";
-pub(crate) const SUMMARISER_SYSTEM_GENERIC: &str = "You are a conversation summariser. Produce a dense, faithful summary.";
+pub(crate) const SUMMARISER_SYSTEM_CONFLICT_RESOLVER: &str =
+    "You are a conversation summariser. Produce a dense, faithful summary.";
+pub(crate) const SUMMARISER_SYSTEM_GENERIC: &str =
+    "You are a conversation summariser. Produce a dense, faithful summary.";
 
 // ─── Public helpers ───────────────────────────────────────────────────────────
 
@@ -897,7 +904,8 @@ mod tests {
     fn compaction_prompt_varies_by_context() {
         let worker_resume = compaction_prompt(&CompactionContext::PreResume("worker".to_string()));
         let worker_mid = compaction_prompt(&CompactionContext::MidSession("worker".to_string()));
-        let reviewer = compaction_prompt(&CompactionContext::MidSession("task_reviewer".to_string()));
+        let reviewer =
+            compaction_prompt(&CompactionContext::MidSession("task_reviewer".to_string()));
 
         // Each context gets a different prompt
         assert!(worker_resume.contains("rejected or needs fixes"));

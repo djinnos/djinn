@@ -72,7 +72,6 @@ pub enum DjinnEvent {
         settings: GitSettings,
     },
 
-
     // Custom providers
     CustomProviderUpserted(crate::models::CustomProvider),
     CustomProviderDeleted {
@@ -213,10 +212,12 @@ impl From<DjinnEvent> for DjinnEventEnvelope {
             DjinnEvent::SettingUpdated(setting) => serde_json::to_value(setting),
             DjinnEvent::ProjectCreated(project) => serde_json::to_value(project),
             DjinnEvent::ProjectUpdated(project) => serde_json::to_value(project),
-            DjinnEvent::ProjectDeleted { id } => serde_json::to_value(serde_json::json!({ "id": id })),
-            DjinnEvent::ProjectConfigUpdated { project_id, config } => {
-                serde_json::to_value(serde_json::json!({ "project_id": project_id, "config": config }))
+            DjinnEvent::ProjectDeleted { id } => {
+                serde_json::to_value(serde_json::json!({ "id": id }))
             }
+            DjinnEvent::ProjectConfigUpdated { project_id, config } => serde_json::to_value(
+                serde_json::json!({ "project_id": project_id, "config": config }),
+            ),
             DjinnEvent::EpicCreated(epic) => serde_json::to_value(epic),
             DjinnEvent::EpicUpdated(epic) => serde_json::to_value(epic),
             DjinnEvent::EpicDeleted { id } => serde_json::to_value(serde_json::json!({ "id": id })),
@@ -233,12 +234,18 @@ impl From<DjinnEvent> for DjinnEventEnvelope {
             DjinnEvent::GitSettingsUpdated {
                 project_id,
                 settings,
-            } => serde_json::to_value(serde_json::json!({ "project_id": project_id, "settings": settings })),
+            } => serde_json::to_value(
+                serde_json::json!({ "project_id": project_id, "settings": settings }),
+            ),
             DjinnEvent::CustomProviderUpserted(provider) => serde_json::to_value(provider),
-            DjinnEvent::CustomProviderDeleted { id } => serde_json::to_value(serde_json::json!({ "id": id })),
+            DjinnEvent::CustomProviderDeleted { id } => {
+                serde_json::to_value(serde_json::json!({ "id": id }))
+            }
             DjinnEvent::CredentialCreated(credential) => serde_json::to_value(credential),
             DjinnEvent::CredentialUpdated(credential) => serde_json::to_value(credential),
-            DjinnEvent::CredentialDeleted { id } => serde_json::to_value(serde_json::json!({ "id": id })),
+            DjinnEvent::CredentialDeleted { id } => {
+                serde_json::to_value(serde_json::json!({ "id": id }))
+            }
             DjinnEvent::SessionDispatched {
                 project_id,
                 task_id,
@@ -338,15 +345,31 @@ impl DjinnEvent {
     pub fn entity_type(&self) -> &'static str {
         match self {
             DjinnEvent::SettingUpdated(_) => "setting",
-            DjinnEvent::ProjectCreated(_) | DjinnEvent::ProjectUpdated(_) | DjinnEvent::ProjectDeleted { .. } => "project",
+            DjinnEvent::ProjectCreated(_)
+            | DjinnEvent::ProjectUpdated(_)
+            | DjinnEvent::ProjectDeleted { .. } => "project",
             DjinnEvent::ProjectConfigUpdated { .. } => "project_config",
-            DjinnEvent::EpicCreated(_) | DjinnEvent::EpicUpdated(_) | DjinnEvent::EpicDeleted { .. } => "epic",
-            DjinnEvent::TaskCreated { .. } | DjinnEvent::TaskUpdated { .. } | DjinnEvent::TaskDeleted { .. } => "task",
-            DjinnEvent::NoteCreated(_) | DjinnEvent::NoteUpdated(_) | DjinnEvent::NoteDeleted { .. } => "note",
+            DjinnEvent::EpicCreated(_)
+            | DjinnEvent::EpicUpdated(_)
+            | DjinnEvent::EpicDeleted { .. } => "epic",
+            DjinnEvent::TaskCreated { .. }
+            | DjinnEvent::TaskUpdated { .. }
+            | DjinnEvent::TaskDeleted { .. } => "task",
+            DjinnEvent::NoteCreated(_)
+            | DjinnEvent::NoteUpdated(_)
+            | DjinnEvent::NoteDeleted { .. } => "note",
             DjinnEvent::GitSettingsUpdated { .. } => "git_settings",
-            DjinnEvent::CustomProviderUpserted(_) | DjinnEvent::CustomProviderDeleted { .. } => "custom_provider",
-            DjinnEvent::CredentialCreated(_) | DjinnEvent::CredentialUpdated(_) | DjinnEvent::CredentialDeleted { .. } => "credential",
-            DjinnEvent::SessionDispatched { .. } | DjinnEvent::SessionCreated(_) | DjinnEvent::SessionUpdated(_) | DjinnEvent::SessionTokenUpdate { .. } | DjinnEvent::SessionMessage { .. } => "session",
+            DjinnEvent::CustomProviderUpserted(_) | DjinnEvent::CustomProviderDeleted { .. } => {
+                "custom_provider"
+            }
+            DjinnEvent::CredentialCreated(_)
+            | DjinnEvent::CredentialUpdated(_)
+            | DjinnEvent::CredentialDeleted { .. } => "credential",
+            DjinnEvent::SessionDispatched { .. }
+            | DjinnEvent::SessionCreated(_)
+            | DjinnEvent::SessionUpdated(_)
+            | DjinnEvent::SessionTokenUpdate { .. }
+            | DjinnEvent::SessionMessage { .. } => "session",
             DjinnEvent::SessionMessageInserted { .. } => "session_message",
             DjinnEvent::SyncCompleted { .. } => "sync",
             DjinnEvent::ProjectHealthChanged { .. } => "project",
@@ -396,7 +419,8 @@ impl DjinnEvent {
 
     pub fn from_sync(&self) -> bool {
         match self {
-            DjinnEvent::TaskCreated { from_sync, .. } | DjinnEvent::TaskUpdated { from_sync, .. } => *from_sync,
+            DjinnEvent::TaskCreated { from_sync, .. }
+            | DjinnEvent::TaskUpdated { from_sync, .. } => *from_sync,
             _ => false,
         }
     }

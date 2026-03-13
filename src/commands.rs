@@ -36,9 +36,7 @@ pub async fn run_commands(
         let start = Instant::now();
 
         let mut cmd = std::process::Command::new("sh");
-        cmd.arg("-c")
-            .arg(&spec.command)
-            .current_dir(working_dir);
+        cmd.arg("-c").arg(&spec.command).current_dir(working_dir);
         let output = timeout(duration, crate::process::output(cmd))
             .await
             .map_err(|_| {
