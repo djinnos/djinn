@@ -1,4 +1,5 @@
 use super::*;
+use crate::events::DjinnEvent;
 
 impl TaskRepository {
     pub async fn log_activity(
@@ -33,6 +34,13 @@ impl TaskRepository {
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
+        let _ = self.events.send(DjinnEvent::ActivityLogged {
+            task_id: task_id.map(ToOwned::to_owned),
+            action: event_type.to_owned(),
+            actor: actor_id.to_owned(),
+            actor_role: actor_role.to_owned(),
+            payload: serde_json::from_str(payload).unwrap_or(serde_json::Value::String(payload.to_owned())),
+        });
         Ok(entry)
     }
 

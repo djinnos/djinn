@@ -280,6 +280,25 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             id: Some(project_id),
             project_id: None,
         },
+        DjinnEvent::ActivityLogged {
+            task_id,
+            action,
+            actor,
+            actor_role,
+            payload,
+        } => Envelope {
+            entity_type: "activity",
+            action: "logged",
+            data: Some(serde_json::json!({
+                "task_id": task_id,
+                "action": action,
+                "actor": actor,
+                "actor_role": actor_role,
+                "payload": payload,
+            })),
+            id: None,
+            project_id: None,
+        },
     }
 }
 
