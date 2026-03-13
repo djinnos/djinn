@@ -7,7 +7,7 @@ use super::AgentType;
 /// Worker completion is determined by session end (agent stops calling tools).
 /// Reviewer verdict is determined by acceptance criteria state on the task.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedAgentOutput {
+pub(crate) struct ParsedAgentOutput {
     agent_type: AgentType,
     pub runtime_error: Option<String>,
     pub reviewer_feedback: Option<String>,
@@ -20,7 +20,7 @@ impl Default for ParsedAgentOutput {
 }
 
 impl ParsedAgentOutput {
-    pub fn new(agent_type: AgentType) -> Self {
+    pub(crate) fn new(agent_type: AgentType) -> Self {
         Self {
             agent_type,
             runtime_error: None,
@@ -28,7 +28,7 @@ impl ParsedAgentOutput {
         }
     }
 
-    pub fn ingest_text(&mut self, text: &str) {
+    pub(crate) fn ingest_text(&mut self, text: &str) {
         let normalized = text.replace("\\r\\n", "\n").replace("\\n", "\n");
         for raw_line in normalized.lines() {
             let line = sanitize_line(raw_line);

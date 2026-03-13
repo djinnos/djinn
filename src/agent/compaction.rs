@@ -17,13 +17,13 @@ use crate::server::AppState;
 // ─── Threshold ────────────────────────────────────────────────────────────────
 
 /// Fraction of the context window at which compaction is triggered.
-pub const COMPACTION_THRESHOLD: f64 = 0.8;
+pub(crate) const COMPACTION_THRESHOLD: f64 = 0.8;
 
 // ─── Compaction context ──────────────────────────────────────────────────────
 
 /// Describes *why* compaction is happening, so the prompt can be tailored.
 #[derive(Debug, Clone, Copy)]
-pub enum CompactionContext {
+pub(crate) enum CompactionContext {
     /// Mid-session compaction: context window threshold reached while working.
     MidSession(AgentType),
     /// Pre-resume compaction: compacting before re-prompting with reviewer feedback.
@@ -174,7 +174,7 @@ Wrap reasoning in `<analysis>` tags:
 
 /// Return `true` if the accumulated input tokens have reached the compaction
 /// threshold relative to the model's context window.
-pub fn needs_compaction(total_tokens_in: u32, context_window: i64) -> bool {
+pub(crate) fn needs_compaction(total_tokens_in: u32, context_window: i64) -> bool {
     if context_window <= 0 {
         return false;
     }
@@ -195,7 +195,7 @@ pub fn needs_compaction(total_tokens_in: u32, context_window: i64) -> bool {
 ///    the context window.
 ///
 /// Returns `true` if compaction was performed, `false` only if both strategies fail.
-pub async fn compact_conversation(
+pub(crate) async fn compact_conversation(
     provider: &dyn LlmProvider,
     conversation: &mut Conversation,
     session_id: &str,
@@ -652,7 +652,8 @@ pub(crate) fn deterministic_compact(messages: &[Message], max_chars: usize) -> V
 /// orphaned `tool_use_id` found, or `None` if the conversation is valid.
 ///
 /// This can be used as a debug assertion after compaction and in tests.
-pub fn find_orphaned_tool_result(messages: &[Message]) -> Option<String> {
+#[cfg(test)]
+pub(crate) fn find_orphaned_tool_result(messages: &[Message]) -> Option<String> {
     use crate::agent::message::ContentBlock;
     use std::collections::HashSet;
 

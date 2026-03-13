@@ -409,60 +409,61 @@ pub(super) async fn completions_handler(
 mod tests {
     use super::{compose_system_prompt, DJINN_CHAT_SYSTEM_PROMPT};
     use crate::mcp::server::DjinnMcpServer;
-    use crate::server::test_helpers;
+    use crate::server::AppState;
+    use crate::test_helpers;
     use serde_json::json;
+    use tokio_util::sync::CancellationToken;
+
+    fn test_mcp() -> DjinnMcpServer {
+        let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+        DjinnMcpServer::new(state)
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dispatch_tool_routes_task_family() {
-        let app = test_helpers::create_test_app();
-        let mcp = DjinnMcpServer::new(app.state().clone());
-        let result = mcp.dispatch_tool("task_list", json!({"limit": 1})).await;
-        assert!(result.is_ok());
+        let mcp = test_mcp();
+        let result = mcp.dispatch_tool("task_list", json!({"project": "/tmp/nonexistent", "issue_type": "task", "status": "open", "label": "", "text": "", "sort": "updated_at", "offset": 0, "limit": 10})).await;
+        assert!(result.is_ok(), "dispatch_tool task_list returned error: {result:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dispatch_tool_routes_epic_family() {
-        let app = test_helpers::create_test_app();
-        let mcp = DjinnMcpServer::new(app.state().clone());
-        let result = mcp.dispatch_tool("epic_list", json!({"limit": 1})).await;
-        assert!(result.is_ok());
+        let mcp = test_mcp();
+        let result = mcp.dispatch_tool("epic_list", json!({"project": "/tmp/nonexistent", "limit": 1})).await;
+        assert!(result.is_ok(), "dispatch_tool epic_list returned error: {result:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dispatch_tool_routes_memory_family() {
-        let app = test_helpers::create_test_app();
-        let mcp = DjinnMcpServer::new(app.state().clone());
+        let mcp = test_mcp();
         let result = mcp
-            .dispatch_tool("memory_search", json!({"project":".", "query":"x", "limit": 1}))
+            .dispatch_tool("memory_search", json!({"project":"/tmp/nonexistent", "query":"x", "limit": 1}))
             .await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "dispatch_tool memory_search returned error: {result:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dispatch_tool_routes_settings_family() {
-        let app = test_helpers::create_test_app();
-        let mcp = DjinnMcpServer::new(app.state().clone());
+        let mcp = test_mcp();
         let result = mcp.dispatch_tool("settings_get", json!({})).await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "dispatch_tool settings_get returned error: {result:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dispatch_tool_routes_provider_family() {
-        let app = test_helpers::create_test_app();
-        let mcp = DjinnMcpServer::new(app.state().clone());
+        let mcp = test_mcp();
         let result = mcp.dispatch_tool("provider_list", json!({})).await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "dispatch_tool provider_list returned error: {result:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dispatch_tool_rejects_unknown_tool() {
-        let app = test_helpers::create_test_app();
-        let mcp = DjinnMcpServer::new(app.state().clone());
+        let mcp = test_mcp();
         let err = mcp
             .dispatch_tool("tool_that_does_not_exist", json!({}))
             .await
             .expect_err("unknown tool should fail");
-        assert!(err.contains("unknown tool"));
+        assert!(err.contains("unknown MCP tool"));
     }
 
     #[test]
