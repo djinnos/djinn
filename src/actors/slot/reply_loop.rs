@@ -3,7 +3,6 @@ use std::path::Path;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::AgentType;
 use crate::agent::extension;
 use crate::agent::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use crate::agent::output_parser::ParsedAgentOutput;
@@ -80,7 +79,7 @@ pub(super) async fn run_reply_loop(
     session_id: &str,
     project_path: &str,
     worktree_path: &Path,
-    agent_type: AgentType,
+    role_name: &str,
     cancel: &CancellationToken,
     global_cancel: &CancellationToken,
     app_state: &AppState,
@@ -88,7 +87,7 @@ pub(super) async fn run_reply_loop(
     model_id: &str,
     is_resumed_session: bool,
 ) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64) {
-    let mut output = ParsedAgentOutput::new(agent_type);
+    let mut output = ParsedAgentOutput::new(role_name.parse().unwrap_or(crate::agent::AgentType::Worker));
 
     // Token counts and last assistant text are declared outside the async block
     // so they survive the borrow and can be used for telemetry/return values.
@@ -106,7 +105,7 @@ pub(super) async fn run_reply_loop(
             model: model_id,
             task_short_id,
             task_id,
-            agent_type: agent_type.as_str(),
+            agent_type: role_name,
             session_id,
         });
         // Record system prompt from the first message.
@@ -250,7 +249,7 @@ pub(super) async fn run_reply_loop(
                     }
                     let compacted = crate::agent::compaction::compact_conversation(
                         provider, conversation, session_id, task_id, app_state,
-                        crate::agent::compaction::CompactionContext::MidSession(agent_type),
+                        crate::agent::compaction::CompactionContext::MidSession(role_name.to_string()),
                         context_window,
                     ).await;
                     if compacted {
@@ -325,7 +324,7 @@ pub(super) async fn run_reply_loop(
                                 let _ = app_state.events().send(DjinnEvent::SessionMessage {
                                     session_id: session_id.to_owned(),
                                     task_id: task_id.to_owned(),
-                                    agent_type: agent_type.as_str().to_owned(),
+                                    agent_type: role_name.to_owned(),
                                     message: serde_json::json!({
                                         "type": "delta",
                                         "role": "assistant",
@@ -407,7 +406,7 @@ pub(super) async fn run_reply_loop(
                 );
                 let compacted = crate::agent::compaction::compact_conversation(
                     provider, conversation, session_id, task_id, app_state,
-                    crate::agent::compaction::CompactionContext::MidSession(agent_type),
+                    crate::agent::compaction::CompactionContext::MidSession(role_name.to_string()),
                     context_window,
                 ).await;
                 if compacted {
@@ -497,7 +496,7 @@ pub(super) async fn run_reply_loop(
             let _ = app_state.events().send(DjinnEvent::SessionMessage {
                 session_id: session_id.to_owned(),
                 task_id: task_id.to_owned(),
-                agent_type: agent_type.as_str().to_owned(),
+                agent_type: role_name.to_owned(),
                 message: serialize_message(&assistant_msg),
             });
 
@@ -516,7 +515,7 @@ pub(super) async fn run_reply_loop(
                     session_id,
                     task_id,
                     app_state,
-                    crate::agent::compaction::CompactionContext::MidSession(agent_type),
+                    crate::agent::compaction::CompactionContext::MidSession(role_name.to_string()),
                     context_window,
                 )
                 .await;
@@ -554,7 +553,7 @@ pub(super) async fn run_reply_loop(
                 // No tool calls → text-only response → session complete.
                 tracing::info!(
                     task_id = %task_id,
-                    agent_type = %agent_type.as_str(),
+                    agent_type = %role_name,
                     turns,
                     assistant_message_count,
                     "ReplyLoop: text-only turn — session complete"
@@ -692,28 +691,29 @@ pub(super) async fn run_reply_loop(
                 // doom loop: verify→review→reject→resume→text-only→verify…).
                 tracing::warn!(
                     task_id = %task_id,
-                    agent_type = %agent_type.as_str(),
+                    agent_type = %role_name,
                     "ReplyLoop: resumed session ended text-only (no tool calls = no progress)"
                 );
                 return Err(anyhow::anyhow!(
                     "resumed worker ended without any tool use (no progress made on reviewer feedback)"
                 ));
             } else {
-                let reason = match agent_type {
-                    AgentType::Worker | AgentType::ConflictResolver => {
+                let reason = match role_name {
+                    "worker" | "conflict_resolver" => {
                         "worker ended without any tool use (provider error?)"
                     }
-                    AgentType::TaskReviewer => {
+                    "task_reviewer" => {
                         "task reviewer ended without any tool use (provider error?)"
                     }
-                    AgentType::PM => "PM agent ended without any tool use (provider error?)",
-                    AgentType::Groomer => {
+                    "pm" => "PM agent ended without any tool use (provider error?)",
+                    "groomer" => {
                         "groomer agent ended without any tool use (provider error?)"
                     }
+                    _ => "agent ended without any tool use (provider error?)",
                 };
                 tracing::warn!(
                     task_id = %task_id,
-                    agent_type = %agent_type.as_str(),
+                    agent_type = %role_name,
                     saw_any_event,
                     assistant_message_count,
                     runtime_error = ?output.runtime_error,
@@ -726,7 +726,7 @@ pub(super) async fn run_reply_loop(
 
         tracing::info!(
             task_id = %task_id,
-            agent_type = %agent_type.as_str(),
+            agent_type = %role_name,
             saw_any_event,
             assistant_message_count,
             turns,
