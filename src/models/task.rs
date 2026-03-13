@@ -444,9 +444,14 @@ pub fn compute_transition(
         TransitionAction::Escalate => {
             if !matches!(
                 from,
-                TaskStatus::Open | TaskStatus::InTaskReview | TaskStatus::Verifying
+                TaskStatus::Open
+                    | TaskStatus::InProgress
+                    | TaskStatus::InTaskReview
+                    | TaskStatus::Verifying
             ) {
-                return bad("escalate is only valid from open, in_task_review, or verifying");
+                return bad(
+                    "escalate is only valid from open, in_progress, in_task_review, or verifying",
+                );
             }
             TransitionApply {
                 to_status: Some(TaskStatus::NeedsPmIntervention),
@@ -593,7 +598,10 @@ mod tests {
             }
             (
                 TransitionAction::Escalate,
-                TaskStatus::Open | TaskStatus::InTaskReview | TaskStatus::Verifying,
+                TaskStatus::Open
+                | TaskStatus::InProgress
+                | TaskStatus::InTaskReview
+                | TaskStatus::Verifying,
             ) => Some(TaskStatus::NeedsPmIntervention),
             (TransitionAction::PmInterventionStart, TaskStatus::NeedsPmIntervention) => {
                 Some(TaskStatus::InPmIntervention)

@@ -72,6 +72,7 @@ where
         "task_update" => call_task_update(state, &call.arguments).await,
         "task_update_ac" => call_task_update_ac(state, &call.arguments).await,
         "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
+        "request_pm" => call_request_pm(state, &call.arguments).await,
         "task_transition" => call_task_transition(state, &call.arguments).await,
         "task_delete_branch" => call_task_delete_branch(state, &call.arguments).await,
         "task_archive_activity" => call_task_archive_activity(state, &call.arguments).await,
@@ -560,6 +561,55 @@ async fn call_task_update_ac(
     Ok(task_to_value(&updated))
 }
 
+async fn call_request_pm(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    #[derive(Deserialize)]
+    struct RequestPmParams {
+        id: String,
+        reason: String,
+        suggested_breakdown: Option<String>,
+    }
+
+    let p: RequestPmParams = parse_args(arguments)?;
+    let repo = TaskRepository::new(state.db().clone(), state.events().clone());
+
+    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
+    };
+
+    // Log the PM request as a structured comment.
+    let mut body = format!("[PM_REQUEST] {}", p.reason);
+    if let Some(ref breakdown) = p.suggested_breakdown {
+        body.push_str(&format!("\n\nSuggested breakdown:\n{breakdown}"));
+    }
+    let payload = serde_json::json!({ "body": body }).to_string();
+    repo.log_activity(Some(&task.id), "worker-agent", "worker", "comment", &payload)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Escalate to PM intervention queue.
+    let updated = repo
+        .transition(
+            &task.id,
+            crate::models::TransitionAction::Escalate,
+            "worker-agent",
+            "worker",
+            Some(&p.reason),
+            None,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "status": "escalated",
+        "task_id": updated.id,
+        "new_status": updated.status,
+        "message": "Task escalated to PM. Your session should end now."
+    }))
+}
+
 async fn call_task_comment_add(
     state: &AppState,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -780,6 +830,7 @@ fn is_tool_allowed_for_agent(agent_type: AgentType, name: &str) -> bool {
         "task_show" | "task_list" | "task_activity_list" | "task_comment_add" | "memory_read"
         | "memory_search" | "shell" | "task_create" => true,
         "write" | "edit" => matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver),
+        "request_pm" => matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver),
         "task_update_ac" => matches!(agent_type, AgentType::TaskReviewer),
         "task_update"
         | "task_transition"
@@ -1267,6 +1318,23 @@ fn tool_task_comment_add() -> RmcpTool {
     )
 }
 
+fn tool_request_pm() -> RmcpTool {
+    RmcpTool::new(
+        "request_pm".to_string(),
+        "Request PM intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the PM queue. Your session will effectively end after this call."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["id", "reason"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short_id"},
+                "reason": {"type": "string", "description": "Why PM intervention is needed (e.g. task too large, design ambiguous, blocked on decision)"},
+                "suggested_breakdown": {"type": "string", "description": "Optional suggested split: list of smaller tasks the PM should create"}
+            }
+        }),
+    )
+}
+
 fn tool_memory_read() -> RmcpTool {
     RmcpTool::new(
         "memory_read".to_string(),
@@ -1537,6 +1605,8 @@ pub(crate) fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
     if matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver) {
         tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
         tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
+        tool_values
+            .push(serde_json::to_value(tool_request_pm()).expect("serialize tool_request_pm"));
     }
 
     if matches!(agent_type, AgentType::TaskReviewer) {

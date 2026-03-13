@@ -21,6 +21,7 @@ You have access to these tools via the `djinn` extension:
 
 - `task_list(project, status?)` — list tasks, filter by status
 - `task_show(id)` — read full task details
+- `task_create(project, title, ...)` — create new tasks (for splitting oversized work)
 - `task_update(id, ...)` — update task fields (description, design, acceptance_criteria, memory_refs)
 - `task_transition(id, action, reason?)` — transition task status
 - `task_comment_add(id, body)` — leave notes for other agents
@@ -48,6 +49,14 @@ You have access to these tools via the `djinn` extension:
 
 Promote it for worker dispatch:
 - Call `task_transition(id, action="accept")` (Backlog → Open).
+
+### If task is oversized
+
+Split it into smaller, independently deliverable tasks:
+- A task is oversized when it touches more than ~3 files or requires multiple conceptually distinct changes (e.g., "refactor type + update all call sites + rewrite tests" is 3 tasks, not 1).
+- Create new smaller tasks with `task_create(...)`, each with its own AC and design. Set `blocked_by` to express ordering dependencies between the new tasks.
+- Close the original oversized task: `task_transition(id, action="wont_do", reason="Split into smaller tasks: <list short_ids>")`.
+- Leave a comment on the original linking to the new tasks.
 
 ### If task is underspecified
 
