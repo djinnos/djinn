@@ -21,6 +21,14 @@ pub struct DjinnMcpServer {
 }
 
 impl DjinnMcpServer {
+    pub fn all_tool_schemas(&self) -> Vec<serde_json::Value> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| serde_json::to_value(tool).expect("MCP tool definitions must serialize to JSON"))
+            .collect()
+    }
+
     pub fn new(state: AppState) -> Self {
         Self {
             state: state.clone(),

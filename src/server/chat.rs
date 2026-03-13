@@ -12,7 +12,6 @@ use crate::actors::slot::{
     auth_method_for_provider, capabilities_for_provider, default_base_url,
     format_family_for_provider, load_provider_credential, parse_model_id, ProviderCredential,
 };
-use crate::agent::extension::chat_tool_schemas;
 use crate::agent::message::{ContentBlock, Conversation, Message, Role};
 use crate::agent::provider::{create_provider, StreamEvent};
 use crate::db::{EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, TaskRepository};
@@ -251,10 +250,8 @@ pub(super) async fn completions_handler(
         });
     }
 
-    let tool_schemas = chat_tool_schemas()
-        .into_iter()
-        .filter_map(|t| serde_json::to_value(t).ok())
-        .collect::<Vec<_>>();
+    let mcp = DjinnMcpServer::new(state.clone());
+    let tool_schemas = mcp.all_tool_schemas();
 
     let _worktree_path = req.project.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
 
@@ -352,7 +349,6 @@ pub(super) async fn completions_handler(
                     .await;
 
                 let args = serde_json::Value::Object(input.as_object().cloned().unwrap_or_default());
-                let mcp = DjinnMcpServer::new(state.clone());
                 match mcp.dispatch_tool(&name, args).await {
                     Ok(value) => {
                         tool_results.push(ContentBlock::ToolResult {
