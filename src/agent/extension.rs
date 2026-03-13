@@ -1492,7 +1492,6 @@ where
 /// Returns the JSON tool schemas for the given agent type, suitable for
 /// passing directly to the `LlmProvider::stream` call in the Djinn-native
 /// reply loop.
-#[allow(dead_code)]
 pub(crate) fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
     let mut tool_values = vec![
         serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
@@ -1550,7 +1549,6 @@ pub(crate) fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
 ///     _ => None,
 /// };
 /// ```
-#[allow(dead_code)]
 pub(crate) async fn call_tool(
     state: &AppState,
     name: &str,
