@@ -8,13 +8,14 @@ tags: []
 
 
 
+
 # Roadmap — Djinn Server Rust Rewrite
 
 Phased delivery plan for v1 requirements. Each phase builds on the previous and has testable success criteria. Phases are sequenced by real dependencies — later phases require earlier foundations.
 
 ## Progress Overview
 
-_Updated: 2026-03-06_
+_Updated: 2026-03-13_
 
 | Phase | Status | Remaining |
 |-------|--------|-----------|
@@ -26,15 +27,23 @@ _Updated: 2026-03-06_
 | Phase 6: Review | Complete | -- |
 | Phase 7: Desktop & Sync | Complete | -- |
 | Phase 8: Session Visibility | Complete | -- |
-| Phase 9: V1 Completion | Complete | `ewbt` (KB file watcher only) |
-| Phase 10: Operational Reliability | Not started | ADR-022: outcome-based validation |
-| Phase 11: Cognitive Memory | Not started | ADR-023: multi-signal retrieval, associations, confidence |
+| Phase 9: V1 Completion | Complete | -- |
+| Phase 10: Architecture & Agent Roles | Complete | -- |
+| Phase 11: Own the Agent Loop | Complete | -- |
+| Phase 12: Backlog Grooming | Nearly complete | 1 task (`78gy` SSE event) |
+| Phase 13: Chat Experience | In progress | 3 tasks remaining |
+| Phase 14: Desktop SSE Completeness | In progress | 5 tasks remaining |
+| Phase 15: Deep Module Architecture | In progress | 2 tasks remaining |
+| Phase 16: Operational Reliability | Not started | ADR-022 remaining items |
+| Phase 17: Cognitive Memory | Not started | ADR-023: full scope |
+| Phase 18: Test Coverage & CI | Not started | ADR-026 Phases 2-3 |
 
-**All V1 server phases complete (55/55 items, 100%).**
-**Phase 10 addresses operational reliability: outcome-based worker validation, AC-driven reviewer verdicts, circuit breakers. See [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]].**
-**Phase 11 upgrades the KB to a cognitive memory system for multi-agent scale: RRF search, Hebbian associations, Bayesian confidence, contradiction detection, context compression. See [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]].**
+**V1 server phases 1-9 complete (55/55 items, 100%).**
+**Post-V1 phases 10-11 complete: slot architecture, PM intervention, agent loop ownership.**
+**Phases 12-15 in progress: grooming, chat, SSE completeness, deep modules.**
+**Phases 16-18 planned: operational reliability, cognitive memory, test/CI pipeline.**
 
-**ADR-008:** Goose library replaces summon. MCP-connect bridge (`1tst`) and scaffold system (`1nby`) dropped. See [[ADR-008: Agent Harness -- Goose Library over Summon Subprocess Spawning]].
+**ADR-008:** Goose library replaced summon — then itself replaced by own agent loop (ADR-027). MCP-connect bridge (`1tst`) and scaffold system (`1nby`) dropped. See [[ADR-008: Agent Harness -- Goose Library over Summon Subprocess Spawning]].
 
 **ADR-009:** Phases eliminated. No dispatch grouping -- tasks dispatch when open + unblocked. Simplified execution tools (6 instead of 26). See [[ADR-009: Simplified Execution -- No Phases, Direct Task Dispatch]].
 
@@ -45,6 +54,10 @@ _Updated: 2026-03-06_
 **ADR-013:** OS-level shell sandboxing. Landlock (Linux) + Seatbelt (macOS) for kernel-enforced filesystem isolation. Supersedes ADR-011. See [[ADR-013: OS-Level Shell Sandboxing -- Landlock + Seatbelt]].
 
 **ADR-022:** Outcome-based session validation. Git diff replaces worker DONE marker; AC met state replaces reviewer text markers; circuit breakers prevent infinite loops. See [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]].
+
+**ADR-027:** Own the agent loop. Goose fully replaced with Djinn-owned provider abstraction, reply loop, compaction, OAuth, session messages, and Langfuse telemetry. See [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]].
+
+**ADR-028:** Deep module architecture. `#![warn(unreachable_pub)]` enforced, facade re-exports, pub(crate) sweep, cross-coupling extraction. See [[ADR-028: Module Visibility Enforcement and Deep Module Architecture]].
 
 ## Phase 1: Foundation — Database, Schema, and Core Server ✅
 
@@ -279,7 +292,7 @@ _Updated: 2026-03-06_
 
 **Goal**: Close gaps found in the Go server comparison audit. Covers execution control, project tools, operational logging, conflict resolution, structured output parsing, merge tracking, and file watchers. **See ADR-009 for simplified execution model. ADR-012 for epic review batches and output nudging.**
 
-**Progress**: COMPLETE (7.5/8). All items implemented except KB file watcher (settings file watcher done). Epic review batches landed per ADR-012 — tasks close immediately, batch orchestration for epic review, structured output nudging with 2-retry budget.
+**Progress**: COMPLETE (8/8). All items implemented including KB file watcher. Epic review batches landed per ADR-012 — tasks close immediately, batch orchestration for epic review, structured output nudging with 2-retry budget.
 
 **Features/Tasks**:
 - `cu4v` — ~~Simplified execution control MCP tools~~ ✓ — start/pause/resume/status/kill + session_for_task
@@ -288,7 +301,7 @@ _Updated: 2026-03-06_
 - `layi` — ~~Conflict resolution merge flow~~ ✓ — conflict detection, ConflictResolver agent type, prompt template
 - `lypu` — ~~Structured agent output parsing~~ ✓ — WORKER_RESULT/REVIEW_RESULT/EPIC_REVIEW_RESULT + nudging per ADR-012
 - `1i5q` — ~~Store merge_commit_sha on task~~ ✓ — field on Task model, persisted after squash-merge
-- `ewbt` — File watchers — ⚠️ PARTIAL: settings file watcher done (notify crate, debounce), KB file watcher not yet implemented
+- `ewbt` — ~~File watchers~~ ✓ — settings file watcher (notify crate, debounce) + KB note file watcher (watches .djinn/ per project, reindex_from_disk on .md changes)
 - `stdio-bridge` — ~~`djinn-server --mcp-connect` stdio↔HTTP MCP bridge~~ ✓ — full forwarding to daemon HTTP endpoint
 
 **Requirements addressed**:
@@ -304,84 +317,211 @@ _Updated: 2026-03-06_
 4. ~~Merge conflicts detected and resolved via agent rework loop~~ ✓
 5. ~~Agent verdicts parsed from output stream and drive state transitions~~ ✓
 6. ~~merge_commit_sha stored on task after successful squash-merge~~ ✓
-7. External KB edits detected and re-indexed automatically — ⚠️ settings only, KB pending
+7. ~~External KB edits detected and re-indexed automatically~~ ✓
 
 **Depends on**: Phase 5 (coordinator/supervisor for execution tools), Phase 4 (git for conflict resolution)
 
-## Phase Dependency Graph
+---
 
-```
-Phase 1-9: V1 Complete
-    |
-Phase 10: Operational Reliability (ADR-022)
-    |
-Phase 11: Cognitive Memory Infrastructure (ADR-023)
+## Post-V1 Phases
 
-Phase 12: Own the Agent Loop (ADR-027) — can run in parallel with 10/11
-```
+## Phase 10: Architecture & Agent Roles ✅
 
-All V1 server phases complete. Phase 10 addresses operational reliability. Phase 11 upgrades the memory system for multi-agent scale. Phase 12 replaces Goose with a Djinn-owned agent loop.
+**Goal**: Replace the monolithic AgentSupervisor with slot-based parallelism, add PM agent for circuit-breaker escalation, per-project configuration MCP tools, and session continuation. Covers ADR-014, ADR-015, ADR-024 (PM only), and the slot architecture.
 
-## Phase 12: Own the Agent Loop — Replace Goose with Direct LLM Integration
+**Progress**: COMPLETE. Slot-based supervisor (epic `zlrv`, 7/7 tasks), PM intervention (migrations V20260309000003-4, AgentType::PM, coordinator dispatch, prompt), project configuration MCP (epic `lirr`, 2/2 tasks), session continuation (epic `r7ez`), OS shell hardening (epic `0qu2`), session compaction (epic `aj6b`).
+
+**Epics**: `zlrv` (Slot-Based Supervisor), `lirr` (Project Config MCP), `r7ez` (Setup & Session Resume), `0qu2` (OS Shell Hardening), `aj6b` (Session Compaction)
+
+**Key deliverables**:
+- SlotPool architecture: `src/actors/slot/` module — lifecycle, reply_loop, helpers, worktree, commands, task_review, pool/
+- PM agent: `AgentType::PM`, `needs_pm_intervention`/`in_pm_intervention` statuses, PM prompt, coordinator dispatch
+- Circuit breaker: `continuation_count` ≥ 3 stale cycles → `Escalate` → PM intervention
+- Project config: `project_config_get`/`project_config_set` MCP tools, per-project target_branch/auto_merge/sync settings
+- Session continuation: worker pauses (not completes), reviewer feedback appended, conversation resumed
+- Compaction: 80% context threshold, LLM summarization, continuation_of chain
+- OS sandboxing: Landlock (Linux) + Seatbelt (macOS) kernel-enforced filesystem isolation
+
+**Success criteria**:
+1. ~~Slots own full task lifecycle; parallel post-session processing~~ ✓
+2. ~~PM agent dispatched for tasks stuck ≥3 stale review cycles~~ ✓
+3. ~~Per-project config persisted and accessible via MCP~~ ✓
+4. ~~Session continuation resumes conversation with reviewer feedback~~ ✓
+5. ~~Compaction fires at 80% context, agent continues in fresh context~~ ✓
+
+**Depends on**: Phase 9 (V1 complete)
+
+## Phase 11: Own the Agent Loop ✅
 
 **Goal**: Remove the Goose library dependency entirely. Djinn owns the full agent loop: LLM API calls, SSE streaming, tool dispatch, compaction, OAuth, session storage, and observability. **See [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]].**
 
-**Progress**: Not started.
+**Progress**: COMPLETE. Epic `q81u` — all 9/9 tasks closed: native message types (`lctb`), provider HTTP layer (`8o1w`), developer tools port (`dsb7`), session message storage (`a87g`), reply loop (`ty9u`), compaction (`zih5`), OAuth flows (`sbue`), lifecycle rewiring (`g7qy`), Goose crate removal (`qmcl`).
+
+**Epic**: `q81u` (Own the Agent Loop — Replace Goose)
 
 **Requirements addressed**:
 - AGENT-03 (revised: direct LLM API calls replace Goose library)
 - AGENT-17 (revised: provider creation from vault without Goose)
 - AGENT-18 (revised: per-session config without Goose Agent)
 - AGENT-19 (revised: session messages in Djinn's single DB)
-- NEW OBS-03: Langfuse LLM observability (traces + generations)
+- OBS-03: Langfuse/OpenTelemetry LLM observability (traces + generations)
 
-**Features** (to be broken down by `/breakdown`):
-- Provider HTTP layer with 3 format families (OpenAI-compatible, Anthropic, Google)
-- Reply loop (stream → tool dispatch → continue)
-- Compaction (copied from Goose as-is initially)
-- OAuth flows (ChatGPT Codex PKCE, GitHub Copilot device code)
-- Session message consolidation into Djinn's DB
-- Developer tools port (write/edit)
-- Message types (Djinn-native)
-- Token counting (API response primary, tiktoken fallback)
-- Langfuse observability client
-- Goose crate removal
+**Key deliverables**:
+- 4 provider format families: OpenAI-compatible, OpenAI Responses (Codex), Anthropic, Google — in `src/agent/provider/format/`
+- `ApiClient` with SSE streaming, exponential backoff retry, 600s timeout
+- `run_reply_loop()` — stream consumption, tool dispatch, token tracking, context-length compaction
+- Djinn-native `Message`/`ContentBlock`/`Conversation` types with per-format wire serializers
+- `SessionMessageRepository` — messages in single DB, batch insert, conversation load
+- OAuth: GitHub Copilot device code flow + ChatGPT Codex PKCE flow in `src/agent/oauth/`
+- Langfuse telemetry via OpenTelemetry OTLP export — session/LLM/tool span hierarchy
+- Token counting from provider API responses (no tiktoken needed)
+- Zero Goose dependency in Cargo.toml
 
 **Success criteria**:
-1. Agent sessions run without any Goose crate dependency
-2. All 3 format families stream LLM responses and handle tool calls correctly
-3. Codex OAuth flow authenticates and dispatches agents against ChatGPT subscription
-4. Copilot OAuth flow authenticates and dispatches agents against GitHub Copilot
-5. Session conversation history stored in Djinn's main DB (no separate sessions.db)
-6. Compaction fires at 80% context usage and agent continues in fresh context
-7. Langfuse receives traces with token counts for every LLM generation
-8. All existing tests pass with Goose removed
-9. `~/.djinn/sessions/` directory no longer created
+1. ~~Agent sessions run without any Goose crate dependency~~ ✓
+2. ~~All 4 format families stream LLM responses and handle tool calls correctly~~ ✓
+3. ~~Codex OAuth flow authenticates and dispatches agents~~ ✓
+4. ~~Copilot OAuth flow authenticates and dispatches agents~~ ✓
+5. ~~Session conversation history stored in Djinn's main DB~~ ✓
+6. ~~Compaction fires at 80% context usage and agent continues~~ ✓
+7. ~~Langfuse receives traces with token counts~~ ✓
+8. ~~All existing tests pass with Goose removed~~ ✓
 
-**Depends on**: Phase 9 (V1 complete). Can run in parallel with Phases 10 and 11.
+**Depends on**: Phase 9 (V1 complete). Ran in parallel with Phase 10.
 
-**Estimation**: ~3000-3500 LOC new/adapted code. See [[Agent Loop Port Scope]].
+## Phase 12: Backlog Grooming — ADR-025
 
-## Phase 10: Operational Reliability — Outcome-Based Validation & Agent Roles
+**Goal**: Every task passes through a grooming quality gate before worker dispatch. Groomer agent validates AC, scope, design, and memory refs. **See [[ADR-025: Backlog Grooming and Autonomous Dispatch Triggers]].**
 
-**Goal**: Replace unreliable text-marker-based session routing with outcome-based validation. Workers validated by git diff, reviewers validated by AC state, circuit breakers prevent infinite loops. **See [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]].**
+**Progress**: Nearly complete (18/19 tasks). Epic `rewx`. Groomer agent type, prompt, coordinator debounced backlog watcher, project-scoped session support, nullable session task_id all implemented. 1 SSE event task remaining.
 
-**Progress**: Not started.
+**Epic**: `rewx` (Backlog Grooming — ADR-025)
+
+**Key deliverables**:
+- `AgentType::Groomer` with project-scoped lifecycle (no worktree, uses project_dir)
+- Groomer prompt: `src/agent/prompts/groomer.md` — validates AC, scope, design, memory refs; promotes or improves
+- `dispatch_groomer_for_project()` in coordinator — debounced backlog monitoring, single groomer per project
+- `run_project_lifecycle()` in slot lifecycle — handles non-worktree agent sessions
+- `Backlog` as default task status (renamed from Draft)
+
+**Remaining**:
+- `78gy` — Emit SessionDispatched SSE event for project-scoped sessions (P2, 2 verification failures)
+
+**Success criteria**:
+1. ~~Groomer dispatched when backlog tasks exist~~ ✓
+2. ~~Quality gate enforces AC, scope, design on every task~~ ✓
+3. ~~Project-scoped sessions work without worktree~~ ✓
+4. SessionDispatched SSE emitted for project-scoped sessions — pending `78gy`
+
+**Depends on**: Phase 10 (slot architecture, PM agent), Phase 11 (own agent loop)
+
+## Phase 13: Chat Experience
+
+**Goal**: Server-side streaming chat endpoint enabling the desktop chat UI to interact with an LLM that has MCP tool access for project management through conversation.
+
+**Progress**: In progress (5/8 tasks). Epic `xo4q`. Streaming endpoint, system prompt, project context injection, initial tool schemas, and MCP dispatch bridge all implemented. Remaining work: unify chat tool schemas with MCP router, wire full dispatch, and add integration tests.
+
+**Epic**: `xo4q` (Chat Experience)
+
+**Key deliverables**:
+- `POST /api/chat/completions` streaming endpoint in `src/server/chat.rs`
+- SSE response format: delta, tool_call, tool_result, done, error events
+- Chat system prompt (`src/agent/prompts/chat.md`) with workflow guidance
+- Project context injection: epic/task counts, project brief in system prompt
+- Up to 20 tool iterations per conversation
+- Provider credential resolution and format family detection
+
+**Remaining**:
+- `zq9z` — Replace chat_tool_schemas with full MCP tool list (P0, 2 verification failures)
+- `4e4q` — Wire chat handler to use MCP dispatch instead of dispatch_tool_call (P1, blocked by zq9z)
+- `3w5h` — Chat integration tests — tool dispatch and system prompt (P2, blocked by 4e4q)
+
+**Success criteria**:
+1. ~~Streaming chat completions endpoint functional~~ ✓
+2. ~~System prompt includes project context~~ ✓
+3. Chat exposes all MCP tools (not manual subset) — pending `zq9z`
+4. Tool dispatch routes through MCP server — pending `4e4q`
+5. Integration tests cover dispatch routing and prompt composition — pending `3w5h`
+
+**Depends on**: Phase 11 (own agent loop — provider abstraction), Phase 1 (MCP server)
+
+## Phase 14: Desktop SSE Completeness
+
+**Goal**: Ensure every repository write emits an SSE event so the desktop UI stays in sync. Close gaps in session event payloads and add missing event types.
+
+**Progress**: In progress (8/13 tasks). Epic `br1h`. Session messages MCP tool, SessionMessage SSE event, structured commands_run events, per-command duration, interrupt_all_running fix all done. Remaining: repo-emits-on-write gaps and session payload enrichment.
+
+**Epic**: `br1h` (Session Content & Activity Enrichment)
+
+**Key deliverables (done)**:
+- `session_messages` MCP tool for historical conversation content
+- `SessionMessage` SSE event for live session streaming
+- Structured `commands_run` activity events (ADR-020) with per-command duration
+- `SessionUpdated` emission for `interrupt_all_running`
+
+**Remaining**:
+- `6is6` — Add project_id to session SSE event payloads (P2, 2 verification failures)
+- `a5qz` — Emit TaskUpdated after blocker add/remove (P2, 1 verification failure)
+- `1hdw` — Add events field to CustomProviderRepository and emit on writes (P2, needs_pm_intervention)
+- `y62p` — Emit TaskUpdated from increment_continuation_count (P4)
+- `9x4u` — Add ActivityLogged event and emit from log_activity (P4, 2 verification failures)
+
+**Success criteria**:
+1. ~~Session messages accessible via MCP tool and live SSE~~ ✓
+2. ~~Structured activity events with duration~~ ✓
+3. All repository writes emit SSE events — pending 5 tasks
+4. Session lifecycle events include project_id — pending `6is6`
+
+**Depends on**: Phase 8 (session visibility), Phase 10 (slot architecture)
+
+## Phase 15: Deep Module Architecture — ADR-028
+
+**Goal**: Enforce deep module pattern across db/, models/, agent/ — flatten import paths, restrict visibility at compile time, break cross-coupling. **See [[ADR-028: Module Visibility Enforcement and Deep Module Architecture]].**
+
+**Progress**: In progress (10/12 tasks). Epic `ag0y`. `#![warn(unreachable_pub)]` enforced in lib.rs, facade re-exports on db/ and models/, exhaustive state machine tests, AC enforcement tests, security tests, MCP behavior assertions, lifecycle tests, provider validation tests, first decoupling extraction all done. 2 tasks remaining.
+
+**Epic**: `ag0y` (Deep Module Architecture — ADR-028)
+
+**Key deliverables (done)**:
+- `#![warn(unreachable_pub)]` in `src/lib.rs`
+- Facade re-exports on db/ and models/ (`er9m`)
+- Exhaustive task state machine transition tests (`1f7z`)
+- MCP contract tests with DB-state behavior assertions (`1xdt`)
+- Security tests for extension.rs path safety and tool authorization (`4ulk`)
+- Task review pipeline unit tests (`ripe`)
+- Lifecycle and provider validation tests (`8x0j`, `okck`)
+
+**Remaining**:
+- `t16l` — pub(crate) sweep on agent/ internals (needs_pm_intervention, all AC met but verification failures)
+- `tt9l` — Extract shared task transition types to break agent↔actor coupling (P3, blocked by t16l)
+
+**Success criteria**:
+1. ~~`#![warn(unreachable_pub)]` catches leaks at compile time~~ ✓
+2. ~~Facade re-exports flatten import paths~~ ✓
+3. ~~Exhaustive state machine tests~~ ✓
+4. agent/ internals marked pub(crate) — pending `t16l`
+5. agent↔actor cross-coupling extracted — pending `tt9l`
+
+**Depends on**: Phase 9 (V1 complete — codebase to refactor)
+
+## Phase 16: Operational Reliability — ADR-022
+
+**Goal**: Replace text-marker-based session routing with outcome-based validation. Workers validated by git diff, reviewers validated by AC state. **See [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]].**
+
+**Progress**: Not started. Circuit breaker and PM escalation already landed in Phase 10; this phase covers the remaining ADR-022 mechanism changes.
+
+**Note**: ADR-024 PM agent and ADR-025 backlog grooming were originally scoped under this phase but delivered independently in Phases 10 and 12. What remains is the core outcome-based validation mechanism.
 
 **Requirements addressed**:
-- REVIEW-01 extension (AC-driven reviewer verdicts replace text markers)
-- REVIEW-03 extension (circuit breaker on reopen limit)
-- AGENT-08 extension (outcome-based stuck detection replaces marker-based)
-- NEW AGENT-20: Git diff as worker completion signal
-- NEW AGENT-21: Evidence-based nudging with retry budget
-- NEW AGENT-22: Task-level circuit breaker (no-changes, reopen limit, session errors)
-- NEW REVIEW-04: AC-only reviewer verdicts (workers cannot update AC met status)
+- AGENT-20: Git diff as worker completion signal
+- AGENT-21: Evidence-based nudging with retry budget
+- AGENT-22: Task-level circuit breaker refinement (no-changes, session errors)
+- REVIEW-04: AC-only reviewer verdicts (workers cannot update AC met status)
 
-**Features/Tasks** (to be broken down):
+**Features** (to be broken down):
 - Outcome-based worker validation — git diff check after reply loop, NO_CHANGES_NEEDED signal
 - AC-driven reviewer verdicts — derive VERIFIED/REOPEN from AC met state, not text markers
 - Evidence-based nudging — git diff evidence in nudge, max 2 attempts
-- Task-level circuit breaker — fail after no-changes/reopen-limit/session-error thresholds
 - Worker AC restriction — prevent workers from updating AC met status
 - Write-tool tracking — distinguish "explored but didn't implement" from "genuinely done"
 
@@ -389,23 +529,16 @@ All V1 server phases complete. Phase 10 addresses operational reliability. Phase
 1. Worker that produces file changes proceeds to review without needing a text marker
 2. Worker that produces no changes gets evidence-based nudge showing empty git diff
 3. Worker that produces no changes after 2 nudges has task marked failed
-4. Task reopened 3+ times by reviewer is marked failed for human triage
-5. Reviewer verdict derived from AC met/unmet state, not from REVIEW_RESULT text
-6. Workers cannot call task_update to set acceptance_criteria met status
-7. NO_CHANGES_NEEDED signal passes to reviewer who independently verifies the claim
+4. Reviewer verdict derived from AC met/unmet state, not from REVIEW_RESULT text
+5. Workers cannot call task_update to set acceptance_criteria met status
 
-**Depends on**: Phase 9 (V1 complete), Phase 6 (review system)
+**Depends on**: Phase 11 (own agent loop — reply loop is where validation happens), Phase 10 (PM/circuit breaker foundation)
 
-**ADR-024:** Agent role redesign. EpicReviewer killed, replaced by PM (backlog grooming, circuit breaker escalation, KB hygiene) and Architect (codebase analysis, ADR enforcement, proposals). ADR status gains system semantics (Proposed/Accepted/Superseded/Rejected). Workers lose `task_update`. See [[ADR-024: Agent Role Redesign — PM, Architect, and Approval Pipeline]].
+## Phase 17: Cognitive Memory Infrastructure — ADR-023
 
-**ADR-025:** Backlog grooming and dispatch triggers. `Draft` renamed to `Backlog` as default status. PM triggered by debounced backlog watch. Architect triggered by merge count threshold. PM has dispatch priority over workers. See [[ADR-025: Backlog Grooming and Autonomous Dispatch Triggers]].
+**Goal**: Upgrade the knowledge base from a static note store with FTS search to a cognitive memory system with multi-signal retrieval, implicit association learning, confidence scoring, and context compression. Designed for multi-agent scale. **See [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]].**
 
-
-## Phase 11: Cognitive Memory Infrastructure
-
-**Goal**: Upgrade the knowledge base from a static note store with FTS search to a cognitive memory system with multi-signal retrieval, implicit association learning, confidence scoring, and context compression. Designed for multi-agent scale (hundreds of concurrent agents, thousands of tasks). **See [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]].**
-
-**Progress**: Not started.
+**Progress**: Not started. Planning complete — scope, requirements (CMEM-01 through CMEM-14), and sub-phases defined.
 
 **Requirements addressed**:
 - CMEM-01 (multi-signal RRF search)
@@ -425,7 +558,7 @@ All V1 server phases complete. Phase 10 addresses operational reliability. Phase
 
 **Sub-phases**:
 
-### 11a: Retrieval Pipeline
+### 17a: Retrieval Pipeline
 - Schema migration: `access_count`, `confidence`, `summary` columns on notes
 - FTS5 field weighting (title=3×, tags=2×, content=1×)
 - ACT-R temporal priority function (query-time computation)
@@ -434,7 +567,7 @@ All V1 server phases complete. Phase 10 addresses operational reliability. Phase
 - RRF fusion of 4 signals with configurable k-constants
 - `build_context` upgrade with progressive disclosure
 
-### 11b: Association Learning
+### 17b: Association Learning
 - `note_associations` table schema + migration
 - Co-access tracking (session-scoped batches)
 - Hebbian weight updates on session completion
@@ -442,14 +575,14 @@ All V1 server phases complete. Phase 10 addresses operational reliability. Phase
 - Implicit associations as graph proximity signal
 - `memory_associations` MCP tool
 
-### 11c: Confidence & Contradiction
+### 17c: Confidence & Contradiction
 - Bayesian confidence update function
 - Task outcome → confidence signal (success/failure)
 - Concept-cluster contradiction detection on write
 - Contradiction event emission
 - Confidence in search results and note reads
 
-### 11d: Session Reflection
+### 17d: Session Reflection
 - Post-task reflection job in supervisor
 - Co-access extraction from session tool log
 - Batch Hebbian + confidence updates
@@ -464,52 +597,79 @@ All V1 server phases complete. Phase 10 addresses operational reliability. Phase
 6. `build_context` returns top-K related notes as summaries, not full content
 7. Post-session reflection updates association weights and confidence for notes accessed during the session
 
-**Depends on**: Phase 9 (V1 complete — existing KB infrastructure), Phase 10 (operational reliability — session outcome tracking provides confidence signals)
+**Depends on**: Phase 9 (V1 complete — existing KB infrastructure)
 
 **Research**: [[Cognitive Memory Systems Research]] — comparative analysis of MuninnDB, Augment Code, Letta/MemGPT, GitHub Copilot, Cognee, and git-based context patterns.
+
+## Phase 18: Test Coverage & CI — ADR-026 Phases 2-3
+
+**Goal**: Extend test coverage to the desktop (Tauri + React), establish CI pipeline with automated test runs, coverage gating, and lint enforcement. **See [[ADR-026: Automated Testing Strategy — Three-Phase Full-Stack Coverage]].**
+
+**Progress**: Not started. Phase 1 (server tests) complete — epic `b11g` closed 2026-03-12, 456 tests passing, 47.26% line coverage baseline.
+
+**Features** (to be broken down):
+- Desktop Rust backend unit tests (Tauri commands, state management)
+- React component tests (Vitest + Testing Library)
+- E2E integration tests (Playwright or similar)
+- CI pipeline: cargo test + clippy + coverage on PR
+- Coverage gating thresholds
+- Lint enforcement (rustfmt, eslint)
+
+**Success criteria**:
+1. Desktop Rust tests cover Tauri command handlers
+2. React components have unit test coverage for key flows
+3. CI blocks PRs that fail tests or introduce clippy warnings
+4. Coverage trends tracked over time
+
+**Depends on**: Phase 15 (deep module architecture — clean boundaries make testing easier)
 
 ## Phase Dependency Graph
 
 ```
-Phase 1-4: Foundation, Task Board, KB, Git
+Phase 1-9: V1 Complete
     |
-Phase 5: Coordinator
-    |
-Phase 6: Review
-    |
-Phase 7: Desktop & Sync
-    |
-Phase 8: Session Visibility
-    |
-Phase 9: V1 Completion (KB file watcher pending)
-    |
-Phase 10: Operational Reliability (ADR-022)
-    |
-Phase 11: Cognitive Memory Infrastructure (ADR-023)
+    ├── Phase 10: Architecture & Agent Roles ✅
+    │       |
+    │   Phase 11: Own the Agent Loop ✅ (parallel with 10)
+    │       |
+    │   Phase 12: Backlog Grooming (nearly complete)
+    │
+    ├── Phase 13: Chat Experience (in progress)
+    │
+    ├── Phase 14: Desktop SSE Completeness (in progress)
+    │
+    ├── Phase 15: Deep Module Architecture (in progress)
+    │       |
+    │   Phase 18: Test Coverage & CI
+    │
+    ├── Phase 16: Operational Reliability
+    │
+    └── Phase 17: Cognitive Memory
 ```
 
-All V1 server phases complete. Phase 10 addresses operational reliability. Phase 11 upgrades the memory system for multi-agent scale.
+Phases 13-15 can proceed in parallel. Phase 16 and 17 are independent of each other. Phase 18 benefits from Phase 15 clean boundaries.
 
 ## Coverage Check
 
-Updated 2026-03-04. All phases complete. ADR-012 adds epic review batches. ADR-013 adds OS-level sandboxing (future work, not a V1 requirement).
+Updated 2026-03-13. V1 phases 1-9 complete. Post-V1 phases 10-11 complete.
 
 - Phase 1: DB-01..07, MCP-01/02/05, CFG-01/02 (13 reqs) ✅
 - Phase 2: TASK-01..14 (14 reqs) ✅
 - Phase 3: MEM-01..10 (10 reqs) ✅
 - Phase 4: GIT-01..08, CFG-03 (9 reqs) ✅
-- Phase 5: AGENT-01..11, AGENT-16..18, CFG-04 (15 reqs) ✅
+- Phase 5: AGENT-01..11, AGENT-16..19, CFG-04 (16 reqs) ✅
 - Phase 6: REVIEW-01..03 (3 reqs) ✅
 - Phase 7: MCP-04, DB-05a, SYNC-01..04, WSL-01..04, LIFE-01..05 (16 reqs) ✅
 - Phase 8: AGENT-19, OBS-01 extension (2 reqs) ✅
 - Phase 9: GIT-09, OBS-02, CFG-02 MCP tools, REVIEW-01..03 completion (5 reqs) ✅
-- Cross-cutting: TEST-01..03 (3 reqs) — Phase 1 complete (ADR-026, epic `b11g` closed 2026-03-12; 454 tests, all passing)
+- Phase 10: ADR-014/015/024(PM)/slot architecture (cross-cutting) ✅
+- Phase 11: AGENT-03/17/18/19 revised, OBS-03 (5 reqs) ✅
+- Cross-cutting: TEST-01..03 (3 reqs) — Phase 1 complete (ADR-026, epic `b11g` closed 2026-03-12; 456 tests, all passing)
 
-- Phase 10: AGENT-20..22, REVIEW-04 (4 reqs)
-- Phase 11: CMEM-01..14 (14 reqs)
+- Phase 16: AGENT-20..22, REVIEW-04 (4 reqs) — not started
+- Phase 17: CMEM-01..14 (14 reqs) — not started
 
-Total: 112 (94 prior + 4 Phase 10 + 14 Phase 11) ✓
-
+Total: 112+ (94 V1 + 5 Phase 11 + 4 Phase 16 + 14 Phase 17) ✓
 
 ## Relations
 
