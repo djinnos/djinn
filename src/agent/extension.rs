@@ -962,31 +962,10 @@ async fn call_task_transition(
     };
     let action = TransitionAction::parse(&p.action).map_err(|e| e.to_string())?;
 
-    // PM approve: run verification gate, then squash merge.
+    // PM approve: squash merge (verification gate runs inside merge_and_transition).
     if action == TransitionAction::PmApprove {
         if task.status != TaskStatus::InPmIntervention.as_str() {
             return Ok(serde_json::json!({ "error": "pm_approve is only valid from in_pm_intervention" }));
-        }
-
-        // Run verification commands before allowing merge.
-        let project_path = crate::actors::slot::project_path_for_id(
-            &task.project_id,
-            state,
-        )
-        .await
-        .unwrap_or_else(|| ".".to_string());
-
-        if let Err(feedback) = crate::actors::slot::verification::run_verification_gate(
-            &task.id,
-            &project_path,
-            state,
-        )
-        .await
-        {
-            return Ok(serde_json::json!({
-                "error": "verification failed — cannot approve until code passes verification",
-                "verification_feedback": feedback,
-            }));
         }
 
         let (merge_action, reason) = merge_and_transition(&task.id, state, &PM_MERGE_ACTIONS)
