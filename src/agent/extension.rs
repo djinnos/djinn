@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::AgentType;
 use super::sandbox;
+use crate::db::EpicRepository;
 use crate::db::NoteRepository;
 use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
@@ -393,9 +394,17 @@ async fn call_task_create(
         }
     };
 
+    // Resolve epic_id (accepts UUID or short_id).
+    let epic_repo = EpicRepository::new(state.db().clone(), state.events().clone());
+    let epic = epic_repo
+        .resolve(&p.epic_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("epic not found: {}", p.epic_id))?;
+
     let mut task = repo
         .create(
-            &p.epic_id,
+            &epic.id,
             &p.title,
             description,
             design,
