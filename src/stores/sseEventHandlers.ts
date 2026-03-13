@@ -15,14 +15,45 @@ import type { Task, Epic } from "@/api/types";
 
 /**
  * Unwrap SSE event payload.
- * SSE events arrive as {type, action, data: {...entity...}}.
- * Returns the inner entity object.
+ *
+ * The server serialises events using Rust's externally-tagged enum format:
+ *   {"TaskUpdated": {"task": {...}}}
+ *   {"SessionDispatched": {"task_id": "...", ...}}
+ *   {"EpicCreated": {...}}
+ *
+ * This helper strips the outer variant key and, when present, an inner
+ * entity key (e.g. "task" inside TaskCreated/TaskUpdated) so callers
+ * receive the flat entity/payload object.
  */
 function unwrapPayload(raw: unknown): Record<string, unknown> {
   const obj = raw as Record<string, unknown>;
-  if (obj && typeof obj === "object" && "data" in obj && typeof obj.data === "object") {
+  if (!obj || typeof obj !== "object") return obj;
+
+  // Legacy format: {data: {...entity...}}
+  if ("data" in obj && typeof obj.data === "object") {
     return obj.data as Record<string, unknown>;
   }
+
+  // Rust externally-tagged enum: single key wrapping the payload
+  const keys = Object.keys(obj);
+  if (keys.length === 1) {
+    const inner = obj[keys[0]];
+    if (inner && typeof inner === "object") {
+      const innerObj = inner as Record<string, unknown>;
+      // Some variants nest further, e.g. TaskUpdated has {"task": {...}}
+      // Unwrap if the inner object has a single key whose value is an object
+      // with an "id" field (entity-like).
+      const innerKeys = Object.keys(innerObj);
+      if (innerKeys.length === 1) {
+        const nested = innerObj[innerKeys[0]];
+        if (nested && typeof nested === "object" && "id" in (nested as Record<string, unknown>)) {
+          return nested as Record<string, unknown>;
+        }
+      }
+      return innerObj;
+    }
+  }
+
   return obj;
 }
 
