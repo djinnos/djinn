@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::actors::git::GitActorHandle;
 use crate::actors::slot::{PoolError, SlotPoolHandle};
 use crate::agent::AgentType;
+use crate::agent::roles::RoleRegistry;
 use crate::commands::{CommandSpec, run_commands};
 use crate::db::GitSettingsRepository;
 use crate::db::ProjectRepository;
@@ -171,6 +172,8 @@ struct CoordinatorActor {
     #[cfg_attr(test, allow(dead_code))]
     catalog: CatalogService,
     health: HealthTracker,
+    #[allow(dead_code)]
+    role_registry: Arc<RoleRegistry>,
     // Sender clone for background tasks to send results back.
     self_sender: mpsc::Sender<CoordinatorMessage>,
     // Watch channel for lock-free status reads.
@@ -212,6 +215,7 @@ impl CoordinatorActor {
         pool: SlotPoolHandle,
         catalog: CatalogService,
         health: HealthTracker,
+    role_registry: Arc<RoleRegistry>,
         status_tx: watch::Sender<SharedCoordinatorState>,
         verification_tracker: VerificationTracker,
     ) -> Self {
@@ -228,6 +232,7 @@ impl CoordinatorActor {
             pool,
             catalog,
             health,
+            role_registry,
             self_sender,
             status_tx,
             paused_projects: HashSet::new(),
@@ -619,6 +624,7 @@ pub struct CoordinatorHandle {
 
 impl CoordinatorHandle {
     /// Spawn the `CoordinatorActor` and return a handle to it.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         events_tx: broadcast::Sender<DjinnEvent>,
         cancel: CancellationToken,
@@ -626,6 +632,7 @@ impl CoordinatorHandle {
         pool: SlotPoolHandle,
         catalog: CatalogService,
         health: HealthTracker,
+    role_registry: Arc<RoleRegistry>,
         verification_tracker: VerificationTracker,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(32);
@@ -646,6 +653,7 @@ impl CoordinatorHandle {
             pool,
             catalog,
             health,
+            role_registry,
             status_tx,
             verification_tracker,
         );
@@ -836,6 +844,7 @@ mod tests {
     use crate::models::TransitionAction;
     use crate::provider::health::HealthTracker;
     use crate::server::AppState;
+    use crate::agent::roles::RoleRegistry;
     use crate::test_helpers;
 
     fn spawn_coordinator(db: &Database, tx: &broadcast::Sender<DjinnEvent>) -> CoordinatorHandle {
@@ -867,6 +876,7 @@ mod tests {
         let catalog = CatalogService::new();
         let health = HealthTracker::new();
         let verification_tracker = VerificationTracker::default();
+        let role_registry = Arc::new(RoleRegistry::new());
         CoordinatorHandle::spawn(
             tx.clone(),
             cancel,
@@ -874,6 +884,7 @@ mod tests {
             pool,
             catalog,
             health,
+            role_registry,
             verification_tracker,
         )
     }

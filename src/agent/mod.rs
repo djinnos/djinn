@@ -7,7 +7,7 @@ pub(crate) mod output_parser;
 pub mod prompts;
 pub mod provider;
 pub mod sandbox;
-mod roles;
+pub(crate) mod roles;
 
 // ─── Agent type ───────────────────────────────────────────────────────────────
 
