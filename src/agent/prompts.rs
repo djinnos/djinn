@@ -70,13 +70,14 @@ pub fn render_project_prompt(
     project_path: &str,
     verification_commands: Option<&str>,
 ) -> String {
-    let template = match agent_type {
-        AgentType::Groomer => GROOMER_TEMPLATE,
-        other => panic!(
+    let config = agent_type.role_config();
+    if !config.is_project_scoped {
+        panic!(
             "render_project_prompt called for task-scoped agent: {}",
-            other.as_str()
-        ),
-    };
+            agent_type.as_str()
+        );
+    }
+    let template = config.initial_message;
     let verification_section = match verification_commands {
         Some(cmds) if !cmds.trim().is_empty() => format!(
             "## Project Verification Commands\n\n\
@@ -97,13 +98,8 @@ pub fn render_project_prompt(
 ///
 /// Returns a plain `String` ready for `agent.set_system_prompt_override()`.
 pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> String {
-    let (role_name, role_template) = match agent_type {
-        AgentType::Worker => ("Developer", DEV_TEMPLATE),
-        AgentType::ConflictResolver => ("Conflict Resolver", CONFLICT_RESOLVER_TEMPLATE),
-        AgentType::TaskReviewer => ("Task Reviewer", TASK_REVIEWER_TEMPLATE),
-        AgentType::PM => ("PM Intervention", PM_TEMPLATE),
-        AgentType::Groomer => ("Groomer", GROOMER_TEMPLATE),
-    };
+    let config = agent_type.role_config();
+    let (role_name, role_template) = (config.display_name, config.initial_message);
 
     let ac = format_acceptance_criteria(&task.acceptance_criteria);
     let labels = format_labels(&task.labels);

@@ -20,7 +20,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::actors::git::GitActorHandle;
 use crate::actors::slot::{PoolError, SlotPoolHandle};
-use crate::agent::AgentType;
 use crate::agent::roles::RoleRegistry;
 use crate::commands::{CommandSpec, run_commands};
 use crate::db::GitSettingsRepository;
@@ -172,7 +171,6 @@ struct CoordinatorActor {
     #[cfg_attr(test, allow(dead_code))]
     catalog: CatalogService,
     health: HealthTracker,
-    #[allow(dead_code)]
     role_registry: Arc<RoleRegistry>,
     // Sender clone for background tasks to send results back.
     self_sender: mpsc::Sender<CoordinatorMessage>,
@@ -616,10 +614,6 @@ impl CoordinatorActor {
             // enumerating random credentials — only dispatch what the user configured.
             selected
         }
-    }
-
-    fn role_for_task_status(status: &str) -> &'static str {
-        AgentType::for_task_status(status, false).dispatch_role()
     }
 
     fn task_repo(&self) -> TaskRepository {

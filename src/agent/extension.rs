@@ -1189,28 +1189,10 @@ fn resolve_path(raw: &str, base: &std::path::Path) -> PathBuf {
 }
 
 fn is_tool_allowed_for_agent(agent_type: AgentType, name: &str) -> bool {
-    match name {
-        "task_show" | "task_list" | "task_activity_list" | "task_comment_add" | "memory_read"
-        | "memory_search" | "shell" | "read" | "task_create" => true,
-        "write" | "edit" | "apply_patch" => {
-            matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver)
-        }
-        "request_pm" => matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver),
-        "task_update_ac" => matches!(agent_type, AgentType::TaskReviewer),
-        "task_update"
-        | "task_transition"
-        | "task_delete_branch"
-        | "task_archive_activity"
-        | "task_reset_counters"
-        | "task_kill_session"
-        | "task_blocked_list"
-        | "epic_show"
-        | "epic_update"
-        | "epic_tasks" => {
-            matches!(agent_type, AgentType::PM | AgentType::Groomer)
-        }
-        _ => false,
-    }
+    let schemas = agent_type.tool_schemas();
+    schemas
+        .iter()
+        .any(|schema| schema.get("name").and_then(|n| n.as_str()) == Some(name))
 }
 
 fn ensure_path_within_worktree(path: &Path, worktree_path: &Path) -> Result<(), String> {

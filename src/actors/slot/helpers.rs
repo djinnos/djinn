@@ -365,7 +365,7 @@ pub(crate) async fn transition_start(
     agent_type: AgentType,
     app_state: &AppState,
 ) -> anyhow::Result<()> {
-    if let Some(action) = agent_type.start_action(task.status.as_str()) {
+    if let Some(action) = (agent_type.role_config().start_action)(task.status.as_str()) {
         let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
         retry_on_locked(|| async {
             repo.transition(
@@ -390,7 +390,7 @@ pub(crate) async fn transition_interrupted(
     reason: &str,
     app_state: &AppState,
 ) {
-    let action = agent_type.release_action();
+    let action = (agent_type.role_config().release_action)();
 
     let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     let reason = reason.to_owned();
