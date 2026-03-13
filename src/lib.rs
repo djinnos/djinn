@@ -11,6 +11,7 @@ pub mod events;
 pub mod logging;
 pub mod mcp;
 pub mod models;
+pub mod process;
 pub mod provider;
 pub mod server;
 pub mod sse;

@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::pin::Pin;
 
-use crate::agent::message::{ContentBlock, Conversation};
+use crate::agent::message::{ContentBlock, Conversation, Role};
 use crate::agent::provider::client::ApiClient;
 use crate::agent::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
 
@@ -23,21 +23,120 @@ impl OpenAIProvider {
     }
 
     fn build_request(&self, conversation: &Conversation, tools: &[Value]) -> Value {
-        let messages = conversation.to_openai_messages();
+        // Convert messages — OpenAI Chat Completions format requires:
+        // - Assistant tool calls in a separate `tool_calls` field (NOT in content)
+        // - Tool results as standalone messages with role "tool"
+        let mut messages: Vec<Value> = Vec::new();
+
+        for msg in &conversation.messages {
+            let role = match msg.role {
+                Role::System => "system",
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+
+            // Separate content blocks by type
+            let mut text_blocks: Vec<Value> = Vec::new();
+            let mut tool_calls: Vec<Value> = Vec::new();
+            let mut tool_results: Vec<Value> = Vec::new();
+
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text } => {
+                        text_blocks.push(json!({"type": "text", "text": text}));
+                    }
+                    ContentBlock::ToolUse { id, name, input } => {
+                        tool_calls.push(json!({
+                            "id": id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": input.to_string()}
+                        }));
+                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error: _,
+                    } => {
+                        let text = content
+                            .iter()
+                            .filter_map(|c| {
+                                if let ContentBlock::Text { text } = c {
+                                    Some(text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("");
+                        tool_results.push(json!({
+                            "role": "tool",
+                            "tool_call_id": tool_use_id,
+                            "content": text
+                        }));
+                    }
+                }
+            }
+
+            if !tool_results.is_empty() {
+                // Tool results become standalone messages with role "tool"
+                for tr in tool_results {
+                    messages.push(tr);
+                }
+            } else if !tool_calls.is_empty() {
+                // Assistant message with tool_calls
+                let mut assistant_msg = json!({"role": role});
+                if !text_blocks.is_empty() {
+                    let text = text_blocks
+                        .iter()
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("");
+                    assistant_msg["content"] = json!(text);
+                } else {
+                    assistant_msg["content"] = Value::Null;
+                }
+                assistant_msg["tool_calls"] = json!(tool_calls);
+                messages.push(assistant_msg);
+            } else if text_blocks.len() == 1 {
+                // Simple single text — use string content form
+                let text = text_blocks[0].get("text").and_then(|t| t.as_str()).unwrap_or("");
+                messages.push(json!({"role": role, "content": text}));
+            } else {
+                // Multiple text blocks — use array content form
+                messages.push(json!({"role": role, "content": text_blocks}));
+            }
+        }
 
         let mut body = json!({
             "model": self.config.model_id,
             "messages": messages,
+            "stream": true,
+            "stream_options": {"include_usage": true}
         });
 
-        // Only request streaming when the provider supports it.
-        if self.config.capabilities.streaming {
-            body["stream"] = json!(true);
-            body["stream_options"] = json!({"include_usage": true});
-        }
-
         if !tools.is_empty() {
-            body["tools"] = json!(convert_tools_to_openai(tools));
+            // Convert RMCP tool format to OpenAI function-calling format.
+            // RMCP: {"name", "description", "inputSchema"}
+            // OpenAI: {"type": "function", "function": {"name", "description", "parameters"}}
+            let openai_tools: Vec<Value> = tools
+                .iter()
+                .map(|t| {
+                    if t.get("type").is_some() && t.get("function").is_some() {
+                        // Already in OpenAI format.
+                        t.clone()
+                    } else {
+                        json!({
+                            "type": "function",
+                            "function": {
+                                "name": t.get("name").cloned().unwrap_or(json!("")),
+                                "description": t.get("description").cloned().unwrap_or(json!("")),
+                                "parameters": t.get("inputSchema").cloned().unwrap_or(json!({"type": "object"})),
+                            }
+                        })
+                    }
+                })
+                .collect();
+            body["tools"] = json!(openai_tools);
         }
 
         body
@@ -309,40 +408,26 @@ impl LlmProvider for OpenAIProvider {
         let url = self.effective_url();
         let auth = self.config.auth.clone();
         let extra_headers = self.extra_headers();
-        let streaming = self.config.capabilities.streaming;
 
         Box::pin(async move {
-            if streaming {
-                // Streaming path: SSE
-                let raw = self.client.stream_sse(&url, body, &auth, extra_headers);
-                let out: Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>> =
-                    Box::pin(stream! {
-                        let mut tool_acc: Option<(String, String, String)> = None;
-                        let mut raw_stream = raw;
-                        while let Some(result) = raw_stream.next().await {
-                            match result {
-                                Err(e) => { yield Err(e); return; }
-                                Ok(line) => {
-                                    for event in parse_openai_line(&line, &mut tool_acc) {
-                                        yield Ok(event);
-                                    }
+            let raw = self.client.stream_sse(&url, body, &auth, extra_headers);
+            let out: Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>> =
+                Box::pin(stream! {
+                    let mut tool_acc: Option<(String, String, String)> = None;
+                    let mut raw_stream = raw;
+                    while let Some(result) = raw_stream.next().await {
+                        match result {
+                            Err(e) => { yield Err(e); return; }
+                            Ok(line) => {
+                                for event in parse_openai_line(&line, &mut tool_acc) {
+                                    yield Ok(event);
                                 }
                             }
                         }
-                        yield Ok(StreamEvent::Done);
-                    });
-                Ok(out)
-            } else {
-                // Non-streaming path: single POST, parse complete response
-                let response_body = self
-                    .client
-                    .post_json(&url, body, &auth, extra_headers)
-                    .await?;
-                let events = parse_openai_response(&response_body);
-                let out: Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>> =
-                    Box::pin(futures::stream::iter(events.into_iter().map(Ok)));
-                Ok(out)
-            }
+                    }
+                    yield Ok(StreamEvent::Done);
+                });
+            Ok(out)
         })
     }
 }

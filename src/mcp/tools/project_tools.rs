@@ -25,10 +25,9 @@ async fn ensure_git_repo_ready(path: &str) -> Result<(), String> {
     // 1. Initialize git repo if needed.
     if !git_dir.exists() {
         tracing::info!(path, "project_add: initializing git repo");
-        let output = tokio::process::Command::new("git")
-            .args(["init"])
-            .current_dir(&project_path)
-            .output()
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["init"]).current_dir(&project_path);
+        let output = crate::process::output(cmd)
             .await
             .map_err(|e| format!("git init failed: {e}"))?;
         if !output.status.success() {
@@ -40,10 +39,10 @@ async fn ensure_git_repo_ready(path: &str) -> Result<(), String> {
     }
 
     // 2. Check if HEAD points to a valid commit.
-    let rev_parse = tokio::process::Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-        .current_dir(&project_path)
-        .output()
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(&project_path);
+    let rev_parse = crate::process::output(cmd)
         .await
         .map_err(|e| format!("git rev-parse failed: {e}"))?;
 
@@ -53,10 +52,10 @@ async fn ensure_git_repo_ready(path: &str) -> Result<(), String> {
 
     // 3. Stage .djinn/.gitignore and create initial commit.
     tracing::info!(path, "project_add: creating initial commit");
-    let add = tokio::process::Command::new("git")
-        .args(["add", ".djinn/.gitignore"])
-        .current_dir(&project_path)
-        .output()
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["add", ".djinn/.gitignore"])
+        .current_dir(&project_path);
+    let add = crate::process::output(cmd)
         .await
         .map_err(|e| format!("git add failed: {e}"))?;
     if !add.status.success() {
@@ -66,15 +65,15 @@ async fn ensure_git_repo_ready(path: &str) -> Result<(), String> {
         ));
     }
 
-    let commit = tokio::process::Command::new("git")
-        .args([
-            "commit",
-            "--no-verify",
-            "-m",
-            "chore: initialize repository",
-        ])
-        .current_dir(&project_path)
-        .output()
+    let mut cmd = std::process::Command::new("git");
+    cmd.args([
+        "commit",
+        "--no-verify",
+        "-m",
+        "chore: initialize repository",
+    ])
+    .current_dir(&project_path);
+    let commit = crate::process::output(cmd)
         .await
         .map_err(|e| format!("git commit failed: {e}"))?;
     if !commit.status.success() {

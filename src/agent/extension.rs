@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use std::process::Stdio;
 
-use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 use rmcp::model::Tool as RmcpTool;
@@ -713,11 +712,11 @@ async fn call_shell(
     let timeout_ms = p.timeout_ms.unwrap_or(120_000).max(1000);
 
     let mut cmd = if cfg!(windows) {
-        let mut c = Command::new("cmd");
+        let mut c = std::process::Command::new("cmd");
         c.arg("/c").arg(&p.command);
         c
     } else {
-        let mut c = Command::new("bash");
+        let mut c = std::process::Command::new("bash");
         c.arg("-lc").arg(&p.command);
         c
     };
@@ -726,13 +725,13 @@ async fn call_shell(
         .apply(worktree_path, &mut cmd)
         .map_err(|e| e.to_string())?;
 
+    cmd.current_dir(worktree_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let output = timeout(
         Duration::from_millis(timeout_ms),
-        cmd.current_dir(worktree_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
+        crate::process::output(cmd),
     )
     .await
     .map_err(|_| format!("shell timed out after {} ms", timeout_ms))?

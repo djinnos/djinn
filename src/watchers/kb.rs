@@ -175,9 +175,10 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
 
     match debouncer {
         Ok(mut debouncer) => {
+            // Watch .djinn/ non-recursively for top-level note files (brief.md, etc.).
             if let Err(e) = debouncer
                 .watcher()
-                .watch(&djinn_dir, notify::RecursiveMode::Recursive)
+                .watch(&djinn_dir, notify::RecursiveMode::NonRecursive)
             {
                 tracing::warn!(
                     path = %djinn_dir.display(),
@@ -186,6 +187,35 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
                 );
                 return;
             }
+
+            // Watch each subdirectory recursively EXCEPT directories that don't
+            // contain notes.  On macOS, kqueue opens a fd per watched file, so
+            // watching `worktrees/` (full source trees) exhausts the fd table
+            // and breaks all process spawning with EBADF.
+            const SKIP_DIRS: &[&str] = &["worktrees", "logs", "tasks"];
+            if let Ok(entries) = std::fs::read_dir(&djinn_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let name = entry.file_name();
+                    if SKIP_DIRS.iter().any(|s| name == *s) {
+                        continue;
+                    }
+                    if let Err(e) = debouncer
+                        .watcher()
+                        .watch(&path, notify::RecursiveMode::Recursive)
+                    {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "failed to watch KB subdirectory"
+                        );
+                    }
+                }
+            }
+
             state.watchers.insert(project_path.to_path_buf(), debouncer);
         }
         Err(e) => {

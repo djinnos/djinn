@@ -159,16 +159,15 @@ fn parse_timeframe(s: &str) -> i64 {
 
 /// Run `git log --format="%H|||%s|||%an|||%ai" -n N -- file` and parse entries.
 async fn git_log_for_file(file_path: &str, limit: i64) -> Vec<GitLogEntry> {
-    let output = tokio::process::Command::new("git")
-        .args([
-            "log",
-            "--format=%H|||%s|||%an|||%ai",
-            &format!("-n{limit}"),
-            "--",
-            file_path,
-        ])
-        .output()
-        .await;
+    let mut cmd = std::process::Command::new("git");
+    cmd.args([
+        "log",
+        "--format=%H|||%s|||%an|||%ai",
+        &format!("-n{limit}"),
+        "--",
+        file_path,
+    ]);
+    let output = crate::process::output(cmd).await;
 
     match output {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
@@ -198,10 +197,9 @@ async fn git_diff_for_file(file_path: &str, sha: Option<&str>) -> String {
         Some(s) => s.to_owned(),
         None => {
             // Find the most recent commit that touched this file.
-            let out = tokio::process::Command::new("git")
-                .args(["log", "-n1", "--format=%H", "--", file_path])
-                .output()
-                .await;
+            let mut cmd = std::process::Command::new("git");
+            cmd.args(["log", "-n1", "--format=%H", "--", file_path]);
+            let out = crate::process::output(cmd).await;
             match out {
                 Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
                 _ => return String::new(),
@@ -213,10 +211,9 @@ async fn git_diff_for_file(file_path: &str, sha: Option<&str>) -> String {
         return String::new();
     }
 
-    let out = tokio::process::Command::new("git")
-        .args(["diff", &format!("{sha}^"), &sha, "--", file_path])
-        .output()
-        .await;
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["diff", &format!("{sha}^"), &sha, "--", file_path]);
+    let out = crate::process::output(cmd).await;
 
     match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),

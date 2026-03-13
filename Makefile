@@ -6,7 +6,7 @@ INSTALL_PATH := $(INSTALL_DIR)/$(BINARY)
 DESKTOP_DIR := $(CURDIR)/../desktop
 DAEMON_FILE := $(HOME)/.djinn/daemon.json
 
-.PHONY: build release run dev test check clippy fmt clean install restart run-all reset stop halt help
+.PHONY: build release run dev test check clippy fmt clean install restart run-all reset stop halt langfuse-up langfuse-down help
 
 build: ## Build debug binary
 	cargo build
@@ -99,6 +99,12 @@ reset: ## Kill everything and restart fresh
 	@sleep 1
 	@echo "Restarting..."
 	$(MAKE) run-all
+
+langfuse-up: ## Start Langfuse stack (dashboard at http://localhost:3000)
+	docker compose -f docker/docker-compose.langfuse.yml up -d
+
+langfuse-down: ## Stop Langfuse stack
+	docker compose -f docker/docker-compose.langfuse.yml down
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'

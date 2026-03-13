@@ -22,30 +22,21 @@ async fn ensure_target_branch_ready(
     git: &crate::actors::git::GitActorHandle,
     target_branch: &str,
 ) -> anyhow::Result<()> {
-    // Fast path: target branch already resolves to a valid commit.
-    if git
-        .run_command(vec![
-            "rev-parse".into(),
-            "--verify".into(),
-            "--quiet".into(),
-            format!("refs/heads/{target_branch}"),
-        ])
-        .await
-        .is_ok()
-    {
-        return Ok(());
+    // Fast path: target branch already exists (git2 — no process spawn).
+    match git.branch_exists(target_branch).await {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!(
+                target_branch,
+                error = %e,
+                "Lifecycle: git2 branch_exists check failed; falling through to bootstrap"
+            );
+        }
     }
 
-    // Check if the repo has *any* commits (HEAD resolves?).
-    let head_exists = git
-        .run_command(vec![
-            "rev-parse".into(),
-            "--verify".into(),
-            "--quiet".into(),
-            "HEAD".into(),
-        ])
-        .await
-        .is_ok();
+    // Check if the repo has *any* commits (git2 — no process spawn).
+    let head_exists = git.has_commits().await.unwrap_or(false);
 
     if head_exists {
         // Repo has commits, but the target branch doesn't exist.
@@ -89,20 +80,69 @@ async fn ensure_target_branch_ready(
     );
 
     // Stage .djinn/.gitignore and create initial commit.
-    git.run_command(vec!["add".into(), ".djinn/.gitignore".into()])
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!("failed to stage .djinn/.gitignore for initial commit: {e}")
-        })?;
+    //
+    // Multiple slots may race here for the same repo.  If the git add or
+    // commit fails (e.g. EBADF from concurrent git operations), re-check
+    // whether another slot already bootstrapped the branch.  If so, we're
+    // done — no need to fail.
+    let stage_result = git
+        .run_command(vec!["add".into(), ".djinn/.gitignore".into()])
+        .await;
 
-    git.run_command(vec![
-        "commit".into(),
-        "--no-verify".into(),
-        "-m".into(),
-        format!("chore: initialize {target_branch} branch"),
-    ])
-    .await
-    .map_err(|e| anyhow::anyhow!("failed to bootstrap repo with initial commit: {e}"))?;
+    if let Err(e) = &stage_result {
+        // Another slot may have completed the bootstrap while we raced.
+        if git
+            .run_command(vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                format!("refs/heads/{target_branch}"),
+            ])
+            .await
+            .is_ok()
+        {
+            tracing::info!(
+                target_branch,
+                "Lifecycle: bootstrap race resolved — branch now exists"
+            );
+            return Ok(());
+        }
+        return Err(anyhow::anyhow!(
+            "failed to stage .djinn/.gitignore for initial commit: {e}"
+        ));
+    }
+
+    let commit_result = git
+        .run_command(vec![
+            "commit".into(),
+            "--no-verify".into(),
+            "-m".into(),
+            format!("chore: initialize {target_branch} branch"),
+        ])
+        .await;
+
+    if let Err(e) = &commit_result {
+        // Same race check — another slot may have finished first.
+        if git
+            .run_command(vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                format!("refs/heads/{target_branch}"),
+            ])
+            .await
+            .is_ok()
+        {
+            tracing::info!(
+                target_branch,
+                "Lifecycle: bootstrap race resolved — branch now exists"
+            );
+            return Ok(());
+        }
+        return Err(anyhow::anyhow!(
+            "failed to bootstrap repo with initial commit: {e}"
+        ));
+    }
 
     Ok(())
 }

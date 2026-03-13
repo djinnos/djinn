@@ -22,7 +22,8 @@ use super::{Sandbox, git_dir, git_metadata_dir};
 pub struct LandlockSandbox;
 
 impl Sandbox for LandlockSandbox {
-    fn apply(&self, worktree_path: &Path, cmd: &mut tokio::process::Command) -> Result<()> {
+    fn apply(&self, worktree_path: &Path, cmd: &mut std::process::Command) -> Result<()> {
+        use std::os::unix::process::CommandExt;
         let worktree = worktree_path.to_path_buf();
         let git_meta = git_metadata_dir(worktree_path);
         // Safety: pre_exec runs in the forked child process. The closure only

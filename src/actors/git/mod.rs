@@ -6,7 +6,7 @@
 //!
 //! Hybrid approach (GIT-05):
 //!   - Reads → git2 crate (status, diff, ref queries)
-//!   - Writes → `tokio::process::Command` git CLI (worktree, merge, push)
+//!   - Writes → `std::process::Command` via `crate::process` (worktree, merge, push)
 
 use std::path::{Path, PathBuf};
 
@@ -152,6 +152,15 @@ pub(super) enum GitMessage {
     RunCommand {
         args: Vec<String>,
         respond_to: Reply<CommandOutput>,
+    },
+    /// Check if a local branch exists (git2 read — no process spawn).
+    BranchExists {
+        branch: String,
+        respond_to: Reply<bool>,
+    },
+    /// Check if the repo has any commits (git2 read — no process spawn).
+    HasCommits {
+        respond_to: Reply<bool>,
     },
     /// Create local `task/{short_id}` from `target_branch` (GIT-01).
     CreateBranch {
