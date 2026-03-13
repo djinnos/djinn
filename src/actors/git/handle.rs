@@ -54,6 +54,21 @@ impl GitActorHandle {
         .await
     }
 
+    /// Check if a local branch exists (git2 read — no process spawn).
+    pub async fn branch_exists(&self, name: &str) -> Result<bool, GitError> {
+        self.request(|tx| GitMessage::BranchExists {
+            branch: name.into(),
+            respond_to: tx,
+        })
+        .await
+    }
+
+    /// Check if the repo has any commits (git2 read — no process spawn).
+    pub async fn has_commits(&self) -> Result<bool, GitError> {
+        self.request(|tx| GitMessage::HasCommits { respond_to: tx })
+            .await
+    }
+
     /// Rebase onto `upstream` with short retry/jitter for transient git-state failures.
     pub async fn rebase_with_retry(&self, upstream: &str) -> Result<(), GitError> {
         let mut last_error: Option<GitError> = None;

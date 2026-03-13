@@ -20,7 +20,7 @@ pub mod macos;
 /// (Landlock on Linux, Seatbelt on macOS). FallbackSandbox performs heuristic
 /// path validation when the OS backend is unavailable.
 pub trait Sandbox: Send + Sync {
-    fn apply(&self, worktree_path: &Path, cmd: &mut tokio::process::Command) -> Result<()>;
+    fn apply(&self, worktree_path: &Path, cmd: &mut std::process::Command) -> Result<()>;
 }
 
 // ─── Global singleton ─────────────────────────────────────────────────────────
@@ -38,7 +38,7 @@ pub static SANDBOX: LazyLock<Box<dyn Sandbox>> = LazyLock::new(detect_backend);
 pub struct FallbackSandbox;
 
 impl Sandbox for FallbackSandbox {
-    fn apply(&self, worktree_path: &Path, _cmd: &mut tokio::process::Command) -> Result<()> {
+    fn apply(&self, worktree_path: &Path, _cmd: &mut std::process::Command) -> Result<()> {
         if !worktree_path.exists() || !worktree_path.is_dir() {
             return Err(anyhow::anyhow!(
                 "workdir does not exist or is not a directory: {}",

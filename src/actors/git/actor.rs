@@ -50,6 +50,14 @@ impl GitActor {
                 let result = Self::run_git_command(path, args).await;
                 let _ = respond_to.send(result);
             }
+            GitMessage::BranchExists { branch, respond_to } => {
+                let result = tokio::task::block_in_place(|| self.branch_exists(&branch));
+                let _ = respond_to.send(result);
+            }
+            GitMessage::HasCommits { respond_to } => {
+                let result = tokio::task::block_in_place(|| self.has_commits());
+                let _ = respond_to.send(result);
+            }
             GitMessage::CreateBranch {
                 short_id,
                 target_branch,
@@ -151,6 +159,26 @@ impl GitActor {
         })
     }
 
+    fn branch_exists(&self, name: &str) -> Result<bool, GitError> {
+        match self.repo.find_branch(name, git2::BranchType::Local) {
+            Ok(_) => Ok(true),
+            Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(false),
+            Err(e) => Err(GitError::Git(e)),
+        }
+    }
+
+    fn has_commits(&self) -> Result<bool, GitError> {
+        match self.repo.head() {
+            Ok(head) => Ok(head.peel_to_commit().is_ok()),
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch
+                || e.code() == git2::ErrorCode::NotFound =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(GitError::Git(e)),
+        }
+    }
+
     // ── CLI writes ────────────────────────────────────────────────────────────
 
     /// Static so no `&self` crosses the await point (git2::Repository: !Sync).
@@ -158,11 +186,22 @@ impl GitActor {
         path: PathBuf,
         args: Vec<String>,
     ) -> Result<CommandOutput, GitError> {
-        let output = tokio::process::Command::new("git")
-            .args(&args)
+        use std::process::Stdio;
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(&args)
             .current_dir(&path)
-            .output()
-            .await?;
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = crate::process::output(cmd).await.map_err(|e| {
+            tracing::error!(
+                error = %e,
+                args = %args.join(" "),
+                cwd = %path.display(),
+                "git command failed"
+            );
+            e
+        })?;
 
         let code = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();

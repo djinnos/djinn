@@ -56,10 +56,9 @@ pub type Result<T> = std::result::Result<T, TaskSyncError>;
 // ── Git helpers ───────────────────────────────────────────────────────────────
 
 async fn git(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args).current_dir(cwd);
+    let output = crate::process::output(cmd)
         .await
         .map_err(TaskSyncError::Io)?;
 
@@ -74,10 +73,9 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 
 async fn git_ok(cwd: &Path, args: &[&str]) -> bool {
-    tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args).current_dir(cwd);
+    crate::process::output(cmd)
         .await
         .map(|o| o.status.success())
         .unwrap_or(false)

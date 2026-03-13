@@ -31,13 +31,12 @@ impl CoordinatorActor {
             // This is a fast local check — no network calls.
             let project_path = std::path::PathBuf::from(&project.path);
             if project_path.exists() {
-                let origin_check = tokio::process::Command::new("git")
-                    .args(["remote", "get-url", "origin"])
+                let mut cmd = std::process::Command::new("git");
+                cmd.args(["remote", "get-url", "origin"])
                     .current_dir(&project_path)
                     .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .await;
+                    .stderr(std::process::Stdio::null());
+                let origin_check = crate::process::status(cmd).await;
                 match origin_check {
                     Ok(status) if !status.success() => {
                         let err = "No git remote 'origin' configured. Execution requires a remote to merge completed work. \

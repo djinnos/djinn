@@ -1,6 +1,5 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
-use tokio::process::Command;
 use tokio::time::timeout;
 
 use serde::{Deserialize, Serialize};
@@ -36,22 +35,19 @@ pub async fn run_commands(
         let duration = Duration::from_secs(timeout_secs);
         let start = Instant::now();
 
-        let output = timeout(
-            duration,
-            Command::new("sh")
-                .arg("-c")
-                .arg(&spec.command)
-                .current_dir(working_dir)
-                .output(),
-        )
-        .await
-        .map_err(|_| {
-            Error::Internal(format!(
-                "command '{}' timed out after {}s",
-                spec.name, timeout_secs
-            ))
-        })?
-        .map_err(|e| Error::Internal(format!("failed to run '{}': {}", spec.name, e)))?;
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(&spec.command)
+            .current_dir(working_dir);
+        let output = timeout(duration, crate::process::output(cmd))
+            .await
+            .map_err(|_| {
+                Error::Internal(format!(
+                    "command '{}' timed out after {}s",
+                    spec.name, timeout_secs
+                ))
+            })?
+            .map_err(|e| Error::Internal(format!("failed to run '{}': {}", spec.name, e)))?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         let exit_code = output.status.code().unwrap_or(-1);
