@@ -421,6 +421,7 @@ pub async fn delete_remote_branch(project: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::events::DjinnEventEnvelope;
     use super::*;
     use crate::db::EpicRepository;
     use crate::db::TaskRepository;
@@ -955,12 +956,10 @@ mod tests {
 
         // Check that the emitted event has from_sync=true.
         let evt = rx.recv().await.unwrap();
-        match evt {
-            DjinnEvent::TaskUpdated { from_sync, .. } => {
-                assert!(from_sync, "import should emit from_sync: true");
-            }
-            other => panic!("expected TaskUpdated, got: {other:?}"),
-        }
+        let envelope: DjinnEventEnvelope = evt.into();
+        assert_eq!(envelope.entity_type, "task");
+        assert_eq!(envelope.action, "updated");
+        assert!(envelope.from_sync, "import should emit from_sync: true");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1212,9 +1211,10 @@ mod tests {
         // Verify events have from_sync=true.
         let mut event_count = 0;
         while let Ok(evt) = rx.try_recv() {
-            if let DjinnEvent::TaskUpdated { from_sync, .. } = evt {
+            let envelope: DjinnEventEnvelope = evt.into();
+            if envelope.entity_type == "task" && envelope.action == "updated" {
                 assert!(
-                    from_sync,
+                    envelope.from_sync,
                     "events from peer import should have from_sync=true"
                 );
                 event_count += 1;
