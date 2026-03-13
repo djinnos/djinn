@@ -184,28 +184,26 @@ pub(crate) async fn find_paused_session_record(
         .flatten()
 }
 
-/// Extract the `reason` field from the last `status_changed` activity entry
-/// that represents a review-to-open rejection (from_status = "in_task_review",
-/// to_status = "open"). Returns `None` if no such transition exists.
+/// Extract the `reason` field from the most recent `status_changed` activity
+/// entry that represents a review-to-open rejection (from_status =
+/// "in_task_review", to_status = "open"). Searches backwards through ALL
+/// status_changed events, not just the very last one, so that intervening
+/// transitions (e.g. verification failures cycling through verifying→open)
+/// don't obscure the original rejection reason.
 async fn last_review_rejection_reason(task_id: &str, app_state: &AppState) -> Option<String> {
     let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     let activity = repo.list_activity(task_id).await.ok()?;
-    let last_status = activity
-        .iter()
-        .rev()
-        .find(|e| e.event_type == "status_changed")?;
-    let payload: serde_json::Value = serde_json::from_str(&last_status.payload).ok()?;
-    let from_status = payload
-        .get("from_status")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let to_status = payload
-        .get("to_status")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    if from_status != "in_task_review" || to_status != "open" {
-        return None;
-    }
+    let rejection = activity.iter().rev().find(|e| {
+        if e.event_type != "status_changed" {
+            return false;
+        }
+        let Ok(p) = serde_json::from_str::<serde_json::Value>(&e.payload) else {
+            return false;
+        };
+        p.get("from_status").and_then(|v| v.as_str()) == Some("in_task_review")
+            && p.get("to_status").and_then(|v| v.as_str()) == Some("open")
+    })?;
+    let payload: serde_json::Value = serde_json::from_str(&rejection.payload).ok()?;
     Some(
         payload
             .get("reason")
@@ -219,8 +217,22 @@ pub(crate) async fn conflict_context_for_dispatch(
     task_id: &str,
     app_state: &AppState,
 ) -> Option<MergeConflictMetadata> {
-    let reason = last_review_rejection_reason(task_id, app_state).await?;
-    parse_conflict_metadata(&reason)
+    // Try the status_changed reason first (carries the full metadata).
+    if let Some(reason) = last_review_rejection_reason(task_id, app_state).await
+        && let Some(meta) = parse_conflict_metadata(&reason)
+    {
+        return Some(meta);
+    }
+    // Fallback: look for a merge_conflict activity event directly.
+    // This covers cases where the status_changed reason was lost or
+    // the rejection used a different prefix format.
+    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let activity = repo.list_activity(task_id).await.ok()?;
+    activity
+        .iter()
+        .rev()
+        .find(|e| e.event_type == "merge_conflict")
+        .and_then(|e| serde_json::from_str(&e.payload).ok())
 }
 
 pub(crate) async fn merge_validation_context_for_dispatch(
