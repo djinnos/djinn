@@ -8,7 +8,7 @@ anyhow = "1"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 clap = { version = "4", features = ["derive", "env"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form"] }
 futures = "0.3"
 async-stream = "0.3"
 bytes = "1"
@@ -50,3 +50,8 @@ http-body-util = "0.1"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
+
+[profile.dev]
+debug = "line-tables-only"
+[profile.dev.build-override]
+opt-level = 3
