@@ -87,7 +87,8 @@ pub(super) async fn run_reply_loop(
     model_id: &str,
     is_resumed_session: bool,
 ) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64) {
-    let mut output = ParsedAgentOutput::new(role_name.parse().unwrap_or(crate::agent::AgentType::Worker));
+    let mut output =
+        ParsedAgentOutput::new(role_name.parse().unwrap_or(crate::agent::AgentType::Worker));
 
     // Token counts and last assistant text are declared outside the async block
     // so they survive the borrow and can be used for telemetry/return values.

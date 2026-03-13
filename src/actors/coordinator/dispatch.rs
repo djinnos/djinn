@@ -285,7 +285,9 @@ impl CoordinatorActor {
                 let has_session = match self.pool.has_session(&task.id).await {
                     Ok(b) => b,
                     Err(PoolError::ActorDead) => {
-                        tracing::error!("CoordinatorActor: slot pool actor dead, aborting stuck scan");
+                        tracing::error!(
+                            "CoordinatorActor: slot pool actor dead, aborting stuck scan"
+                        );
                         return;
                     }
                     Err(e) => {
@@ -327,7 +329,9 @@ impl CoordinatorActor {
                         );
                         affected += 1;
                     }
-                    Err(e) => tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: failed to recover stuck task"),
+                    Err(e) => {
+                        tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: failed to recover stuck task")
+                    }
                 }
             }
         }
@@ -381,20 +385,28 @@ impl CoordinatorActor {
                     );
                     affected += 1;
                 }
-                Err(e) => tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: failed to recover verifying task"),
+                Err(e) => {
+                    tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: failed to recover verifying task")
+                }
             }
         }
 
         if affected > 0 {
             self.recovered += affected;
             self.publish_status();
-            tracing::info!(affected, total_recovered = self.recovered, "CoordinatorActor: stuck-task recovery pass complete");
+            tracing::info!(
+                affected,
+                total_recovered = self.recovered,
+                "CoordinatorActor: stuck-task recovery pass complete"
+            );
         }
     }
 
     pub(crate) fn mark_backlog_event(&mut self, project_id: &str) {
-        self.backlog_debounce
-            .insert(project_id.to_owned(), Instant::now() + Duration::from_secs(2));
+        self.backlog_debounce.insert(
+            project_id.to_owned(),
+            Instant::now() + Duration::from_secs(2),
+        );
     }
 
     pub(crate) async fn backlog_count(&self, project_id: &str) -> i64 {
@@ -416,7 +428,10 @@ impl CoordinatorActor {
         }
     }
 
-    pub(crate) async fn dispatch_groomer_for_project(&mut self, project_id: &str) -> Result<(), ()> {
+    pub(crate) async fn dispatch_groomer_for_project(
+        &mut self,
+        project_id: &str,
+    ) -> Result<(), ()> {
         if self.active_groomer_sessions.contains(project_id) {
             return Ok(());
         }
@@ -498,7 +513,9 @@ impl CoordinatorActor {
                     self.active_groomer_sessions.remove(&project_id);
                 }
                 Err(PoolError::ActorDead) => {
-                    tracing::error!("CoordinatorActor: slot pool actor dead while interrupting groomers");
+                    tracing::error!(
+                        "CoordinatorActor: slot pool actor dead while interrupting groomers"
+                    );
                     return;
                 }
                 Err(e) => {
@@ -508,5 +525,4 @@ impl CoordinatorActor {
             }
         }
     }
-
 }

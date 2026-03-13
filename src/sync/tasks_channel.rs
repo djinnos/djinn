@@ -421,10 +421,10 @@ pub async fn delete_remote_branch(project: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::events::DjinnEventEnvelope;
     use super::*;
     use crate::db::EpicRepository;
     use crate::db::TaskRepository;
+    use crate::events::DjinnEventEnvelope;
     use crate::models::TransitionAction;
 
     /// Create a temp dir with a git repo + bare "origin" remote.

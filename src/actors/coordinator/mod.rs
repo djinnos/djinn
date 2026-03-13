@@ -215,7 +215,7 @@ impl CoordinatorActor {
         pool: SlotPoolHandle,
         catalog: CatalogService,
         health: HealthTracker,
-    role_registry: Arc<RoleRegistry>,
+        role_registry: Arc<RoleRegistry>,
         status_tx: watch::Sender<SharedCoordinatorState>,
         verification_tracker: VerificationTracker,
     ) -> Self {
@@ -484,7 +484,9 @@ impl CoordinatorActor {
             // must still react to events even when globally paused.
             // New projects start paused — must be explicitly resumed.
             ("project", "created") => {
-                let Some(p) = envelope.parse_payload::<crate::models::Project>() else { return; };
+                let Some(p) = envelope.parse_payload::<crate::models::Project>() else {
+                    return;
+                };
                 self.paused_projects.insert(p.id.clone());
                 tracing::info!(
                     project_id = %p.id,
@@ -493,8 +495,18 @@ impl CoordinatorActor {
                 self.publish_status();
             }
             ("task", "created") | ("task", "updated") => {
-                let Some(task_payload) = envelope.payload.as_object().and_then(|m| m.get("task")).cloned() else { return; };
-                let Some(task) = serde_json::from_value::<crate::models::Task>(task_payload).ok() else { return; };
+                let Some(task_payload) = envelope
+                    .payload
+                    .as_object()
+                    .and_then(|m| m.get("task"))
+                    .cloned()
+                else {
+                    return;
+                };
+                let Some(task) = serde_json::from_value::<crate::models::Task>(task_payload).ok()
+                else {
+                    return;
+                };
                 if task.status == "backlog" {
                     self.mark_backlog_event(&task.project_id);
                 }
@@ -512,7 +524,9 @@ impl CoordinatorActor {
                 }
             }
             ("session", "updated") => {
-                let Some(session) = envelope.parse_payload::<crate::models::SessionRecord>() else { return; };
+                let Some(session) = envelope.parse_payload::<crate::models::SessionRecord>() else {
+                    return;
+                };
                 if session.agent_type == "groomer"
                     && matches!(session.status.as_str(), "completed" | "interrupted")
                 {
@@ -637,7 +651,7 @@ impl CoordinatorHandle {
         pool: SlotPoolHandle,
         catalog: CatalogService,
         health: HealthTracker,
-    role_registry: Arc<RoleRegistry>,
+        role_registry: Arc<RoleRegistry>,
         verification_tracker: VerificationTracker,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(32);
@@ -844,12 +858,12 @@ mod tests {
 
     use super::*;
     use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
+    use crate::agent::roles::RoleRegistry;
     use crate::db::EpicRepository;
     use crate::db::TaskRepository;
     use crate::models::TransitionAction;
     use crate::provider::health::HealthTracker;
     use crate::server::AppState;
-    use crate::agent::roles::RoleRegistry;
     use crate::test_helpers;
 
     fn spawn_coordinator(db: &Database, tx: &broadcast::Sender<DjinnEvent>) -> CoordinatorHandle {

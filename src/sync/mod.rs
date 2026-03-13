@@ -661,7 +661,10 @@ mod tests {
         let p2 = project_repo.create("proj-b", "/tmp/b").await.unwrap();
 
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let e1 = epic_repo.create("Epic A", "", "", "", "", None).await.unwrap();
+        let e1 = epic_repo
+            .create("Epic A", "", "", "", "", None)
+            .await
+            .unwrap();
         // Reassign e1's project to p1 (epic auto-creates a default project).
         // For simplicity, create tasks directly in each project.
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
@@ -746,7 +749,10 @@ mod tests {
 
         // Create an epic (auto-creates default project) so upsert_peer's FK check passes.
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo.create("Test Epic", "", "", "", "", None).await.unwrap();
+        let epic = epic_repo
+            .create("Test Epic", "", "", "", "", None)
+            .await
+            .unwrap();
         // Drain setup events (ProjectCreated + EpicCreated).
         while rx.try_recv().is_ok() {}
 

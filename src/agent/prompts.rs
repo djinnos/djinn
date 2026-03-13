@@ -84,8 +84,9 @@ pub fn render_project_prompt(
              **Never create acceptance criteria that duplicate these checks** — they are \
              already guaranteed by the pipeline.\n\n{cmds}\n"
         ),
-        _ => "## Project Verification Commands\n\nNo verification commands configured.\n"
-            .to_string(),
+        _ => {
+            "## Project Verification Commands\n\nNo verification commands configured.\n".to_string()
+        }
     };
     template
         .replace("{{project_path}}", project_path)

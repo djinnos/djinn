@@ -170,8 +170,9 @@ impl GitActor {
     fn has_commits(&self) -> Result<bool, GitError> {
         match self.repo.head() {
             Ok(head) => Ok(head.peel_to_commit().is_ok()),
-            Err(e) if e.code() == git2::ErrorCode::UnbornBranch
-                || e.code() == git2::ErrorCode::NotFound =>
+            Err(e)
+                if e.code() == git2::ErrorCode::UnbornBranch
+                    || e.code() == git2::ErrorCode::NotFound =>
             {
                 Ok(false)
             }

@@ -8,14 +8,14 @@ use tokio_util::sync::CancellationToken;
 use crate::actors::coordinator::CoordinatorHandle;
 use crate::actors::git::{GitActorHandle, GitError};
 use crate::actors::slot::{SlotPoolConfig, SlotPoolHandle};
+use crate::agent::file_time::FileTime;
+use crate::agent::roles::RoleRegistry;
 use crate::db::NoteRepository;
 use crate::db::ProjectRepository;
 use crate::db::SettingsRepository;
 use crate::db::connection::Database;
 use crate::events::DjinnEvent;
 use crate::provider::{CatalogService, HealthTracker};
-use crate::agent::file_time::FileTime;
-use crate::agent::roles::RoleRegistry;
 use crate::sync::SyncManager;
 
 mod settings;

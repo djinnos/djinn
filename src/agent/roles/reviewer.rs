@@ -1,8 +1,5 @@
-use crate::agent::compaction::{
-    REVIEWER_PROMPT, SUMMARISER_SYSTEM_TASK_REVIEWER,
-};
+use crate::agent::compaction::{REVIEWER_PROMPT, SUMMARISER_SYSTEM_TASK_REVIEWER};
 use crate::agent::extension;
-
 
 use super::{CompactionPrompts, RoleConfig};
 

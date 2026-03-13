@@ -830,7 +830,8 @@ impl DjinnMcpServer {
         };
 
         // Persist to DB.
-        let repo = CustomProviderRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo =
+            CustomProviderRepository::new(self.state.db().clone(), self.state.events().clone());
         if let Err(e) = repo.upsert(&provider).await {
             tracing::warn!(id = %input.id, error = %e, "provider_add_custom: DB upsert failed");
             return Json(ProviderAddCustomResponse {
@@ -917,7 +918,8 @@ impl DjinnMcpServer {
         }
 
         // 3. Delete custom provider entry (no-op for built-in providers).
-        let custom_repo = CustomProviderRepository::new(self.state.db().clone(), self.state.events().clone());
+        let custom_repo =
+            CustomProviderRepository::new(self.state.db().clone(), self.state.events().clone());
         let custom_provider_deleted = match custom_repo.delete(provider_id).await {
             Ok(deleted) => deleted,
             Err(e) => {

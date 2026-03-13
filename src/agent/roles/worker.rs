@@ -4,7 +4,6 @@ use crate::agent::compaction::{
 };
 use crate::agent::extension;
 
-
 use super::{CompactionPrompts, RoleConfig};
 
 pub(crate) const WORKER_CONFIG: RoleConfig = RoleConfig {

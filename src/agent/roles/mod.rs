@@ -79,7 +79,10 @@ impl RoleRegistry {
             groomer_dispatch_rule(),
         ];
 
-        Self { roles, dispatch_rules }
+        Self {
+            roles,
+            dispatch_rules,
+        }
     }
 
     pub(crate) fn role_for_task(&self, task: &Task, ctx: &DispatchContext) -> Option<&'static str> {
@@ -160,7 +163,10 @@ fn task_reviewer_dispatch_rule() -> DispatchRule {
 }
 
 fn pm_claims(task: &Task, _ctx: &DispatchContext) -> bool {
-    matches!(task.status.as_str(), "needs_pm_intervention" | "in_pm_intervention")
+    matches!(
+        task.status.as_str(),
+        "needs_pm_intervention" | "in_pm_intervention"
+    )
 }
 
 fn pm_start_action(status: &str) -> Option<TransitionAction> {
