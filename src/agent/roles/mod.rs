@@ -56,13 +56,13 @@ pub(crate) struct DispatchRule {
     pub(crate) release_action: TransitionAction,
 }
 
-pub(crate) struct RoleRegistry {
+pub struct RoleRegistry {
     pub(crate) roles: HashMap<&'static str, AgentType>,
     pub(crate) dispatch_rules: Vec<DispatchRule>,
 }
 
 impl RoleRegistry {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let roles = HashMap::from([
             ("worker", AgentType::Worker),
             ("conflict_resolver", AgentType::ConflictResolver),

@@ -14,6 +14,7 @@ use crate::db::SettingsRepository;
 use crate::db::connection::Database;
 use crate::events::DjinnEvent;
 use crate::provider::{CatalogService, HealthTracker};
+use crate::agent::roles::RoleRegistry;
 use crate::sync::SyncManager;
 
 mod settings;
@@ -37,6 +38,7 @@ struct Inner {
     pub catalog: CatalogService,
     /// Per-model circuit-breaker health tracker.
     pub health_tracker: HealthTracker,
+    pub role_registry: Arc<RoleRegistry>,
     /// djinn/ namespace git sync manager.
     pub sync: SyncManager,
     /// Long-running coordinator actor handle.
@@ -73,6 +75,7 @@ impl AppState {
                 git_actors: Mutex::new(HashMap::new()),
                 catalog: CatalogService::new(),
                 health_tracker: HealthTracker::new(),
+                role_registry: Arc::new(RoleRegistry::new()),
                 sync,
                 coordinator: Mutex::new(None),
                 pool: Mutex::new(None),
@@ -181,6 +184,7 @@ impl AppState {
             pool.clone(),
             self.catalog().clone(),
             self.health_tracker().clone(),
+            self.inner.role_registry.clone(),
             self.inner.verifying_tasks.clone(),
         );
 
