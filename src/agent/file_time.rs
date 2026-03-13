@@ -1,8 +1,10 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 type SessionId = String;
 type NormalizedPath = String;
@@ -14,6 +16,8 @@ type FileTimeMap = HashMap<SessionId, SessionFileTimes>;
 pub struct FileTime {
     // session_id -> (normalized_path -> (read_at, mtime_at_read))
     inner: RwLock<FileTimeMap>,
+    // Per-file write locks to serialize concurrent writes to the same file
+    locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
 }
 
 impl FileTime {
@@ -64,6 +68,30 @@ impl FileTime {
         }
         Ok(())
     }
+
+    /// Acquire a per-file mutex, then execute the given future while holding
+    /// the lock.  This serializes concurrent writes to the same file path,
+    /// preventing race conditions when multiple agent tasks target the same
+    /// file simultaneously.
+    pub async fn with_lock<F, T>(&self, path: &Path, f: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        let canonical = canonical_lock_key(path);
+        let mutex = {
+            let mut map = self.locks.lock().await;
+            Arc::clone(map.entry(canonical).or_insert_with(|| Arc::new(Mutex::new(()))))
+        };
+        let _guard = mutex.lock().await;
+        f.await
+    }
+}
+
+/// Produce a stable key for the per-file lock map.  We try to canonicalize
+/// first so that symlinks / `..` segments resolve to the same entry; if the
+/// file doesn't exist yet we fall back to the raw path.
+fn canonical_lock_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn normalize(path: &Path) -> String {
