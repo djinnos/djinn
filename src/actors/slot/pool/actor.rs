@@ -278,6 +278,8 @@ impl SlotPool {
 
         self.task_to_slot.insert(task_id.clone(), slot_id);
         self.task_started.insert(task_id.clone(), Instant::now());
+        self.task_projects
+            .insert(task_id.clone(), project_id.clone());
         self.slot_states.insert(
             slot_id,
             SlotState::Busy {
