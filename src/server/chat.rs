@@ -20,6 +20,17 @@ use crate::server::AppState;
 const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../agent/prompts/chat.md");
 const MAX_TOOL_ITERATIONS: usize = 20;
 
+fn compose_system_prompt(base_prompt: &str, project_context: Option<&str>, client_system: Option<&str>) -> String {
+    let mut system_prompt = base_prompt.trim().to_string();
+    if let Some(project_context) = project_context.filter(|s| !s.trim().is_empty()) {
+        system_prompt = format!("{system_prompt}\n\n{project_context}");
+    }
+    if let Some(client_system) = client_system.filter(|s| !s.trim().is_empty()) {
+        system_prompt = format!("{system_prompt}\n\n{client_system}");
+    }
+    system_prompt
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct ChatCompletionRequest {
     pub model: String,
@@ -60,7 +71,6 @@ struct ToolResultPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
 }
-
 
 fn normalize_brief_excerpt(content: &str, max_chars: usize) -> String {
     let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -125,10 +135,7 @@ async fn build_project_context_block(state: &AppState, project_ref: &str) -> Opt
         .unwrap_or_else(|| "No brief yet — suggest /init-project".to_string());
 
     Some(format!(
-        "## Current Project
-**Name**: {}  **Path**: {}
-**Open epics**: {}  **Open tasks**: {}
-**Brief**: {}",
+        "## Current Project\n**Name**: {}  **Path**: {}\n**Open epics**: {}  **Open tasks**: {}\n**Brief**: {}",
         project.name, project.path, open_epics, open_tasks, brief
     ))
 }
@@ -223,15 +230,16 @@ pub(super) async fn completions_handler(
     let provider = create_provider(provider_config);
 
     let mut conversation = Conversation::new();
-    let mut system_prompt = DJINN_CHAT_SYSTEM_PROMPT.trim().to_string();
-    if let Some(project_ref) = req.project.as_deref()
-        && let Some(project_context) = build_project_context_block(&state, project_ref).await
-    {
-        system_prompt = format!("{system_prompt}\n\n{project_context}");
-    }
-    if let Some(client_system) = req.system.filter(|s| !s.trim().is_empty()) {
-        system_prompt = format!("{system_prompt}\n\n{client_system}");
-    }
+    let project_context = if let Some(project_ref) = req.project.as_deref() {
+        build_project_context_block(&state, project_ref).await
+    } else {
+        None
+    };
+    let system_prompt = compose_system_prompt(
+        DJINN_CHAT_SYSTEM_PROMPT,
+        project_context.as_deref(),
+        req.system.as_deref(),
+    );
     conversation.push(Message::system(system_prompt));
 
     for m in req.messages {
@@ -251,7 +259,6 @@ pub(super) async fn completions_handler(
 
     let mcp = DjinnMcpServer::new(state.clone());
     let tool_schemas = mcp.all_tool_schemas();
-
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
     tokio::spawn(async move {
@@ -396,4 +403,92 @@ pub(super) async fn completions_handler(
     });
 
     Ok(Sse::new(ReceiverStream::new(rx).map(Ok)).keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compose_system_prompt, DJINN_CHAT_SYSTEM_PROMPT};
+    use crate::mcp::server::DjinnMcpServer;
+    use crate::server::test_helpers;
+    use serde_json::json;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_tool_routes_task_family() {
+        let app = test_helpers::create_test_app();
+        let mcp = DjinnMcpServer::new(app.state().clone());
+        let result = mcp.dispatch_tool("task_list", json!({"limit": 1})).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_tool_routes_epic_family() {
+        let app = test_helpers::create_test_app();
+        let mcp = DjinnMcpServer::new(app.state().clone());
+        let result = mcp.dispatch_tool("epic_list", json!({"limit": 1})).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_tool_routes_memory_family() {
+        let app = test_helpers::create_test_app();
+        let mcp = DjinnMcpServer::new(app.state().clone());
+        let result = mcp
+            .dispatch_tool("memory_search", json!({"project":".", "query":"x", "limit": 1}))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_tool_routes_settings_family() {
+        let app = test_helpers::create_test_app();
+        let mcp = DjinnMcpServer::new(app.state().clone());
+        let result = mcp.dispatch_tool("settings_get", json!({})).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_tool_routes_provider_family() {
+        let app = test_helpers::create_test_app();
+        let mcp = DjinnMcpServer::new(app.state().clone());
+        let result = mcp.dispatch_tool("provider_list", json!({})).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_tool_rejects_unknown_tool() {
+        let app = test_helpers::create_test_app();
+        let mcp = DjinnMcpServer::new(app.state().clone());
+        let err = mcp
+            .dispatch_tool("tool_that_does_not_exist", json!({}))
+            .await
+            .expect_err("unknown tool should fail");
+        assert!(err.contains("unknown tool"));
+    }
+
+    #[test]
+    fn system_prompt_contains_base_prompt_first_and_project_block_before_client_system() {
+        let project_context = "## Current Project\n**Name**: Demo  **Path**: /tmp/demo\n**Open epics**: 1  **Open tasks**: 2\n**Brief**: hello";
+        let client_system = "client system message";
+        let prompt = compose_system_prompt(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            Some(project_context),
+            Some(client_system),
+        );
+
+        let base = DJINN_CHAT_SYSTEM_PROMPT.trim();
+        assert!(prompt.starts_with(base));
+        let base_pos = prompt.find(base).unwrap();
+        let project_pos = prompt.find("## Current Project").unwrap();
+        let client_pos = prompt.find(client_system).unwrap();
+        assert!(base_pos <= project_pos);
+        assert!(project_pos < client_pos);
+    }
+
+    #[test]
+    fn system_prompt_appends_client_system_after_internal_content() {
+        let client_system = "be concise";
+        let prompt = compose_system_prompt(DJINN_CHAT_SYSTEM_PROMPT, None, Some(client_system));
+        assert!(prompt.starts_with(DJINN_CHAT_SYSTEM_PROMPT.trim()));
+        assert!(prompt.ends_with(client_system));
+    }
 }
