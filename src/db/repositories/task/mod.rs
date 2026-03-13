@@ -14,7 +14,6 @@ mod queries;
 mod reads;
 mod status;
 pub mod transitions;
-mod verification;
 mod writes;
 
 // ── Query / result types ──────────────────────────────────────────────────────

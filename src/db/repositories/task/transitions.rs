@@ -1,10 +1,6 @@
 use std::path::PathBuf;
 
 use crate::actors::git::GitError;
-use crate::commands::CommandSpec;
-use crate::db::repositories::task::verification::{
-    run_setup_commands_checked, run_verification_commands,
-};
 use crate::db::{ProjectRepository, SessionRepository, TaskRepository};
 use crate::models::{SessionStatus, TransitionAction};
 use crate::server::AppState;
@@ -236,40 +232,7 @@ async fn run_verification_gate(
     project_path: &str,
     app_state: &AppState,
 ) -> Result<(), String> {
-    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
-    let task = task_repo
-        .get(task_id)
-        .await
-        .map_err(|e| format!("failed to load task: {e}"))?
-        .ok_or_else(|| "task not found".to_string())?;
-
-    let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
-    let project = project_repo
-        .get(&task.project_id)
-        .await
-        .map_err(|e| format!("failed to load project: {e}"))?
-        .ok_or_else(|| "project not found".to_string())?;
-
-    let worktree_path = PathBuf::from(project_path);
-
-    let setup_specs: Vec<CommandSpec> =
-        serde_json::from_str(&project.setup_commands).unwrap_or_default();
-    let setup_commands: Vec<String> = setup_specs.into_iter().map(|s| s.command).collect();
-
-    run_setup_commands_checked(&worktree_path, &setup_commands, Some(task_id), app_state).await?;
-
-    let verify_specs: Vec<CommandSpec> =
-        serde_json::from_str(&project.verification_commands).unwrap_or_default();
-
-    run_verification_commands(
-        task_id,
-        Some("agent-supervisor"),
-        Some("verification"),
-        &verify_specs,
-        app_state,
-        &worktree_path,
-    )
-    .await
+    crate::actors::slot::verification::run_verification_gate(task_id, project_path, app_state).await
 }
 
 pub(crate) async fn cleanup_paused_worker_session(task_id: &str, app_state: &AppState) {
