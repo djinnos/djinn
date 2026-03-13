@@ -66,17 +66,29 @@ fn convert_tools_to_openai(tools: &[Value]) -> Vec<Value> {
             if t.get("type").is_some() && t.get("function").is_some() {
                 t.clone()
             } else {
+                let params = t.get("inputSchema").cloned().unwrap_or(json!({"type": "object"}));
+                let params = ensure_object_properties(params);
                 json!({
                     "type": "function",
                     "function": {
                         "name": t.get("name").cloned().unwrap_or(json!("")),
                         "description": t.get("description").cloned().unwrap_or(json!("")),
-                        "parameters": t.get("inputSchema").cloned().unwrap_or(json!({"type": "object"})),
+                        "parameters": params,
                     }
                 })
             }
         })
         .collect()
+}
+
+/// OpenAI requires `"properties"` on object schemas. Ensure it exists.
+pub(super) fn ensure_object_properties(mut schema: Value) -> Value {
+    if let Some(obj) = schema.as_object_mut()
+        && obj.get("type").and_then(|v| v.as_str()) == Some("object")
+    {
+        obj.entry("properties").or_insert_with(|| json!({}));
+    }
+    schema
 }
 
 // ─── SSE parsing helpers ──────────────────────────────────────────────────────

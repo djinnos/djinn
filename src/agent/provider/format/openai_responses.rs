@@ -48,7 +48,9 @@ impl OpenAIResponsesProvider {
                         .or_else(|| tool.get("function").and_then(|f| f.get("description")));
                     let parameters = tool.get("inputSchema")
                         .or_else(|| tool.get("input_schema"))
-                        .or_else(|| tool.get("function").and_then(|f| f.get("parameters")));
+                        .or_else(|| tool.get("function").and_then(|f| f.get("parameters")))
+                        .cloned()
+                        .map(super::openai::ensure_object_properties);
                     json!({
                         "type": "function",
                         "name": name,
