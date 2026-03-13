@@ -264,12 +264,7 @@ impl CoordinatorActor {
         let mut any_recovered = false;
 
         // ── Slot-based statuses: check has_session ──
-        for (status, agent_type) in [
-            ("in_progress", AgentType::Worker),
-            ("in_task_review", AgentType::TaskReviewer),
-            ("in_pm_intervention", AgentType::PM),
-        ] {
-            let action = agent_type.release_action();
+        for status in ["in_progress", "in_task_review", "in_pm_intervention"] {
             let tasks = match repo.list_by_status(status).await {
                 Ok(tasks) => tasks,
                 Err(e) => {
@@ -309,11 +304,26 @@ impl CoordinatorActor {
                     }
                 }
 
+                let role = Self::role_for_task_status(&task.status);
+                let Some(rule) = self.role_registry.dispatch_rule_for_role(role) else {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        task_uuid = %task.id,
+                        project_id = %task.project_id,
+                        status,
+                        role,
+                        "CoordinatorActor: no dispatch rule found for stuck task role; skipping release"
+                    );
+                    continue;
+                };
+                let action = rule.release_action.clone();
+
                 tracing::warn!(
                     task_id = %task.short_id,
                     task_uuid = %task.id,
                     project_id = %task.project_id,
                     status,
+                    role,
                     transition_action = ?action,
                     "CoordinatorActor: stuck task detected (no session) — releasing"
                 );

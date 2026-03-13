@@ -97,6 +97,12 @@ impl RoleRegistry {
             .into_iter()
             .collect()
     }
+
+    pub(crate) fn dispatch_rule_for_role(&self, role_name: &str) -> Option<&DispatchRule> {
+        self.dispatch_rules
+            .iter()
+            .find(|rule| rule.role_name == role_name)
+    }
 }
 
 fn worker_claims(task: &Task, _ctx: &DispatchContext) -> bool {
