@@ -1,16 +1,16 @@
 use crate::agent::compaction::{
     CONFLICT_RESOLVER_PROMPT, SUMMARISER_SYSTEM_CONFLICT_RESOLVER,
 };
-use crate::agent::prompts::CONFLICT_RESOLVER_TEMPLATE;
-use crate::tooling::schemas::worker_tool_schemas;
+use crate::agent::extension;
+
 
 use super::{CompactionPrompts, RoleConfig};
 
-pub(super) const CONFLICT_RESOLVER_CONFIG: RoleConfig = RoleConfig {
+pub(crate) const CONFLICT_RESOLVER_CONFIG: RoleConfig = RoleConfig {
     name: "conflict_resolver",
     dispatch_role: "worker",
-    tool_schemas: worker_tool_schemas,
-    initial_message: CONFLICT_RESOLVER_TEMPLATE,
+    tool_schemas: || extension::tool_schemas(crate::agent::AgentType::ConflictResolver),
+    initial_message: crate::agent::prompts::CONFLICT_RESOLVER_TEMPLATE,
     compaction: CompactionPrompts {
         mid_session: CONFLICT_RESOLVER_PROMPT,
         mid_session_system: SUMMARISER_SYSTEM_CONFLICT_RESOLVER,

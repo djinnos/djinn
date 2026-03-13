@@ -1,14 +1,14 @@
 use crate::agent::compaction::{GENERIC_PROMPT, SUMMARISER_SYSTEM_GENERIC};
-use crate::agent::prompts::GROOMER_TEMPLATE;
-use crate::tooling::schemas::groomer_tool_schemas;
+use crate::agent::extension;
+
 
 use super::{CompactionPrompts, RoleConfig};
 
-pub(super) const GROOMER_CONFIG: RoleConfig = RoleConfig {
+pub(crate) const GROOMER_CONFIG: RoleConfig = RoleConfig {
     name: "groomer",
     dispatch_role: "groomer",
-    tool_schemas: groomer_tool_schemas,
-    initial_message: GROOMER_TEMPLATE,
+    tool_schemas: || extension::tool_schemas(crate::agent::AgentType::Groomer),
+    initial_message: crate::agent::prompts::GROOMER_TEMPLATE,
     compaction: CompactionPrompts {
         mid_session: GENERIC_PROMPT,
         mid_session_system: SUMMARISER_SYSTEM_GENERIC,
