@@ -188,27 +188,45 @@ pub(super) async fn run_reply_loop(
                     model_id,
                     turns,
                 );
-                // Record the last user message as input.
-                if let Some(last_user) = conversation
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == Role::User)
+                // Build a JSON messages array for the generation input.
+                // On the first turn include the system prompt; on subsequent
+                // turns only the last user/tool-result message.
                 {
-                    let input_text = last_user
-                        .content
+                    let mut msgs = Vec::new();
+                    if turns == 1
+                        && let Some(sys) = conversation
+                            .messages
+                            .iter()
+                            .find(|m| m.role == Role::System)
+                    {
+                        let text: String = sys
+                            .content
+                            .iter()
+                            .filter_map(|b| b.as_text())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if !text.is_empty() {
+                            msgs.push(serde_json::json!({"role": "system", "content": text}));
+                        }
+                    }
+                    if let Some(last_user) = conversation
+                        .messages
                         .iter()
-                        .filter_map(|b| {
-                            if let ContentBlock::Text { text } = b {
-                                Some(text.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if !input_text.is_empty() {
-                        llm.record_input(&input_text);
+                        .rev()
+                        .find(|m| m.role == Role::User)
+                    {
+                        let text: String = last_user
+                            .content
+                            .iter()
+                            .filter_map(|b| b.as_text())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if !text.is_empty() {
+                            msgs.push(serde_json::json!({"role": "user", "content": text}));
+                        }
+                    }
+                    if !msgs.is_empty() {
+                        llm.record_input(&serde_json::to_string(&msgs).unwrap());
                     }
                 }
                 llm
