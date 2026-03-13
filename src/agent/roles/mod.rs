@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::agent::prompts::{self, TaskContext};
 use crate::agent::AgentType;
 use crate::models::{Task, TransitionAction};
 
@@ -38,6 +40,104 @@ pub struct DispatchRule {
 pub struct RoleRegistry {
     pub roles: HashMap<&'static str, AgentType>,
     pub dispatch_rules: Vec<DispatchRule>,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transition {
+    None,
+    Start,
+    Release,
+}
+
+pub struct AgentContext<'a> {
+    pub task: &'a Task,
+    pub task_ctx: &'a TaskContext,
+    pub project_dir: &'a Path,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentOutcome {
+    pub transition: Transition,
+}
+
+impl AgentOutcome {
+    pub fn none() -> Self {
+        Self {
+            transition: Transition::None,
+        }
+    }
+}
+
+pub trait AgentRole {
+    fn config(&self) -> RoleConfig;
+    fn render_prompt(&self, ctx: &AgentContext<'_>) -> String;
+    fn on_complete(&self, _ctx: &AgentContext<'_>) -> AgentOutcome {
+        AgentOutcome::none()
+    }
+    fn prepare_worktree(&self, ctx: &AgentContext<'_>) -> PathBuf {
+        ctx.project_dir.join(".djinn").join("worktrees").join(&ctx.task.short_id)
+    }
+}
+
+pub struct WorkerRole;
+pub struct TaskReviewerRole;
+pub struct PmRole;
+pub struct GroomerRole;
+pub struct ConflictResolverRole;
+
+impl AgentRole for WorkerRole {
+    fn config(&self) -> RoleConfig {
+        AgentType::Worker.role_config()
+    }
+
+    fn render_prompt(&self, ctx: &AgentContext<'_>) -> String {
+        prompts::render_prompt(AgentType::Worker, ctx.task, ctx.task_ctx)
+    }
+}
+
+impl AgentRole for TaskReviewerRole {
+    fn config(&self) -> RoleConfig {
+        AgentType::TaskReviewer.role_config()
+    }
+
+    fn render_prompt(&self, ctx: &AgentContext<'_>) -> String {
+        prompts::render_prompt(AgentType::TaskReviewer, ctx.task, ctx.task_ctx)
+    }
+}
+
+impl AgentRole for PmRole {
+    fn config(&self) -> RoleConfig {
+        AgentType::PM.role_config()
+    }
+
+    fn render_prompt(&self, ctx: &AgentContext<'_>) -> String {
+        prompts::render_prompt(AgentType::PM, ctx.task, ctx.task_ctx)
+    }
+}
+
+impl AgentRole for GroomerRole {
+    fn config(&self) -> RoleConfig {
+        AgentType::Groomer.role_config()
+    }
+
+    fn render_prompt(&self, ctx: &AgentContext<'_>) -> String {
+        prompts::render_prompt(AgentType::Groomer, ctx.task, ctx.task_ctx)
+    }
+}
+
+impl AgentRole for ConflictResolverRole {
+    fn config(&self) -> RoleConfig {
+        AgentType::ConflictResolver.role_config()
+    }
+
+    fn render_prompt(&self, ctx: &AgentContext<'_>) -> String {
+        prompts::render_prompt(AgentType::ConflictResolver, ctx.task, ctx.task_ctx)
+    }
+
+    fn prepare_worktree(&self, ctx: &AgentContext<'_>) -> PathBuf {
+        ctx.project_dir.join(".djinn").join("worktrees").join(&ctx.task.short_id)
+    }
 }
 
 impl RoleRegistry {
@@ -174,7 +274,10 @@ fn groomer_dispatch_rule() -> DispatchRule {
 
 #[cfg(test)]
 mod tests {
-    use super::{DispatchContext, RoleRegistry};
+    use super::{
+        AgentContext, AgentRole, ConflictResolverRole, DispatchContext, GroomerRole, PmRole,
+        RoleRegistry, TaskReviewerRole, WorkerRole,
+    };
     use crate::agent::AgentType;
     use crate::models::{Task, TransitionAction};
 
@@ -340,3 +443,63 @@ mod tests {
         assert_eq!(AgentType::Worker.release_action(), TransitionAction::Release);
     }
 }
+
+
+    fn sample_task_context() -> crate::agent::prompts::TaskContext {
+        crate::agent::prompts::TaskContext {
+            project_path: "/tmp/project".to_string(),
+            workspace_path: "/tmp/project/.djinn/worktrees/t1".to_string(),
+            diff: None,
+            commits: None,
+            start_commit: None,
+            end_commit: None,
+            conflict_files: None,
+            merge_base_branch: None,
+            merge_target_branch: None,
+            merge_failure_context: None,
+            setup_commands: None,
+            verification_commands: None,
+            activity: None,
+        }
+    }
+
+    #[test]
+    fn role_render_prompt_equivalence() {
+        let task = task_with_status("open");
+        let task_ctx = sample_task_context();
+        let role_ctx = AgentContext {
+            task: &task,
+            task_ctx: &task_ctx,
+            project_dir: std::path::Path::new("/tmp/project"),
+        };
+
+        let worker = WorkerRole;
+        assert_eq!(
+            worker.render_prompt(&role_ctx),
+            crate::agent::prompts::render_prompt(AgentType::Worker, &task, &task_ctx)
+        );
+
+        let reviewer = TaskReviewerRole;
+        assert_eq!(
+            reviewer.render_prompt(&role_ctx),
+            crate::agent::prompts::render_prompt(AgentType::TaskReviewer, &task, &task_ctx)
+        );
+
+        let pm = PmRole;
+        assert_eq!(
+            pm.render_prompt(&role_ctx),
+            crate::agent::prompts::render_prompt(AgentType::PM, &task, &task_ctx)
+        );
+
+        let groomer = GroomerRole;
+        assert_eq!(
+            groomer.render_prompt(&role_ctx),
+            crate::agent::prompts::render_prompt(AgentType::Groomer, &task, &task_ctx)
+        );
+
+        let conflict = ConflictResolverRole;
+        assert_eq!(
+            conflict.render_prompt(&role_ctx),
+            crate::agent::prompts::render_prompt(AgentType::ConflictResolver, &task, &task_ctx)
+        );
+    }
