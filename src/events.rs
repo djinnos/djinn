@@ -71,6 +71,12 @@ pub enum DjinnEvent {
         settings: GitSettings,
     },
 
+
+    // Custom providers
+    CustomProviderUpserted(crate::models::CustomProvider),
+    CustomProviderDeleted {
+        id: String,
+    },
     // Credential vault (encrypted_value never included in event payload)
     CredentialCreated(Credential),
     CredentialUpdated(Credential),

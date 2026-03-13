@@ -1,14 +1,17 @@
 use crate::db::connection::Database;
 use crate::error::Result;
+use crate::events::DjinnEvent;
 use crate::models::{CustomProvider, SeedModel};
+use tokio::sync::broadcast;
 
 pub struct CustomProviderRepository {
     db: Database,
+    events: broadcast::Sender<DjinnEvent>,
 }
 
 impl CustomProviderRepository {
-    pub fn new(db: Database) -> Self {
-        Self { db }
+    pub fn new(db: Database, events: broadcast::Sender<DjinnEvent>) -> Self {
+        Self { db, events }
     }
 
     /// Return all custom providers, ordered by `created_at`.
@@ -65,6 +68,9 @@ impl CustomProviderRepository {
         .bind(&seed_json)
         .execute(self.db.pool())
         .await?;
+        let _ = self
+            .events
+            .send(DjinnEvent::CustomProviderUpserted(provider.clone()));
         Ok(())
     }
 
@@ -75,7 +81,13 @@ impl CustomProviderRepository {
             .bind(id)
             .execute(self.db.pool())
             .await?;
-        Ok(result.rows_affected() > 0)
+        let deleted = result.rows_affected() > 0;
+        if deleted {
+            let _ = self
+                .events
+                .send(DjinnEvent::CustomProviderDeleted { id: id.to_string() });
+        }
+        Ok(deleted)
     }
 
     /// Return a single provider by ID, or `None`.
@@ -114,7 +126,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upsert_and_list() {
         let db = test_helpers::create_test_db();
-        let repo = CustomProviderRepository::new(db);
+        let repo = CustomProviderRepository::new(db, test_helpers::test_events());
 
         let provider = CustomProvider {
             id: "my-llm".to_string(),
@@ -140,14 +152,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_returns_none_for_missing() {
         let db = test_helpers::create_test_db();
-        let repo = CustomProviderRepository::new(db);
+        let repo = CustomProviderRepository::new(db, test_helpers::test_events());
         assert!(repo.get("nonexistent").await.unwrap().is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upsert_is_idempotent() {
         let db = test_helpers::create_test_db();
-        let repo = CustomProviderRepository::new(db);
+        let repo = CustomProviderRepository::new(db, test_helpers::test_events());
 
         let mut provider = CustomProvider {
             id: "p1".to_string(),

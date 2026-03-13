@@ -48,7 +48,7 @@ pub async fn test_app_state_in_memory() -> AppState {
     AppState::new(db, cancel)
 }
 
-fn test_events() -> broadcast::Sender<DjinnEvent> {
+pub fn test_events() -> broadcast::Sender<DjinnEvent> {
     let (tx, _rx) = broadcast::channel(256);
     tx
 }
