@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::db::repositories::settings::SettingsRepository;
+use crate::db::SettingsRepository;
 use crate::mcp::server::DjinnMcpServer;
-use crate::models::settings::DjinnSettings;
+use crate::models::DjinnSettings;
 
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 

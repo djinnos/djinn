@@ -8,8 +8,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::connection::Database;
-use crate::db::repositories::note::NoteRepository;
-use crate::db::repositories::project::ProjectRepository;
+use crate::db::NoteRepository;
+use crate::db::ProjectRepository;
 use crate::events::DjinnEvent;
 
 /// Debounce window — reindex fires this long after the last file change.

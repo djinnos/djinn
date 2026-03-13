@@ -11,7 +11,7 @@ use futures::StreamExt;
 use crate::agent::message::{Conversation, Message, Role};
 use crate::agent::provider::{LlmProvider, StreamEvent};
 use crate::agent::AgentType;
-use crate::db::repositories::session_message::SessionMessageRepository;
+use crate::db::SessionMessageRepository;
 use crate::server::AppState;
 
 // ─── Threshold ────────────────────────────────────────────────────────────────

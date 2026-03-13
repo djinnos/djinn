@@ -194,7 +194,7 @@ pub struct MemorySearchResponse {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryListResponse {
-    pub notes: Vec<crate::models::note::NoteCompact>,
+    pub notes: Vec<crate::models::NoteCompact>,
     pub error: Option<String>,
 }
 
@@ -209,7 +209,7 @@ pub struct MemoryHealthResponse {
     pub total_notes: Option<i64>,
     pub broken_link_count: Option<i64>,
     pub orphan_note_count: Option<i64>,
-    pub stale_notes_by_folder: Option<Vec<crate::models::note::StaleFolder>>,
+    pub stale_notes_by_folder: Option<Vec<crate::models::StaleFolder>>,
     pub error: Option<String>,
 }
 
@@ -221,7 +221,7 @@ pub struct MemoryCatalogResponse {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryRecentResponse {
-    pub notes: Vec<crate::models::note::NoteCompact>,
+    pub notes: Vec<crate::models::NoteCompact>,
     pub error: Option<String>,
 }
 
@@ -240,7 +240,7 @@ pub struct MemoryDiffResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryBuildContextResponse {
     pub primary: Vec<MemoryNoteView>,
-    pub related: Vec<crate::models::note::NoteCompact>,
+    pub related: Vec<crate::models::NoteCompact>,
     pub error: Option<String>,
 }
 
@@ -260,20 +260,20 @@ pub struct MemoryTaskRefItem {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryGraphResponse {
-    pub nodes: Vec<crate::models::note::GraphNode>,
-    pub edges: Vec<crate::models::note::GraphEdge>,
+    pub nodes: Vec<crate::models::GraphNode>,
+    pub edges: Vec<crate::models::GraphEdge>,
     pub error: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryBrokenLinksResponse {
-    pub broken_links: Vec<crate::models::note::BrokenLink>,
+    pub broken_links: Vec<crate::models::BrokenLink>,
     pub error: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryOrphansResponse {
-    pub orphans: Vec<crate::models::note::OrphanNote>,
+    pub orphans: Vec<crate::models::OrphanNote>,
     pub error: Option<String>,
 }
 
@@ -302,8 +302,8 @@ pub struct MemoryNoteView {
     pub last_accessed: String,
 }
 
-impl From<crate::models::note::Note> for MemoryNoteView {
-    fn from(note: crate::models::note::Note) -> Self {
+impl From<crate::models::Note> for MemoryNoteView {
+    fn from(note: crate::models::Note) -> Self {
         Self {
             tags: note.parsed_tags(),
             id: note.id,
@@ -321,8 +321,8 @@ impl From<crate::models::note::Note> for MemoryNoteView {
     }
 }
 
-impl From<&crate::models::note::Note> for MemoryNoteView {
-    fn from(note: &crate::models::note::Note) -> Self {
+impl From<&crate::models::Note> for MemoryNoteView {
+    fn from(note: &crate::models::Note) -> Self {
         Self {
             id: note.id.clone(),
             project_id: note.project_id.clone(),
@@ -341,7 +341,7 @@ impl From<&crate::models::note::Note> for MemoryNoteView {
 }
 
 impl MemoryNoteResponse {
-    pub(super) fn from_note(note: &crate::models::note::Note) -> Self {
+    pub(super) fn from_note(note: &crate::models::Note) -> Self {
         Self {
             id: Some(note.id.clone()),
             project_id: Some(note.project_id.clone()),

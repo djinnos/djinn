@@ -6,10 +6,10 @@ use std::path::Path;
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::db::repositories::note::NoteRepository;
-use crate::db::repositories::project::ProjectRepository;
+use crate::db::NoteRepository;
+use crate::db::ProjectRepository;
 use crate::mcp::server::DjinnMcpServer;
-use crate::models::note::{GitLogEntry, Note, ReindexSummary};
+use crate::models::{GitLogEntry, Note, ReindexSummary};
 
 pub(crate) mod types;
 pub use types::*;

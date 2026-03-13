@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::actors::git::GitError;
-use crate::db::repositories::project::ProjectRepository;
-use crate::db::repositories::session::SessionRepository;
+use crate::db::ProjectRepository;
+use crate::db::SessionRepository;
 use crate::server::AppState;
 
 use super::*;
@@ -113,7 +113,7 @@ async fn ensure_target_branch_ready(
 
 pub(crate) async fn prepare_worktree(
     project_dir: &Path,
-    task: &crate::models::task::Task,
+    task: &crate::models::Task,
     app_state: &AppState,
 ) -> anyhow::Result<PathBuf> {
     let branch = format!("task/{}", task.short_id);

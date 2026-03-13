@@ -22,11 +22,11 @@ use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::provider::create_provider;
 use crate::agent::AgentType;
 use crate::commands::{CommandSpec, run_commands};
-use crate::db::repositories::project::ProjectRepository;
-use crate::db::repositories::session::SessionRepository;
-use crate::db::repositories::task::TaskRepository;
-use crate::models::session::SessionStatus;
-use crate::models::task::TransitionAction;
+use crate::db::ProjectRepository;
+use crate::db::SessionRepository;
+use crate::db::TaskRepository;
+use crate::models::SessionStatus;
+use crate::models::TransitionAction;
 use crate::server::AppState;
 
 use super::*;
@@ -720,7 +720,7 @@ pub async fn run_task_lifecycle(
     // Compaction already saves pre-compaction messages; this saves whatever remains
     // (post-compaction turns, or the full conversation if no compaction occurred).
     if let Some(ref record_id) = current_record_id {
-        let msg_repo = crate::db::repositories::session_message::SessionMessageRepository::new(
+        let msg_repo = crate::db::SessionMessageRepository::new(
             app_state.db().clone(),
             app_state.events().clone(),
         );
@@ -1158,7 +1158,7 @@ pub async fn run_project_lifecycle(
 
     // ── Persist messages ──────────────────────────────────────────────────
     if let Some(ref record_id) = current_record_id {
-        let msg_repo = crate::db::repositories::session_message::SessionMessageRepository::new(
+        let msg_repo = crate::db::SessionMessageRepository::new(
             app_state.db().clone(),
             app_state.events().clone(),
         );

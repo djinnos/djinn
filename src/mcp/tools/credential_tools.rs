@@ -2,7 +2,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::db::repositories::credential::CredentialRepository;
+use crate::db::CredentialRepository;
 use crate::mcp::server::DjinnMcpServer;
 
 // ── credential_set ────────────────────────────────────────────────────────────

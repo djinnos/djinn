@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::agent::AgentType;
-use crate::db::repositories::credential::CredentialRepository;
-use crate::db::repositories::project::ProjectRepository;
-use crate::db::repositories::session::SessionRepository;
-use crate::db::repositories::task::TaskRepository;
-use crate::models::session::{SessionRecord, SessionStatus};
-use crate::models::task::Task;
+use crate::db::CredentialRepository;
+use crate::db::ProjectRepository;
+use crate::db::SessionRepository;
+use crate::db::TaskRepository;
+use crate::models::{SessionRecord, SessionStatus};
+use crate::models::Task;
 use crate::server::AppState;
 
 use super::*;

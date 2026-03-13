@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 use crate::db::connection::Database;
 use crate::error::Result;
 use crate::events::DjinnEvent;
-use crate::models::git_settings::GitSettings;
+use crate::models::GitSettings;
 
 pub struct GitSettingsRepository {
     db: Database,

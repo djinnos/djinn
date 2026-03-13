@@ -5,7 +5,7 @@ use crate::crypto;
 use crate::db::connection::Database;
 use crate::error::Result;
 use crate::events::DjinnEvent;
-use crate::models::credential::Credential;
+use crate::models::Credential;
 
 pub struct CredentialRepository {
     db: Database,

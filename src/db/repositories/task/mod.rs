@@ -3,10 +3,10 @@ use tokio::sync::broadcast;
 use sqlx::SqlitePool;
 
 use crate::db::connection::Database;
-use crate::db::repositories::epic::EpicRepository;
+use crate::db::EpicRepository;
 use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
-use crate::models::task::{ActivityEntry, Task, TaskStatus, TransitionAction, compute_transition};
+use crate::models::{ActivityEntry, Task, TaskStatus, TransitionAction, compute_transition};
 
 mod activity;
 mod blockers;

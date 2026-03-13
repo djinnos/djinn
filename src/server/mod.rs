@@ -82,8 +82,8 @@ mod tests {
 
     use tokio::sync::broadcast;
 
-    use crate::db::repositories::credential::CredentialRepository;
-    use crate::models::settings::DjinnSettings;
+    use crate::db::CredentialRepository;
+    use crate::models::DjinnSettings;
     use crate::server::{self, AppState};
     use crate::test_helpers;
     use tokio_util::sync::CancellationToken;
@@ -696,7 +696,7 @@ mod tests {
         let epic = test_helpers::create_test_epic(&db, &project.id).await;
         let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
 
-        let repo = crate::db::repositories::task::TaskRepository::new(
+        let repo = crate::db::TaskRepository::new(
             db.clone(),
             {
                 let (tx, _rx) = broadcast::channel(256);

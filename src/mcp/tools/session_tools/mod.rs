@@ -1,12 +1,12 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::db::repositories::session::SessionRepository;
-use crate::db::repositories::session_message::SessionMessageRepository;
-use crate::db::repositories::task::TaskRepository;
-use crate::db::repositories::task::ActivityQuery;
+use crate::db::SessionRepository;
+use crate::db::SessionMessageRepository;
+use crate::db::TaskRepository;
+use crate::db::ActivityQuery;
 use crate::mcp::server::DjinnMcpServer;
-use crate::models::session::SessionRecord;
+use crate::models::SessionRecord;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct SessionListParams {

@@ -3,17 +3,17 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::db::repositories::epic::{
+use crate::db::{
     EpicCountQuery, EpicListQuery, EpicRepository, EpicTaskCounts,
 };
-use crate::db::repositories::task::{ListQuery, TaskRepository};
+use crate::db::{ListQuery, TaskRepository};
 use crate::mcp::server::DjinnMcpServer;
 use crate::mcp::tools::validation::{
     validate_color, validate_description, validate_emoji, validate_limit, validate_offset,
     validate_owner, validate_sort, validate_title,
 };
-use crate::models::epic::Epic;
-use crate::models::task::Task;
+use crate::models::Epic;
+use crate::models::Task;
 
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(untagged)]

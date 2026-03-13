@@ -229,7 +229,7 @@ impl DjinnMcpServer {
         let mut related = Vec::new();
         for id in related_ids.into_iter().take(max_related) {
             if let Ok(Some(n)) = repo.get(&id).await {
-                use crate::models::note::NoteCompact;
+                use crate::models::NoteCompact;
                 related.push(NoteCompact {
                     id: n.id,
                     permalink: n.permalink,

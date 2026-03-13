@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::actors::coordinator::CoordinatorHandle;
-use crate::db::repositories::task::TaskRepository;
+use crate::db::TaskRepository;
 use crate::server::AppState;
 
 use super::super::{ModelSlotConfig, SlotEvent, SlotHandle, SlotPoolConfig, SlotState};

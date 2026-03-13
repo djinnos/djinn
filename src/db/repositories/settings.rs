@@ -3,7 +3,7 @@ use tokio::sync::broadcast;
 use crate::db::connection::Database;
 use crate::error::Result;
 use crate::events::DjinnEvent;
-use crate::models::settings::Setting;
+use crate::models::Setting;
 
 pub struct SettingsRepository {
     db: Database,

@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
-use crate::db::repositories::task::TaskRepository;
+use crate::db::TaskRepository;
 use crate::events::DjinnEvent;
-use crate::models::task::Task;
+use crate::models::Task;
 
 /// The sync branch name.
 pub const BRANCH: &str = "djinn/tasks";
@@ -259,7 +259,7 @@ pub async fn import(
     events: &broadcast::Sender<DjinnEvent>,
 ) -> Result<usize> {
     // Two-phase pull (SYNC-08): cheap SHA check before expensive fetch.
-    let settings = crate::db::repositories::settings::SettingsRepository::new(
+    let settings = crate::db::SettingsRepository::new(
         db.clone(),
         events.clone(),
     );
@@ -404,9 +404,9 @@ pub async fn delete_remote_branch(project: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::repositories::epic::EpicRepository;
-    use crate::db::repositories::task::TaskRepository;
-    use crate::models::task::TransitionAction;
+    use crate::db::EpicRepository;
+    use crate::db::TaskRepository;
+    use crate::models::TransitionAction;
 
     /// Create a temp dir with a git repo + bare "origin" remote.
     /// Returns (project_path, _temp_dir_guard).
@@ -522,7 +522,7 @@ mod tests {
 
         // Create two projects with tasks.
         let project_repo =
-            crate::db::repositories::project::ProjectRepository::new(db.clone(), tx.clone());
+            crate::db::ProjectRepository::new(db.clone(), tx.clone());
         let p1 = project_repo.create("proj-a", "/tmp/a").await.unwrap();
         let p2 = project_repo.create("proj-b", "/tmp/b").await.unwrap();
 
@@ -972,7 +972,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn import_skips_when_remote_sha_unchanged() {
-        use crate::db::repositories::settings::SettingsRepository;
+        use crate::db::SettingsRepository;
 
         let (repo, _tmp) = setup_git_repo().await;
         let db = crate::test_helpers::create_test_db();
@@ -1012,7 +1012,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sha_persisted_only_after_tx_commit() {
-        use crate::db::repositories::settings::SettingsRepository;
+        use crate::db::SettingsRepository;
 
         let (repo, _tmp) = setup_git_repo().await;
         let db = crate::test_helpers::create_test_db();
@@ -1054,7 +1054,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sha_not_updated_on_rollback() {
-        use crate::db::repositories::settings::SettingsRepository;
+        use crate::db::SettingsRepository;
 
         let (repo, _tmp) = setup_git_repo().await;
         let db = crate::test_helpers::create_test_db();

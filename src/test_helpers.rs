@@ -9,17 +9,17 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use crate::db::connection::Database;
-use crate::db::repositories::epic::EpicRepository;
-use crate::db::repositories::note::NoteRepository;
-use crate::db::repositories::project::ProjectRepository;
-use crate::db::repositories::session::SessionRepository;
-use crate::db::repositories::task::TaskRepository;
+use crate::db::EpicRepository;
+use crate::db::NoteRepository;
+use crate::db::ProjectRepository;
+use crate::db::SessionRepository;
+use crate::db::TaskRepository;
 use crate::events::DjinnEvent;
-use crate::models::epic::Epic;
-use crate::models::note::Note;
-use crate::models::project::Project;
-use crate::models::session::SessionRecord;
-use crate::models::task::Task;
+use crate::models::Epic;
+use crate::models::Note;
+use crate::models::Project;
+use crate::models::SessionRecord;
+use crate::models::Task;
 use crate::server::{self, AppState};
 
 /// Create an in-memory database with all migrations applied.

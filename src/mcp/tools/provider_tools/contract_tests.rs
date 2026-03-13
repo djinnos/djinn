@@ -1,4 +1,4 @@
-use crate::db::repositories::credential::CredentialRepository;
+use crate::db::CredentialRepository;
 use crate::test_helpers::{create_test_app_with_db, create_test_db, initialize_mcp_session, mcp_call_tool};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

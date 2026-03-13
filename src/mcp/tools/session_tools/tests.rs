@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::db::repositories::session_message::SessionMessageRepository;
+use crate::db::SessionMessageRepository;
 use crate::test_helpers::{
     create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
     create_test_session, create_test_task, initialize_mcp_session, mcp_call_tool,

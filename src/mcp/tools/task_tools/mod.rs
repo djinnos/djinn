@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::db::repositories::epic::EpicRepository;
-use crate::db::repositories::project::ProjectRepository;
-use crate::db::repositories::session::SessionRepository;
-use crate::db::repositories::task::{
+use crate::db::EpicRepository;
+use crate::db::ProjectRepository;
+use crate::db::SessionRepository;
+use crate::db::{
     ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository,
 };
 use crate::mcp::server::DjinnMcpServer;
@@ -19,8 +19,8 @@ use crate::mcp::tools::validation::{
     validate_offset, validate_owner, validate_priority, validate_reason, validate_sort,
     validate_task_create_status, validate_title,
 };
-use crate::models::session::SessionStatus;
-use crate::models::task::{Task, TaskStatus, TransitionAction};
+use crate::models::SessionStatus;
+use crate::models::{Task, TaskStatus, TransitionAction};
 
 mod board;
 mod types;

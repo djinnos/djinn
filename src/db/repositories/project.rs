@@ -3,7 +3,7 @@ use tokio::sync::broadcast;
 use crate::db::connection::Database;
 use crate::error::Result;
 use crate::events::DjinnEvent;
-use crate::models::project::Project;
+use crate::models::Project;
 
 #[derive(Clone, Debug, serde::Serialize, sqlx::FromRow)]
 pub struct ProjectConfig {

@@ -3,7 +3,7 @@ use tokio::sync::broadcast;
 use crate::db::connection::Database;
 use crate::error::Result;
 use crate::events::DjinnEvent;
-use crate::models::session::{SessionRecord, SessionStatus};
+use crate::models::{SessionRecord, SessionStatus};
 
 /// Column list shared by all session SELECT queries.
 const SESSION_COLS: &str =
@@ -303,8 +303,8 @@ impl SessionRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::repositories::epic::EpicRepository;
-    use crate::db::repositories::task::TaskRepository;
+    use crate::db::EpicRepository;
+    use crate::db::TaskRepository;
     use crate::test_helpers;
 
     async fn create_task(

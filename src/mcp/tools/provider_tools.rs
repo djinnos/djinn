@@ -3,10 +3,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::db::repositories::credential::CredentialRepository;
-use crate::db::repositories::custom_provider::CustomProviderRepository;
+use crate::db::CredentialRepository;
+use crate::db::CustomProviderRepository;
 use crate::mcp::server::DjinnMcpServer;
-use crate::models::provider::{CustomProvider, Model, Provider, SeedModel};
+use crate::models::{CustomProvider, Model, Provider, SeedModel};
 use crate::provider::builtin;
 use crate::provider::health::ModelHealth;
 use crate::provider::validate::{self, ValidationRequest};
@@ -871,7 +871,7 @@ impl DjinnMcpServer {
                 attachment: false,
                 context_window: 0,
                 output_limit: 0,
-                pricing: crate::models::provider::Pricing::default(),
+                pricing: crate::models::Pricing::default(),
             })
             .collect();
         self.state

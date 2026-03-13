@@ -4,7 +4,7 @@ use tokio::sync::broadcast;
 use crate::db::connection::Database;
 use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
-use crate::models::epic::Epic;
+use crate::models::Epic;
 
 // ── Query / result types ─────────────────────────────────────────────────────
 
@@ -720,7 +720,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let task_repo = crate::db::repositories::task::TaskRepository::new(db, tx);
+        let task_repo = crate::db::TaskRepository::new(db, tx);
 
         let epic = epic_repo.create("Counts", "", "", "", "").await.unwrap();
         task_repo
@@ -748,7 +748,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let task_repo = crate::db::repositories::task::TaskRepository::new(db, tx);
+        let task_repo = crate::db::TaskRepository::new(db, tx);
 
         let epic = epic_repo.create("Delete", "", "", "", "").await.unwrap();
         task_repo
