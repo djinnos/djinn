@@ -1742,4 +1742,38 @@ mod tests {
         assert_eq!(resolve_timeout(None), 120_000);
         assert_eq!(resolve_timeout(Some(0)), 1000);
     }
+
+    #[test]
+    fn tool_schemas_include_role_specific_tools() {
+        fn names(agent: AgentType) -> Vec<String> {
+            tool_schemas(agent)
+                .into_iter()
+                .filter_map(|v| {
+                    v.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(ToString::to_string)
+                })
+                .collect()
+        }
+
+        let worker = names(AgentType::Worker);
+        assert!(worker.len() > 1);
+        assert!(worker.iter().any(|n| n == "shell"));
+        assert!(worker.iter().any(|n| n == "write"));
+        assert!(worker.iter().any(|n| n == "edit"));
+
+        let reviewer = names(AgentType::TaskReviewer);
+        assert!(reviewer.len() > 1);
+        assert!(reviewer.iter().any(|n| n == "task_update_ac"));
+
+        let pm = names(AgentType::PM);
+        assert!(pm.len() > 1);
+        assert!(pm.iter().any(|n| n == "task_create"));
+        assert!(pm.iter().any(|n| n == "task_transition"));
+
+        let groomer = names(AgentType::Groomer);
+        assert!(groomer.len() > 1);
+        assert!(groomer.iter().any(|n| n == "task_create"));
+        assert!(groomer.iter().any(|n| n == "task_transition"));
+    }
 }

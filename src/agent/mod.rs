@@ -120,3 +120,89 @@ impl<'de> serde::Deserialize<'de> for AgentType {
         s.parse().map_err(serde::de::Error::custom)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AgentType;
+    use crate::models::TransitionAction;
+
+    #[test]
+    fn for_task_status_covers_all_expected_paths() {
+        assert_eq!(
+            AgentType::for_task_status("open", false),
+            AgentType::Worker
+        );
+        assert_eq!(
+            AgentType::for_task_status("open", true),
+            AgentType::ConflictResolver
+        );
+        assert_eq!(
+            AgentType::for_task_status("needs_task_review", false),
+            AgentType::TaskReviewer
+        );
+        assert_eq!(
+            AgentType::for_task_status("in_task_review", false),
+            AgentType::TaskReviewer
+        );
+        assert_eq!(
+            AgentType::for_task_status("needs_pm_intervention", false),
+            AgentType::PM
+        );
+        assert_eq!(
+            AgentType::for_task_status("in_pm_intervention", false),
+            AgentType::PM
+        );
+        assert_eq!(
+            AgentType::for_task_status("backlog", false),
+            AgentType::Worker
+        );
+    }
+
+    #[test]
+    fn dispatch_role_for_all_variants() {
+        assert_eq!(AgentType::Worker.dispatch_role(), "worker");
+        assert_eq!(AgentType::ConflictResolver.dispatch_role(), "worker");
+        assert_eq!(AgentType::TaskReviewer.dispatch_role(), "task_reviewer");
+        assert_eq!(AgentType::PM.dispatch_role(), "pm");
+        assert_eq!(AgentType::Groomer.dispatch_role(), "groomer");
+    }
+
+    #[test]
+    fn start_action_for_each_variant_and_status() {
+        assert_eq!(
+            AgentType::Worker.start_action("open"),
+            Some(TransitionAction::Start)
+        );
+        assert_eq!(
+            AgentType::ConflictResolver.start_action("open"),
+            Some(TransitionAction::Start)
+        );
+        assert_eq!(
+            AgentType::TaskReviewer.start_action("needs_task_review"),
+            Some(TransitionAction::TaskReviewStart)
+        );
+        assert_eq!(
+            AgentType::PM.start_action("needs_pm_intervention"),
+            Some(TransitionAction::PmInterventionStart)
+        );
+        assert_eq!(AgentType::Groomer.start_action("open"), None);
+    }
+
+    #[test]
+    fn release_action_for_all_variants() {
+        assert_eq!(AgentType::Worker.release_action(), TransitionAction::Release);
+        assert_eq!(
+            AgentType::ConflictResolver.release_action(),
+            TransitionAction::Release
+        );
+        assert_eq!(
+            AgentType::TaskReviewer.release_action(),
+            TransitionAction::ReleaseTaskReview
+        );
+        assert_eq!(
+            AgentType::PM.release_action(),
+            TransitionAction::PmInterventionRelease
+        );
+        assert_eq!(AgentType::Groomer.release_action(), TransitionAction::Release);
+    }
+}

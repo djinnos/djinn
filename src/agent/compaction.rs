@@ -1142,4 +1142,21 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn prompts_exist_for_expected_compaction_contexts() {
+        let contexts = [
+            CompactionContext::MidSession(AgentType::Worker),
+            CompactionContext::PreResume(AgentType::Worker),
+            CompactionContext::MidSession(AgentType::TaskReviewer),
+            CompactionContext::MidSession(AgentType::ConflictResolver),
+        ];
+
+        for ctx in contexts {
+            let prompt = compaction_prompt(ctx);
+            let system = summariser_system(ctx);
+            assert!(!prompt.is_empty());
+            assert!(!system.is_empty());
+        }
+    }
 }
