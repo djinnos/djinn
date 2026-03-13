@@ -12,10 +12,11 @@ use crate::actors::slot::{
     auth_method_for_provider, capabilities_for_provider, default_base_url,
     format_family_for_provider, load_provider_credential, parse_model_id, ProviderCredential,
 };
-use crate::agent::extension::{call_tool, chat_tool_schemas};
+use crate::agent::extension::chat_tool_schemas;
 use crate::agent::message::{ContentBlock, Conversation, Message, Role};
 use crate::agent::provider::{create_provider, StreamEvent};
 use crate::db::{EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, TaskRepository};
+use crate::mcp::server::DjinnMcpServer;
 use crate::server::AppState;
 
 const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../agent/prompts/chat.md");
@@ -255,7 +256,7 @@ pub(super) async fn completions_handler(
         .filter_map(|t| serde_json::to_value(t).ok())
         .collect::<Vec<_>>();
 
-    let worktree_path = req.project.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let _worktree_path = req.project.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
     tokio::spawn(async move {
@@ -350,8 +351,9 @@ pub(super) async fn completions_handler(
                     ))
                     .await;
 
-                let args = input.as_object().cloned();
-                match call_tool(&state, &name, args, &worktree_path).await {
+                let args = serde_json::Value::Object(input.as_object().cloned().unwrap_or_default());
+                let mcp = DjinnMcpServer::new(state.clone());
+                match mcp.dispatch_tool(&name, args).await {
                     Ok(value) => {
                         tool_results.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
