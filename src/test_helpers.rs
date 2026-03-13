@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use crate::db::EpicRepository;
+use crate::db::repositories::epic::EpicCreateInput;
 use crate::db::NoteRepository;
 use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
@@ -67,12 +68,14 @@ pub async fn create_test_epic(db: &Database, project_id: &str) -> Epic {
     let repo = EpicRepository::new(db.clone(), test_events());
     repo.create_for_project(
         project_id,
-        "test-epic",
-        "test epic description",
-        "🧪",
-        "blue",
-        "test-owner",
-        None,
+        EpicCreateInput {
+            title: "test-epic",
+            description: "test epic description",
+            emoji: "🧪",
+            color: "blue",
+            owner: "test-owner",
+            memory_refs: None,
+        },
     )
     .await
     .expect("failed to create test epic")

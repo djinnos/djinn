@@ -392,7 +392,7 @@ impl DjinnMcpServer {
             }
         };
         match repo
-            .create_for_project(&project_id, &title, description, emoji, color, &owner, None)
+            .create_for_project(&project_id, crate::db::repositories::epic::EpicCreateInput { title: &title, description, emoji, color, owner: &owner, memory_refs: None })
             .await
         {
             Ok(epic) => Json(EpicSingleResponse {
@@ -596,7 +596,7 @@ impl DjinnMcpServer {
         };
 
         match repo
-            .update(&epic.id, &title, description, emoji, color, &owner, None)
+             .update(&epic.id, crate::db::repositories::epic::EpicUpdateInput { title: &title, description, emoji, color, owner: &owner, memory_refs: None })
             .await
         {
             Ok(updated) => Json(EpicSingleResponse {

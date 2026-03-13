@@ -56,6 +56,19 @@ enum SqlParam {
     Text(String),
 }
 
+
+
+pub struct EpicCreateInput<'a> {
+    pub title: &'a str,
+    pub description: &'a str,
+    pub emoji: &'a str,
+    pub color: &'a str,
+    pub owner: &'a str,
+    pub memory_refs: Option<&'a str>,
+}
+
+pub type EpicUpdateInput<'a> = EpicCreateInput<'a>;
+
 pub struct EpicRepository {
     db: Database,
     events: broadcast::Sender<DjinnEvent>,
@@ -113,26 +126,22 @@ impl EpicRepository {
         let project_id = self.ensure_default_project_id().await?;
         self.create_for_project(
             &project_id,
-            title,
-            description,
-            emoji,
-            color,
-            owner,
-            memory_refs,
+            EpicCreateInput {
+                title,
+                description,
+                emoji,
+                color,
+                owner,
+                memory_refs,
+            },
         )
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn create_for_project(
         &self,
         project_id: &str,
-        title: &str,
-        description: &str,
-        emoji: &str,
-        color: &str,
-        owner: &str,
-        _memory_refs: Option<&str>,
+        input: EpicCreateInput<'_>,
     ) -> Result<Epic> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
@@ -144,11 +153,11 @@ impl EpicRepository {
         .bind(&id)
         .bind(project_id)
         .bind(&short_id)
-        .bind(title)
-        .bind(description)
-        .bind(emoji)
-        .bind(color)
-        .bind(owner)
+                .bind(input.title)
+        .bind(input.description)
+        .bind(input.emoji)
+        .bind(input.color)
+        .bind(input.owner)
         .execute(self.db.pool())
         .await?;
         let epic: Epic = sqlx::query_as(
@@ -164,17 +173,7 @@ impl EpicRepository {
         Ok(epic)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update(
-        &self,
-        id: &str,
-        title: &str,
-        description: &str,
-        emoji: &str,
-        color: &str,
-        owner: &str,
-        _memory_refs: Option<&str>,
-    ) -> Result<Epic> {
+    pub async fn update(&self, id: &str, input: EpicUpdateInput<'_>) -> Result<Epic> {
         self.db.ensure_initialized().await?;
         sqlx::query(
             "UPDATE epics SET title = ?2, description = ?3, emoji = ?4,
@@ -183,11 +182,11 @@ impl EpicRepository {
              WHERE id = ?1",
         )
         .bind(id)
-        .bind(title)
-        .bind(description)
-        .bind(emoji)
-        .bind(color)
-        .bind(owner)
+                .bind(input.title)
+        .bind(input.description)
+        .bind(input.emoji)
+        .bind(input.color)
+        .bind(input.owner)
         .execute(self.db.pool())
         .await?;
         let epic: Epic = sqlx::query_as(
@@ -589,7 +588,7 @@ mod tests {
         let _ = rx.recv().await.unwrap();
 
         let updated = repo
-            .update(&epic.id, "New", "desc", "🎯", "#fff", "", None)
+            .update(&epic.id, EpicUpdateInput { title: "New", description: "desc", emoji: "🎯", color: "#fff", owner: "", memory_refs: None })
             .await
             .unwrap();
         assert_eq!(updated.title, "New");
