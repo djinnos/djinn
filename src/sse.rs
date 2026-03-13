@@ -162,6 +162,7 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             project_id: None,
         },
         DjinnEvent::SessionDispatched {
+            project_id,
             task_id,
             model_id,
             agent_type,
@@ -169,6 +170,7 @@ fn to_envelope(evt: DjinnEvent) -> Envelope {
             entity_type: "session",
             action: "dispatched",
             data: Some(serde_json::json!({
+                "project_id": project_id,
                 "task_id": task_id,
                 "model_id": model_id,
                 "agent_type": agent_type,
@@ -386,7 +388,60 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    use crate::events::DjinnEvent;
+    use crate::models::SessionRecord;
     use crate::test_helpers;
+
+    use super::to_envelope;
+
+    fn sample_session_record() -> SessionRecord {
+        SessionRecord {
+            id: "session-1".to_string(),
+            project_id: "project-123".to_string(),
+            task_id: Some("task-123".to_string()),
+            model_id: "provider/model".to_string(),
+            agent_type: "worker".to_string(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            ended_at: None,
+            status: "running".to_string(),
+            tokens_in: 0,
+            tokens_out: 0,
+            worktree_path: None,
+            goose_session_id: None,
+        }
+    }
+
+    #[test]
+    fn session_dispatched_payload_includes_project_id_and_task_fields() {
+        let envelope = to_envelope(DjinnEvent::SessionDispatched {
+            project_id: "project-123".to_string(),
+            task_id: "task-123".to_string(),
+            model_id: "provider/model".to_string(),
+            agent_type: "worker".to_string(),
+        });
+
+        let data = envelope.data.expect("data payload should exist");
+        assert_eq!(data["project_id"], "project-123");
+        assert!(!data["project_id"].as_str().unwrap_or_default().is_empty());
+        assert_eq!(data["task_id"], "task-123");
+        assert_eq!(data["model_id"], "provider/model");
+        assert_eq!(data["agent_type"], "worker");
+    }
+
+    #[test]
+    fn session_created_and_updated_payloads_include_project_id() {
+        let session = sample_session_record();
+
+        let created = to_envelope(DjinnEvent::SessionCreated(session.clone()));
+        let created_data = created.data.expect("created data payload should exist");
+        assert_eq!(created_data["project_id"], "project-123");
+        assert!(!created_data["project_id"].as_str().unwrap_or_default().is_empty());
+
+        let updated = to_envelope(DjinnEvent::SessionUpdated(session));
+        let updated_data = updated.data.expect("updated data payload should exist");
+        assert_eq!(updated_data["project_id"], "project-123");
+        assert!(!updated_data["project_id"].as_str().unwrap_or_default().is_empty());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn events_returns_200_with_sse_content_type() {

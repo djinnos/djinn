@@ -530,7 +530,8 @@ mod transition_tests {
 
     #[tokio::test]
     async fn is_stale_review_cycle_cases() {
-        let app = test_helpers::test_app_state_in_memory().await;
+        let db = test_helpers::create_test_db();
+        let app = crate::server::AppState::new(db, tokio_util::sync::CancellationToken::new());
         let project = test_helpers::create_test_project(app.db()).await;
         let epic = test_helpers::create_test_epic(app.db(), &project.id).await;
         let task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
@@ -558,7 +559,8 @@ mod transition_tests {
 
     #[tokio::test]
     async fn success_transition_agent_variants_and_stale_threshold() {
-        let app = test_helpers::test_app_state_in_memory().await;
+        let db = test_helpers::create_test_db();
+        let app = crate::server::AppState::new(db, tokio_util::sync::CancellationToken::new());
         let project = test_helpers::create_test_project(app.db()).await;
         let epic = test_helpers::create_test_epic(app.db(), &project.id).await;
 
