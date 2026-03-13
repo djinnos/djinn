@@ -15,6 +15,7 @@ use crate::actors::slot::{
 use crate::agent::extension::{call_tool, chat_tool_schemas};
 use crate::agent::message::{ContentBlock, Conversation, Message, Role};
 use crate::agent::provider::{create_provider, StreamEvent};
+use crate::db::{EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, TaskRepository};
 use crate::server::AppState;
 
 const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../agent/prompts/chat.md");
@@ -61,6 +62,77 @@ struct ToolResultPayload {
     message: Option<String>,
 }
 
+
+fn normalize_brief_excerpt(content: &str, max_chars: usize) -> String {
+    let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+    compact.chars().take(max_chars).collect::<String>()
+}
+
+async fn build_project_context_block(state: &AppState, project_ref: &str) -> Option<String> {
+    let project_repo = ProjectRepository::new(state.db().clone(), state.events().clone());
+    let project_id = match project_repo.resolve(project_ref).await {
+        Ok(Some(id)) => id,
+        Ok(None) => return None,
+        Err(_) => return None,
+    };
+
+    let project = match project_repo.get(&project_id).await {
+        Ok(Some(project)) => project,
+        Ok(None) => return None,
+        Err(_) => return None,
+    };
+
+    let epic_repo = EpicRepository::new(state.db().clone(), state.events().clone());
+    let task_repo = TaskRepository::new(state.db().clone(), state.events().clone());
+    let note_repo = NoteRepository::new(state.db().clone(), state.events().clone());
+
+    let open_epics = epic_repo
+        .count_grouped(EpicCountQuery {
+            project_id: Some(project_id.clone()),
+            status: Some("open".to_string()),
+            group_by: None,
+        })
+        .await
+        .ok()
+        .and_then(|v| v.get("total_count").and_then(|n| n.as_i64()).map(|n| n.to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let open_tasks = task_repo
+        .count_grouped(crate::db::CountQuery {
+            project_id: Some(project_id.clone()),
+            status: Some("open".to_string()),
+            issue_type: None,
+            priority: None,
+            label: None,
+            text: None,
+            parent: None,
+            group_by: None,
+        })
+        .await
+        .ok()
+        .and_then(|v| v.get("total_count").and_then(|n| n.as_i64()).map(|n| n.to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let brief = note_repo
+        .get_by_permalink(&project_id, "brief")
+        .await
+        .ok()
+        .flatten()
+        .map(|note| normalize_brief_excerpt(&note.content, 200))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "No brief yet — suggest /init-project".to_string());
+
+    Some(format!(
+        "## Current Project
+**Name**: {}  **Path**: {}
+**Open epics**: {}  **Open tasks**: {}
+**Brief**: {}",
+        project.name, project.path, open_epics, open_tasks, brief
+    ))
+}
 fn sse_json_event<T: Serialize>(event: &str, payload: &T) -> Event {
     Event::default().event(event).json_data(payload).unwrap_or_else(|_| {
         Event::default()
@@ -153,6 +225,11 @@ pub(super) async fn completions_handler(
 
     let mut conversation = Conversation::new();
     let mut system_prompt = DJINN_CHAT_SYSTEM_PROMPT.trim().to_string();
+    if let Some(project_ref) = req.project.as_deref()
+        && let Some(project_context) = build_project_context_block(&state, project_ref).await
+    {
+        system_prompt = format!("{system_prompt}\n\n{project_context}");
+    }
     if let Some(client_system) = req.system.filter(|s| !s.trim().is_empty()) {
         system_prompt = format!("{system_prompt}\n\n{client_system}");
     }
