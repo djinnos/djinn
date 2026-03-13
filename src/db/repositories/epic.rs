@@ -214,30 +214,6 @@ impl EpicRepository {
         Ok(epic)
     }
 
-    pub async fn mark_in_review(&self, id: &str) -> Result<Epic> {
-        self.db.ensure_initialized().await?;
-        sqlx::query(
-            "UPDATE epics SET status = 'in_review',
-                    closed_at = NULL,
-                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
-        )
-        .bind(id)
-        .execute(self.db.pool())
-        .await?;
-        let epic: Epic = sqlx::query_as(
-            "SELECT id, project_id, short_id, title, description, emoji, color, status,
-                    owner, created_at, updated_at, closed_at
-             FROM epics WHERE id = ?1",
-        )
-        .bind(id)
-        .fetch_one(self.db.pool())
-        .await?;
-
-        let _ = self.events.send(DjinnEvent::EpicUpdated(epic.clone()));
-        Ok(epic)
-    }
-
     pub async fn delete(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query("DELETE FROM epics WHERE id = ?1")
@@ -292,9 +268,9 @@ impl EpicRepository {
             .get(id)
             .await?
             .ok_or_else(|| Error::Internal(format!("epic not found: {id}")))?;
-        if current.status != "closed" && current.status != "in_review" {
+        if current.status != "closed" {
             return Err(Error::InvalidTransition(format!(
-                "epic must be closed or in_review to reopen (current: {})",
+                "epic must be closed to reopen (current: {})",
                 current.status
             )));
         }
