@@ -131,10 +131,6 @@ async fn run_verification_pipeline(
 ///
 /// Returns `Ok(())` when all commands pass (or none are configured), and
 /// `Err(feedback)` with a human-readable failure description otherwise.
-#[expect(
-    dead_code,
-    reason = "verification gate now implemented in shared task transitions module"
-)]
 pub(crate) async fn run_verification_gate(
     task_id: &str,
     project_path: &str,
