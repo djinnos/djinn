@@ -1933,10 +1933,11 @@ mod tests {
 
     #[test]
     fn shell_timeout_defaults_and_minimum() {
-        let none_timeout: Option<u64> = None;
-        assert_eq!(none_timeout.unwrap_or(120_000).max(1000), 120_000);
-        let zero_timeout = Some(0_u64);
-        assert_eq!(zero_timeout.unwrap_or(120_000).max(1000), 1000);
+        fn resolve_timeout(t: Option<u64>) -> u64 {
+            t.unwrap_or(120_000).max(1000)
+        }
+        assert_eq!(resolve_timeout(None), 120_000);
+        assert_eq!(resolve_timeout(Some(0)), 1000);
     }
 
 }

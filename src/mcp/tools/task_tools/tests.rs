@@ -12,7 +12,7 @@ async fn task_create_success_shape() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
-    let app = create_test_app_with_db(db);
+    let app = create_test_app_with_db(db.clone());
     let sid = initialize_mcp_session(&app).await;
 
     let payload = mcp_call_tool(
@@ -33,7 +33,7 @@ async fn task_create_success_shape() {
     let created = repo.get(payload["id"].as_str().unwrap()).await.unwrap().unwrap();
     assert_eq!(created.title, "Create task contract test");
     assert_eq!(created.status, "backlog");
-    assert_eq!(created.epic_id, epic.id);
+    assert_eq!(created.epic_id, Some(epic.id));
 }
 
 #[tokio::test]
@@ -136,6 +136,9 @@ async fn task_list_filters_and_pagination() {
     repo.transition(&t1.id, crate::models::TransitionAction::Accept, "a", "user", None, None)
         .await
         .unwrap();
+    repo.update(&t1.id, "alpha ready", "desc", "design", 1, "owner", "", r#"[{"description":"default","met":false}]"#)
+        .await
+        .unwrap();
     repo.transition(&t1.id, crate::models::TransitionAction::Start, "a", "user", None, None)
         .await
         .unwrap();
@@ -178,7 +181,7 @@ async fn task_update_partial_and_error_shape() {
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
-    let app = create_test_app_with_db(db);
+    let app = create_test_app_with_db(db.clone());
     let sid = initialize_mcp_session(&app).await;
 
     let ok = mcp_call_tool(
@@ -210,7 +213,7 @@ async fn task_transition_valid_and_invalid() {
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
-    let app = create_test_app_with_db(db);
+    let app = create_test_app_with_db(db.clone());
     let sid = initialize_mcp_session(&app).await;
 
     let ok = mcp_call_tool(

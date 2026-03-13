@@ -173,7 +173,7 @@ mod tests {
         let out = mcp
             .dispatch_tool(
                 "task_list",
-                json!({"issue_type": "task", "status": "open", "label": "", "text": "", "sort": "updated_at", "offset": 0, "limit": 10}),
+                json!({"project": "/tmp/nonexistent", "issue_type": "task", "status": "open", "label": "", "text": "", "sort": "updated_at", "offset": 0, "limit": 10}),
             )
             .await;
         assert!(out.is_ok(), "dispatch_tool task_list returned error: {:?}", out);

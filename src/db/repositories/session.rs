@@ -418,9 +418,8 @@ mod tests {
             .await
             .unwrap();
 
-        for _ in 0..2 {
-            let _ = rx.recv().await.unwrap();
-        }
+        // Drain all prior events (epic + task + 2 session creates).
+        while rx.try_recv().is_ok() {}
 
         let rows = repo.interrupt_all_running().await.unwrap();
         assert_eq!(rows, 2);

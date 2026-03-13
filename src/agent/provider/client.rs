@@ -303,7 +303,7 @@ mod tests {
     fn backoff_delay_first_attempt() {
         let delay = backoff_delay_ms(1);
         // First attempt: 1000ms * 2^0 = 1000ms, with 0.8-1.2x jitter
-        assert!(delay >= 800 && delay <= 1200, "delay was {delay}");
+        assert!((800..=1200).contains(&delay), "delay was {delay}");
     }
 
     #[test]
