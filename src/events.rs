@@ -83,6 +83,7 @@ pub enum DjinnEvent {
     /// session record is created in the DB. Lets the frontend show the agent
     /// avatar as soon as the task goes in-progress.
     SessionDispatched {
+        project_id: String,
         task_id: String,
         model_id: String,
         agent_type: String,

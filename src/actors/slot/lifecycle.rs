@@ -120,6 +120,7 @@ pub async fn run_task_lifecycle(
     // Notify the frontend immediately so it can show the agent avatar while
     // worktree/setup is still running.
     let _ = app_state.events().send(crate::events::DjinnEvent::SessionDispatched {
+        project_id: task.project_id.clone(),
         task_id: task.id.clone(),
         model_id: model_id.clone(),
         agent_type: agent_type.as_str().to_string(),
