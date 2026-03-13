@@ -213,6 +213,13 @@ impl TaskRepository {
         .bind(id)
         .execute(self.db.pool())
         .await?;
+
+        let task = self
+            .get(id)
+            .await?
+            .ok_or_else(|| Error::Internal(format!("task not found: {id}")))?;
+        let _ = self.events.send(DjinnEvent::TaskUpdated { task, from_sync: false });
+
         Ok(())
     }
 

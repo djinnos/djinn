@@ -1268,3 +1268,28 @@ async fn list_for_export_excludes_old_closed() {
         "task closed >1 hour ago should be evicted from export"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn increment_continuation_count_emits_task_updated_event() {
+    let db = test_helpers::create_test_db();
+    let (tx, mut rx) = broadcast::channel(256);
+    let epic = make_epic(&db, tx.clone()).await;
+    let _ = rx.recv().await.unwrap(); // consume EpicCreated
+    let repo = TaskRepository::new(db, tx);
+
+    let task = repo
+        .create(&epic.id, "T", "", "", "task", 0, "", Some("open"))
+        .await
+        .unwrap();
+    let _ = rx.recv().await.unwrap(); // consume TaskCreated
+
+    repo.increment_continuation_count(&task.id).await.unwrap();
+
+    match rx.recv().await.unwrap() {
+        DjinnEvent::TaskUpdated { task: t, from_sync: false } => {
+            assert_eq!(t.id, task.id);
+            assert_eq!(t.continuation_count, task.continuation_count + 1);
+        }
+        _ => panic!("expected TaskUpdated"),
+    }
+}
