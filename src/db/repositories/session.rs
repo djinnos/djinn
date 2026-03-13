@@ -106,6 +106,17 @@ impl SessionRepository {
     /// Called once at server startup — no runtime sessions can exist yet.
     pub async fn interrupt_all_running(&self) -> Result<u64> {
         self.db.ensure_initialized().await?;
+
+        let running_sessions = sqlx::query_as::<_, SessionRecord>(&format!(
+            "SELECT {SESSION_COLS} FROM sessions WHERE status = 'running'"
+        ))
+        .fetch_all(self.db.pool())
+        .await?;
+
+        if running_sessions.is_empty() {
+            return Ok(0);
+        }
+
         let result = sqlx::query(
             "UPDATE sessions
              SET status = 'interrupted',
@@ -114,6 +125,11 @@ impl SessionRepository {
         )
         .execute(self.db.pool())
         .await?;
+
+        for session in running_sessions {
+            let _ = self.fetch_and_emit_update(&session.id).await?;
+        }
+
         Ok(result.rows_affected())
     }
 
@@ -370,6 +386,56 @@ mod tests {
             }
         }
         assert!(updated_seen, "expected SessionUpdated event");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn interrupt_all_running_emits_session_updated_for_each_interrupted_session() {
+        let db = test_helpers::create_test_db();
+        let (tx, mut rx) = broadcast::channel(1024);
+        let (project_id, task_id) = create_task(tx.clone(), db.clone()).await;
+        let repo = SessionRepository::new(db, tx);
+
+        let first = repo
+            .create(
+                &project_id,
+                Some(&task_id),
+                "openai/gpt-5",
+                "worker",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let second = repo
+            .create(
+                &project_id,
+                Some(&task_id),
+                "openai/gpt-5",
+                "worker",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            let _ = rx.recv().await.unwrap();
+        }
+
+        let rows = repo.interrupt_all_running().await.unwrap();
+        assert_eq!(rows, 2);
+
+        let mut updated_ids = std::collections::HashSet::new();
+        for _ in 0..2 {
+            if let DjinnEvent::SessionUpdated(session) = rx.recv().await.unwrap() {
+                assert_eq!(session.status, "interrupted");
+                assert!(session.ended_at.is_some());
+                updated_ids.insert(session.id);
+            }
+        }
+
+        assert!(updated_ids.contains(&first.id));
+        assert!(updated_ids.contains(&second.id));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
