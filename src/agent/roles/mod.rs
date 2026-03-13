@@ -1,3 +1,15 @@
+mod conflict;
+mod groomer;
+mod pm;
+mod reviewer;
+mod worker;
+
+pub(super) use conflict::CONFLICT_RESOLVER_CONFIG;
+pub(super) use groomer::GROOMER_CONFIG;
+pub(super) use pm::PM_CONFIG;
+pub(super) use reviewer::TASK_REVIEWER_CONFIG;
+pub(super) use worker::WORKER_CONFIG;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -8,7 +20,7 @@ use crate::agent::AgentType;
 use crate::models::{Task, TransitionAction};
 
 #[derive(Debug, Clone)]
-pub struct CompactionPrompts {
+pub(super) struct CompactionPrompts {
     pub mid_session: &'static str,
     pub mid_session_system: &'static str,
     pub pre_resume: &'static str,
@@ -16,10 +28,10 @@ pub struct CompactionPrompts {
 }
 
 #[derive(Debug, Clone)]
-pub struct RoleConfig {
+pub(super) struct RoleConfig {
     pub name: &'static str,
     pub dispatch_role: &'static str,
-    pub tool_schemas: Vec<Value>,
+    pub tool_schemas: fn() -> Vec<Value>,
     pub initial_message: &'static str,
     pub compaction: CompactionPrompts,
     pub preserves_session: bool,
@@ -271,6 +283,8 @@ fn groomer_dispatch_rule() -> DispatchRule {
         release_action: AgentType::Groomer.release_action(),
     }
 }
+<<<<<<< HEAD
+=======
 
 #[cfg(test)]
 mod tests {
@@ -503,3 +517,4 @@ mod tests {
             crate::agent::prompts::render_prompt(AgentType::ConflictResolver, &task, &task_ctx)
         );
     }
+>>>>>>> origin/main
