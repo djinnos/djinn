@@ -67,13 +67,16 @@ pub fn spawn_kb_watchers(
                 }
                 recv = events_rx.recv() => {
                     match recv {
-                        Ok(DjinnEvent::ProjectCreated(project)) => {
-                            let mut guard = state_clone.lock().await;
-                            let path = PathBuf::from(&project.path);
-                            add_watch(&mut guard, &project.id, &path);
-                            tracing::info!(project = %project.path, "KB watcher added for new project");
+                        Ok(evt) if evt.entity_type() == "project" && evt.action() == "created" => {
+                            if let DjinnEvent::ProjectCreated(project) = evt {
+                                let mut guard = state_clone.lock().await;
+                                let path = PathBuf::from(&project.path);
+                                add_watch(&mut guard, &project.id, &path);
+                                tracing::info!(project = %project.path, "KB watcher added for new project");
+                            }
                         }
-                        Ok(DjinnEvent::ProjectDeleted { id }) => {
+                        Ok(evt) if evt.entity_type() == "project" && evt.action() == "deleted" => {
+                            let DjinnEvent::ProjectDeleted { id } = evt else { continue; };
                             let mut guard = state_clone.lock().await;
                             // Find and remove by scanning — we don't have path from the delete event.
                             // The watcher is dropped which stops watching.
