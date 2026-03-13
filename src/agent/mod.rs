@@ -159,7 +159,51 @@ impl<'de> serde::Deserialize<'de> for AgentType {
 #[cfg(test)]
 mod tests {
     use super::AgentType;
+    use crate::agent::roles;
     use crate::models::TransitionAction;
+
+    fn assert_equivalent_to_role_config(agent_type: AgentType) {
+        let cfg = roles::config_for(agent_type);
+
+        assert_eq!(agent_type.as_str(), cfg.name);
+        assert_eq!(agent_type.dispatch_role(), cfg.dispatch_role);
+        assert_eq!(agent_type.preserves_session(), cfg.preserves_session);
+        assert_eq!(agent_type.is_project_scoped(), cfg.is_project_scoped);
+
+        assert_eq!(
+            agent_type.mid_session_compaction_prompt(),
+            cfg.compaction.mid_session
+        );
+        assert_eq!(
+            agent_type.mid_session_compaction_system_prompt(),
+            cfg.compaction.mid_session_system
+        );
+        assert_eq!(agent_type.pre_resume_compaction_prompt(), cfg.compaction.pre_resume);
+        assert_eq!(
+            agent_type.pre_resume_compaction_system_prompt(),
+            cfg.compaction.pre_resume_system
+        );
+
+        assert_eq!(agent_type.tool_schemas(), (cfg.tool_schemas)());
+    }
+
+    #[test]
+    fn role_config_equivalence_for_all_agent_types() {
+        for agent_type in [
+            AgentType::Worker,
+            AgentType::ConflictResolver,
+            AgentType::TaskReviewer,
+            AgentType::PM,
+            AgentType::Groomer,
+        ] {
+            assert_equivalent_to_role_config(agent_type);
+        }
+    }
+
+    #[test]
+    fn conflict_resolver_dispatch_role_maps_to_worker_pool() {
+        assert_eq!(AgentType::ConflictResolver.dispatch_role(), "worker");
+    }
 
     #[test]
     fn for_task_status_covers_all_expected_paths() {
