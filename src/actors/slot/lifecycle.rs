@@ -17,7 +17,6 @@ fn truncate_utf8(s: &mut String, max_bytes: usize) {
 }
 
 use crate::agent::AgentType;
-use crate::agent::extension;
 use crate::agent::message::{Conversation, Message};
 use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::provider::create_provider;
@@ -364,7 +363,7 @@ pub async fn run_task_lifecycle(
                         let _ = task_repo
                             .transition(
                                 &task.id,
-                                agent_type.release_action(),
+                                (agent_type.role_config().release_action)(),
                                 "agent-supervisor",
                                 "system",
                                 Some(&reason),
@@ -388,7 +387,7 @@ pub async fn run_task_lifecycle(
                     let _ = task_repo
                         .transition(
                             &task.id,
-                            agent_type.release_action(),
+                            (agent_type.role_config().release_action)(),
                             "agent-supervisor",
                             "system",
                             Some(&reason),
@@ -575,7 +574,7 @@ pub async fn run_task_lifecycle(
     let provider = create_provider(provider_config);
 
     // ── Create or resume session record + build conversation ─────────────────
-    let tools = extension::tool_schemas(agent_type);
+    let tools = agent_type.tool_schemas();
 
     // Try to resume from a paused session's saved conversation.
     let (current_record_id, mut conversation) = if let Some(ref resume_id) = resume_record_id {
@@ -896,7 +895,7 @@ pub async fn run_task_lifecycle(
     // Determine transition.
     let transition = match final_result {
         Ok(()) => success_transition(&task_id, agent_type, &final_output, &app_state).await,
-        Err(reason) => Some((agent_type.release_action(), Some(reason.to_string()))),
+        Err(reason) => Some(((agent_type.role_config().release_action)(), Some(reason.to_string()))),
     };
 
     if let Some((action, reason)) = transition {
@@ -1147,7 +1146,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
 
     // ── Build conversation ────────────────────────────────────────────────
-    let tools = extension::tool_schemas(agent_type);
+    let tools = agent_type.tool_schemas();
     let mut conversation = Conversation::new();
     conversation.push(Message::system(system_prompt));
     conversation.push(Message::user(

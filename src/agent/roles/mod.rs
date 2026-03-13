@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use super::AgentType;
 use crate::models::{Task, TransitionAction};
 use std::collections::{HashMap, HashSet};
@@ -16,6 +15,7 @@ pub(crate) use reviewer::TASK_REVIEWER_CONFIG;
 pub(crate) use worker::WORKER_CONFIG;
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub(crate) struct CompactionPrompts {
     pub(crate) mid_session: &'static str,
     pub(crate) mid_session_system: &'static str,
@@ -26,10 +26,15 @@ pub(crate) struct CompactionPrompts {
 #[derive(Clone, Copy)]
 pub(crate) struct RoleConfig {
     pub(crate) name: &'static str,
+    pub(crate) display_name: &'static str,
     pub(crate) dispatch_role: &'static str,
     pub(crate) tool_schemas: fn() -> Vec<serde_json::Value>,
+    pub(crate) start_action: fn(&str) -> Option<TransitionAction>,
+    pub(crate) release_action: fn() -> TransitionAction,
     pub(crate) initial_message: &'static str,
+    #[allow(dead_code)]
     pub(crate) compaction: CompactionPrompts,
+    #[allow(dead_code)]
     pub(crate) preserves_session: bool,
     pub(crate) is_project_scoped: bool,
 }
@@ -52,8 +57,6 @@ pub(crate) struct DispatchContext {
 pub(crate) struct DispatchRule {
     pub(crate) role_name: &'static str,
     pub(crate) claims: fn(&Task, &DispatchContext) -> bool,
-    pub(crate) start_action: fn(&str) -> Option<TransitionAction>,
-    pub(crate) release_action: TransitionAction,
 }
 
 pub struct RoleRegistry {
@@ -92,6 +95,7 @@ impl RoleRegistry {
             .map(|rule| rule.role_name)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn dispatch_roles(&self) -> Vec<&'static str> {
         self.dispatch_rules
             .iter()
@@ -101,10 +105,34 @@ impl RoleRegistry {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn dispatch_rule_for_role(&self, role_name: &str) -> Option<&DispatchRule> {
         self.dispatch_rules
             .iter()
             .find(|rule| rule.role_name == role_name)
+    }
+
+    /// Unique model-pool role names (dispatch_role from RoleConfig).
+    pub(crate) fn model_pool_roles(&self) -> Vec<&'static str> {
+        let mut seen = HashSet::new();
+        self.roles
+            .values()
+            .filter_map(|at| {
+                let dr = config_for(*at).dispatch_role;
+                seen.insert(dr).then_some(dr)
+            })
+            .collect()
+    }
+
+    /// Get the model-pool role (dispatch_role) for a task.
+    pub(crate) fn dispatch_role_for_task(
+        &self,
+        task: &Task,
+        ctx: &DispatchContext,
+    ) -> Option<&'static str> {
+        let role_name = self.role_for_task(task, ctx)?;
+        let agent_type = self.roles.get(role_name)?;
+        Some(config_for(*agent_type).dispatch_role)
     }
 }
 
@@ -115,16 +143,10 @@ fn worker_claims(task: &Task, _ctx: &DispatchContext) -> bool {
     )
 }
 
-fn worker_start_action(status: &str) -> Option<TransitionAction> {
-    AgentType::Worker.start_action(status)
-}
-
 fn worker_dispatch_rule() -> DispatchRule {
     DispatchRule {
         role_name: "worker",
         claims: worker_claims,
-        start_action: worker_start_action,
-        release_action: AgentType::Worker.release_action(),
     }
 }
 
@@ -132,16 +154,10 @@ fn conflict_resolver_claims(task: &Task, ctx: &DispatchContext) -> bool {
     task.status == "open" && ctx.has_conflict_context
 }
 
-fn conflict_resolver_start_action(status: &str) -> Option<TransitionAction> {
-    AgentType::ConflictResolver.start_action(status)
-}
-
 fn conflict_resolver_dispatch_rule() -> DispatchRule {
     DispatchRule {
         role_name: "conflict_resolver",
         claims: conflict_resolver_claims,
-        start_action: conflict_resolver_start_action,
-        release_action: AgentType::ConflictResolver.release_action(),
     }
 }
 
@@ -149,16 +165,10 @@ fn task_reviewer_claims(task: &Task, _ctx: &DispatchContext) -> bool {
     matches!(task.status.as_str(), "needs_task_review" | "in_task_review")
 }
 
-fn task_reviewer_start_action(status: &str) -> Option<TransitionAction> {
-    AgentType::TaskReviewer.start_action(status)
-}
-
 fn task_reviewer_dispatch_rule() -> DispatchRule {
     DispatchRule {
         role_name: "task_reviewer",
         claims: task_reviewer_claims,
-        start_action: task_reviewer_start_action,
-        release_action: AgentType::TaskReviewer.release_action(),
     }
 }
 
@@ -169,16 +179,10 @@ fn pm_claims(task: &Task, _ctx: &DispatchContext) -> bool {
     )
 }
 
-fn pm_start_action(status: &str) -> Option<TransitionAction> {
-    AgentType::PM.start_action(status)
-}
-
 fn pm_dispatch_rule() -> DispatchRule {
     DispatchRule {
         role_name: "pm",
         claims: pm_claims,
-        start_action: pm_start_action,
-        release_action: AgentType::PM.release_action(),
     }
 }
 
@@ -186,15 +190,9 @@ fn groomer_claims(_task: &Task, _ctx: &DispatchContext) -> bool {
     false
 }
 
-fn groomer_start_action(status: &str) -> Option<TransitionAction> {
-    AgentType::Groomer.start_action(status)
-}
-
 fn groomer_dispatch_rule() -> DispatchRule {
     DispatchRule {
         role_name: "groomer",
         claims: groomer_claims,
-        start_action: groomer_start_action,
-        release_action: AgentType::Groomer.release_action(),
     }
 }

@@ -58,69 +58,8 @@ impl AgentType {
         self.role_config().dispatch_role
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn preserves_session(&self) -> bool {
-        self.role_config().preserves_session
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn is_project_scoped(&self) -> bool {
-        self.role_config().is_project_scoped
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn initial_message(&self) -> &'static str {
-        self.role_config().initial_message
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn mid_session_compaction_prompt(&self) -> &'static str {
-        self.role_config().compaction.mid_session
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn mid_session_compaction_system_prompt(&self) -> &'static str {
-        self.role_config().compaction.mid_session_system
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn pre_resume_compaction_prompt(&self) -> &'static str {
-        self.role_config().compaction.pre_resume
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn pre_resume_compaction_system_prompt(&self) -> &'static str {
-        self.role_config().compaction.pre_resume_system
-    }
-
-    #[allow(dead_code)]
     pub(crate) fn tool_schemas(&self) -> Vec<serde_json::Value> {
         (self.role_config().tool_schemas)()
-    }
-
-    /// The transition action to claim/start a task for this agent type, given
-    /// the task's current status.  Returns `None` if the task is already in the
-    /// active state (e.g. `in_progress` for a worker).
-    pub fn start_action(&self, task_status: &str) -> Option<crate::models::TransitionAction> {
-        use crate::models::TransitionAction;
-        match (self, task_status) {
-            (Self::Worker | Self::ConflictResolver, "open") => Some(TransitionAction::Start),
-            (Self::TaskReviewer, "needs_task_review") => Some(TransitionAction::TaskReviewStart),
-            (Self::PM, "needs_pm_intervention") => Some(TransitionAction::PmInterventionStart),
-            (Self::Groomer, _) => None,
-            _ => None,
-        }
-    }
-
-    /// The transition action to release/interrupt a task held by this agent type.
-    pub fn release_action(&self) -> crate::models::TransitionAction {
-        use crate::models::TransitionAction;
-        match self {
-            Self::Worker | Self::ConflictResolver => TransitionAction::Release,
-            Self::TaskReviewer => TransitionAction::ReleaseTaskReview,
-            Self::PM => TransitionAction::PmInterventionRelease,
-            Self::Groomer => TransitionAction::Release,
-        }
     }
 }
 
@@ -169,26 +108,8 @@ mod tests {
 
         assert_eq!(agent_type.as_str(), cfg.name);
         assert_eq!(agent_type.dispatch_role(), cfg.dispatch_role);
-        assert_eq!(agent_type.preserves_session(), cfg.preserves_session);
-        assert_eq!(agent_type.is_project_scoped(), cfg.is_project_scoped);
-
-        assert_eq!(
-            agent_type.mid_session_compaction_prompt(),
-            cfg.compaction.mid_session
-        );
-        assert_eq!(
-            agent_type.mid_session_compaction_system_prompt(),
-            cfg.compaction.mid_session_system
-        );
-        assert_eq!(
-            agent_type.pre_resume_compaction_prompt(),
-            cfg.compaction.pre_resume
-        );
-        assert_eq!(
-            agent_type.pre_resume_compaction_system_prompt(),
-            cfg.compaction.pre_resume_system
-        );
-
+        assert_eq!(agent_type.role_config().preserves_session, cfg.preserves_session);
+        assert_eq!(agent_type.role_config().is_project_scoped, cfg.is_project_scoped);
         assert_eq!(agent_type.tool_schemas(), (cfg.tool_schemas)());
     }
 
@@ -249,46 +170,50 @@ mod tests {
     }
 
     #[test]
-    fn start_action_for_each_variant_and_status() {
+    fn start_action_via_role_config() {
+        let cfg = AgentType::Worker.role_config();
+        assert_eq!((cfg.start_action)("open"), Some(TransitionAction::Start));
+        assert_eq!((cfg.start_action)("in_progress"), None);
+
+        let cfg = AgentType::ConflictResolver.role_config();
+        assert_eq!((cfg.start_action)("open"), Some(TransitionAction::Start));
+
+        let cfg = AgentType::TaskReviewer.role_config();
         assert_eq!(
-            AgentType::Worker.start_action("open"),
-            Some(TransitionAction::Start)
-        );
-        assert_eq!(
-            AgentType::ConflictResolver.start_action("open"),
-            Some(TransitionAction::Start)
-        );
-        assert_eq!(
-            AgentType::TaskReviewer.start_action("needs_task_review"),
+            (cfg.start_action)("needs_task_review"),
             Some(TransitionAction::TaskReviewStart)
         );
+
+        let cfg = AgentType::PM.role_config();
         assert_eq!(
-            AgentType::PM.start_action("needs_pm_intervention"),
+            (cfg.start_action)("needs_pm_intervention"),
             Some(TransitionAction::PmInterventionStart)
         );
-        assert_eq!(AgentType::Groomer.start_action("open"), None);
+
+        let cfg = AgentType::Groomer.role_config();
+        assert_eq!((cfg.start_action)("open"), None);
     }
 
     #[test]
-    fn release_action_for_all_variants() {
+    fn release_action_via_role_config() {
         assert_eq!(
-            AgentType::Worker.release_action(),
+            (AgentType::Worker.role_config().release_action)(),
             TransitionAction::Release
         );
         assert_eq!(
-            AgentType::ConflictResolver.release_action(),
+            (AgentType::ConflictResolver.role_config().release_action)(),
             TransitionAction::Release
         );
         assert_eq!(
-            AgentType::TaskReviewer.release_action(),
+            (AgentType::TaskReviewer.role_config().release_action)(),
             TransitionAction::ReleaseTaskReview
         );
         assert_eq!(
-            AgentType::PM.release_action(),
+            (AgentType::PM.role_config().release_action)(),
             TransitionAction::PmInterventionRelease
         );
         assert_eq!(
-            AgentType::Groomer.release_action(),
+            (AgentType::Groomer.role_config().release_action)(),
             TransitionAction::Release
         );
     }

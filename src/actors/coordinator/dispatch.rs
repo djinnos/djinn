@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::roles::DispatchContext;
 use crate::models::{TaskStatus, TransitionAction};
 
 /// Result of a single `try_dispatch_to_pool` attempt.
@@ -78,7 +79,7 @@ impl CoordinatorActor {
     /// those that don't already have an active session.
     pub(super) async fn dispatch_ready_tasks(&mut self, project_filter: Option<&str>) {
         let mut role_models: HashMap<&'static str, Vec<String>> = HashMap::new();
-        for role in ["worker", "task_reviewer", "pm"] {
+        for role in self.role_registry.model_pool_roles() {
             let model_ids = self.resolve_dispatch_models_for_role(role).await;
             if !model_ids.is_empty() {
                 role_models.insert(role, model_ids);
@@ -162,7 +163,10 @@ impl CoordinatorActor {
                 continue;
             }
 
-            let role = Self::role_for_task_status(&task.status);
+            let ctx = DispatchContext::default();
+            let Some(role) = self.role_registry.dispatch_role_for_task(&task, &ctx) else {
+                continue;
+            };
             if exhausted_roles.contains(role) {
                 continue;
             }
