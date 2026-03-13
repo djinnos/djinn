@@ -48,27 +48,17 @@ fn compaction_prompt(ctx: CompactionContext) -> &'static str {
 /// Build the system instruction for the summariser based on context.
 fn summariser_system(ctx: CompactionContext) -> &'static str {
     match ctx {
-        CompactionContext::PreResume(AgentType::Worker) => {
-            "You are summarising a coding agent's work session that is about to receive reviewer feedback. \
-             Produce a dense, faithful summary focused on what was implemented, what files were changed, \
-             and what the current state of the code is. Do NOT include any statements about work being \
-             complete or done — the reviewer has determined it is not."
-        }
-        CompactionContext::MidSession(AgentType::Worker) => {
-            "You are summarising a coding agent's in-progress work session. \
-             Produce a dense, faithful summary that preserves all implementation context \
-             so the agent can continue working without re-reading files."
-        }
+        CompactionContext::PreResume(AgentType::Worker) => SUMMARISER_SYSTEM_WORKER_PRE_RESUME,
+        CompactionContext::MidSession(AgentType::Worker) => SUMMARISER_SYSTEM_WORKER_MID_SESSION,
         CompactionContext::MidSession(AgentType::TaskReviewer)
-        | CompactionContext::PreResume(AgentType::TaskReviewer) => {
-            "You are summarising a code review session. Produce a dense, faithful summary \
-             that preserves the review findings, issues identified, and assessment progress."
-        }
-        _ => "You are a conversation summariser. Produce a dense, faithful summary.",
+        | CompactionContext::PreResume(AgentType::TaskReviewer) => SUMMARISER_SYSTEM_TASK_REVIEWER,
+        CompactionContext::MidSession(AgentType::ConflictResolver)
+        | CompactionContext::PreResume(AgentType::ConflictResolver) => SUMMARISER_SYSTEM_CONFLICT_RESOLVER,
+        _ => SUMMARISER_SYSTEM_GENERIC,
     }
 }
 
-const PRE_RESUME_WORKER_PROMPT: &str = r#"## Compaction Context
+pub(crate) const PRE_RESUME_WORKER_PROMPT: &str = r#"## Compaction Context
 A coding agent's session is being compacted before re-prompting with reviewer feedback.
 The agent's previous work was rejected or needs fixes. Summarise what happened so the
 agent can efficiently address the feedback without re-doing research.
@@ -92,7 +82,7 @@ Wrap reasoning in `<analysis>` tags.
 - Focus on FACTS: what files exist, what code was written, what errors remain
 - Preserve exact file paths, function names, and type names"#;
 
-const MID_SESSION_WORKER_PROMPT: &str = r#"## Compaction Context
+pub(crate) const MID_SESSION_WORKER_PROMPT: &str = r#"## Compaction Context
 A coding agent's context window is full and needs compaction to continue working.
 
 **Conversation History:**
@@ -112,7 +102,7 @@ Wrap reasoning in `<analysis>` tags.
 
 > Preserve exact file paths, function names, type names, and error messages"#;
 
-const REVIEWER_PROMPT: &str = r#"## Compaction Context
+pub(crate) const REVIEWER_PROMPT: &str = r#"## Compaction Context
 A code review agent's session needs compaction.
 
 **Conversation History:**
@@ -130,7 +120,7 @@ Wrap reasoning in `<analysis>` tags.
 
 > Preserve exact file paths, line numbers, error messages, and acceptance criteria text"#;
 
-const CONFLICT_RESOLVER_PROMPT: &str = r#"## Compaction Context
+pub(crate) const CONFLICT_RESOLVER_PROMPT: &str = r#"## Compaction Context
 A merge conflict resolution agent's session needs compaction.
 
 **Conversation History:**
@@ -147,7 +137,7 @@ Wrap reasoning in `<analysis>` tags.
 
 > Preserve exact file paths, branch names, and conflict markers"#;
 
-const GENERIC_PROMPT: &str = r#"## Task Context
+pub(crate) const GENERIC_PROMPT: &str = r#"## Task Context
 - An llm context limit was reached when a user was in a working session with an agent (you)
 - Generate a version of the below messages with only the most verbose parts removed
 - Include user requests, your responses, all technical content, and as much of the original context as possible
@@ -172,6 +162,13 @@ Wrap reasoning in `<analysis>` tags:
 9. **Next Step** – *Include only if* directly continues user instruction
 
 > No new ideas unless user confirmed"#;
+
+
+pub(crate) const SUMMARISER_SYSTEM_WORKER_PRE_RESUME: &str = "You are summarising a coding agent's work session that is about to receive reviewer feedback. Produce a dense, faithful summary focused on what was implemented, what files were changed, and what the current state of the code is. Do NOT include any statements about work being complete or done — the reviewer has determined it is not.";
+pub(crate) const SUMMARISER_SYSTEM_WORKER_MID_SESSION: &str = "You are summarising a coding agent's in-progress work session. Produce a dense, faithful summary that preserves all implementation context so the agent can continue working without re-reading files.";
+pub(crate) const SUMMARISER_SYSTEM_TASK_REVIEWER: &str = "You are summarising a code review session. Produce a dense, faithful summary that preserves the review findings, issues identified, and assessment progress.";
+pub(crate) const SUMMARISER_SYSTEM_CONFLICT_RESOLVER: &str = "You are a conversation summariser. Produce a dense, faithful summary.";
+pub(crate) const SUMMARISER_SYSTEM_GENERIC: &str = "You are a conversation summariser. Produce a dense, faithful summary.";
 
 // ─── Public helpers ───────────────────────────────────────────────────────────
 

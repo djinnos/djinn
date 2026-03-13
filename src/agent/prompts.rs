@@ -13,11 +13,11 @@ use crate::models::Task;
 // ─── Embedded templates ────────────────────────────────────────────────────────
 
 const BASE_TEMPLATE: &str = include_str!("prompts/base.md");
-const DEV_TEMPLATE: &str = include_str!("prompts/dev.md");
-const CONFLICT_RESOLVER_TEMPLATE: &str = include_str!("prompts/conflict-resolver.md");
-const TASK_REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.md");
-const PM_TEMPLATE: &str = include_str!("prompts/pm.md");
-const GROOMER_TEMPLATE: &str = include_str!("prompts/groomer.md");
+pub(crate) const DEV_TEMPLATE: &str = include_str!("prompts/dev.md");
+pub(crate) const CONFLICT_RESOLVER_TEMPLATE: &str = include_str!("prompts/conflict-resolver.md");
+pub(crate) const TASK_REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.md");
+pub(crate) const PM_TEMPLATE: &str = include_str!("prompts/pm.md");
+pub(crate) const GROOMER_TEMPLATE: &str = include_str!("prompts/groomer.md");
 
 // ─── Context ───────────────────────────────────────────────────────────────────
 

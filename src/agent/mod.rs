@@ -7,6 +7,8 @@ pub(crate) mod output_parser;
 pub mod prompts;
 pub mod provider;
 pub mod sandbox;
+mod roles;
+
 // ─── Agent type ───────────────────────────────────────────────────────────────
 
 /// Role an agent is playing within Djinn.
@@ -25,14 +27,12 @@ pub enum AgentType {
 }
 
 impl AgentType {
+    pub(crate) fn role_config(&self) -> &'static roles::RoleConfig {
+        roles::config_for(*self)
+    }
+
     pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Worker => "worker",
-            Self::ConflictResolver => "conflict_resolver",
-            Self::TaskReviewer => "task_reviewer",
-            Self::PM => "pm",
-            Self::Groomer => "groomer",
-        }
+        self.role_config().name
     }
 
     /// Determine the agent type from a task's status string.
@@ -53,12 +53,47 @@ impl AgentType {
     /// `ConflictResolver` shares the `"worker"` model pool, so both map to
     /// `"worker"`.
     pub fn dispatch_role(&self) -> &'static str {
-        match self {
-            Self::Worker | Self::ConflictResolver => "worker",
-            Self::TaskReviewer => "task_reviewer",
-            Self::PM => "pm",
-            Self::Groomer => "groomer",
-        }
+        self.role_config().dispatch_role
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn preserves_session(&self) -> bool {
+        self.role_config().preserves_session
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn is_project_scoped(&self) -> bool {
+        self.role_config().is_project_scoped
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn initial_message(&self) -> &'static str {
+        self.role_config().initial_message
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn mid_session_compaction_prompt(&self) -> &'static str {
+        self.role_config().compaction.mid_session
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn mid_session_compaction_system_prompt(&self) -> &'static str {
+        self.role_config().compaction.mid_session_system
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn pre_resume_compaction_prompt(&self) -> &'static str {
+        self.role_config().compaction.pre_resume
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn pre_resume_compaction_system_prompt(&self) -> &'static str {
+        self.role_config().compaction.pre_resume_system
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn tool_schemas(&self) -> Vec<serde_json::Value> {
+        (self.role_config().tool_schemas)()
     }
 
     /// The transition action to claim/start a task for this agent type, given
