@@ -65,11 +65,6 @@ pub fn init(config: &LangfuseConfig) -> anyhow::Result<bool> {
 
     let exporter = SpanExporter::builder()
         .with_http()
-        .with_http_client(
-            std::thread::spawn(reqwest::blocking::Client::new)
-                .join()
-                .expect("failed to build blocking reqwest client"),
-        )
         .with_endpoint(format!("{}/v1/traces", config.endpoint.trim_end_matches('/')))
         .with_headers(headers)
         .build()?;
