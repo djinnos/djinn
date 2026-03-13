@@ -7,6 +7,7 @@ use crate::models::Project;
 use crate::models::SessionRecord;
 use crate::models::Setting;
 use crate::models::Task;
+use serde::de::DeserializeOwned;
 
 /// Domain events emitted by repositories after every write.
 ///
@@ -149,6 +150,189 @@ pub enum DjinnEvent {
     },
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DjinnEventEnvelope {
+    pub entity_type: &'static str,
+    pub action: &'static str,
+    pub payload: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(skip)]
+    pub from_sync: bool,
+}
+
+impl DjinnEventEnvelope {
+    pub fn entity_type(&self) -> &'static str {
+        self.entity_type
+    }
+
+    pub fn action(&self) -> &'static str {
+        self.action
+    }
+
+    pub fn from_sync(&self) -> bool {
+        self.from_sync
+    }
+
+    pub fn payload(&self) -> &serde_json::Value {
+        &self.payload
+    }
+
+    pub fn parse_payload<T: DeserializeOwned>(&self) -> Option<T> {
+        serde_json::from_value(self.payload.clone()).ok()
+    }
+}
+
+impl From<DjinnEvent> for DjinnEventEnvelope {
+    fn from(event: DjinnEvent) -> Self {
+        let entity_type = event.entity_type();
+        let action = event.action();
+        let from_sync = event.from_sync();
+
+        let id = match &event {
+            DjinnEvent::ProjectDeleted { id }
+            | DjinnEvent::EpicDeleted { id }
+            | DjinnEvent::TaskDeleted { id }
+            | DjinnEvent::NoteDeleted { id }
+            | DjinnEvent::CustomProviderDeleted { id }
+            | DjinnEvent::CredentialDeleted { id } => Some(id.clone()),
+            _ => None,
+        };
+
+        let project_id = match &event {
+            DjinnEvent::ProjectConfigUpdated { project_id, .. }
+            | DjinnEvent::GitSettingsUpdated { project_id, .. }
+            | DjinnEvent::SessionDispatched { project_id, .. }
+            | DjinnEvent::ProjectHealthChanged { project_id, .. } => Some(project_id.clone()),
+            _ => None,
+        };
+
+        let payload = match event {
+            DjinnEvent::SettingUpdated(setting) => serde_json::to_value(setting),
+            DjinnEvent::ProjectCreated(project) => serde_json::to_value(project),
+            DjinnEvent::ProjectUpdated(project) => serde_json::to_value(project),
+            DjinnEvent::ProjectDeleted { id } => serde_json::to_value(serde_json::json!({ "id": id })),
+            DjinnEvent::ProjectConfigUpdated { project_id, config } => {
+                serde_json::to_value(serde_json::json!({ "project_id": project_id, "config": config }))
+            }
+            DjinnEvent::EpicCreated(epic) => serde_json::to_value(epic),
+            DjinnEvent::EpicUpdated(epic) => serde_json::to_value(epic),
+            DjinnEvent::EpicDeleted { id } => serde_json::to_value(serde_json::json!({ "id": id })),
+            DjinnEvent::TaskCreated { task, from_sync } => {
+                serde_json::to_value(serde_json::json!({ "task": task, "from_sync": from_sync }))
+            }
+            DjinnEvent::TaskUpdated { task, from_sync } => {
+                serde_json::to_value(serde_json::json!({ "task": task, "from_sync": from_sync }))
+            }
+            DjinnEvent::TaskDeleted { id } => serde_json::to_value(serde_json::json!({ "id": id })),
+            DjinnEvent::NoteCreated(note) => serde_json::to_value(note),
+            DjinnEvent::NoteUpdated(note) => serde_json::to_value(note),
+            DjinnEvent::NoteDeleted { id } => serde_json::to_value(serde_json::json!({ "id": id })),
+            DjinnEvent::GitSettingsUpdated {
+                project_id,
+                settings,
+            } => serde_json::to_value(serde_json::json!({ "project_id": project_id, "settings": settings })),
+            DjinnEvent::CustomProviderUpserted(provider) => serde_json::to_value(provider),
+            DjinnEvent::CustomProviderDeleted { id } => serde_json::to_value(serde_json::json!({ "id": id })),
+            DjinnEvent::CredentialCreated(credential) => serde_json::to_value(credential),
+            DjinnEvent::CredentialUpdated(credential) => serde_json::to_value(credential),
+            DjinnEvent::CredentialDeleted { id } => serde_json::to_value(serde_json::json!({ "id": id })),
+            DjinnEvent::SessionDispatched {
+                project_id,
+                task_id,
+                model_id,
+                agent_type,
+            } => serde_json::to_value(serde_json::json!({
+                "project_id": project_id,
+                "task_id": task_id,
+                "model_id": model_id,
+                "agent_type": agent_type,
+            })),
+            DjinnEvent::SessionCreated(session_record) => serde_json::to_value(session_record),
+            DjinnEvent::SessionUpdated(session_record) => serde_json::to_value(session_record),
+            DjinnEvent::SessionTokenUpdate {
+                session_id,
+                task_id,
+                tokens_in,
+                tokens_out,
+                context_window,
+                usage_pct,
+            } => serde_json::to_value(serde_json::json!({
+                "session_id": session_id,
+                "task_id": task_id,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "context_window": context_window,
+                "usage_pct": usage_pct,
+            })),
+            DjinnEvent::SessionMessage {
+                session_id,
+                task_id,
+                agent_type,
+                message,
+            } => serde_json::to_value(serde_json::json!({
+                "session_id": session_id,
+                "task_id": task_id,
+                "agent_type": agent_type,
+                "message": message,
+            })),
+            DjinnEvent::SessionMessageInserted {
+                session_id,
+                task_id,
+                role,
+            } => serde_json::to_value(serde_json::json!({
+                "session_id": session_id,
+                "task_id": task_id,
+                "role": role,
+            })),
+            DjinnEvent::SyncCompleted {
+                channel,
+                direction,
+                count,
+                error,
+            } => serde_json::to_value(serde_json::json!({
+                "channel": channel,
+                "direction": direction,
+                "count": count,
+                "error": error,
+            })),
+            DjinnEvent::ProjectHealthChanged {
+                project_id,
+                healthy,
+                error,
+            } => serde_json::to_value(serde_json::json!({
+                "project_id": project_id,
+                "healthy": healthy,
+                "error": error,
+            })),
+            DjinnEvent::ActivityLogged {
+                task_id,
+                action,
+                actor,
+                actor_role,
+                payload,
+            } => serde_json::to_value(serde_json::json!({
+                "task_id": task_id,
+                "action": action,
+                "actor": actor,
+                "actor_role": actor_role,
+                "payload": payload,
+            })),
+        }
+        .expect("serializing DjinnEvent payload to Value should not fail");
+
+        Self {
+            entity_type,
+            action,
+            payload,
+            id,
+            project_id,
+            from_sync,
+        }
+    }
+}
 
 impl DjinnEvent {
     pub fn entity_type(&self) -> &'static str {
@@ -215,5 +399,138 @@ impl DjinnEvent {
             DjinnEvent::TaskCreated { from_sync, .. } | DjinnEvent::TaskUpdated { from_sync, .. } => *from_sync,
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DjinnEvent, DjinnEventEnvelope};
+    use crate::models::{Project, Setting, Task};
+    use serde_json::json;
+
+    #[test]
+    fn envelope_task_created_round_trip_and_parse_payload() {
+        let task = Task {
+            id: "task-1".into(),
+            project_id: "p1".into(),
+            short_id: "T-1".into(),
+            epic_id: None,
+            title: "Title".into(),
+            description: "".into(),
+            design: "".into(),
+            issue_type: "task".into(),
+            status: "open".into(),
+            priority: 1,
+            owner: "".into(),
+            labels: "[]".into(),
+            acceptance_criteria: "[]".into(),
+            reopen_count: 0,
+            continuation_count: 0,
+            verification_failure_count: 0,
+            created_at: "2025-01-01T00:00:00Z".into(),
+            updated_at: "2025-01-01T00:00:00Z".into(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            memory_refs: "[]".into(),
+            unresolved_blocker_count: 0,
+        };
+        let event = DjinnEvent::TaskCreated {
+            task: task.clone(),
+            from_sync: true,
+        };
+
+        let envelope = DjinnEventEnvelope::from(event);
+        assert_eq!(envelope.entity_type(), "task");
+        assert_eq!(envelope.action(), "created");
+        assert!(envelope.from_sync());
+        assert_eq!(envelope.id, None);
+        assert_eq!(envelope.project_id, None);
+
+        let parsed: Option<serde_json::Value> = envelope.parse_payload();
+        assert_eq!(parsed, Some(json!({ "task": task, "from_sync": true })));
+    }
+
+    #[test]
+    fn envelope_project_deleted_has_id_only() {
+        let event = DjinnEvent::ProjectDeleted {
+            id: "proj-123".into(),
+        };
+        let envelope = DjinnEventEnvelope::from(event);
+
+        assert_eq!(envelope.entity_type(), "project");
+        assert_eq!(envelope.action(), "deleted");
+        assert_eq!(envelope.id.as_deref(), Some("proj-123"));
+        assert_eq!(envelope.project_id, None);
+        assert!(!envelope.from_sync());
+        assert_eq!(envelope.payload(), &json!({"id": "proj-123"}));
+    }
+
+    #[test]
+    fn envelope_session_message_nested_payload() {
+        let msg = json!({"content": [{"type":"text","text":"hello"}]});
+        let event = DjinnEvent::SessionMessage {
+            session_id: "s1".into(),
+            task_id: "t1".into(),
+            agent_type: "worker".into(),
+            message: msg.clone(),
+        };
+        let envelope = DjinnEventEnvelope::from(event);
+
+        assert_eq!(envelope.entity_type(), "session");
+        assert_eq!(envelope.action(), "message");
+        assert_eq!(
+            envelope.payload(),
+            &json!({
+                "session_id": "s1",
+                "task_id": "t1",
+                "agent_type": "worker",
+                "message": msg,
+            })
+        );
+    }
+
+    #[test]
+    fn envelope_setting_updated_parse_payload_typed() {
+        let setting = Setting {
+            key: "foo".into(),
+            value: "bar".into(),
+            updated_at: "2025-01-01T00:00:00Z".into(),
+        };
+        let event = DjinnEvent::SettingUpdated(setting.clone());
+        let envelope = DjinnEventEnvelope::from(event);
+
+        assert_eq!(envelope.entity_type(), "setting");
+        assert_eq!(envelope.action(), "updated");
+
+        let parsed: Option<Setting> = envelope.parse_payload();
+        assert!(parsed.is_some());
+        let parsed = parsed.expect("setting payload parses");
+        assert_eq!(parsed.key, setting.key);
+        assert_eq!(parsed.value, setting.value);
+        assert_eq!(parsed.updated_at, setting.updated_at);
+    }
+
+    #[test]
+    fn envelope_serializes_flat_json() {
+        let project = Project {
+            id: "proj-1".into(),
+            name: "name".into(),
+            path: "/tmp/proj".into(),
+            created_at: "2025-01-01T00:00:00Z".into(),
+            setup_commands: "[]".into(),
+            verification_commands: "[]".into(),
+            target_branch: "main".into(),
+            auto_merge: false,
+            sync_enabled: false,
+            sync_remote: None,
+        };
+        let envelope = DjinnEventEnvelope::from(DjinnEvent::ProjectCreated(project));
+        let value = serde_json::to_value(envelope).expect("envelope serializes");
+
+        assert!(value.get("entity_type").is_some());
+        assert!(value.get("action").is_some());
+        assert!(value.get("payload").is_some());
+        assert!(value.get("from_sync").is_none());
     }
 }
