@@ -15,6 +15,7 @@ use crate::db::NoteRepository;
 use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
 use crate::db::TaskRepository;
+use crate::agent::lsp::format_diagnostics_xml;
 use crate::models::Task;
 use crate::server::AppState;
 
@@ -1005,10 +1006,14 @@ async fn call_write(
         .read(&worktree_path.display().to_string(), &path)
         .await?;
 
+    state.lsp().touch_file(worktree_path, &path, true).await;
+    let diag_xml = format_diagnostics_xml(state.lsp().diagnostics().await);
+
     Ok(serde_json::json!({
         "ok": true,
         "path": path.display().to_string(),
         "bytes": p.content.len(),
+        "diagnostics": diag_xml,
     }))
 }
 
@@ -1069,9 +1074,13 @@ async fn call_edit(
         .read(&worktree_path.display().to_string(), &path)
         .await?;
 
+    state.lsp().touch_file(worktree_path, &path, true).await;
+    let diag_xml = format_diagnostics_xml(state.lsp().diagnostics().await);
+
     Ok(serde_json::json!({
         "ok": true,
         "path": path.display().to_string(),
+        "diagnostics": diag_xml,
     }))
 }
 
@@ -1148,9 +1157,13 @@ async fn call_apply_patch(
         .read(&worktree_path.display().to_string(), &path)
         .await?;
 
+    state.lsp().touch_file(worktree_path, &path, true).await;
+    let diag_xml = format_diagnostics_xml(state.lsp().diagnostics().await);
+
     Ok(serde_json::json!({
         "ok": true,
         "path": path.display().to_string(),
+        "diagnostics": diag_xml,
     }))
 }
 
