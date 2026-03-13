@@ -2806,8 +2806,32 @@ export namespace TaskUpdateOutputSchema {
 
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
+export namespace SetUserIdentityInputSchema {
+  export interface SetUserIdentityInput {
+  /**
+   * User's email address from Clerk authentication
+   */
+  email: string
+  /**
+   * User's unique ID (Clerk sub) for future use
+   */
+  user_id?: string
+  [k: string]: any
+  }
 
-export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_commands_get" | "project_commands_set" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
+}
+export type SetUserIdentityInput = SetUserIdentityInputSchema.SetUserIdentityInput;
+export namespace SetUserIdentityOutputSchema {
+  export interface SetUserIdentityOutput {
+  status: string
+  email: string
+  [k: string]: any
+  }
+
+}
+export type SetUserIdentityOutput = SetUserIdentityOutputSchema.SetUserIdentityOutput;
+
+export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_commands_get" | "project_commands_set" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "set_user_identity" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "board_health": { input: BoardHealthInput; output: BoardHealthOutput };
@@ -2869,6 +2893,7 @@ export interface McpToolMap {
   "session_list": { input: SessionListInput; output: SessionListOutput };
   "session_messages": { input: SessionMessagesInput; output: SessionMessagesOutput };
   "session_show": { input: SessionShowInput; output: SessionShowOutput };
+  "set_user_identity": { input: SetUserIdentityInput; output: SetUserIdentityOutput };
   "settings_get": { input: SettingsGetInput; output: SettingsGetOutput };
   "settings_reset": { input: SettingsResetInput; output: SettingsResetOutput };
   "settings_set": { input: SettingsSetInput; output: SettingsSetOutput };

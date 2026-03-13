@@ -1,4 +1,5 @@
 use crate::auth::{build_authorize_url, clear_token, generate_pkce, retrieve_token, store_token, PkceParams};
+use crate::auth_callback::AuthCallbackManager;
 use crate::server::ServerState;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use once_cell::sync::Lazy;
@@ -38,8 +39,8 @@ struct IdTokenClaims {
 }
 
 use serde::Deserialize;
-use std::sync::Mutex as StdMutex;
-use tauri::{AppHandle, Emitter, State};
+use std::sync::{Arc, Mutex as StdMutex};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
 /// Global storage for PKCE params during OAuth flow
@@ -63,6 +64,23 @@ fn build_auth_state_response(session: Option<&AuthSession>) -> AuthStateResponse
 fn emit_auth_state_changed(app: &AppHandle, state: &AuthStateResponse) {
     if let Err(e) = app.emit("auth:state-changed", state) {
         log::warn!("Failed to emit auth:state-changed event: {}", e);
+    }
+}
+
+/// OAuth configuration returned to the frontend.
+/// Single source of truth — the frontend MUST NOT duplicate these values.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthConfig {
+    pub client_id: String,
+    pub redirect_uri: String,
+}
+
+#[tauri::command]
+pub fn get_oauth_config() -> OAuthConfig {
+    OAuthConfig {
+        client_id: crate::auth::CLIENT_ID.to_string(),
+        redirect_uri: crate::auth::redirect_uri().to_string(),
     }
 }
 
@@ -276,6 +294,11 @@ pub async fn initiate_oauth_login(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
     *stored = Some(pkce.clone());
     drop(stored);
+
+    // Store state + code_verifier in AuthCallbackManager for CSRF validation
+    // (used by both deep link handler and dev server)
+    let manager: tauri::State<'_, Arc<AuthCallbackManager>> = app.state();
+    manager.set_pending_state(pkce.state.clone(), pkce.code_verifier.clone());
 
     // Build authorization URL
     let auth_url = build_authorize_url(&pkce);

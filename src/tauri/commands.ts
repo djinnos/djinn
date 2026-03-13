@@ -8,7 +8,19 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export const CLERK_DOMAIN = "clerk.djinnai.io";
-export const CLIENT_ID = "djinnos-desktop";
+
+export interface OAuthConfig {
+  clientId: string;
+  redirectUri: string;
+}
+
+/**
+ * Get OAuth configuration from the Rust backend.
+ * Single source of truth — never hardcode CLIENT_ID or REDIRECT_URI in TS.
+ */
+export async function getOAuthConfig(): Promise<OAuthConfig> {
+  return invoke<OAuthConfig>("get_oauth_config");
+}
 
 export interface AuthUser {
   sub: string;

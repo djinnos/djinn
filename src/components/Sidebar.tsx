@@ -1,4 +1,5 @@
 import { useSidebarStore } from '@/stores/sidebarStore';
+import { useAuthStore } from '@/stores/authStore';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import {
@@ -12,6 +13,7 @@ import {
   FolderOpen,
   Plus,
   MessageSquare,
+  LogOut,
 } from 'lucide-react';
 import { KanbanIcon } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
@@ -284,6 +286,57 @@ function ProjectRow({
   );
 }
 
+function UserFooter({ isCollapsed }: { isCollapsed: boolean }) {
+  const { user, logout } = useAuthStore();
+
+  if (!user) return null;
+
+  if (isCollapsed) {
+    return (
+      <button
+        type="button"
+        onClick={() => void logout()}
+        className="flex w-full items-center justify-center rounded-md py-2 transition-colors hover:bg-white/[0.04]"
+        title={`${user.name || user.email || 'User'} — Sign out`}
+      >
+        {user.picture ? (
+          <img src={user.picture} alt="" className="h-6 w-6 rounded-full" />
+        ) : (
+          <div className="flex h-6 w-6 items-center justify-center rounded-full bg-muted text-[10px] font-medium">
+            {(user.name?.[0] || user.email?.[0] || '?').toUpperCase()}
+          </div>
+        )}
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2.5 rounded-md px-2 py-2">
+      {user.picture ? (
+        <img src={user.picture} alt="" className="h-7 w-7 shrink-0 rounded-full" />
+      ) : (
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium">
+          {(user.name?.[0] || user.email?.[0] || '?').toUpperCase()}
+        </div>
+      )}
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium text-sidebar-foreground">{user.name || 'User'}</p>
+        {user.email && (
+          <p className="truncate text-[11px] text-muted-foreground">{user.email}</p>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={() => void logout()}
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+        title="Sign out"
+      >
+        <LogOut className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
 export function Sidebar() {
   const { isCollapsed, activeSection, projectsExpanded, toggleCollapse, setActiveSection, setProjectsExpanded } = useSidebarStore();
   const navigate = useNavigate();
@@ -455,8 +508,8 @@ export function Sidebar() {
         </div>
       </nav>
 
-      {/* Settings at bottom */}
-      <div className="border-t p-2">
+      {/* Footer */}
+      <div className="border-t p-3 space-y-2">
         <NavItem
           icon={<Settings className="h-4 w-4" />}
           label="Settings"
@@ -465,6 +518,16 @@ export function Sidebar() {
           isCollapsed={isCollapsed}
           onClick={() => navigate('/settings')}
         />
+        {!isCollapsed && (
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm transition-colors text-muted-foreground hover:bg-white/[0.04] hover:text-foreground"
+          >
+            <Plus className="h-4 w-4" />
+            <span>New Project</span>
+          </button>
+        )}
+        <UserFooter isCollapsed={isCollapsed} />
       </div>
     </aside>
   );

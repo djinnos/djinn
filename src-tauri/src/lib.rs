@@ -167,6 +167,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_oauth_config,
             commands::greet,
             commands::get_server_port,
             commands::get_server_status,

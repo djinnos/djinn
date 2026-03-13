@@ -4,6 +4,18 @@ import { getServerPort } from "@/tauri/commands";
 import type { Epic, Task } from "@/api/types";
 import { projectStore } from "@/stores/projectStore";
 
+/**
+ * Notify the server of the authenticated user's identity.
+ * Called after every successful Clerk auth (login, silent refresh, token rotation).
+ */
+export async function setUserIdentity(email: string, userId: string): Promise<void> {
+  try {
+    await callMcpTool("set_user_identity", { email, user_id: userId });
+  } catch (e) {
+    console.warn("Failed to set user identity on server:", e);
+  }
+}
+
 async function getBaseUrl(): Promise<string> {
   const port = await getServerPort();
   return `http://127.0.0.1:${port}`;

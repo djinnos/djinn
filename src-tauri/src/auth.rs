@@ -17,8 +17,18 @@ pub struct PkceParams {
 /// Clerk OAuth configuration
 pub const CLERK_DOMAIN: &str = "clerk.djinnai.io";
 pub const OAUTH_AUTHORIZE_PATH: &str = "/oauth/authorize";
-pub const CLIENT_ID: &str = "djinnos-desktop";
-pub const REDIRECT_URI: &str = "djinn://auth/callback";
+pub const CLIENT_ID: &str = "rXf6AlZNrHOcJ2HV";
+pub const REDIRECT_URI_PROD: &str = "djinn://auth/callback";
+pub const REDIRECT_URI_DEV: &str = "http://localhost:19876/auth/callback";
+
+/// Return the correct redirect URI based on build mode
+pub fn redirect_uri() -> &'static str {
+    if cfg!(debug_assertions) {
+        REDIRECT_URI_DEV
+    } else {
+        REDIRECT_URI_PROD
+    }
+}
 const KEYRING_SERVICE: &str = "djinnos-desktop";
 const KEYRING_USERNAME: &str = "refresh_token";
 
@@ -64,10 +74,11 @@ fn generate_state() -> String {
 pub fn build_authorize_url(pkce: &PkceParams) -> String {
     use url::form_urlencoded;
 
+    let redirect = redirect_uri();
     let scope = "openid profile email offline_access";
     let encoded_scope = form_urlencoded::byte_serialize(scope.as_bytes()).collect::<String>();
     let encoded_redirect =
-        form_urlencoded::byte_serialize(REDIRECT_URI.as_bytes()).collect::<String>();
+        form_urlencoded::byte_serialize(redirect.as_bytes()).collect::<String>();
 
     format!(
         "https://{}{}?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&code_challenge={}&code_challenge_method=S256&prompt=login",
@@ -252,7 +263,7 @@ mod tests {
 
         // The redirect_uri should be URL-encoded in the query string
         let encoded_redirect =
-            url::form_urlencoded::byte_serialize(REDIRECT_URI.as_bytes()).collect::<String>();
+            url::form_urlencoded::byte_serialize(redirect_uri().as_bytes()).collect::<String>();
         assert!(
             url.contains(&format!("redirect_uri={}", encoded_redirect)),
             "URL should contain the correct encoded redirect_uri"
@@ -260,12 +271,22 @@ mod tests {
     }
 
     #[test]
-    fn test_redirect_uri_starts_with_scheme_from_tauri_conf() {
-        // From tauri.conf.json, the scheme is "djinn"
-        // REDIRECT_URI should start with djinn://
+    fn test_prod_redirect_uri_uses_deep_link_scheme() {
         assert!(
-            REDIRECT_URI.starts_with("djinn://"),
-            "REDIRECT_URI should start with djinn:// scheme from tauri.conf.json"
+            REDIRECT_URI_PROD.starts_with("djinn://"),
+            "Production REDIRECT_URI should start with djinn:// scheme from tauri.conf.json"
+        );
+    }
+
+    #[test]
+    fn test_dev_redirect_uri_uses_localhost() {
+        assert!(
+            REDIRECT_URI_DEV.starts_with("http://localhost:"),
+            "Dev REDIRECT_URI should use localhost"
+        );
+        assert!(
+            REDIRECT_URI_DEV.contains("19876"),
+            "Dev REDIRECT_URI should use port 19876"
         );
     }
 }
