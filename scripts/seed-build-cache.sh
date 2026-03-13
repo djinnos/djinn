@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-MAIN_TREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
+MAIN_TREE=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
 MAIN_TARGET="${MAIN_TREE}/target"
 LOCAL_TARGET="$(pwd)/target"
 
