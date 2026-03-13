@@ -14,6 +14,7 @@ CREATE TABLE epics (
     status      TEXT NOT NULL DEFAULT 'open'
                      CHECK(status IN ('open', 'closed')),
     owner       TEXT NOT NULL DEFAULT '',
+    memory_refs TEXT NOT NULL DEFAULT '[]',
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     closed_at   TEXT
