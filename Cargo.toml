@@ -39,7 +39,7 @@ notify = { version = "8", default-features = false, features = ["macos_kqueue"] 
 notify-debouncer-mini = "0.6"
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", features = ["http-proto", "reqwest-client", "reqwest-rustls"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "reqwest-client", "reqwest-rustls", "trace", "internal-logs"] }
 opentelemetry-semantic-conventions = "0.31"
 
 [target.'cfg(target_os = "linux")'.dependencies]
