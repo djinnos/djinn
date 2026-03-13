@@ -308,10 +308,10 @@ mod tests {
         assert!(text.contains("provider credential resolution failed"));
     }
 
-    #[test]
-    fn all_tool_schemas_includes_cross_domain_tools() {
-        let app = test_helpers::create_test_app();
-        let mcp = crate::mcp::server::DjinnMcpServer::new(app.state().clone());
+    #[tokio::test]
+    async fn all_tool_schemas_includes_cross_domain_tools() {
+        let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+        let mcp = crate::mcp::server::DjinnMcpServer::new(state);
         let tools = mcp.all_tool_schemas();
         assert!(!tools.is_empty(), "all_tool_schemas should not be empty");
 
@@ -334,10 +334,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn chat_uses_router_derived_tool_schemas() {
-        let app = test_helpers::create_test_app();
-        let mcp = crate::mcp::server::DjinnMcpServer::new(app.state().clone());
+    #[tokio::test]
+    async fn chat_uses_router_derived_tool_schemas() {
+        let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+        let mcp = crate::mcp::server::DjinnMcpServer::new(state);
 
         let names = mcp
             .all_tool_schemas()

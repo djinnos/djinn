@@ -1,9 +1,9 @@
-pub mod compaction;
+pub(crate) mod compaction;
 pub mod config;
-pub mod extension;
+pub(crate) mod extension;
 pub mod message;
 pub mod oauth;
-pub mod output_parser;
+pub(crate) mod output_parser;
 pub mod prompts;
 pub mod provider;
 pub mod sandbox;
