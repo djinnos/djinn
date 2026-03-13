@@ -34,3 +34,5 @@ export { initSSEEventHandlers, cleanupSSEEventHandlers } from "./sseEventHandler
 
 // Base hook
 export { useStoreWithSelector } from "./useStoreWithSelector";
+
+export { projectSessionStore, type ProjectSession, type ProjectSessionState } from "./projectSessionStore";
