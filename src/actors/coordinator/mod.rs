@@ -896,7 +896,7 @@ mod tests {
 
     async fn make_epic(db: &Database, tx: broadcast::Sender<DjinnEvent>) -> crate::models::Epic {
         EpicRepository::new(db.clone(), tx)
-            .create("Epic", "", "", "", "")
+            .create("Epic", "", "", "", "", None)
             .await
             .unwrap()
     }

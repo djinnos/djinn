@@ -72,6 +72,7 @@ pub async fn create_test_epic(db: &Database, project_id: &str) -> Epic {
         "🧪",
         "blue",
         "test-owner",
+        None,
     )
     .await
     .expect("failed to create test epic")
