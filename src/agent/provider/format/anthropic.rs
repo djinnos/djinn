@@ -1,14 +1,12 @@
 use async_stream::stream;
 use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::pin::Pin;
 
 use crate::agent::message::{ContentBlock, Conversation};
-use crate::agent::provider::{
-    LlmProvider, ProviderConfig, StreamEvent, TokenUsage,
-};
 use crate::agent::provider::client::ApiClient;
+use crate::agent::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
 
 pub struct AnthropicProvider {
     config: ProviderConfig,
@@ -26,11 +24,7 @@ impl AnthropicProvider {
     fn build_request(&self, conversation: &Conversation, tools: &[Value]) -> Value {
         let (system, messages) = conversation.to_anthropic_messages();
 
-        let max_tokens = self
-            .config
-            .capabilities
-            .max_tokens_default
-            .unwrap_or(8192);
+        let max_tokens = self.config.capabilities.max_tokens_default.unwrap_or(8192);
 
         let mut body = json!({
             "model": self.config.model_id,
@@ -146,9 +140,8 @@ pub(crate) fn parse_anthropic_event(
                     }
                     "input_json_delta" => {
                         if let Some(acc) = tool_acc.as_mut()
-                            && let Some(frag) = v
-                                .pointer("/delta/partial_json")
-                                .and_then(|x| x.as_str())
+                            && let Some(frag) =
+                                v.pointer("/delta/partial_json").and_then(|x| x.as_str())
                         {
                             acc.input_json.push_str(frag);
                         }
@@ -161,8 +154,8 @@ pub(crate) fn parse_anthropic_event(
         "content_block_stop" => {
             // If we were accumulating a tool use, emit it now
             if let Some(acc) = tool_acc.take() {
-                let input =
-                    serde_json::from_str(&acc.input_json).unwrap_or(Value::Object(Default::default()));
+                let input = serde_json::from_str(&acc.input_json)
+                    .unwrap_or(Value::Object(Default::default()));
                 events.push(StreamEvent::Delta(ContentBlock::ToolUse {
                     id: acc.id,
                     name: acc.name,
@@ -174,9 +167,7 @@ pub(crate) fn parse_anthropic_event(
         "message_delta" => {
             // {"type":"message_delta","usage":{"output_tokens":N}}
             if let Ok(v) = serde_json::from_str::<Value>(data)
-                && let Some(n) = v
-                    .pointer("/usage/output_tokens")
-                    .and_then(|x| x.as_u64())
+                && let Some(n) = v.pointer("/usage/output_tokens").and_then(|x| x.as_u64())
             {
                 events.push(StreamEvent::Usage(TokenUsage {
                     input: *input_tokens,
@@ -211,7 +202,7 @@ impl LlmProvider for AnthropicProvider {
                         Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
                     >,
                 > + Send
-            + 'a,
+                + 'a,
         >,
     > {
         let body = self.build_request(conversation, tools);
@@ -277,7 +268,8 @@ mod tests {
         let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
         let mut acc = None;
         let mut input_tokens = 0u32;
-        let events = parse_anthropic_event("content_block_delta", data, &mut acc, &mut input_tokens);
+        let events =
+            parse_anthropic_event("content_block_delta", data, &mut acc, &mut input_tokens);
         assert_eq!(events.len(), 1);
         match &events[0] {
             StreamEvent::Delta(ContentBlock::Text { text }) => assert_eq!(text, "Hello"),

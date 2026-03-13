@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+
 use std::process::Stdio;
 
 use tokio::process::Command;
@@ -301,10 +302,7 @@ async fn call_task_show(
                         })
                     })
                     .collect();
-                map.insert(
-                    "activity".to_string(),
-                    serde_json::json!(activity_json),
-                );
+                map.insert("activity".to_string(), serde_json::json!(activity_json));
             }
             Ok(value)
         }
@@ -353,11 +351,8 @@ async fn call_task_activity_list(
                         && s.len() > MAX_PAYLOAD_CHARS
                     {
                         let end = floor_char_boundary(s, MAX_PAYLOAD_CHARS);
-                        let truncated = format!(
-                            "{}… [truncated, {} total chars]",
-                            &s[..end],
-                            s.len()
-                        );
+                        let truncated =
+                            format!("{}… [truncated, {} total chars]", &s[..end], s.len());
                         *value = serde_json::json!(truncated);
                     }
                 }
@@ -706,7 +701,6 @@ async fn call_write(
     // Ensure path is within worktree
     ensure_path_within_worktree(&path, worktree_path)?;
 
-
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -732,7 +726,6 @@ async fn call_edit(
 
     // Ensure path is within worktree
     ensure_path_within_worktree(&path, worktree_path)?;
-
 
     let content = tokio::fs::read_to_string(&path)
         .await
@@ -782,15 +775,19 @@ fn resolve_path(raw: &str, base: &std::path::Path) -> PathBuf {
     out
 }
 
-
 fn is_tool_allowed_for_agent(agent_type: AgentType, name: &str) -> bool {
     match name {
         "task_show" | "task_list" | "task_activity_list" | "task_comment_add" | "memory_read"
         | "memory_search" | "shell" | "task_create" => true,
         "write" | "edit" => matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver),
         "task_update_ac" => matches!(agent_type, AgentType::TaskReviewer),
-        "task_update" | "task_transition" | "task_delete_branch" | "task_archive_activity"
-        | "task_reset_counters" | "task_kill_session" | "task_blocked_list" => {
+        "task_update"
+        | "task_transition"
+        | "task_delete_branch"
+        | "task_archive_activity"
+        | "task_reset_counters"
+        | "task_kill_session"
+        | "task_blocked_list" => {
             matches!(agent_type, AgentType::PM | AgentType::Groomer)
         }
         _ => false,
@@ -831,12 +828,8 @@ where
 /// If an incoming object has a `criterion` field it is used as-is.  Otherwise
 /// the `criterion` text is copied from the existing array at the same index so
 /// that reviewer payloads like `[{"met": true}]` don't erase the text.
-fn merge_acceptance_criteria(
-    existing_json: &str,
-    incoming: &[serde_json::Value],
-) -> String {
-    let existing: Vec<serde_json::Value> =
-        serde_json::from_str(existing_json).unwrap_or_default();
+fn merge_acceptance_criteria(existing_json: &str, incoming: &[serde_json::Value]) -> String {
+    let existing: Vec<serde_json::Value> = serde_json::from_str(existing_json).unwrap_or_default();
 
     let merged: Vec<serde_json::Value> = incoming
         .iter()
@@ -948,12 +941,11 @@ struct TaskResetCountersParams {
     id: String,
 }
 
-
 async fn call_task_transition(
     state: &AppState,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    use crate::actors::slot::task_review::{merge_and_transition, PM_MERGE_ACTIONS};
+    use crate::db::repositories::task::transitions::{PM_MERGE_ACTIONS, merge_and_transition};
     use crate::models::{TaskStatus, TransitionAction};
     let p: TaskTransitionParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db().clone(), state.events().clone());
@@ -965,7 +957,9 @@ async fn call_task_transition(
     // PM approve: squash merge (verification gate runs inside merge_and_transition).
     if action == TransitionAction::PmApprove {
         if task.status != TaskStatus::InPmIntervention.as_str() {
-            return Ok(serde_json::json!({ "error": "pm_approve is only valid from in_pm_intervention" }));
+            return Ok(
+                serde_json::json!({ "error": "pm_approve is only valid from in_pm_intervention" }),
+            );
         }
 
         let (merge_action, reason) = merge_and_transition(&task.id, state, &PM_MERGE_ACTIONS)
@@ -975,7 +969,14 @@ async fn call_task_transition(
                 Some("merge_and_transition returned None".to_string()),
             ));
         let updated = repo
-            .transition(&task.id, merge_action, "pm-agent", "pm", reason.as_deref(), None)
+            .transition(
+                &task.id,
+                merge_action,
+                "pm-agent",
+                "pm",
+                reason.as_deref(),
+                None,
+            )
             .await
             .map_err(|e| e.to_string())?;
         return Ok(task_to_value(&updated));
@@ -1000,13 +1001,21 @@ async fn call_task_transition(
         }
     }
 
-    let target = p.target_status
+    let target = p
+        .target_status
         .as_deref()
         .map(TaskStatus::parse)
         .transpose()
         .map_err(|e| e.to_string())?;
     let updated = repo
-        .transition(&task.id, action, "pm-agent", "pm", p.reason.as_deref(), target)
+        .transition(
+            &task.id,
+            action,
+            "pm-agent",
+            "pm",
+            p.reason.as_deref(),
+            target,
+        )
         .await
         .map_err(|e| e.to_string())?;
     Ok(task_to_value(&updated))
@@ -1023,11 +1032,18 @@ async fn call_task_delete_branch(
     };
 
     // Interrupt and clean up any paused worker session (handles worktree cleanup too).
-    crate::actors::slot::interrupt_paused_worker_session(&task.id, state).await;
-    crate::actors::slot::cleanup_paused_worker_session(&task.id, state).await;
+    crate::db::repositories::task::transitions::interrupt_paused_worker_session(&task.id, state)
+        .await;
+    crate::db::repositories::task::transitions::cleanup_paused_worker_session(&task.id, state)
+        .await;
 
     // Delete the task branch from git.
-    let project_dir = match crate::actors::slot::project_path_for_id(&task.project_id, state).await {
+    let project_dir = match crate::db::repositories::task::transitions::resolve_project_path_for_id(
+        &task.project_id,
+        state,
+    )
+    .await
+    {
         Some(p) => std::path::PathBuf::from(p),
         None => return Ok(serde_json::json!({ "error": "project not found" })),
     };
@@ -1060,7 +1076,10 @@ async fn call_task_archive_activity(
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
-    let count = repo.archive_activity_for_task(&task.id).await.map_err(|e| e.to_string())?;
+    let count = repo
+        .archive_activity_for_task(&task.id)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "ok": true, "task_id": task.short_id, "archived_count": count }))
 }
 
@@ -1080,12 +1099,18 @@ async fn call_task_reset_counters(
     .execute(state.db().pool())
     .await
     .map_err(|e| e.to_string())?;
-    let updated = repo.get(&task.id).await.map_err(|e| e.to_string())?.unwrap_or(task.clone());
+    let updated = repo
+        .get(&task.id)
+        .await
+        .map_err(|e| e.to_string())?
+        .unwrap_or(task.clone());
     let _ = state.events().send(crate::events::DjinnEvent::TaskUpdated {
         task: updated.clone(),
         from_sync: false,
     });
-    Ok(serde_json::json!({ "ok": true, "task_id": task.short_id, "reopen_count": 0, "continuation_count": 0 }))
+    Ok(
+        serde_json::json!({ "ok": true, "task_id": task.short_id, "reopen_count": 0, "continuation_count": 0 }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -1105,8 +1130,10 @@ async fn call_task_kill_session(
 
     // Interrupt the paused session and delete saved conversation.
     // This forces a fresh session on next dispatch without deleting the branch.
-    crate::actors::slot::interrupt_paused_worker_session(&task.id, state).await;
-    crate::actors::slot::cleanup_paused_worker_session(&task.id, state).await;
+    crate::db::repositories::task::transitions::interrupt_paused_worker_session(&task.id, state)
+        .await;
+    crate::db::repositories::task::transitions::cleanup_paused_worker_session(&task.id, state)
+        .await;
 
     Ok(serde_json::json!({
         "ok": true,
@@ -1145,7 +1172,10 @@ async fn call_task_blocked_list(
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
-    let blocked = repo.list_blocked_by(&task.id).await.map_err(|e| e.to_string())?;
+    let blocked = repo
+        .list_blocked_by(&task.id)
+        .await
+        .map_err(|e| e.to_string())?;
     let tasks: Vec<serde_json::Value> = blocked
         .iter()
         .map(|b| {
@@ -1273,7 +1303,8 @@ fn tool_memory_search() -> RmcpTool {
 fn tool_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
-        "Execute shell commands in the task worktree. Commands always run from the worktree root.".to_string(),
+        "Execute shell commands in the task worktree. Commands always run from the worktree root."
+            .to_string(),
         object!({
             "type": "object",
             "required": ["command"],
@@ -1488,7 +1519,6 @@ where
     serde_json::from_value(value)
 }
 
-
 /// Returns the JSON tool schemas for the given agent type, suitable for
 /// passing directly to the `LlmProvider::stream` call in the Djinn-native
 /// reply loop.
@@ -1496,8 +1526,7 @@ pub(crate) fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
     let mut tool_values = vec![
         serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
         serde_json::to_value(tool_task_list()).expect("serialize tool_task_list"),
-        serde_json::to_value(tool_task_activity_list())
-            .expect("serialize tool_task_activity_list"),
+        serde_json::to_value(tool_task_activity_list()).expect("serialize tool_task_activity_list"),
         serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
         serde_json::to_value(tool_memory_read()).expect("serialize tool_memory_read"),
         serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
@@ -1628,7 +1657,10 @@ mod tests {
 
     #[test]
     fn worker_cannot_use_pm_only_tool() {
-        assert!(!is_tool_allowed_for_agent(AgentType::Worker, "task_transition"));
+        assert!(!is_tool_allowed_for_agent(
+            AgentType::Worker,
+            "task_transition"
+        ));
         assert!(is_tool_allowed_for_agent(AgentType::PM, "task_transition"));
     }
 
@@ -1640,6 +1672,4 @@ mod tests {
         assert_eq!(resolve_timeout(None), 120_000);
         assert_eq!(resolve_timeout(Some(0)), 1000);
     }
-
 }
-

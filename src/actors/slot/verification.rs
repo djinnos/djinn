@@ -21,11 +21,7 @@ const VERIFICATION_ESCALATION_THRESHOLD: i64 = 3;
 /// 5. On fail: logs the failure as an activity comment, transitions to `open` (VerificationFail)
 /// 6. Cleans up the worktree
 /// 7. Triggers redispatch for the project
-pub(crate) fn spawn_verification(
-    task_id: String,
-    project_path: String,
-    app_state: AppState,
-) {
+pub(crate) fn spawn_verification(task_id: String, project_path: String, app_state: AppState) {
     app_state.register_verification(&task_id);
     tokio::spawn(async move {
         if let Err(e) = run_verification_pipeline(&task_id, &project_path, &app_state).await {
@@ -135,6 +131,10 @@ async fn run_verification_pipeline(
 ///
 /// Returns `Ok(())` when all commands pass (or none are configured), and
 /// `Err(feedback)` with a human-readable failure description otherwise.
+#[expect(
+    dead_code,
+    reason = "verification gate now implemented in shared task transitions module"
+)]
 pub(crate) async fn run_verification_gate(
     task_id: &str,
     project_path: &str,
@@ -162,17 +162,13 @@ pub(crate) async fn run_verification_gate(
         .map_err(|e| format!("failed to create verification worktree: {e}"))?;
 
     // Run setup commands.
-    if let Some(feedback) =
-        run_setup_commands_checked(task_id, &worktree_path, app_state).await
-    {
+    if let Some(feedback) = run_setup_commands_checked(task_id, &worktree_path, app_state).await {
         cleanup_worktree(task_id, &worktree_path, app_state).await;
         return Err(feedback);
     }
 
     // Run verification commands.
-    if let Some(feedback) =
-        run_verification_commands(task_id, &worktree_path, app_state).await
-    {
+    if let Some(feedback) = run_verification_commands(task_id, &worktree_path, app_state).await {
         cleanup_worktree(task_id, &worktree_path, app_state).await;
         return Err(feedback);
     }

@@ -468,12 +468,22 @@ mod tests {
         let created = to_envelope(DjinnEvent::SessionCreated(session.clone()));
         let created_data = created.data.expect("created data payload should exist");
         assert_eq!(created_data["project_id"], "project-123");
-        assert!(!created_data["project_id"].as_str().unwrap_or_default().is_empty());
+        assert!(
+            !created_data["project_id"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+        );
 
         let updated = to_envelope(DjinnEvent::SessionUpdated(session));
         let updated_data = updated.data.expect("updated data payload should exist");
         assert_eq!(updated_data["project_id"], "project-123");
-        assert!(!updated_data["project_id"].as_str().unwrap_or_default().is_empty());
+        assert!(
+            !updated_data["project_id"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

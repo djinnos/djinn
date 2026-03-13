@@ -296,7 +296,7 @@ impl TaskRepository {
                         );
                         return Err(Error::Database(sqlx::Error::Database(db_err)));
                     }
-                },
+                }
                 Err(e) => return Err(Error::Database(e)),
             }
         };
@@ -304,7 +304,10 @@ impl TaskRepository {
         tx.commit().await?;
 
         if changed && let Ok(Some(updated)) = self.get(&task.id).await {
-            let _ = self.events.send(DjinnEvent::TaskUpdated { task: updated, from_sync: true });
+            let _ = self.events.send(DjinnEvent::TaskUpdated {
+                task: updated,
+                from_sync: true,
+            });
         }
         Ok(changed)
     }
@@ -323,7 +326,6 @@ impl TaskRepository {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         task: &Task,
     ) -> Result<bool> {
-
         // Verify epic exists before INSERT when task references one.
         if let Some(epic_id) = &task.epic_id {
             let epic_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM epics WHERE id = ?1")
@@ -448,7 +450,7 @@ impl TaskRepository {
                         );
                         return Err(Error::Database(sqlx::Error::Database(db_err)));
                     }
-                },
+                }
                 Err(e) => return Err(Error::Database(e)),
             }
         }
@@ -460,7 +462,7 @@ impl TaskRepository {
     /// - Skips already-closed tasks (terminal state protection - SYNC-11)
     /// - Skips tasks whose IDs are in peer_task_ids
     /// - Closes remaining tasks with close_reason = 'peer_reconciled'
-    /// 
+    ///
     /// Returns the count of tasks that were reconciled (closed).
     pub async fn reconcile_peer_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -473,41 +475,49 @@ impl TaskRepository {
         }
 
         // Build placeholders for the NOT IN clause
-        let placeholders: String = peer_task_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        
+        let placeholders: String = peer_task_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+
         // Find tasks owned by peer that are not in their export and not already closed
         let sql_select = format!(
             "SELECT id FROM tasks WHERE owner = ? AND status != 'closed' AND id NOT IN ({})",
             placeholders
         );
-        
+
         let mut query = sqlx::query_scalar::<_, String>(&sql_select).bind(peer_user_id);
         for id in peer_task_ids {
             query = query.bind(id);
         }
-        
+
         let tasks_to_close: Vec<String> = query.fetch_all(&mut **tx).await?;
-        
+
         if tasks_to_close.is_empty() {
             return Ok(0);
         }
-        
+
         // Close the tasks with peer_reconciled reason
         let now = crate::sync::now_utc();
-        let placeholders: String = tasks_to_close.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        
+        let placeholders: String = tasks_to_close
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+
         let sql_update = format!(
             "UPDATE tasks SET status = 'closed', close_reason = 'peer_reconciled', closed_at = ? WHERE id IN ({})",
             placeholders
         );
-        
+
         let mut update_query = sqlx::query(&sql_update).bind(&now);
         for id in &tasks_to_close {
             update_query = update_query.bind(id);
         }
-        
+
         let result = update_query.execute(&mut **tx).await?;
-        
+
         Ok(result.rows_affected() as usize)
     }
 }

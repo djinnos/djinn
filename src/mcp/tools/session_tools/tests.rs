@@ -24,7 +24,10 @@ async fn session_list_returns_empty_for_task_without_sessions() {
     .await;
 
     assert_eq!(payload.get("error"), None);
-    assert_eq!(payload.get("task_id").and_then(|v| v.as_str()), Some(task.id.as_str()));
+    assert_eq!(
+        payload.get("task_id").and_then(|v| v.as_str()),
+        Some(task.id.as_str())
+    );
     let sessions = payload.get("sessions").and_then(|v| v.as_array()).unwrap();
     assert!(sessions.is_empty());
 }
@@ -60,12 +63,16 @@ async fn session_list_filters_by_project_and_task() {
     assert_eq!(payload.get("error"), None);
     let sessions = payload.get("sessions").and_then(|v| v.as_array()).unwrap();
     assert_eq!(sessions.len(), 2);
-    assert!(sessions
-        .iter()
-        .all(|s| s.get("task_id").and_then(|v| v.as_str()) == Some(task_a1.id.as_str())));
-    assert!(sessions
-        .iter()
-        .all(|s| s.get("project_id").and_then(|v| v.as_str()) == Some(project_a.id.as_str())));
+    assert!(
+        sessions
+            .iter()
+            .all(|s| s.get("task_id").and_then(|v| v.as_str()) == Some(task_a1.id.as_str()))
+    );
+    assert!(
+        sessions
+            .iter()
+            .all(|s| s.get("project_id").and_then(|v| v.as_str()) == Some(project_a.id.as_str()))
+    );
 }
 
 #[tokio::test]
@@ -208,8 +215,14 @@ async fn task_timeline_returns_chronological_session_and_message_history() {
     let messages = payload.get("messages").and_then(|v| v.as_array()).unwrap();
     assert_eq!(sessions.len(), 2);
     assert_eq!(messages.len(), 2);
-    let ts0 = messages[0].get("timestamp").and_then(|v| v.as_str()).unwrap();
-    let ts1 = messages[1].get("timestamp").and_then(|v| v.as_str()).unwrap();
+    let ts0 = messages[0]
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .unwrap();
+    let ts1 = messages[1]
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .unwrap();
     assert!(ts0 <= ts1);
 }
 
@@ -232,7 +245,6 @@ async fn task_timeline_not_found_returns_error_shape() {
     assert!(payload.get("sessions").is_none());
     assert!(payload.get("messages").is_none());
 }
-
 
 #[tokio::test]
 async fn session_messages_returns_messages_for_valid_session_id() {
@@ -267,5 +279,8 @@ async fn session_messages_returns_messages_for_valid_session_id() {
     assert_eq!(payload.get("error"), None);
     let messages = payload.get("messages").and_then(|v| v.as_array()).unwrap();
     assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].get("role").and_then(|v| v.as_str()), Some("user"));
+    assert_eq!(
+        messages[0].get("role").and_then(|v| v.as_str()),
+        Some("user")
+    );
 }

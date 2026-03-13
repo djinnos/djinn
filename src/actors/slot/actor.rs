@@ -7,7 +7,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::server::AppState;
 
-use super::{ProjectLifecycleParams, SlotCommand, SlotError, SlotEvent, run_project_lifecycle, run_task_lifecycle};
+use super::{
+    ProjectLifecycleParams, SlotCommand, SlotError, SlotEvent, run_project_lifecycle,
+    run_task_lifecycle,
+};
 
 type LifecycleFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'static>>;
 type LifecycleRunner = Arc<
@@ -208,8 +211,8 @@ impl SlotHandle {
         app_state: AppState,
         cancel: CancellationToken,
     ) -> Self {
-        let runner: LifecycleRunner = Arc::new(
-            |task_id, project_path, model_id, app_state, kill, pause| {
+        let runner: LifecycleRunner =
+            Arc::new(|task_id, project_path, model_id, app_state, kill, pause| {
                 Box::pin(async move {
                     let (sink, _rx) = mpsc::channel::<SlotEvent>(1);
                     run_task_lifecycle(
@@ -223,8 +226,7 @@ impl SlotHandle {
                     )
                     .await
                 })
-            },
-        );
+            });
         Self::spawn_with_runner(id, model_id, event_tx, app_state, cancel, runner)
     }
 

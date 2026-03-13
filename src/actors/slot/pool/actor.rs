@@ -10,7 +10,7 @@ use crate::db::TaskRepository;
 use crate::server::AppState;
 
 use super::super::{ModelSlotConfig, SlotEvent, SlotHandle, SlotPoolConfig, SlotState};
-use super::types::{now_unix_string, PoolError, PoolMessage, SlotFactory};
+use super::types::{PoolError, PoolMessage, SlotFactory, now_unix_string};
 
 pub(super) struct SlotPool {
     pub(super) receiver: mpsc::Receiver<PoolMessage>,
@@ -39,18 +39,10 @@ impl SlotPool {
         cancel: CancellationToken,
         config: SlotPoolConfig,
     ) -> Self {
-        let slot_factory: SlotFactory = Arc::new(
-            |id, model_id, event_tx, app_state, cancel| {
-                SlotHandle::spawn(id, model_id, event_tx, app_state, cancel)
-            },
-        );
-        Self::new_with_factory(
-            receiver,
-            app_state,
-            cancel,
-            config,
-            slot_factory,
-        )
+        let slot_factory: SlotFactory = Arc::new(|id, model_id, event_tx, app_state, cancel| {
+            SlotHandle::spawn(id, model_id, event_tx, app_state, cancel)
+        });
+        Self::new_with_factory(receiver, app_state, cancel, config, slot_factory)
     }
 
     pub(super) fn new_with_factory(
@@ -374,13 +366,14 @@ impl SlotPool {
                 continue;
             }
 
-            let status = per_model
-                .entry(model_id.clone())
-                .or_insert(super::types::ModelPoolStatus {
-                    active: 0,
-                    free: 0,
-                    total: 0,
-                });
+            let status =
+                per_model
+                    .entry(model_id.clone())
+                    .or_insert(super::types::ModelPoolStatus {
+                        active: 0,
+                        free: 0,
+                        total: 0,
+                    });
 
             status.total += 1;
             match self.slot_states.get(slot_id) {

@@ -30,13 +30,12 @@ impl TaskRepository {
                 "would create circular blocker dependency".into(),
             ));
         }
-        let result = sqlx::query(
-            "INSERT INTO blockers (task_id, blocking_task_id) VALUES (?1, ?2)",
-        )
-        .bind(task_id)
-        .bind(blocking_id)
-        .execute(&mut *tx)
-        .await;
+        let result =
+            sqlx::query("INSERT INTO blockers (task_id, blocking_task_id) VALUES (?1, ?2)")
+                .bind(task_id)
+                .bind(blocking_id)
+                .execute(&mut *tx)
+                .await;
         match result {
             Ok(_) => {}
             Err(sqlx::Error::Database(ref e))
@@ -151,7 +150,10 @@ impl TaskRepository {
         .await?;
 
         for t in unblocked {
-            let _ = self.events.send(DjinnEvent::TaskUpdated { task: t, from_sync: false });
+            let _ = self.events.send(DjinnEvent::TaskUpdated {
+                task: t,
+                from_sync: false,
+            });
         }
         Ok(())
     }

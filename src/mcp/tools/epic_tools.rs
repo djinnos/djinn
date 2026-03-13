@@ -3,9 +3,7 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::db::{
-    EpicCountQuery, EpicListQuery, EpicRepository, EpicTaskCounts,
-};
+use crate::db::{EpicCountQuery, EpicListQuery, EpicRepository, EpicTaskCounts};
 use crate::db::{ListQuery, TaskRepository};
 use crate::mcp::server::DjinnMcpServer;
 use crate::mcp::tools::validation::{
@@ -914,17 +912,16 @@ impl DjinnMcpServer {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use crate::db::repositories::epic::EpicRepository;
-    use tokio::sync::broadcast;
     use crate::test_helpers::{
-        create_test_app, create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
-        create_test_task, initialize_mcp_session, mcp_call_tool,
+        create_test_app, create_test_app_with_db, create_test_db, create_test_epic,
+        create_test_project, create_test_task, initialize_mcp_session, mcp_call_tool,
     };
+    use tokio::sync::broadcast;
 
     #[tokio::test]
     async fn epic_create_success_shape() {
@@ -948,7 +945,11 @@ mod tests {
         assert_eq!(result["title"], "New Epic");
 
         let repo = EpicRepository::new(db.clone(), broadcast::channel(16).0);
-        let created = repo.get(result["id"].as_str().unwrap()).await.unwrap().unwrap();
+        let created = repo
+            .get(result["id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(created.title, "New Epic");
         assert_eq!(created.status, "open");
     }
@@ -1005,10 +1006,12 @@ mod tests {
         )
         .await;
 
-        assert!(result["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("epic not found"));
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("epic not found")
+        );
     }
 
     #[tokio::test]
@@ -1020,7 +1023,13 @@ mod tests {
         let _e2 = create_test_epic(&db, &project.id).await;
         let session_id = initialize_mcp_session(&app).await;
 
-        let result = mcp_call_tool(&app, &session_id, "epic_list", json!({"project": project.path})).await;
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_list",
+            json!({"project": project.path}),
+        )
+        .await;
 
         assert!(result.get("error").is_none());
         assert!(result["epics"].as_array().is_some());
@@ -1081,7 +1090,11 @@ mod tests {
         )
         .await;
 
-        assert!(result.get("error").is_none(), "unexpected error: {:?}", result);
+        assert!(
+            result.get("error").is_none(),
+            "unexpected error: {:?}",
+            result
+        );
         assert_eq!(result["title"], "Updated Epic");
         assert_eq!(result["description"], "Updated description");
         assert_eq!(result["color"], "#800080");
@@ -1139,10 +1152,12 @@ mod tests {
         )
         .await;
 
-        assert!(result["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("already closed"));
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("already closed")
+        );
     }
 
     #[tokio::test]
@@ -1189,10 +1204,12 @@ mod tests {
         )
         .await;
 
-        assert!(result["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("must be closed"));
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("must be closed")
+        );
     }
 
     #[tokio::test]
@@ -1228,10 +1245,12 @@ mod tests {
             json!({"project": project.path, "epic_id": epic.id}),
         )
         .await;
-        assert!(tasks_result["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("epic not found"));
+        assert!(
+            tasks_result["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("epic not found")
+        );
     }
 
     #[tokio::test]
@@ -1253,7 +1272,13 @@ mod tests {
 
         assert!(result.get("error").is_none());
         assert_eq!(result["total_count"], 1);
-        assert_eq!(result["tasks"].as_array().map(|a| a.len()).unwrap_or_default(), 1);
+        assert_eq!(
+            result["tasks"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or_default(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1274,7 +1299,13 @@ mod tests {
 
         assert!(result.get("error").is_none());
         assert_eq!(result["total_count"], 0);
-        assert_eq!(result["tasks"].as_array().map(|a| a.len()).unwrap_or_default(), 0);
+        assert_eq!(
+            result["tasks"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or_default(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1286,7 +1317,13 @@ mod tests {
         let _e2 = create_test_epic(&db, &project.id).await;
         let session_id = initialize_mcp_session(&app).await;
 
-        let result = mcp_call_tool(&app, &session_id, "epic_count", json!({"project": project.path})).await;
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_count",
+            json!({"project": project.path}),
+        )
+        .await;
 
         assert!(result.get("error").is_none());
         assert!(result["total_count"].as_i64().unwrap_or_default() >= 2);

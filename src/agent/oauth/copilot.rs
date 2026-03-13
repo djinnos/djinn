@@ -8,7 +8,7 @@
 //! Tokens are stored encrypted in the credentials DB table. Filesystem cache
 //! (`~/.djinn/oauth/copilot.json`) is supported as a migration fallback only.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -175,10 +175,7 @@ fn build_client() -> Result<Client> {
         .user_agent("GithubCopilot/1.155.0")
         .default_headers({
             let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(
-                reqwest::header::ACCEPT,
-                "application/json".parse().unwrap(),
-            );
+            headers.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
             headers.insert(
                 reqwest::header::CONTENT_TYPE,
                 "application/json".parse().unwrap(),
@@ -285,7 +282,9 @@ pub async fn poll_copilot_flow(
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     continue;
                 }
-                "expired_token" => return Err(anyhow!("device code expired; please restart the flow")),
+                "expired_token" => {
+                    return Err(anyhow!("device code expired; please restart the flow"));
+                }
                 other => return Err(anyhow!("OAuth error from GitHub: {}", other)),
             }
         }
@@ -309,7 +308,10 @@ pub async fn poll_copilot_flow(
 // ─── Copilot token exchange ───────────────────────────────────────────────────
 
 /// Exchange a GitHub access token for a short-lived Copilot API token.
-pub async fn exchange_for_copilot_token(client: &Client, github_token: &str) -> Result<CopilotTokens> {
+pub async fn exchange_for_copilot_token(
+    client: &Client,
+    github_token: &str,
+) -> Result<CopilotTokens> {
     #[derive(Deserialize)]
     struct CopilotTokenResponse {
         token: String,

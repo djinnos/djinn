@@ -116,7 +116,8 @@ impl TaskRepository {
             "reason": if reason_str.is_empty() { None } else { Some(reason_str.as_str()) },
         });
         if let Some(ref ac) = ac_snapshot {
-            let ac_value: serde_json::Value = serde_json::from_str(ac).unwrap_or(serde_json::json!([]));
+            let ac_value: serde_json::Value =
+                serde_json::from_str(ac).unwrap_or(serde_json::json!([]));
             payload_obj["ac_snapshot"] = ac_value;
         }
         let payload = payload_obj.to_string();
@@ -141,7 +142,10 @@ impl TaskRepository {
             .await?;
         tx.commit().await?;
 
-        let _ = self.events.send(DjinnEvent::TaskUpdated { task: task.clone(), from_sync: false });
+        let _ = self.events.send(DjinnEvent::TaskUpdated {
+            task: task.clone(),
+            from_sync: false,
+        });
 
         // Blocker resolution: when a task reaches post-merge/closed states, notify any tasks
         // it was blocking that are now fully unblocked, so coordinators can dispatch them.
@@ -179,7 +183,10 @@ impl TaskRepository {
             .fetch_one(self.db.pool())
             .await?;
 
-        let _ = self.events.send(DjinnEvent::TaskUpdated { task: task.clone(), from_sync: false });
+        let _ = self.events.send(DjinnEvent::TaskUpdated {
+            task: task.clone(),
+            from_sync: false,
+        });
         Ok(task)
     }
 
@@ -209,7 +216,10 @@ impl TaskRepository {
             }
         }
 
-        let _ = self.events.send(DjinnEvent::TaskUpdated { task: task.clone(), from_sync: false });
+        let _ = self.events.send(DjinnEvent::TaskUpdated {
+            task: task.clone(),
+            from_sync: false,
+        });
         Ok(task)
     }
 }

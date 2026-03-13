@@ -5,8 +5,8 @@ use crate::db::CredentialRepository;
 use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
 use crate::db::TaskRepository;
-use crate::models::{SessionRecord, SessionStatus};
 use crate::models::Task;
+use crate::models::{SessionRecord, SessionStatus};
 use crate::server::AppState;
 
 use super::*;
@@ -95,7 +95,6 @@ pub(crate) fn runtime_env_diagnostics(
     )
 }
 
-
 // ─── Session record helpers ───────────────────────────────────────────────────
 
 pub(crate) async fn update_session_record(
@@ -168,10 +167,7 @@ pub(crate) async fn find_paused_session_record(
 /// Extract the `reason` field from the last `status_changed` activity entry
 /// that represents a review-to-open rejection (from_status = "in_task_review",
 /// to_status = "open"). Returns `None` if no such transition exists.
-async fn last_review_rejection_reason(
-    task_id: &str,
-    app_state: &AppState,
-) -> Option<String> {
+async fn last_review_rejection_reason(task_id: &str, app_state: &AppState) -> Option<String> {
     let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     let activity = repo.list_activity(task_id).await.ok()?;
     let last_status = activity
@@ -294,7 +290,9 @@ calls will be treated as a failure.\n\n";
         }
     }
 
-    format!("{RESUME_PREAMBLE}Your previous submission was rejected. Re-read the task acceptance criteria with `task_show`, identify what is unmet, make changes, then stop.")
+    format!(
+        "{RESUME_PREAMBLE}Your previous submission was rejected. Re-read the task acceptance criteria with `task_show`, identify what is unmet, make changes, then stop."
+    )
 }
 
 // ─── Retry helper for SQLite lock contention ─────────────────────────────────
@@ -338,8 +336,15 @@ pub(crate) async fn transition_start(
     if let Some(action) = agent_type.start_action(task.status.as_str()) {
         let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
         retry_on_locked(|| async {
-            repo.transition(&task.id, action.clone(), "agent-supervisor", "system", None, None)
-                .await
+            repo.transition(
+                &task.id,
+                action.clone(),
+                "agent-supervisor",
+                "system",
+                None,
+                None,
+            )
+            .await
         })
         .await
         .map_err(|e| anyhow::anyhow!("task transition failed for {}: {e}", task.id))?;
@@ -504,11 +509,8 @@ pub(crate) async fn load_provider_credential(
                     ));
                 }
                 // Copilot refresh requires the github_token → try exchange.
-                match crate::agent::oauth::copilot::refresh_copilot_token(
-                    &tokens,
-                    &credential_repo,
-                )
-                .await
+                match crate::agent::oauth::copilot::refresh_copilot_token(&tokens, &credential_repo)
+                    .await
                 {
                     Ok(refreshed) => {
                         return Ok(ProviderCredential::OAuthConfig(
@@ -574,4 +576,3 @@ pub(crate) fn build_telemetry_meta(
         session_id: Some(task_id.to_owned()),
     }
 }
-

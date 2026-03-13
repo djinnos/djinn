@@ -204,11 +204,7 @@ async fn parse_models(resp: reqwest::Response) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        Router,
-        extract::Request,
-        routing::get,
-    };
+    use axum::{Router, extract::Request, routing::get};
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Debug, Default)]
@@ -292,7 +288,11 @@ mod tests {
         })
         .await;
 
-        let headers = seen.lock().expect("seen lock").clone().expect("captured headers");
+        let headers = seen
+            .lock()
+            .expect("seen lock")
+            .clone()
+            .expect("captured headers");
         assert_eq!(headers.x_api_key.as_deref(), Some("anthropic-key"));
         assert_eq!(headers.anthropic_version.as_deref(), Some("2023-06-01"));
         assert!(headers.authorization.is_none());
@@ -334,7 +334,10 @@ mod tests {
 
         assert_eq!(
             result.models,
-            vec!["gpt-4o".to_string(), "anthropic/claude-opus-4-6".to_string()]
+            vec![
+                "gpt-4o".to_string(),
+                "anthropic/claude-opus-4-6".to_string()
+            ]
         );
     }
 

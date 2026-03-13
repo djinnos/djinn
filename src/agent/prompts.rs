@@ -68,7 +68,10 @@ pub struct TaskContext {
 pub fn render_project_prompt(agent_type: AgentType, project_path: &str) -> String {
     let template = match agent_type {
         AgentType::Groomer => GROOMER_TEMPLATE,
-        other => panic!("render_project_prompt called for task-scoped agent: {}", other.as_str()),
+        other => panic!(
+            "render_project_prompt called for task-scoped agent: {}",
+            other.as_str()
+        ),
     };
     template.replace("{{project_path}}", project_path)
 }

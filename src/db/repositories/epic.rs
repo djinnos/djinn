@@ -607,7 +607,6 @@ mod tests {
         }
     }
 
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reopen_emits_event() {
         let db = test_helpers::create_test_db();

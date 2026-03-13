@@ -46,7 +46,8 @@ impl CoordinatorActor {
                             project_id = %project.id,
                             "CoordinatorActor: project missing git remote 'origin' — blocking dispatch"
                         );
-                        let _ = self.self_sender
+                        let _ = self
+                            .self_sender
                             .send(CoordinatorMessage::SetProjectHealth {
                                 project_id: project.id.clone(),
                                 healthy: false,
@@ -65,7 +66,8 @@ impl CoordinatorActor {
                             error = %e,
                             "CoordinatorActor: failed to run git remote check"
                         );
-                        let _ = self.self_sender
+                        let _ = self
+                            .self_sender
                             .send(CoordinatorMessage::SetProjectHealth {
                                 project_id: project.id.clone(),
                                 healthy: false,

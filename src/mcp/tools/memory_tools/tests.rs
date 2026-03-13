@@ -5,11 +5,11 @@ use serde_json::json;
 use crate::db::repositories::note::NoteRepository;
 use crate::db::repositories::project::ProjectRepository;
 use crate::mcp::tools::memory_tools::types::*;
-use tokio::sync::broadcast;
 use crate::test_helpers::{
-    create_test_app, create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
-    initialize_mcp_session, mcp_call_tool,
+    create_test_app, create_test_app_with_db, create_test_db, create_test_epic,
+    create_test_project, initialize_mcp_session, mcp_call_tool,
 };
+use tokio::sync::broadcast;
 
 #[tokio::test]
 async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
@@ -36,7 +36,10 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     assert!(created.get("permalink").and_then(|v| v.as_str()).is_some());
 
     let project_repo = ProjectRepository::new(db.clone(), broadcast::channel(16).0);
-    let project = project_repo.resolve_or_create("/tmp/mcp-memory-write").await.unwrap();
+    let project = project_repo
+        .resolve_or_create("/tmp/mcp-memory-write")
+        .await
+        .unwrap();
     let note_repo = NoteRepository::new(db.clone(), broadcast::channel(16).0);
     let note = note_repo
         .get_by_permalink(&project, created["permalink"].as_str().unwrap())
@@ -308,18 +311,48 @@ async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
     let session_id = initialize_mcp_session(&app).await;
     let project = "/tmp/mcp-memory-list";
 
-    mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "A", "content": "x", "type": "adr"})).await;
-    mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "B", "content": "x", "type": "reference"})).await;
+    mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({"project": project, "title": "A", "content": "x", "type": "adr"}),
+    )
+    .await;
+    mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({"project": project, "title": "B", "content": "x", "type": "reference"}),
+    )
+    .await;
 
-    let all = mcp_call_tool(&app, &session_id, "memory_list", json!({"project": project})).await;
+    let all = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_list",
+        json!({"project": project}),
+    )
+    .await;
     assert!(all["notes"].as_array().unwrap().len() >= 2);
 
-    let folder = mcp_call_tool(&app, &session_id, "memory_list", json!({"project": project, "folder": "decisions"})).await;
+    let folder = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_list",
+        json!({"project": project, "folder": "decisions"}),
+    )
+    .await;
     for n in folder["notes"].as_array().unwrap() {
         assert_eq!(n["folder"], "decisions");
     }
 
-    let typed = mcp_call_tool(&app, &session_id, "memory_list", json!({"project": project, "type": "reference"})).await;
+    let typed = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_list",
+        json!({"project": project, "type": "reference"}),
+    )
+    .await;
     for n in typed["notes"].as_array().unwrap() {
         assert_eq!(n["note_type"], "reference");
     }
@@ -331,10 +364,22 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
     let session_id = initialize_mcp_session(&app).await;
     let project = "/tmp/mcp-memory-graph";
 
-    mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Node B", "content": "b", "type": "reference"})).await;
+    mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({"project": project, "title": "Node B", "content": "b", "type": "reference"}),
+    )
+    .await;
     mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Node A", "content": "links [[Node B]]", "type": "reference"})).await;
 
-    let graph = mcp_call_tool(&app, &session_id, "memory_graph", json!({"project": project})).await;
+    let graph = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_graph",
+        json!({"project": project}),
+    )
+    .await;
     let edges = graph["edges"].as_array().unwrap();
     assert!(!edges.is_empty());
 }
@@ -345,13 +390,43 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
     let session_id = initialize_mcp_session(&app).await;
     let project = "/tmp/mcp-memory-recent";
 
-    mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Older", "content": "o", "type": "reference"})).await;
-    mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Newer", "content": "n", "type": "reference"})).await;
+    mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({"project": project, "title": "Older", "content": "o", "type": "reference"}),
+    )
+    .await;
+    mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({"project": project, "title": "Newer", "content": "n", "type": "reference"}),
+    )
+    .await;
 
-    mcp_call_tool(&app, &session_id, "memory_read", json!({"project": project, "identifier": "Older"})).await;
-    mcp_call_tool(&app, &session_id, "memory_read", json!({"project": project, "identifier": "Newer"})).await;
+    mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_read",
+        json!({"project": project, "identifier": "Older"}),
+    )
+    .await;
+    mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_read",
+        json!({"project": project, "identifier": "Newer"}),
+    )
+    .await;
 
-    let recent = mcp_call_tool(&app, &session_id, "memory_recent", json!({"project": project, "timeframe": "7d", "limit": 2})).await;
+    let recent = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_recent",
+        json!({"project": project, "timeframe": "7d", "limit": 2}),
+    )
+    .await;
     let notes = recent["notes"].as_array().unwrap();
     assert_eq!(notes[0]["title"], "Newer");
 }
@@ -362,9 +437,26 @@ async fn mcp_memory_catalog_returns_structured_catalog() {
     let session_id = initialize_mcp_session(&app).await;
     let project = "/tmp/mcp-memory-catalog";
 
-    mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Catalog Item", "content": "c", "type": "reference"})).await;
-    let catalog = mcp_call_tool(&app, &session_id, "memory_catalog", json!({"project": project})).await;
-    assert!(catalog["catalog"].as_str().unwrap().contains("Catalog Item"));
+    mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({"project": project, "title": "Catalog Item", "content": "c", "type": "reference"}),
+    )
+    .await;
+    let catalog = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_catalog",
+        json!({"project": project}),
+    )
+    .await;
+    assert!(
+        catalog["catalog"]
+            .as_str()
+            .unwrap()
+            .contains("Catalog Item")
+    );
 }
 
 #[tokio::test]
@@ -375,14 +467,32 @@ async fn mcp_memory_health_orphans_and_broken_links_shapes() {
 
     mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "type": "reference"})).await;
 
-    let health = mcp_call_tool(&app, &session_id, "memory_health", json!({"project": project})).await;
+    let health = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_health",
+        json!({"project": project}),
+    )
+    .await;
     assert!(health.get("orphan_note_count").is_some());
     assert!(health.get("broken_link_count").is_some());
 
-    let orphans = mcp_call_tool(&app, &session_id, "memory_orphans", json!({"project": project})).await;
+    let orphans = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_orphans",
+        json!({"project": project}),
+    )
+    .await;
     assert!(orphans["orphans"].is_array());
 
-    let broken = mcp_call_tool(&app, &session_id, "memory_broken_links", json!({"project": project})).await;
+    let broken = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_broken_links",
+        json!({"project": project}),
+    )
+    .await;
     assert!(broken["broken_links"].is_array());
 }
 
@@ -474,8 +584,7 @@ fn list_params_deserialize() {
 
 #[test]
 fn list_params_deserialize_minimal() {
-    let params: ListParams =
-        serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
+    let params: ListParams = serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(params.project, "/tmp/p");
     assert!(params.folder.is_none());
     assert!(params.note_type.is_none());
@@ -503,8 +612,7 @@ fn recent_params_deserialize() {
 
 #[test]
 fn catalog_params_deserialize() {
-    let params: CatalogParams =
-        serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
+    let params: CatalogParams = serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(params.project, "/tmp/p");
 }
 
@@ -522,11 +630,9 @@ fn orphans_params_deserialize() {
 
 #[test]
 fn broken_links_params_deserialize() {
-    let params: BrokenLinksParams =
-        serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
+    let params: BrokenLinksParams = serde_json::from_value(json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(params.project, "/tmp/p");
 }
-
 
 #[tokio::test]
 async fn mcp_memory_history_and_diff_round_trip() {
@@ -584,7 +690,11 @@ async fn mcp_memory_history_and_diff_round_trip() {
         return;
     }
 
-    let latest_sha = entries.first().and_then(|e| e["sha"].as_str()).unwrap().to_string();
+    let latest_sha = entries
+        .first()
+        .and_then(|e| e["sha"].as_str())
+        .unwrap()
+        .to_string();
 
     let diff = mcp_call_tool(
         &app,
@@ -665,7 +775,11 @@ async fn mcp_memory_build_context_follows_wikilinks() {
     let primary = built["primary"].as_array().unwrap();
     let related = built["related"].as_array().unwrap();
     assert_eq!(primary[0]["permalink"], seed["permalink"]);
-    assert!(related.iter().any(|n| n["permalink"] == target["permalink"]));
+    assert!(
+        related
+            .iter()
+            .any(|n| n["permalink"] == target["permalink"])
+    );
 }
 
 #[tokio::test]
@@ -713,9 +827,11 @@ async fn mcp_memory_task_refs_returns_tasks_for_permalink() {
 
     assert!(refs.get("error").is_none() || refs["error"].is_null());
     let tasks = refs["tasks"].as_array().unwrap();
-    assert!(tasks.iter().any(|t| {
-        t["id"] == task["id"] && t["title"] == "Task referencing memory note"
-    }));
+    assert!(
+        tasks
+            .iter()
+            .any(|t| { t["id"] == task["id"] && t["title"] == "Task referencing memory note" })
+    );
 }
 
 #[test]

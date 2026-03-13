@@ -1,11 +1,11 @@
 use serde_json::json;
 
 use crate::db::repositories::task::TaskRepository;
-use tokio::sync::broadcast;
 use crate::test_helpers::{
     create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
     create_test_task, initialize_mcp_session, mcp_call_tool,
 };
+use tokio::sync::broadcast;
 
 #[tokio::test]
 async fn task_create_success_shape() {
@@ -30,7 +30,11 @@ async fn task_create_success_shape() {
     assert_eq!(payload["epic_id"], epic.id);
 
     let repo = TaskRepository::new(db.clone(), broadcast::channel(16).0);
-    let created = repo.get(payload["id"].as_str().unwrap()).await.unwrap().unwrap();
+    let created = repo
+        .get(payload["id"].as_str().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(created.title, "Create task contract test");
     assert_eq!(created.status, "backlog");
     assert_eq!(created.epic_id, Some(epic.id));
@@ -133,15 +137,38 @@ async fn task_list_filters_and_pagination() {
         )
         .await
         .unwrap();
-    repo.transition(&t1.id, crate::models::TransitionAction::Accept, "a", "user", None, None)
-        .await
-        .unwrap();
-    repo.update(&t1.id, "alpha ready", "desc", "design", 1, "owner", "", r#"[{"description":"default","met":false}]"#)
-        .await
-        .unwrap();
-    repo.transition(&t1.id, crate::models::TransitionAction::Start, "a", "user", None, None)
-        .await
-        .unwrap();
+    repo.transition(
+        &t1.id,
+        crate::models::TransitionAction::Accept,
+        "a",
+        "user",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.update(
+        &t1.id,
+        "alpha ready",
+        "desc",
+        "design",
+        1,
+        "owner",
+        "",
+        r#"[{"description":"default","met":false}]"#,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        &t1.id,
+        crate::models::TransitionAction::Start,
+        "a",
+        "user",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let app = create_test_app_with_db(db.clone());
     let sid = initialize_mcp_session(&app).await;
@@ -246,12 +273,26 @@ async fn task_count_plain_and_grouped() {
     let epic = create_test_epic(&db, &project.id).await;
     let t1 = create_test_task(&db, &project.id, &epic.id).await;
     let repo = TaskRepository::new(db.clone(), tokio::sync::broadcast::channel(16).0);
-    repo.transition(&t1.id, crate::models::TransitionAction::Accept, "u1", "user", None, None)
-        .await
-        .unwrap();
-    repo.transition(&t1.id, crate::models::TransitionAction::Start, "u1", "user", None, None)
-        .await
-        .unwrap();
+    repo.transition(
+        &t1.id,
+        crate::models::TransitionAction::Accept,
+        "u1",
+        "user",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        &t1.id,
+        crate::models::TransitionAction::Start,
+        "u1",
+        "user",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let _t2 = create_test_task(&db, &project.id, &epic.id).await;
 
     let app = create_test_app_with_db(db.clone());
@@ -260,9 +301,13 @@ async fn task_count_plain_and_grouped() {
     let plain = mcp_call_tool(&app, &sid, "task_count", json!({"project": project.path})).await;
     assert!(plain["total_count"].as_i64().unwrap() >= 2);
 
-    let grouped =
-        mcp_call_tool(&app, &sid, "task_count", json!({"project": project.path, "group_by": "status"}))
-            .await;
+    let grouped = mcp_call_tool(
+        &app,
+        &sid,
+        "task_count",
+        json!({"project": project.path, "group_by": "status"}),
+    )
+    .await;
     assert!(grouped["groups"].as_array().is_some());
 }
 
@@ -282,7 +327,13 @@ async fn task_claim_ready_and_empty() {
     let project2 = create_test_project(&db2).await;
     let app2 = create_test_app_with_db(db2);
     let sid2 = initialize_mcp_session(&app2).await;
-    let empty = mcp_call_tool(&app2, &sid2, "task_claim", json!({"project": project2.path})).await;
+    let empty = mcp_call_tool(
+        &app2,
+        &sid2,
+        "task_claim",
+        json!({"project": project2.path}),
+    )
+    .await;
     assert!(empty["task"].is_null());
 }
 

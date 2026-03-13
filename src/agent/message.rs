@@ -183,9 +183,7 @@ impl Conversation {
             .flat_map(|m| m.content.iter())
             .map(|b| match b {
                 ContentBlock::Text { text } => text.len(),
-                ContentBlock::ToolUse { name, input, .. } => {
-                    name.len() + input.to_string().len()
-                }
+                ContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
                 ContentBlock::ToolResult { content, .. } => content
                     .iter()
                     .filter_map(|c| c.as_text())
@@ -361,19 +359,13 @@ impl Conversation {
                     }
                 }
                 Role::User => {
-                    let content: Vec<serde_json::Value> = msg
-                        .content
-                        .iter()
-                        .map(content_block_to_anthropic)
-                        .collect();
+                    let content: Vec<serde_json::Value> =
+                        msg.content.iter().map(content_block_to_anthropic).collect();
                     msgs.push(json!({"role": "user", "content": content}));
                 }
                 Role::Assistant => {
-                    let content: Vec<serde_json::Value> = msg
-                        .content
-                        .iter()
-                        .map(content_block_to_anthropic)
-                        .collect();
+                    let content: Vec<serde_json::Value> =
+                        msg.content.iter().map(content_block_to_anthropic).collect();
                     msgs.push(json!({"role": "assistant", "content": content}));
                 }
             }
@@ -602,7 +594,12 @@ mod tests {
     fn user_message_has_text_content_block() {
         let msg = Message::user("hello");
         assert_eq!(msg.content.len(), 1);
-        assert_eq!(msg.content[0], ContentBlock::Text { text: "hello".into() });
+        assert_eq!(
+            msg.content[0],
+            ContentBlock::Text {
+                text: "hello".into()
+            }
+        );
     }
 
     #[test]

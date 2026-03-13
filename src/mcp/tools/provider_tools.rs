@@ -506,9 +506,7 @@ impl DjinnMcpServer {
 
     /// List all models for a provider. Each model includes capabilities
     /// (tool_call, reasoning, attachment), context limits, and per-million-token pricing.
-    #[tool(
-        description = "List models for a provider. Returns empty for unknown providers."
-    )]
+    #[tool(description = "List models for a provider. Returns empty for unknown providers.")]
     pub async fn provider_models(
         &self,
         Parameters(input): Parameters<ProviderModelsInput>,
@@ -575,8 +573,7 @@ impl DjinnMcpServer {
             // If this parent has merged children, include their models too.
             if !merged_ids.is_empty() {
                 for child_id in &merged_ids {
-                    if builtin::find_builtin_provider(child_id)
-                        .and_then(|bp| bp.merge_into)
+                    if builtin::find_builtin_provider(child_id).and_then(|bp| bp.merge_into)
                         == Some(p.id.as_str())
                     {
                         connected_provider_ids.push(child_id.clone());
@@ -604,11 +601,7 @@ impl DjinnMcpServer {
                         out.provider_id = display_pid.clone();
                         // Re-tag the full ID to use the display provider
                         // (for merged children → parent namespace).
-                        let bare = m
-                            .id
-                            .split_once('/')
-                            .map(|(_, name)| name)
-                            .unwrap_or(&m.id);
+                        let bare = m.id.split_once('/').map(|(_, name)| name).unwrap_or(&m.id);
                         out.id = format!("{display_pid}/{bare}");
                         out
                     })
@@ -685,14 +678,12 @@ impl DjinnMcpServer {
             CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
         let result = match flow_kind {
             OAuthFlowKind::Codex => codex::run_codex_flow(&credential_repo).await.map(|_| ()),
-            OAuthFlowKind::Copilot => {
-                match copilot::start_copilot_flow().await {
-                    Ok(session) => copilot::poll_copilot_flow(session, &credential_repo)
-                        .await
-                        .map(|_| ()),
-                    Err(e) => Err(e),
-                }
-            }
+            OAuthFlowKind::Copilot => match copilot::start_copilot_flow().await {
+                Ok(session) => copilot::poll_copilot_flow(session, &credential_repo)
+                    .await
+                    .map(|_| ()),
+                Err(e) => Err(e),
+            },
         };
 
         match result {

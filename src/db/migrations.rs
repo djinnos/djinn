@@ -86,9 +86,7 @@ async fn run_migration_sql(pool: &SqlitePool, sql: &str) -> Result<()> {
             sqlx::raw_sql("PRAGMA foreign_keys = OFF")
                 .execute(&mut *conn)
                 .await?;
-            sqlx::raw_sql("BEGIN EXCLUSIVE")
-                .execute(&mut *conn)
-                .await?;
+            sqlx::raw_sql("BEGIN EXCLUSIVE").execute(&mut *conn).await?;
 
             match sqlx::raw_sql(&sql).execute(&mut *conn).await {
                 Ok(_) => {
@@ -117,12 +115,7 @@ async fn run_migration_sql(pool: &SqlitePool, sql: &str) -> Result<()> {
 /// honours it (PRAGMAs are no-ops inside transactions).
 fn strip_pragmas(sql: &str) -> String {
     sql.lines()
-        .filter(|line| {
-            !line
-                .trim()
-                .to_uppercase()
-                .starts_with("PRAGMA ")
-        })
+        .filter(|line| !line.trim().to_uppercase().starts_with("PRAGMA "))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -222,12 +215,12 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload)
-             VALUES ('act-001', ?1, 'user1', 'user', 'comment', '{\"body\":\"hello\"}')"
+             VALUES ('act-001', ?1, 'user1', 'user', 'comment', '{\"body\":\"hello\"}')",
         )
-            .bind(task_a)
-            .execute(&pool)
-            .await
-            .unwrap();
+        .bind(task_a)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         sqlx::query(
             "INSERT INTO sessions (id, project_id, task_id, model_id, agent_type, status, tokens_in, tokens_out)
@@ -245,21 +238,31 @@ mod tests {
 
         // Verify all data survived.
         let proj_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(proj_count, 1, "project row lost");
 
         let epic_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM epics")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(epic_count, 1, "epic row lost");
 
         let task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(task_count, 2, "task rows lost");
 
         // Verify task field values are intact.
-        let row = sqlx::query("SELECT title, status, priority, description, design, labels FROM tasks WHERE id = ?1")
-            .bind(task_a)
-            .fetch_one(&pool).await.unwrap();
+        let row = sqlx::query(
+            "SELECT title, status, priority, description, design, labels FROM tasks WHERE id = ?1",
+        )
+        .bind(task_a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(row.get::<String, _>("title"), "Task A");
         assert_eq!(row.get::<String, _>("status"), "open");
         assert_eq!(row.get::<i64, _>("priority"), 1);
@@ -268,20 +271,29 @@ mod tests {
         assert_eq!(row.get::<String, _>("labels"), "[\"label1\"]");
 
         let blocker_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blockers")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(blocker_count, 1, "blocker row lost");
 
         let activity_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM activity_log")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(activity_count, 1, "activity row lost");
 
         let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(session_count, 1, "session row lost");
 
-        let sess_row = sqlx::query("SELECT tokens_in, tokens_out, status FROM sessions WHERE id = ?1")
-            .bind(session_id)
-            .fetch_one(&pool).await.unwrap();
+        let sess_row =
+            sqlx::query("SELECT tokens_in, tokens_out, status FROM sessions WHERE id = ?1")
+                .bind(session_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(sess_row.get::<i64, _>("tokens_in"), 100);
         assert_eq!(sess_row.get::<i64, _>("tokens_out"), 200);
         assert_eq!(sess_row.get::<String, _>("status"), "completed");

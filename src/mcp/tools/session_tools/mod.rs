@@ -1,10 +1,10 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::db::SessionRepository;
-use crate::db::SessionMessageRepository;
-use crate::db::TaskRepository;
 use crate::db::ActivityQuery;
+use crate::db::SessionMessageRepository;
+use crate::db::SessionRepository;
+use crate::db::TaskRepository;
 use crate::mcp::server::DjinnMcpServer;
 use crate::models::SessionRecord;
 
@@ -377,7 +377,7 @@ impl DjinnMcpServer {
                     model_id: Some(session.model_id),
                     messages: None,
                     error: Some(format!("failed to load messages: {e}")),
-                })
+                });
             }
         };
 
@@ -394,7 +394,9 @@ impl DjinnMcpServer {
                 let content = msg
                     .content
                     .into_iter()
-                    .map(|block| super::json_object::AnyJson(serde_json::to_value(block).unwrap_or_default()))
+                    .map(|block| {
+                        super::json_object::AnyJson(serde_json::to_value(block).unwrap_or_default())
+                    })
                     .collect();
                 SessionMessage { role, content }
             })
@@ -448,7 +450,10 @@ impl DjinnMcpServer {
             SessionMessageRepository::new(self.state.db().clone(), self.state.events().clone());
 
         // 1. Get sessions
-        let sessions = match session_repo.list_for_task_in_project(&project_id, &task.id).await {
+        let sessions = match session_repo
+            .list_for_task_in_project(&project_id, &task.id)
+            .await
+        {
             Ok(s) => s,
             Err(e) => return err(e.to_string()),
         };
@@ -506,8 +511,7 @@ impl DjinnMcpServer {
                 .map(|e| TimelineActivity {
                     event_type: e.event_type.clone(),
                     payload: super::json_object::AnyJson(
-                        serde_json::from_str(&e.payload)
-                            .unwrap_or_else(|_| serde_json::json!({})),
+                        serde_json::from_str(&e.payload).unwrap_or_else(|_| serde_json::json!({})),
                     ),
                     timestamp: e.created_at.clone(),
                 })
@@ -523,4 +527,5 @@ impl DjinnMcpServer {
         })
     }
 }
-#[cfg(test)] mod tests;
+#[cfg(test)]
+mod tests;

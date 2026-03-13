@@ -3,12 +3,12 @@ use std::path::Path;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::agent::AgentType;
 use crate::agent::extension;
 use crate::agent::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use crate::agent::output_parser::ParsedAgentOutput;
 use crate::agent::provider::telemetry;
 use crate::agent::provider::{LlmProvider, StreamEvent};
-use crate::agent::AgentType;
 use crate::events::DjinnEvent;
 use crate::server::AppState;
 
@@ -751,5 +751,10 @@ pub(super) async fn run_reply_loop(
         }
     }
 
-    (run_result, output, total_tokens_in as i64, total_tokens_out as i64)
+    (
+        run_result,
+        output,
+        total_tokens_in as i64,
+        total_tokens_out as i64,
+    )
 }

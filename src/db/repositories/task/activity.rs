@@ -39,7 +39,8 @@ impl TaskRepository {
             action: event_type.to_owned(),
             actor: actor_id.to_owned(),
             actor_role: actor_role.to_owned(),
-            payload: serde_json::from_str(payload).unwrap_or(serde_json::Value::String(payload.to_owned())),
+            payload: serde_json::from_str(payload)
+                .unwrap_or(serde_json::Value::String(payload.to_owned())),
         });
         Ok(entry)
     }
@@ -132,12 +133,11 @@ impl TaskRepository {
     /// Soft-delete all activity entries for a task (set archived = 1).
     pub async fn archive_activity_for_task(&self, task_id: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let result = sqlx::query(
-            "UPDATE activity_log SET archived = 1 WHERE task_id = ?1 AND archived = 0",
-        )
-        .bind(task_id)
-        .execute(self.db.pool())
-        .await?;
+        let result =
+            sqlx::query("UPDATE activity_log SET archived = 1 WHERE task_id = ?1 AND archived = 0")
+                .bind(task_id)
+                .execute(self.db.pool())
+                .await?;
         Ok(result.rows_affected())
     }
 }

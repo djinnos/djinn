@@ -72,8 +72,8 @@ impl SessionMessageRepository {
                 Role::User => "user",
                 Role::Assistant => "assistant",
             };
-            let content_json = serde_json::to_string(&msg.content)
-                .unwrap_or_else(|_| "[]".to_string());
+            let content_json =
+                serde_json::to_string(&msg.content).unwrap_or_else(|_| "[]".to_string());
             let id = uuid::Uuid::now_v7().to_string();
 
             sqlx::query(
@@ -140,9 +140,7 @@ impl SessionMessageRepository {
         self.db.ensure_initialized().await?;
 
         // Build placeholders: (?1, ?2, ?3, ...)
-        let placeholders: Vec<String> = (1..=session_ids.len())
-            .map(|i| format!("?{i}"))
-            .collect();
+        let placeholders: Vec<String> = (1..=session_ids.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "SELECT session_id, role, content_json, created_at \
              FROM session_messages \
@@ -174,10 +172,10 @@ impl SessionMessageRepository {
 mod tests {
     use super::*;
     use crate::agent::message::{Message, Role};
-    use crate::db::connection::Database;
     use crate::db::EpicRepository;
     use crate::db::SessionRepository;
     use crate::db::TaskRepository;
+    use crate::db::connection::Database;
     use crate::events::DjinnEvent;
     use tokio::sync::broadcast;
 
@@ -197,13 +195,20 @@ mod tests {
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
         let task = task_repo
-            .create(&epic.id, "Task", "", "", "task", 0 , "", Some("open"))
+            .create(&epic.id, "Task", "", "", "task", 0, "", Some("open"))
             .await
             .unwrap();
 
         let session_repo = SessionRepository::new(db, tx);
         let session = session_repo
-            .create(&task.project_id, Some(&task.id), "test-model", "worker", None, None)
+            .create(
+                &task.project_id,
+                Some(&task.id),
+                "test-model",
+                "worker",
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -246,9 +251,15 @@ mod tests {
 
         let repo = SessionMessageRepository::new(db, tx);
 
-        repo.insert_message(&session_id, &task_id, "user", r#"[{"type":"text","text":"hi"}]"#, None)
-            .await
-            .expect("insert");
+        repo.insert_message(
+            &session_id,
+            &task_id,
+            "user",
+            r#"[{"type":"text","text":"hi"}]"#,
+            None,
+        )
+        .await
+        .expect("insert");
 
         // Drain events looking for the SessionMessageInserted event.
         let mut found = false;

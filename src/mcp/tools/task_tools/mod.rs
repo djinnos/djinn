@@ -8,9 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::EpicRepository;
 use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
-use crate::db::{
-    ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository,
-};
+use crate::db::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository};
 use crate::mcp::server::DjinnMcpServer;
 use crate::mcp::tools::AnyJson;
 use crate::mcp::tools::validation::{
@@ -23,9 +21,9 @@ use crate::models::SessionStatus;
 use crate::models::{Task, TaskStatus, TransitionAction};
 
 mod board;
-mod types;
 #[cfg(test)]
 mod tests;
+mod types;
 
 pub use types::*;
 
@@ -166,20 +164,18 @@ impl DjinnMcpServer {
 
         // Apply memory_refs if provided.
         if let Some(ref refs) = p.memory_refs
-            && !refs.is_empty() {
-                let refs_json = serde_json::to_string(refs).unwrap_or_else(|_| "[]".into());
-                if let Ok(t) = repo.update_memory_refs(&task.id, &refs_json).await {
-                    task = t;
-                }
+            && !refs.is_empty()
+        {
+            let refs_json = serde_json::to_string(refs).unwrap_or_else(|_| "[]".into());
+            if let Ok(t) = repo.update_memory_refs(&task.id, &refs_json).await {
+                task = t;
             }
+        }
 
         // Apply blocked_by relationships atomically at creation.
         if let Some(ref blockers) = p.blocked_by {
             for blocker_ref in blockers {
-                let blocking_id = match self
-                    .resolve_task_not_epic(&project_id, blocker_ref)
-                    .await
-                {
+                let blocking_id = match self.resolve_task_not_epic(&project_id, blocker_ref).await {
                     Ok(id) => id,
                     Err(e) => return Json(ErrorOr::Error(e)),
                 };
@@ -355,10 +351,7 @@ impl DjinnMcpServer {
         // Apply blocker changes if requested.
         if let Some(ref add) = p.blocked_by_add {
             for blocker_ref in add {
-                let blocking_id = match self
-                    .resolve_task_not_epic(&project_id, blocker_ref)
-                    .await
-                {
+                let blocking_id = match self.resolve_task_not_epic(&project_id, blocker_ref).await {
                     Ok(id) => id,
                     Err(e) => return Json(ErrorOr::Error(e)),
                 };
@@ -369,10 +362,7 @@ impl DjinnMcpServer {
         }
         if let Some(ref remove) = p.blocked_by_remove {
             for blocker_ref in remove {
-                let blocking_id = match self
-                    .resolve_task_not_epic(&project_id, blocker_ref)
-                    .await
-                {
+                let blocking_id = match self.resolve_task_not_epic(&project_id, blocker_ref).await {
                     Ok(id) => id,
                     Err(e) => return Json(ErrorOr::Error(e)),
                 };
@@ -531,8 +521,7 @@ impl DjinnMcpServer {
                     }
                 }
 
-                let task_ids: Vec<&str> =
-                    result.tasks.iter().map(|t| t.id.as_str()).collect();
+                let task_ids: Vec<&str> = result.tasks.iter().map(|t| t.id.as_str()).collect();
                 let session_counts = session_repo
                     .count_for_tasks(&task_ids)
                     .await
@@ -542,19 +531,14 @@ impl DjinnMcpServer {
                     .tasks
                     .iter()
                     .map(|t| {
-                        let active = session_by_task.remove(&t.id).map(|s| {
-                            ActiveSessionSummary {
-                                session_id: s.id,
-                                agent_type: s.agent_type,
-                                model_id: s.model_id,
-                                started_at: s.started_at,
-                                status: s.status,
-                            }
+                        let active = session_by_task.remove(&t.id).map(|s| ActiveSessionSummary {
+                            session_id: s.id,
+                            agent_type: s.agent_type,
+                            model_id: s.model_id,
+                            started_at: s.started_at,
+                            status: s.status,
                         });
-                        let count = session_counts
-                            .get(&t.id)
-                            .copied()
-                            .unwrap_or(0);
+                        let count = session_counts.get(&t.id).copied().unwrap_or(0);
                         task_to_list_item(t, active, count)
                     })
                     .collect();

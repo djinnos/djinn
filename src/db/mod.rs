@@ -7,7 +7,7 @@ pub use repositories::credential::CredentialRepository;
 pub use repositories::custom_provider::CustomProviderRepository;
 pub use repositories::epic::{EpicCountQuery, EpicListQuery, EpicRepository, EpicTaskCounts};
 pub use repositories::git_settings::GitSettingsRepository;
-pub use repositories::note::{is_singleton, NoteRepository};
+pub use repositories::note::{NoteRepository, is_singleton};
 pub use repositories::project::{ProjectConfig, ProjectRepository};
 pub use repositories::session::SessionRepository;
 pub use repositories::session_message::SessionMessageRepository;

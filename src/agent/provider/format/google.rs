@@ -1,14 +1,12 @@
 use async_stream::stream;
 use futures::StreamExt;
 use reqwest::header::HeaderMap;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::pin::Pin;
 
 use crate::agent::message::{ContentBlock, Conversation};
-use crate::agent::provider::{
-    LlmProvider, ProviderConfig, StreamEvent, TokenUsage,
-};
 use crate::agent::provider::client::ApiClient;
+use crate::agent::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
 
 pub struct GoogleProvider {
     config: ProviderConfig,
@@ -105,15 +103,17 @@ pub fn parse_google_line(line: &str) -> Vec<StreamEvent> {
                         let input = fc.get("args").cloned().unwrap_or(Value::Null);
                         // Google doesn't provide a tool use id in streaming; generate a placeholder
                         let id = format!("google_fc_{}", name);
-                        events.push(StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }));
+                        events.push(StreamEvent::Delta(ContentBlock::ToolUse {
+                            id,
+                            name,
+                            input,
+                        }));
                     }
                 }
             }
 
             // Check finish reason for end of stream signal
-            if let Some(reason) = candidate
-                .get("finishReason")
-                .and_then(|r| r.as_str())
+            if let Some(reason) = candidate.get("finishReason").and_then(|r| r.as_str())
                 && !reason.is_empty()
                 && reason != "FINISH_REASON_UNSPECIFIED"
             {
@@ -152,7 +152,7 @@ impl LlmProvider for GoogleProvider {
                         Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
                     >,
                 > + Send
-            + 'a,
+                + 'a,
         >,
     > {
         let body = self.build_request(conversation, tools);
@@ -249,7 +249,8 @@ mod tests {
 
     #[test]
     fn test_finish_reason_emits_done() {
-        let line = r#"{"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP"}]}"#;
+        let line =
+            r#"{"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP"}]}"#;
         let events = parse_google_line(line);
         assert!(events.iter().any(|e| matches!(e, StreamEvent::Done)));
     }

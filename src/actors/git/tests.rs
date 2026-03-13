@@ -455,9 +455,9 @@ async fn list_worktrees_includes_main_and_task() {
     // Canonicalize both sides because macOS tempdir /var/folders/ is a symlink
     // to /private/var/folders/, and git resolves symlinks in porcelain output.
     let wt_canonical = wt_path.canonicalize().unwrap_or(wt_path.clone());
-    let task_wt = worktrees.iter().find(|w| {
-        w.path.canonicalize().unwrap_or(w.path.clone()) == wt_canonical
-    });
+    let task_wt = worktrees
+        .iter()
+        .find(|w| w.path.canonicalize().unwrap_or(w.path.clone()) == wt_canonical);
     assert!(task_wt.is_some(), "task worktree should be listed");
     let task_wt = task_wt.unwrap();
     assert_eq!(task_wt.branch.as_deref(), Some("task/wt3"));

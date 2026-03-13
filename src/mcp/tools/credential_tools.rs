@@ -97,15 +97,13 @@ impl DjinnMcpServer {
             .set(&input.provider_id, &input.key_name, &input.api_key)
             .await
         {
-            Ok(cred) => {
-                Json(CredentialSetResponse {
-                    ok: true,
-                    success: true,
-                    id: cred.id,
-                    key_name: cred.key_name,
-                    error: None,
-                })
-            }
+            Ok(cred) => Json(CredentialSetResponse {
+                ok: true,
+                success: true,
+                id: cred.id,
+                key_name: cred.key_name,
+                error: None,
+            }),
             Err(e) => {
                 tracing::warn!(key_name = %input.key_name, error = %e, "credential_set failed");
                 Json(CredentialSetResponse {

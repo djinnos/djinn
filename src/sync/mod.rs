@@ -31,8 +31,8 @@ use serde::Serialize;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
-use crate::db::connection::Database;
 use crate::db::ProjectRepository;
+use crate::db::connection::Database;
 use crate::events::DjinnEvent;
 use backoff::BackoffState;
 pub use tasks_channel::TaskSyncError;
@@ -203,7 +203,9 @@ impl SyncManager {
     /// Enable sync for a project by setting `sync_enabled=true` in the projects table (SYNC-07).
     pub async fn enable_project(&self, project_id: &str) -> crate::error::Result<()> {
         let project_repo = project_repo(&self.inner);
-        project_repo.update_config_field(project_id, "sync_enabled", "true").await?;
+        project_repo
+            .update_config_field(project_id, "sync_enabled", "true")
+            .await?;
 
         // Reset backoff on enable.
         let mut states = self.inner.states.lock().await;
@@ -218,7 +220,9 @@ impl SyncManager {
     /// Disable sync for a project by setting `sync_enabled=false` in the projects table (SYNC-07).
     pub async fn disable_project(&self, project_id: &str) -> crate::error::Result<()> {
         let project_repo = project_repo(&self.inner);
-        project_repo.update_config_field(project_id, "sync_enabled", "false").await?;
+        project_repo
+            .update_config_field(project_id, "sync_enabled", "false")
+            .await?;
 
         // Reset backoff.
         let mut states = self.inner.states.lock().await;
@@ -569,7 +573,10 @@ mod tests {
 
         // Create a project.
         let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
-        let project = project_repo.create("test-proj", "/tmp/test-project").await.unwrap();
+        let project = project_repo
+            .create("test-proj", "/tmp/test-project")
+            .await
+            .unwrap();
 
         mgr.enable_project(&project.id).await.unwrap();
 
@@ -586,7 +593,10 @@ mod tests {
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
         let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
-        let project = project_repo.create("test-proj", "/tmp/test-project").await.unwrap();
+        let project = project_repo
+            .create("test-proj", "/tmp/test-project")
+            .await
+            .unwrap();
 
         mgr.enable_project(&project.id).await.unwrap();
         mgr.disable_project(&project.id).await.unwrap();
@@ -602,7 +612,10 @@ mod tests {
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
         let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
-        let project = project_repo.create("my-repo", "/tmp/my-repo").await.unwrap();
+        let project = project_repo
+            .create("my-repo", "/tmp/my-repo")
+            .await
+            .unwrap();
         mgr.enable_project(&project.id).await.unwrap();
 
         let statuses = mgr.status().await;
@@ -660,10 +673,34 @@ mod tests {
         // Reassign e1's project to p1 (epic auto-creates a default project).
         // For simplicity, create tasks directly in each project.
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
-        let _t1 = task_repo.create_in_project(&p1.id, Some(&e1.id), "Task in A", "", "", "task", 0 , "", Some("open"))
-            .await.unwrap();
-        let _t2 = task_repo.create_in_project(&p2.id, Some(&e1.id), "Task in B", "", "", "task", 0 , "", Some("open"))
-            .await.unwrap();
+        let _t1 = task_repo
+            .create_in_project(
+                &p1.id,
+                Some(&e1.id),
+                "Task in A",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                Some("open"),
+            )
+            .await
+            .unwrap();
+        let _t2 = task_repo
+            .create_in_project(
+                &p2.id,
+                Some(&e1.id),
+                "Task in B",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                Some("open"),
+            )
+            .await
+            .unwrap();
 
         // list_for_export with project_id should only return that project's tasks.
         let export_a = task_repo.list_for_export(Some(&p1.id)).await.unwrap();
@@ -672,7 +709,10 @@ mod tests {
 
         assert_eq!(export_a.len(), 1, "should have 1 task for project A");
         assert_eq!(export_b.len(), 1, "should have 1 task for project B");
-        assert!(export_all.len() >= 2, "unfiltered should have at least 2 tasks");
+        assert!(
+            export_all.len() >= 2,
+            "unfiltered should have at least 2 tasks"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -714,10 +754,7 @@ mod tests {
 
         // Create an epic (auto-creates default project) so upsert_peer's FK check passes.
         let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let epic = epic_repo
-            .create("Test Epic", "", "", "", "")
-            .await
-            .unwrap();
+        let epic = epic_repo.create("Test Epic", "", "", "", "").await.unwrap();
         // Drain setup events (ProjectCreated + EpicCreated).
         while rx.try_recv().is_ok() {}
 
@@ -835,9 +872,13 @@ mod tests {
         let should_trigger = |evt: &DjinnEvent| -> bool {
             matches!(
                 evt,
-                DjinnEvent::TaskCreated { from_sync: false, .. }
-                    | DjinnEvent::TaskUpdated { from_sync: false, .. }
-                    | DjinnEvent::TaskDeleted { .. }
+                DjinnEvent::TaskCreated {
+                    from_sync: false,
+                    ..
+                } | DjinnEvent::TaskUpdated {
+                    from_sync: false,
+                    ..
+                } | DjinnEvent::TaskDeleted { .. }
             )
         };
 
@@ -846,32 +887,47 @@ mod tests {
             task: task.clone(),
             from_sync: false,
         };
-        assert!(should_trigger(&local_created), "local TaskCreated should trigger export");
+        assert!(
+            should_trigger(&local_created),
+            "local TaskCreated should trigger export"
+        );
 
         let local_updated = DjinnEvent::TaskUpdated {
             task: task.clone(),
             from_sync: false,
         };
-        assert!(should_trigger(&local_updated), "local TaskUpdated should trigger export");
+        assert!(
+            should_trigger(&local_updated),
+            "local TaskUpdated should trigger export"
+        );
 
         // Sync event → should NOT trigger export.
         let sync_created = DjinnEvent::TaskCreated {
             task: task.clone(),
             from_sync: true,
         };
-        assert!(!should_trigger(&sync_created), "sync TaskCreated should NOT trigger export");
+        assert!(
+            !should_trigger(&sync_created),
+            "sync TaskCreated should NOT trigger export"
+        );
 
         let sync_updated = DjinnEvent::TaskUpdated {
             task: task.clone(),
             from_sync: true,
         };
-        assert!(!should_trigger(&sync_updated), "sync TaskUpdated should NOT trigger export");
+        assert!(
+            !should_trigger(&sync_updated),
+            "sync TaskUpdated should NOT trigger export"
+        );
 
         // Delete always triggers.
         let deleted = DjinnEvent::TaskDeleted {
             id: "t".to_string(),
         };
-        assert!(should_trigger(&deleted), "TaskDeleted should always trigger export");
+        assert!(
+            should_trigger(&deleted),
+            "TaskDeleted should always trigger export"
+        );
     }
 
     // ── SYNC-13: SyncCompleted event tests ───────────────────────────────────
@@ -899,7 +955,10 @@ mod tests {
             error: Some("git push failed".to_string()),
         };
         let json = serde_json::to_string(&evt).unwrap();
-        assert!(json.contains("\"error\":\"git push failed\""), "json: {json}");
+        assert!(
+            json.contains("\"error\":\"git push failed\""),
+            "json: {json}"
+        );
     }
 
     #[test]
@@ -913,11 +972,18 @@ mod tests {
         };
         let triggers = matches!(
             evt,
-            DjinnEvent::TaskCreated { from_sync: false, .. }
-                | DjinnEvent::TaskUpdated { from_sync: false, .. }
-                | DjinnEvent::TaskDeleted { .. }
+            DjinnEvent::TaskCreated {
+                from_sync: false,
+                ..
+            } | DjinnEvent::TaskUpdated {
+                from_sync: false,
+                ..
+            } | DjinnEvent::TaskDeleted { .. }
         );
-        assert!(!triggers, "SyncCompleted should not trigger background export");
+        assert!(
+            !triggers,
+            "SyncCompleted should not trigger background export"
+        );
     }
 
     // ── SYNC-09: Auto-import interval tests ─────────────────────────────────────
@@ -929,7 +995,11 @@ mod tests {
         // `let mut import_interval = tokio::time::interval(Duration::from_secs(60));`
         const SECONDS: u64 = 60;
         let duration = std::time::Duration::from_secs(SECONDS);
-        assert_eq!(duration.as_secs(), 60, "auto-import should fire every 60 seconds");
+        assert_eq!(
+            duration.as_secs(),
+            60,
+            "auto-import should fire every 60 seconds"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -945,7 +1015,10 @@ mod tests {
 
         // Create a project and enable it for sync.
         let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
-        let project = project_repo.create("interval-test", "/tmp/interval-test").await.unwrap();
+        let project = project_repo
+            .create("interval-test", "/tmp/interval-test")
+            .await
+            .unwrap();
         mgr.enable_project(&project.id).await.unwrap();
 
         // Spawn a very short-lived background task that will tick once.

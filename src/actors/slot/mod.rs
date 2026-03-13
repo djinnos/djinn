@@ -97,17 +97,16 @@ impl MergeValidationFailureMetadata {
 mod actor;
 mod commands;
 mod conversation_store;
-pub(crate) mod task_review;
 mod helpers;
 mod lifecycle;
 mod pool;
 mod reply_loop;
+pub(crate) mod task_review;
 pub(crate) mod verification;
 mod worktree;
 
 pub use actor::*;
 pub(crate) use commands::*;
-pub(crate) use task_review::*;
 pub(crate) use helpers::*;
 pub use lifecycle::{ProjectLifecycleParams, run_project_lifecycle, run_task_lifecycle};
 pub use pool::*;
