@@ -271,11 +271,15 @@ impl LlmSpan {
         Self { cx }
     }
 
-    /// Record the input prompt on the observation.
-    pub fn record_input(&self, input: &str) {
+    /// Record input messages on the generation observation.
+    ///
+    /// Accepts pre-serialised JSON (a messages array). Langfuse renders this
+    /// as a chat-style thread in the input panel when it detects the array
+    /// structure with `role` + `content` fields.
+    pub fn record_input(&self, json: &str) {
         self.cx.span().set_attribute(KeyValue::new(
             "langfuse.observation.input",
-            truncate(input, 10_000),
+            truncate(json, 10_000),
         ));
     }
 
