@@ -80,6 +80,9 @@ where
         "task_kill_session" => call_task_kill_session(state, &call.arguments).await,
         "task_blocked_list" => call_task_blocked_list(state, &call.arguments).await,
         "task_activity_list" => call_task_activity_list(state, &call.arguments).await,
+        "epic_show" => call_epic_show(state, &call.arguments).await,
+        "epic_update" => call_epic_update(state, &call.arguments).await,
+        "epic_tasks" => call_epic_tasks(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
@@ -153,6 +156,29 @@ struct TaskCreateParams {
     acceptance_criteria: Option<Vec<String>>,
     blocked_by: Option<Vec<String>>,
     memory_refs: Option<Vec<String>>,
+}
+
+
+#[derive(Deserialize)]
+struct EpicShowParams {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct EpicUpdateParams {
+    id: String,
+    title: Option<String>,
+    description: Option<String>,
+    status: Option<String>,
+    memory_refs_add: Option<Vec<String>>,
+    memory_refs_remove: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct EpicTasksParams {
+    id: String,
+    limit: Option<i64>,
+    offset: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -368,6 +394,83 @@ async fn call_task_activity_list(
         .collect();
 
     Ok(serde_json::json!({ "count": activity_json.len(), "entries": activity_json }))
+}
+
+async fn call_epic_show(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: EpicShowParams = parse_args(arguments)?;
+    let repo = EpicRepository::new(state.db().clone(), state.events().clone());
+
+    match repo.resolve(&p.id).await {
+        Ok(Some(epic)) => Ok(serde_json::to_value(epic).map_err(|e| e.to_string())?),
+        Ok(None) => Ok(serde_json::json!({ "error": format!("epic not found: {}", p.id) })),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+async fn call_epic_update(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: EpicUpdateParams = parse_args(arguments)?;
+    let repo = EpicRepository::new(state.db().clone(), state.events().clone());
+
+    let Some(epic) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "error": format!("epic not found: {}", p.id) }));
+    };
+
+    let title = p.title.as_deref().unwrap_or(&epic.title);
+    let description = p.description.as_deref().unwrap_or(&epic.description);
+    let emoji = epic.emoji.as_str();
+    let color = epic.color.as_str();
+    let owner = epic.owner.as_str();
+
+    let updated = repo
+        .update(&epic.id, title, description, emoji, color, owner)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(_status) = p.status.as_deref() {
+        // EpicRepository::update does not currently support status transitions.
+    }
+
+    if p.memory_refs_add.is_some() || p.memory_refs_remove.is_some() {
+        // Epics do not currently persist memory_refs in storage; accepted for forward compatibility.
+    }
+
+    serde_json::to_value(updated).map_err(|e| e.to_string())
+}
+
+async fn call_epic_tasks(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: EpicTasksParams = parse_args(arguments)?;
+    let epic_repo = EpicRepository::new(state.db().clone(), state.events().clone());
+
+    let Some(epic) = epic_repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "error": format!("epic not found: {}", p.id) }));
+    };
+
+    let task_repo = TaskRepository::new(state.db().clone(), state.events().clone());
+    let limit = p.limit.unwrap_or(50).clamp(1, 200);
+    let offset = p.offset.unwrap_or(0).max(0);
+    let mut all = task_repo.list_by_epic(&epic.id).await.map_err(|e| e.to_string())?;
+    let total = i64::try_from(all.len()).unwrap_or(0);
+    let start = usize::try_from(offset).unwrap_or(0).min(all.len());
+    let end = start.saturating_add(usize::try_from(limit).unwrap_or(0)).min(all.len());
+    let tasks = all.drain(start..end).map(|t| task_to_value(&t)).collect::<Vec<_>>();
+    let has_more = i64::try_from(end).unwrap_or(0) < total;
+
+    Ok(serde_json::json!({
+        "tasks": tasks,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": has_more,
+    }))
 }
 
 async fn call_task_create(
@@ -846,7 +949,10 @@ fn is_tool_allowed_for_agent(agent_type: AgentType, name: &str) -> bool {
         | "task_archive_activity"
         | "task_reset_counters"
         | "task_kill_session"
-        | "task_blocked_list" => {
+        | "task_blocked_list"
+        | "epic_show"
+        | "epic_update"
+        | "epic_tasks" => {
             matches!(agent_type, AgentType::PM | AgentType::Groomer)
         }
         _ => false,
@@ -1217,6 +1323,56 @@ async fn call_task_kill_session(
         "task_id": task.short_id,
         "message": "Paused session interrupted and conversation deleted. Next dispatch will start a fresh session."
     }))
+}
+
+
+fn tool_epic_show() -> RmcpTool {
+    RmcpTool::new(
+        "epic_show".to_string(),
+        "Show details for an epic by UUID or short ID.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Epic UUID or short ID"}
+            }
+        }),
+    )
+}
+
+fn tool_epic_update() -> RmcpTool {
+    RmcpTool::new(
+        "epic_update".to_string(),
+        "Update epic fields (title/description) and accept memory ref delta args for groomer workflows.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Epic UUID or short ID"},
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "status": {"type": "string"},
+                "memory_refs_add": {"type": "array", "items": {"type": "string"}},
+                "memory_refs_remove": {"type": "array", "items": {"type": "string"}}
+            }
+        }),
+    )
+}
+
+fn tool_epic_tasks() -> RmcpTool {
+    RmcpTool::new(
+        "epic_tasks".to_string(),
+        "List tasks for an epic with pagination.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Epic UUID or short ID"},
+                "limit": {"type": "integer"},
+                "offset": {"type": "integer"}
+            }
+        }),
+    )
 }
 
 fn tool_task_list() -> RmcpTool {
@@ -1657,6 +1813,9 @@ pub(crate) fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
                 .expect("serialize tool_task_kill_session"),
             serde_json::to_value(tool_task_blocked_list())
                 .expect("serialize tool_task_blocked_list"),
+            serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
+            serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
+            serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
         ] {
             tool_values.push(value);
         }
