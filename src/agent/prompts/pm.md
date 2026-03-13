@@ -9,7 +9,7 @@ This task has been escalated because the worker agent made multiple unsuccessful
 - `task_transition(id, action)` — move the task between states:
   - `pm_approve` — the implementation is correct; triggers squash merge and closes the task (handles merge conflicts automatically by reopening for a conflict resolver)
   - `pm_intervention_complete` — you've rescoped/updated the task; reopens it for a fresh worker
-  - `force_close` — close a task you are decomposing into subtasks
+  - `force_close` — close a task you are decomposing into subtasks. **Requires `replacement_task_ids`**: pass the IDs of the subtasks you created as replacements. The system verifies they exist and are open before allowing the close.
 - `task_delete_branch(id)` — delete the task branch, worktree, and paused session so the next worker starts with a clean slate
 - `task_archive_activity(id)` — hide old noisy activity so the next worker has a clean context
 - `task_reset_counters(id)` — reset retry counters after meaningful rescoping

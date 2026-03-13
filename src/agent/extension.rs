@@ -984,6 +984,9 @@ struct TaskTransitionParams {
     action: String,
     reason: Option<String>,
     target_status: Option<String>,
+    /// Required when action = "force_close". UUIDs or short IDs of replacement
+    /// tasks the PM created before closing this one.
+    replacement_task_ids: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -1042,21 +1045,36 @@ async fn call_task_transition(
         return Ok(task_to_value(&updated));
     }
 
-    // Guard: force_close requires at least one open subtask in the same epic.
+    // Guard: force_close requires explicit replacement_task_ids that exist and are open.
     // Without this, the PM can close a task claiming "decomposition" without
     // actually creating the replacement subtasks, losing unmerged work.
-    if action == TransitionAction::ForceClose
-        && let Some(ref epic_id) = task.epic_id
-    {
-        let all_in_epic = repo.list_by_epic(epic_id).await.unwrap_or_default();
-        let has_open_subtask = all_in_epic.iter().any(|t| {
-            t.id != task.id
-                && t.status == TaskStatus::Open.as_str()
-                && t.created_at > task.created_at
-        });
-        if !has_open_subtask {
+    if action == TransitionAction::ForceClose {
+        let ids = match p.replacement_task_ids {
+            Some(ref ids) if !ids.is_empty() => ids,
+            _ => {
+                return Ok(serde_json::json!({
+                    "error": "force_close requires replacement_task_ids: an array of task IDs (UUID or short ID) for the replacement tasks you created. Create subtasks with task_create first, then pass their IDs to force_close."
+                }));
+            }
+        };
+        let mut missing = Vec::new();
+        for id in ids {
+            match repo.resolve(id).await {
+                Ok(Some(t)) if t.status == TaskStatus::Open.as_str() => {}
+                Ok(Some(t)) => {
+                    missing.push(format!("{} (status: {})", id, t.status));
+                }
+                _ => {
+                    missing.push(format!("{} (not found)", id));
+                }
+            }
+        }
+        if !missing.is_empty() {
             return Ok(serde_json::json!({
-                "error": "force_close requires at least one open subtask created after this task in the same epic. Create subtasks with task_create first, then force_close."
+                "error": format!(
+                    "force_close replacement tasks must exist and be open. Problems: {}",
+                    missing.join(", ")
+                )
             }));
         }
     }
@@ -1476,7 +1494,7 @@ fn tool_task_update() -> RmcpTool {
 fn tool_task_transition() -> RmcpTool {
     RmcpTool::new(
         "task_transition".to_string(),
-        "Execute a state machine transition on a task. PM can use: pm_intervention_complete (rescope and reopen for worker), pm_approve (approve implementation and merge), force_close, escalate.".to_string(),
+        "Execute a state machine transition on a task. PM can use: pm_intervention_complete (rescope and reopen for worker), pm_approve (approve implementation and merge), force_close (requires replacement_task_ids), escalate.".to_string(),
         object!({
             "type": "object",
             "required": ["id", "action"],
@@ -1484,7 +1502,8 @@ fn tool_task_transition() -> RmcpTool {
                 "id": {"type": "string", "description": "Task UUID or short ID"},
                 "action": {"type": "string", "description": "Transition action"},
                 "reason": {"type": "string"},
-                "target_status": {"type": "string"}
+                "target_status": {"type": "string"},
+                "replacement_task_ids": {"type": "array", "items": {"type": "string"}, "description": "Required for force_close: IDs of replacement tasks created before closing this one"}
             }
         }),
     )
