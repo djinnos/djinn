@@ -12,13 +12,10 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::auth::{clear_token, retrieve_token, store_token, CLERK_DOMAIN};
+use crate::auth::{clear_token, retrieve_token, store_token, CLIENT_ID, CLERK_DOMAIN};
 
 /// Token endpoint path
 const TOKEN_ENDPOINT: &str = "/oauth/token";
-
-/// Client ID for OAuth
-const CLIENT_ID: &str = "djinnos-desktop";
 
 /// Expiry buffer: refresh tokens 30 seconds before actual expiry
 const EXPIRY_BUFFER_SECONDS: u64 = 30;

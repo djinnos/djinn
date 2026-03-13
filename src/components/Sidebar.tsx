@@ -473,8 +473,9 @@ export function Sidebar() {
             {!isCollapsed && (
               <button
                 type="button"
+                onClick={() => navigate('/settings/projects')}
                 className="flex h-6 w-6 items-center justify-center rounded-md transition-colors text-muted-foreground hover:bg-white/10 hover:text-foreground shrink-0 mr-1"
-                title="New Project"
+                title="Project settings"
               >
                 <Plus className="h-3.5 w-3.5" />
               </button>
