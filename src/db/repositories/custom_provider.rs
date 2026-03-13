@@ -1,6 +1,6 @@
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::models::provider::{CustomProvider, SeedModel};
+use crate::models::{CustomProvider, SeedModel};
 
 pub struct CustomProviderRepository {
     db: Database,

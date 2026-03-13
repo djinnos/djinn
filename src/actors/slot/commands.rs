@@ -4,8 +4,8 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::commands::{CommandResult, CommandSpec, run_commands};
-use crate::db::repositories::project::ProjectRepository;
-use crate::db::repositories::task::TaskRepository;
+use crate::db::ProjectRepository;
+use crate::db::TaskRepository;
 use crate::server::AppState;
 
 #[derive(Debug)]

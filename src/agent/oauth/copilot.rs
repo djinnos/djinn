@@ -13,7 +13,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::db::repositories::credential::CredentialRepository;
+use crate::db::CredentialRepository;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 

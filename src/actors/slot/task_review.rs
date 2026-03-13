@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use crate::actors::git::GitError;
 use crate::agent::AgentType;
 use crate::agent::output_parser::ParsedAgentOutput;
-use crate::db::repositories::session::SessionRepository;
-use crate::db::repositories::task::TaskRepository;
-use crate::models::session::SessionStatus;
-use crate::models::task::TransitionAction;
+use crate::db::SessionRepository;
+use crate::db::TaskRepository;
+use crate::models::SessionStatus;
+use crate::models::TransitionAction;
 use crate::server::AppState;
 
 // Stale cycle threshold: escalate after this many stale continuations.

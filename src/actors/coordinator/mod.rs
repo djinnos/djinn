@@ -22,9 +22,9 @@ use crate::actors::git::GitActorHandle;
 use crate::actors::slot::{PoolError, SlotPoolHandle};use crate::agent::AgentType;
 use crate::commands::{CommandSpec, run_commands};
 use crate::db::connection::Database;
-use crate::db::repositories::git_settings::GitSettingsRepository;
-use crate::db::repositories::project::ProjectRepository;
-use crate::db::repositories::task::{ReadyQuery, TaskRepository};
+use crate::db::GitSettingsRepository;
+use crate::db::ProjectRepository;
+use crate::db::{ReadyQuery, TaskRepository};
 use crate::events::DjinnEvent;
 use crate::provider::catalog::CatalogService;
 use crate::provider::health::HealthTracker;
@@ -249,7 +249,7 @@ impl CoordinatorActor {
         // Always start with execution paused for all projects.
         #[cfg(not(test))]
         {
-            let repo = crate::db::repositories::project::ProjectRepository::new(
+            let repo = crate::db::ProjectRepository::new(
                 self.db.clone(),
                 self.events_tx.clone(),
             );
@@ -336,7 +336,7 @@ impl CoordinatorActor {
                 reason,
             } => {
                 // Global pause = pause every known project individually.
-                let repo = crate::db::repositories::project::ProjectRepository::new(
+                let repo = crate::db::ProjectRepository::new(
                     self.db.clone(),
                     self.events_tx.clone(),
                 );
@@ -529,7 +529,7 @@ impl CoordinatorActor {
 
         #[cfg(not(test))]
         {
-            let cred_repo = crate::db::repositories::credential::CredentialRepository::new(
+            let cred_repo = crate::db::CredentialRepository::new(
                 self.db.clone(),
                 self.events_tx.clone(),
             );
@@ -836,9 +836,9 @@ mod tests {
 
     use super::*;
     use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
-    use crate::db::repositories::epic::EpicRepository;
-    use crate::db::repositories::task::TaskRepository;
-    use crate::models::task::TransitionAction;
+    use crate::db::EpicRepository;
+    use crate::db::TaskRepository;
+    use crate::models::TransitionAction;
     use crate::provider::health::HealthTracker;
     use crate::server::AppState;
     use crate::test_helpers;
@@ -878,7 +878,7 @@ mod tests {
     async fn make_epic(
         db: &Database,
         tx: broadcast::Sender<DjinnEvent>,
-    ) -> crate::models::epic::Epic {
+    ) -> crate::models::Epic {
         EpicRepository::new(db.clone(), tx)
             .create("Epic", "", "", "", "")
             .await

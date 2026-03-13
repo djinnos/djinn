@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use crate::commands::CommandSpec;
-use crate::db::repositories::project::ProjectRepository;
-use crate::db::repositories::task::TaskRepository;
-use crate::models::task::TransitionAction;
+use crate::db::ProjectRepository;
+use crate::db::TaskRepository;
+use crate::models::TransitionAction;
 use crate::server::AppState;
 
 use super::*;

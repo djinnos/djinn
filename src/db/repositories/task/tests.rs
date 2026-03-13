@@ -1,12 +1,12 @@
 use super::*;
-use crate::db::repositories::epic::EpicRepository;
-use crate::models::task::{TaskStatus, TransitionAction};
+use crate::db::EpicRepository;
+use crate::models::{TaskStatus, TransitionAction};
 use crate::test_helpers;
 
 async fn make_epic(
     db: &Database,
     tx: broadcast::Sender<DjinnEvent>,
-) -> crate::models::epic::Epic {
+) -> crate::models::Epic {
     EpicRepository::new(db.clone(), tx)
         .create("Test Epic", "", "", "", "")
         .await

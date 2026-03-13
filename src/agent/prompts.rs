@@ -8,7 +8,7 @@
 use serde::Deserialize;
 
 use super::AgentType;
-use crate::models::task::Task;
+use crate::models::Task;
 
 // ─── Embedded templates ────────────────────────────────────────────────────────
 

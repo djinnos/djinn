@@ -25,7 +25,7 @@ impl DjinnMcpServer {
         let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
 
         // For singletons, upsert: try create, fall back to update if already exists.
-        use crate::db::repositories::note::is_singleton;
+        use crate::db::is_singleton;
         if is_singleton(&p.note_type)
             && let Some(existing) = repo
                 .get_by_permalink(&project_id, &p.note_type)

@@ -17,7 +17,7 @@ impl CoordinatorActor {
         }
 
         let repo = self.task_repo();
-        let mut ready: Vec<crate::models::task::Task> = match repo
+        let mut ready: Vec<crate::models::Task> = match repo
             .list_ready(ReadyQuery {
                 issue_type: None,
                 limit: self.dispatch_limit as i64,
@@ -330,7 +330,7 @@ impl CoordinatorActor {
                 match repo
                     .transition(
                         &task.id,
-                        crate::models::task::TransitionAction::ReleaseVerification,
+                        crate::models::TransitionAction::ReleaseVerification,
                         "coordinator",
                         "system",
                         Some("orphaned verifying task — verification pipeline lost (server restart)"),

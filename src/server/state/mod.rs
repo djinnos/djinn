@@ -9,9 +9,9 @@ use crate::actors::coordinator::CoordinatorHandle;
 use crate::actors::git::{GitActorHandle, GitError};
 use crate::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use crate::db::connection::Database;
-use crate::db::repositories::note::NoteRepository;
-use crate::db::repositories::project::ProjectRepository;
-use crate::db::repositories::settings::SettingsRepository;
+use crate::db::NoteRepository;
+use crate::db::ProjectRepository;
+use crate::db::SettingsRepository;
 use crate::events::DjinnEvent;
 use crate::provider::{CatalogService, HealthTracker};
 use crate::sync::SyncManager;
@@ -184,8 +184,8 @@ impl AppState {
     /// Load custom providers from DB into the catalog and trigger a background
     /// catalog refresh from models.dev.  Call once after server startup.
     pub async fn initialize(&self) {
-        use crate::db::repositories::custom_provider::CustomProviderRepository;
-        use crate::models::provider::{Model, Provider};
+        use crate::db::CustomProviderRepository;
+        use crate::models::{Model, Provider};
 
         // Load custom providers from DB → merge into in-memory catalog.
         let repo = CustomProviderRepository::new(self.db().clone());
@@ -213,7 +213,7 @@ impl AppState {
                             attachment: false,
                             context_window: 0,
                             output_limit: 0,
-                            pricing: crate::models::provider::Pricing::default(),
+                            pricing: crate::models::Pricing::default(),
                         })
                         .collect();
                     self.catalog().add_custom_provider(provider, seed_models);
@@ -256,7 +256,7 @@ impl AppState {
     }
 
     async fn interrupt_stale_sessions_on_startup(&self) {
-        use crate::db::repositories::session::SessionRepository;
+        use crate::db::SessionRepository;
         let repo = SessionRepository::new(self.db().clone(), self.events().clone());
         match repo.interrupt_all_running().await {
             Ok(0) => {}

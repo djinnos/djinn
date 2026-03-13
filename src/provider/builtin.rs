@@ -183,7 +183,7 @@ pub fn resolve_oauth_provider(provider_id: &str) -> Option<&'static str> {
 /// Remove OAuth tokens from the DB (and any lingering filesystem cache).
 pub async fn clear_oauth_tokens(
     oauth_keys: &[String],
-    repo: &crate::db::repositories::credential::CredentialRepository,
+    repo: &crate::db::CredentialRepository,
 ) {
     use crate::agent::oauth::{codex::CodexTokens, copilot::CopilotTokens};
 

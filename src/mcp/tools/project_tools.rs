@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::commands::{CommandSpec, run_commands};
-use crate::db::repositories::git_settings::GitSettingsRepository;
-use crate::db::repositories::project::ProjectRepository;
+use crate::db::GitSettingsRepository;
+use crate::db::ProjectRepository;
 use crate::mcp::server::DjinnMcpServer;
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";

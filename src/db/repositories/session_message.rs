@@ -4,7 +4,7 @@ use crate::agent::message::{Conversation, Message, Role};
 use crate::db::connection::Database;
 use crate::error::Result;
 use crate::events::DjinnEvent;
-use crate::models::session_message::SessionMessage;
+use crate::models::SessionMessage;
 
 pub struct SessionMessageRepository {
     db: Database,
@@ -175,9 +175,9 @@ mod tests {
     use super::*;
     use crate::agent::message::{Message, Role};
     use crate::db::connection::Database;
-    use crate::db::repositories::epic::EpicRepository;
-    use crate::db::repositories::session::SessionRepository;
-    use crate::db::repositories::task::TaskRepository;
+    use crate::db::EpicRepository;
+    use crate::db::SessionRepository;
+    use crate::db::TaskRepository;
     use crate::events::DjinnEvent;
     use tokio::sync::broadcast;
 

@@ -64,8 +64,8 @@ impl AgentType {
     /// The transition action to claim/start a task for this agent type, given
     /// the task's current status.  Returns `None` if the task is already in the
     /// active state (e.g. `in_progress` for a worker).
-    pub fn start_action(&self, task_status: &str) -> Option<crate::models::task::TransitionAction> {
-        use crate::models::task::TransitionAction;
+    pub fn start_action(&self, task_status: &str) -> Option<crate::models::TransitionAction> {
+        use crate::models::TransitionAction;
         match (self, task_status) {
             (Self::Worker | Self::ConflictResolver, "open") => Some(TransitionAction::Start),
             (Self::TaskReviewer, "needs_task_review") => Some(TransitionAction::TaskReviewStart),
@@ -76,8 +76,8 @@ impl AgentType {
     }
 
     /// The transition action to release/interrupt a task held by this agent type.
-    pub fn release_action(&self) -> crate::models::task::TransitionAction {
-        use crate::models::task::TransitionAction;
+    pub fn release_action(&self) -> crate::models::TransitionAction {
+        use crate::models::TransitionAction;
         match self {
             Self::Worker | Self::ConflictResolver => TransitionAction::Release,
             Self::TaskReviewer => TransitionAction::ReleaseTaskReview,

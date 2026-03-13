@@ -1,12 +1,12 @@
-use crate::db::repositories::project::ProjectConfig;
-use crate::models::credential::Credential;
-use crate::models::epic::Epic;
-use crate::models::git_settings::GitSettings;
-use crate::models::note::Note;
-use crate::models::project::Project;
-use crate::models::session::SessionRecord;
-use crate::models::settings::Setting;
-use crate::models::task::Task;
+use crate::db::ProjectConfig;
+use crate::models::Credential;
+use crate::models::Epic;
+use crate::models::GitSettings;
+use crate::models::Note;
+use crate::models::Project;
+use crate::models::SessionRecord;
+use crate::models::Setting;
+use crate::models::Task;
 
 /// Domain events emitted by repositories after every write.
 ///

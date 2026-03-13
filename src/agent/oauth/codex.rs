@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex as TokioMutex};
 
-use crate::db::repositories::credential::CredentialRepository;
+use crate::db::CredentialRepository;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 

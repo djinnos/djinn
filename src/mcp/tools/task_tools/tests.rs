@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::db::repositories::task::TaskRepository;
+use crate::db::TaskRepository;
 use crate::test_helpers::{
     create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
     create_test_task, initialize_mcp_session, mcp_call_tool,
@@ -126,10 +126,10 @@ async fn task_list_filters_and_pagination() {
         )
         .await
         .unwrap();
-    repo.transition(&t1.id, crate::models::task::TransitionAction::Accept, "a", "user", None, None)
+    repo.transition(&t1.id, crate::models::TransitionAction::Accept, "a", "user", None, None)
         .await
         .unwrap();
-    repo.transition(&t1.id, crate::models::task::TransitionAction::Start, "a", "user", None, None)
+    repo.transition(&t1.id, crate::models::TransitionAction::Start, "a", "user", None, None)
         .await
         .unwrap();
 
@@ -228,10 +228,10 @@ async fn task_count_plain_and_grouped() {
     let epic = create_test_epic(&db, &project.id).await;
     let t1 = create_test_task(&db, &project.id, &epic.id).await;
     let repo = TaskRepository::new(db.clone(), tokio::sync::broadcast::channel(16).0);
-    repo.transition(&t1.id, crate::models::task::TransitionAction::Accept, "u1", "user", None, None)
+    repo.transition(&t1.id, crate::models::TransitionAction::Accept, "u1", "user", None, None)
         .await
         .unwrap();
-    repo.transition(&t1.id, crate::models::task::TransitionAction::Start, "u1", "user", None, None)
+    repo.transition(&t1.id, crate::models::TransitionAction::Start, "u1", "user", None, None)
         .await
         .unwrap();
     let _t2 = create_test_task(&db, &project.id, &epic.id).await;

@@ -10,11 +10,11 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::AgentType;
 use super::sandbox;
-use crate::db::repositories::note::NoteRepository;
-use crate::db::repositories::project::ProjectRepository;
-use crate::db::repositories::session::SessionRepository;
-use crate::db::repositories::task::TaskRepository;
-use crate::models::task::Task;
+use crate::db::NoteRepository;
+use crate::db::ProjectRepository;
+use crate::db::SessionRepository;
+use crate::db::TaskRepository;
+use crate::models::Task;
 use crate::server::AppState;
 
 #[derive(Deserialize)]
@@ -202,7 +202,7 @@ async fn call_task_list(
 
     let limit = p.limit.unwrap_or(50);
     let offset = p.offset.unwrap_or(0);
-    let query = crate::db::repositories::task::ListQuery {
+    let query = crate::db::ListQuery {
         project_id: project_id.map(|s| s.to_string()),
         status: non_empty(p.status),
         issue_type: non_empty(p.issue_type),
@@ -307,7 +307,7 @@ async fn call_task_activity_list(
     state: &AppState,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    use crate::db::repositories::task::ActivityQuery;
+    use crate::db::ActivityQuery;
 
     let p: TaskActivityListParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db().clone(), state.events().clone());
@@ -842,11 +842,11 @@ async fn resolve_note_by_identifier(
     repo: &NoteRepository,
     project_id: &str,
     identifier: &str,
-) -> Option<crate::models::note::Note> {
+) -> Option<crate::models::Note> {
     repo.resolve(project_id, identifier).await.ok().flatten()
 }
 
-fn note_to_value(note: &crate::models::note::Note) -> serde_json::Value {
+fn note_to_value(note: &crate::models::Note) -> serde_json::Value {
     note.to_value()
 }
 
@@ -912,7 +912,7 @@ async fn call_task_transition(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     use crate::actors::slot::task_review::{merge_and_transition, PM_MERGE_ACTIONS};
-    use crate::models::task::{TaskStatus, TransitionAction};
+    use crate::models::{TaskStatus, TransitionAction};
     let p: TaskTransitionParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db().clone(), state.events().clone());
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {

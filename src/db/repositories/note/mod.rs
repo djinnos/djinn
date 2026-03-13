@@ -7,7 +7,7 @@ use tokio::sync::broadcast;
 use crate::db::connection::Database;
 use crate::error::{Error, Result};
 use crate::events::DjinnEvent;
-use crate::models::note::{
+use crate::models::{
     BrokenLink, GraphEdge, GraphNode, GraphResponse, HealthReport, Note, NoteCompact,
     NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
 };
@@ -47,7 +47,7 @@ impl NoteRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::repositories::project::ProjectRepository;
+    use crate::db::ProjectRepository;
     use crate::test_helpers;
     use tokio::sync::broadcast;
 
@@ -55,7 +55,7 @@ mod tests {
         db: &Database,
         tx: broadcast::Sender<DjinnEvent>,
         path: &Path,
-    ) -> crate::models::project::Project {
+    ) -> crate::models::Project {
         ProjectRepository::new(db.clone(), tx)
             .create("test-project", path.to_str().unwrap())
             .await

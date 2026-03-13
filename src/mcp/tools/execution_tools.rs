@@ -4,8 +4,8 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::db::repositories::session::SessionRepository;
-use crate::db::repositories::task::TaskRepository;
+use crate::db::SessionRepository;
+use crate::db::TaskRepository;
 use crate::mcp::server::DjinnMcpServer;
 
 #[derive(Deserialize, schemars::JsonSchema)]

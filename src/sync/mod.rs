@@ -32,7 +32,7 @@ use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::db::connection::Database;
-use crate::db::repositories::project::ProjectRepository;
+use crate::db::ProjectRepository;
 use crate::events::DjinnEvent;
 use backoff::BackoffState;
 pub use tasks_channel::TaskSyncError;
@@ -464,7 +464,7 @@ impl SyncManager {
     // ── Internal helpers ──────────────────────────────────────────────────────
 
     /// Query sync-enabled projects from the DB (SYNC-07).
-    async fn list_sync_enabled_projects(&self) -> Vec<crate::models::project::Project> {
+    async fn list_sync_enabled_projects(&self) -> Vec<crate::models::Project> {
         project_repo(&self.inner)
             .list_sync_enabled()
             .await
@@ -568,7 +568,7 @@ mod tests {
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
         // Create a project.
-        let project_repo = crate::db::repositories::project::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
         let project = project_repo.create("test-proj", "/tmp/test-project").await.unwrap();
 
         mgr.enable_project(&project.id).await.unwrap();
@@ -585,7 +585,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
-        let project_repo = crate::db::repositories::project::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
         let project = project_repo.create("test-proj", "/tmp/test-project").await.unwrap();
 
         mgr.enable_project(&project.id).await.unwrap();
@@ -601,7 +601,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
-        let project_repo = crate::db::repositories::project::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
         let project = project_repo.create("my-repo", "/tmp/my-repo").await.unwrap();
         mgr.enable_project(&project.id).await.unwrap();
 
@@ -617,7 +617,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
-        let project_repo = crate::db::repositories::project::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
         let p1 = project_repo.create("alpha", "/tmp/alpha").await.unwrap();
         let p2 = project_repo.create("beta", "/tmp/beta").await.unwrap();
         let _p3 = project_repo.create("gamma", "/tmp/gamma").await.unwrap();
@@ -644,14 +644,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_for_export_filters_by_project_id() {
-        use crate::db::repositories::epic::EpicRepository;
-        use crate::db::repositories::task::TaskRepository;
+        use crate::db::EpicRepository;
+        use crate::db::TaskRepository;
 
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(64);
 
         // Create two projects with tasks.
-        let project_repo = crate::db::repositories::project::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
         let p1 = project_repo.create("proj-a", "/tmp/a").await.unwrap();
         let p2 = project_repo.create("proj-b", "/tmp/b").await.unwrap();
 
@@ -706,8 +706,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upsert_peer_emits_from_sync_true() {
-        use crate::db::repositories::epic::EpicRepository;
-        use crate::db::repositories::task::TaskRepository;
+        use crate::db::EpicRepository;
+        use crate::db::TaskRepository;
 
         let db = crate::test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(64);
@@ -722,7 +722,7 @@ mod tests {
         while rx.try_recv().is_ok() {}
 
         let task_repo = TaskRepository::new(db.clone(), tx.clone());
-        let peer_task = crate::models::task::Task {
+        let peer_task = crate::models::Task {
             id: uuid::Uuid::now_v7().to_string(),
             project_id: epic.project_id.clone(),
             short_id: "abc".to_string(),
@@ -763,7 +763,7 @@ mod tests {
     #[test]
     fn sse_envelope_excludes_from_sync_field() {
         // Verify that serde serialization of DjinnEvent skips the from_sync field.
-        let task = crate::models::task::Task {
+        let task = crate::models::Task {
             id: "test-id".to_string(),
             project_id: "proj".to_string(),
             short_id: "xyz".to_string(),
@@ -805,7 +805,7 @@ mod tests {
     fn background_task_match_filters_from_sync_true() {
         // Verify the pattern matching logic: from_sync=true events should NOT
         // match the arm that sets pending=true.
-        let task = crate::models::task::Task {
+        let task = crate::models::Task {
             id: "t".to_string(),
             project_id: "p".to_string(),
             short_id: "s".to_string(),
@@ -944,7 +944,7 @@ mod tests {
         let user_id = "test-user".to_string();
 
         // Create a project and enable it for sync.
-        let project_repo = crate::db::repositories::project::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
         let project = project_repo.create("interval-test", "/tmp/interval-test").await.unwrap();
         mgr.enable_project(&project.id).await.unwrap();
 

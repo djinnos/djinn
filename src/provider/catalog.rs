@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::models::provider::{Model, Pricing, Provider};
+use crate::models::{Model, Pricing, Provider};
 use super::builtin::BuiltinProvider;
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
@@ -263,7 +263,7 @@ impl CatalogService {
     /// This is the single source of truth for "is provider X connected?".
     pub fn connected_provider_ids(
         &self,
-        vault_credentials: &[crate::models::credential::Credential],
+        vault_credentials: &[crate::models::Credential],
     ) -> HashSet<String> {
         use super::builtin;
 

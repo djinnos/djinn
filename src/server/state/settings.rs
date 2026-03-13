@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig};
-use crate::db::repositories::credential::CredentialRepository;
-use crate::db::repositories::settings::SettingsRepository;
-use crate::models::settings::DjinnSettings;
+use crate::db::CredentialRepository;
+use crate::db::SettingsRepository;
+use crate::models::DjinnSettings;
 
 use super::{AppState, SETTINGS_RAW_KEY};
 
