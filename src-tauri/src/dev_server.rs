@@ -25,7 +25,7 @@ struct AuthCallbackQuery {
 }
 
 /// Success HTML response
-const SUCCESS_HTML: &str = "<!DOCTYPE html><html><head><title>Authentication Successful</title><style>body{font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#f5f5f5;}.container{text-align:center;padding:2rem;background:white;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.1);}h1{color:#4CAF50;}p{color:#666;}</style></head><body><div class=\"container\"><h1>Authentication Successful</h1><p>You can close this window and return to DjinnOS.</p></div></body></html>";
+const SUCCESS_HTML: &str = "<!DOCTYPE html><html><head><title>Djinn</title><style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#0a0a0b;color:#a1a1aa;}p{font-size:14px;}</style></head><body><p>Authenticated. You can close this tab.</p></body></html>";
 
 /// Spawn the ephemeral HTTP server for dev-mode OAuth callbacks
 ///
@@ -48,7 +48,7 @@ pub async fn spawn_dev_server(
     // Build router
     let app = Router::new()
         .route("/auth/callback", get(move |query| handle_auth_callback(query, manager.clone(), app_for_handler.clone())))
-        .route("/", get(|| async { "DjinnOS Dev Server" }));
+        .route("/", get(|| async { "Djinn Dev Server" }));
 
     // Try to bind to the port
     let addr = format!("127.0.0.1:{}", DEV_CALLBACK_PORT);

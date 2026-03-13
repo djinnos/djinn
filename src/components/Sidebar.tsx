@@ -520,15 +520,6 @@ export function Sidebar() {
           isCollapsed={isCollapsed}
           onClick={() => navigate('/settings')}
         />
-        {!isCollapsed && (
-          <button
-            type="button"
-            className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm transition-colors text-muted-foreground hover:bg-white/[0.04] hover:text-foreground"
-          >
-            <Plus className="h-4 w-4" />
-            <span>New Project</span>
-          </button>
-        )}
         <UserFooter isCollapsed={isCollapsed} />
       </div>
     </aside>

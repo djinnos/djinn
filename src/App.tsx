@@ -26,7 +26,7 @@ import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 function WelcomeStep() {
   return (
     <div className="flex flex-col gap-4 text-center">
-      <h2 className="text-2xl font-semibold">Welcome to DjinnOS</h2>
+      <h2 className="text-2xl font-semibold">Welcome to Djinn</h2>
       <p className="text-muted-foreground">
         Let's set up your workspace in a few simple steps.
       </p>

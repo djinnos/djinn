@@ -72,7 +72,7 @@ describe("AuthGate", () => {
       renderAuthGate();
 
       await waitFor(() => {
-        expect(screen.getByText("Please sign in to continue to DjinnOS.")).toBeInTheDocument();
+        expect(screen.getByText("Please sign in to continue to Djinn.")).toBeInTheDocument();
       });
     });
 

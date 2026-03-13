@@ -70,10 +70,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
   if (!isAuthenticated) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-background text-foreground">
-        <div className="flex w-full max-w-md flex-col items-center gap-4 rounded-lg border p-8 text-center">
+        <div className="flex w-full max-w-md flex-col items-center gap-4 rounded-lg p-8 text-center">
           <h1 className="text-2xl font-semibold">Sign in required</h1>
           <p className="text-sm text-muted-foreground">
-            {error || "Please sign in to continue to DjinnOS."}
+            {error || "Please sign in to continue to Djinn."}
           </p>
           <Button onClick={() => login()}>Sign in</Button>
         </div>
