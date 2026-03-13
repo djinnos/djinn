@@ -78,7 +78,7 @@ function getStatusBadge(status: string, hasSession: boolean, allAcMet: boolean):
     return { label: "agent stuck", className: "text-red-400" };
   }
   if ((status === "needs_pm_intervention" || status === "in_pm_intervention") && hasSession) {
-    return { label: "pm active", className: "text-orange-400 animate-pulse" };
+    return { label: "pm active", className: "text-red-400 animate-pulse" };
   }
   if (status === "verifying") {
     return { label: "verifying", className: "text-yellow-400 animate-pulse" };
@@ -109,7 +109,7 @@ function getCardTint(task: Task): { ring: string; bg: string; hover: string; act
     return { ring: "ring-red-500/40", bg: "bg-red-500/5", hover: "hover:bg-red-500/10 hover:ring-red-500/60", actionsBg: "bg-red-500/10 text-white" };
   }
   if ((task.status === "needs_pm_intervention" && task.active_session) || task.status === "in_pm_intervention") {
-    return { ring: "ring-orange-500/40", bg: "bg-orange-500/5", hover: "hover:bg-orange-500/10 hover:ring-orange-500/60", actionsBg: "bg-orange-500/10 text-white" };
+    return { ring: "ring-red-500/40", bg: "bg-red-500/5", hover: "hover:bg-red-500/10 hover:ring-red-500/60", actionsBg: "bg-red-500/10 text-white" };
   }
   return null;
 }
