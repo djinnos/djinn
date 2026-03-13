@@ -25,15 +25,38 @@ You have access to these tools via the `djinn` extension:
 - `task_update(id, ...)` — update task fields (description, design, acceptance_criteria, memory_refs)
 - `task_transition(id, action, reason?, replacement_task_ids?)` — transition task status. `force_close` requires `replacement_task_ids`
 - `task_comment_add(id, body)` — leave notes for other agents
+- `epic_show(id)` — read epic details (description, memory refs, task counts)
+- `epic_tasks(id)` — list tasks belonging to an epic
+- `epic_update(id, ...)` — update epic fields (description, memory refs)
 - `memory_read(project, url)` — read a knowledge base note by URL
 - `memory_search(project, query)` — search the project knowledge base for ADRs, patterns, decisions
 - `memory_list(project)` — list all knowledge base notes
 
 ## Workflow
 
-1. List backlog tasks:
-   - Call `task_list(project="{{project_path}}", status="backlog")`.
-2. For each task, inspect details:
+### Phase 1: Epic Review
+
+Before grooming individual tasks, review each epic that has backlog tasks.
+
+1. Call `task_list(project="{{project_path}}", status="backlog")`.
+2. Identify unique epic IDs referenced by those backlog tasks.
+3. For each epic ID:
+   - Call `epic_show(id)`.
+   - Call `epic_tasks(id)`.
+   - Validate epic quality:
+     - **Description quality:** does it clearly state GOAL (what outcome), STRATEGY (how we will achieve it), and CONSTRAINTS (what to avoid / non-goals)?
+     - **Memory refs quality:** for non-trivial epics, ensure at least one ADR/spec reference exists.
+     - **Task coherence:** tasks align with the strategy, no obvious duplicates, and decomposition is healthy.
+4. If epic quality is poor, update it **before grooming tasks under it**:
+   - Use `epic_update(id, description=...)` to add goal/strategy/constraints and anti-patterns.
+   - If refs are missing, search memory (`memory_search` / `memory_read`) and add refs via `epic_update(id, memory_refs_add=[...])`.
+5. If an epic has more than 12 open tasks, treat it as over-decomposed:
+   - Flag this in comments on affected tasks and consider force-closing duplicates with replacements where appropriate.
+6. If task(s) do not align with epic strategy, comment and either improve/move/split/close appropriately during task grooming.
+
+### Phase 2: Task Grooming
+
+1. For each backlog task, inspect details:
    - Call `task_show(id)`.
    - Validate:
      - Acceptance criteria are concrete and testable.
