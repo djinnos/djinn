@@ -148,3 +148,72 @@ pub enum DjinnEvent {
         payload: serde_json::Value,
     },
 }
+
+
+impl DjinnEvent {
+    pub fn entity_type(&self) -> &'static str {
+        match self {
+            DjinnEvent::SettingUpdated(_) => "setting",
+            DjinnEvent::ProjectCreated(_) | DjinnEvent::ProjectUpdated(_) | DjinnEvent::ProjectDeleted { .. } => "project",
+            DjinnEvent::ProjectConfigUpdated { .. } => "project_config",
+            DjinnEvent::EpicCreated(_) | DjinnEvent::EpicUpdated(_) | DjinnEvent::EpicDeleted { .. } => "epic",
+            DjinnEvent::TaskCreated { .. } | DjinnEvent::TaskUpdated { .. } | DjinnEvent::TaskDeleted { .. } => "task",
+            DjinnEvent::NoteCreated(_) | DjinnEvent::NoteUpdated(_) | DjinnEvent::NoteDeleted { .. } => "note",
+            DjinnEvent::GitSettingsUpdated { .. } => "git_settings",
+            DjinnEvent::CustomProviderUpserted(_) | DjinnEvent::CustomProviderDeleted { .. } => "custom_provider",
+            DjinnEvent::CredentialCreated(_) | DjinnEvent::CredentialUpdated(_) | DjinnEvent::CredentialDeleted { .. } => "credential",
+            DjinnEvent::SessionDispatched { .. } | DjinnEvent::SessionCreated(_) | DjinnEvent::SessionUpdated(_) | DjinnEvent::SessionTokenUpdate { .. } | DjinnEvent::SessionMessage { .. } => "session",
+            DjinnEvent::SessionMessageInserted { .. } => "session_message",
+            DjinnEvent::SyncCompleted { .. } => "sync",
+            DjinnEvent::ProjectHealthChanged { .. } => "project",
+            DjinnEvent::ActivityLogged { .. } => "activity",
+        }
+    }
+
+    pub fn action(&self) -> &'static str {
+        match self {
+            DjinnEvent::SettingUpdated(_) => "updated",
+            DjinnEvent::ProjectCreated(_) => "created",
+            DjinnEvent::ProjectUpdated(_) => "updated",
+            DjinnEvent::ProjectDeleted { .. } => "deleted",
+            DjinnEvent::ProjectConfigUpdated { .. } => "updated",
+            DjinnEvent::EpicCreated(_) => "created",
+            DjinnEvent::EpicUpdated(_) => "updated",
+            DjinnEvent::EpicDeleted { .. } => "deleted",
+            DjinnEvent::TaskCreated { .. } => "created",
+            DjinnEvent::TaskUpdated { .. } => "updated",
+            DjinnEvent::TaskDeleted { .. } => "deleted",
+            DjinnEvent::NoteCreated(_) => "created",
+            DjinnEvent::NoteUpdated(_) => "updated",
+            DjinnEvent::NoteDeleted { .. } => "deleted",
+            DjinnEvent::GitSettingsUpdated { .. } => "updated",
+            DjinnEvent::CustomProviderUpserted(_) => "updated",
+            DjinnEvent::CustomProviderDeleted { .. } => "deleted",
+            DjinnEvent::CredentialCreated(_) => "created",
+            DjinnEvent::CredentialUpdated(_) => "updated",
+            DjinnEvent::CredentialDeleted { .. } => "deleted",
+            DjinnEvent::SessionDispatched { .. } => "dispatched",
+            DjinnEvent::SessionCreated(_) => "started",
+            DjinnEvent::SessionUpdated(v) => match v.status.as_str() {
+                "completed" => "completed",
+                "interrupted" => "interrupted",
+                "failed" => "failed",
+                _ => "updated",
+            },
+            DjinnEvent::SessionTokenUpdate { .. } => "token_update",
+            DjinnEvent::SessionMessage { .. } => "message",
+            DjinnEvent::SessionMessageInserted { .. } => "inserted",
+            DjinnEvent::SyncCompleted { .. } => "completed",
+            DjinnEvent::ProjectHealthChanged { healthy: true, .. } => "health_ok",
+            DjinnEvent::ProjectHealthChanged { healthy: false, .. } => "health_error",
+            DjinnEvent::ActivityLogged { .. } => "logged",
+        }
+    }
+
+    pub fn from_sync(&self) -> bool {
+        match self {
+            DjinnEvent::TaskCreated { from_sync, .. } | DjinnEvent::TaskUpdated { from_sync, .. } => *from_sync,
+            _ => false,
+        }
+    }
+}

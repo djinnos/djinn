@@ -156,25 +156,15 @@ impl SyncManager {
                 tokio::select! {
                     result = events_rx.recv() => {
                         match result {
-                            Ok(
-                                DjinnEvent::TaskCreated { from_sync: false, .. }
-                                | DjinnEvent::TaskUpdated { from_sync: false, .. }
-                                | DjinnEvent::TaskDeleted { .. },
-                            ) => {
+                            Ok(evt) if evt.entity_type() == "task" && !evt.from_sync() => {
                                 pending = true;
                             }
-                            // Sync-originated events are intentionally ignored to
-                            // prevent import → export → import feedback loops (SYNC-06).
-                            Ok(
-                                DjinnEvent::TaskCreated { from_sync: true, .. }
-                                | DjinnEvent::TaskUpdated { from_sync: true, .. },
-                            ) => {}
+                            Ok(_) => {}
                             Err(broadcast::error::RecvError::Lagged(_)) => {
                                 // We missed some events; schedule a sync anyway.
                                 pending = true;
                             }
                             Err(broadcast::error::RecvError::Closed) => break,
-                            _ => {}
                         }
                     }
                     _ = debounce.tick() => {
