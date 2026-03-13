@@ -3,6 +3,7 @@ import workerAvatar from "@/assets/worker.png";
 import taskReviewerAvatar from "@/assets/task_reviewer.png";
 import pmAvatar from "@/assets/pm.png";
 import conflictResolverAvatar from "@/assets/conflict_resolver.png";
+import scribeAvatar from "@/assets/scribe.png";
 import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -155,6 +156,7 @@ const AGENT_AVATARS: Record<string, string> = {
   task_reviewer: taskReviewerAvatar,
   conflict_resolver: conflictResolverAvatar,
   pm: pmAvatar,
+  groomer: scribeAvatar,
 };
 
 function agentAvatar(agentType?: string): string {

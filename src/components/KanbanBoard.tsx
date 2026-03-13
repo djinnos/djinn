@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useStore } from "zustand";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
 import { useProjects, useSelectedProjectId } from "@/stores/useProjectStore";
 import { taskStore } from "@/stores/taskStore";
+import { projectSessionStore } from "@/stores/projectSessionStore";
 import type { Epic, Task } from "@/api/types";
 import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
@@ -110,6 +112,7 @@ export function KanbanBoard({
 
   const tasks = tasksProp ?? storeTasks;
   const epics = epicsProp ?? storeEpics;
+  const projectSessions = useStore(projectSessionStore, (state) => state.activeProjectSessions);
   const [searchParams, setSearchParams] = useSearchParams();
   const [collapsedEpics, setCollapsedEpics] = useState<Record<string, boolean>>(() => {
     const next: Record<string, boolean> = {};
@@ -251,10 +254,18 @@ export function KanbanBoard({
     });
   }, [tasks, epicFilters, ownerFilters, priorityFilters, textFilter]);
 
-  const isGrooming = useMemo(
-    () => tasks.some((t) => t.status === "grooming"),
-    [tasks]
-  );
+  const isGrooming = useMemo(() => {
+    if (selectedProjectId === "all") {
+      return Array.from(projectSessions.values()).some((session) => session.agent_type === "groomer");
+    }
+
+    if (!selectedProjectId) {
+      return false;
+    }
+
+    const projectSession = projectSessionStore.getState().getActiveProjectSession(selectedProjectId);
+    return projectSession?.agent_type === "groomer";
+  }, [selectedProjectId, projectSessions]);
 
   const groupedByStatusThenEpic = useMemo(() => {
     const byColumn = new Map<ColumnKey, Map<string, Task[]>>();
