@@ -325,10 +325,10 @@ mod tests {
             "epic_list",
             "memory_search",
             "project_list",
-            "provider_list",
+            "provider_catalog",
             "session_list",
             "settings_get",
-            "health",
+            "system_ping",
         ] {
             assert!(names.contains(required), "missing required tool schema: {required}");
         }
@@ -346,9 +346,9 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
 
         assert!(names.contains("credential_set"));
-        assert!(names.contains("sync_tasks"));
+        assert!(names.contains("task_sync_enable"));
         assert!(names.contains("project_list"));
-        assert!(names.contains("execution_request"));
+        assert!(names.contains("execution_start"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

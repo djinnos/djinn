@@ -452,8 +452,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dispatch_tool_routes_provider_family() {
         let mcp = test_mcp();
-        let result = mcp.dispatch_tool("provider_list", json!({})).await;
-        assert!(result.is_ok(), "dispatch_tool provider_list returned error: {result:?}");
+        let result = mcp.dispatch_tool("provider_catalog", json!({})).await;
+        assert!(result.is_ok(), "dispatch_tool provider_catalog returned error: {result:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
