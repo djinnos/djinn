@@ -227,7 +227,7 @@ export function KanbanBoard({
   }, [epicFilters, ownerFilters, priorityFilters, textFilter, searchParams, setSearchParams, disableSearchParamSync]);
 
   const epicOptions = useMemo(
-    () => Array.from(epics.values()).sort((a, b) => a.title.localeCompare(b.title)),
+    () => Array.from(epics.values()).sort((a, b) => (a.title ?? "").localeCompare(b.title ?? "")),
     [epics]
   );
 

@@ -27,16 +27,22 @@ export function TaskIdLabel({
   const tooltip = shortId ? `${taskId} — click to copy` : "Click to copy";
 
   return (
-    <button
-      type="button"
+    <span
+      role="button"
+      tabIndex={0}
       onClick={handleClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleClick(e as unknown as React.MouseEvent);
+        }
+      }}
       className={cn(
         "inline-flex items-center gap-1",
         "text-xs text-muted-foreground font-mono cursor-pointer",
         "hover:text-foreground transition-colors rounded",
         "select-none",
         "focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2",
-        "border-none bg-transparent p-0 text-left",
         className,
       )}
       title={tooltip}
@@ -52,6 +58,6 @@ export function TaskIdLabel({
         )}
         aria-hidden="true"
       />
-    </button>
+    </span>
   );
 }
