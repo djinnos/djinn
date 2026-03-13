@@ -23,7 +23,7 @@ You have access to these tools via the `djinn` extension:
 - `task_show(id)` — read full task details
 - `task_create(project, title, ...)` — create new tasks (for splitting oversized work)
 - `task_update(id, ...)` — update task fields (description, design, acceptance_criteria, memory_refs)
-- `task_transition(id, action, reason?)` — transition task status
+- `task_transition(id, action, reason?, replacement_task_ids?)` — transition task status. `force_close` requires `replacement_task_ids`
 - `task_comment_add(id, body)` — leave notes for other agents
 - `memory_read(project, url)` — read a knowledge base note by URL
 - `memory_search(project, query)` — search the project knowledge base for ADRs, patterns, decisions
@@ -52,11 +52,14 @@ Promote it for worker dispatch:
 
 ### If task is oversized
 
-Split it into smaller, independently deliverable tasks:
-- A task is oversized when it touches more than ~3 files or requires multiple conceptually distinct changes (e.g., "refactor type + update all call sites + rewrite tests" is 3 tasks, not 1).
-- Create new smaller tasks with `task_create(...)`, each with its own AC and design. Set `blocked_by` to express ordering dependencies between the new tasks.
-- Close the original oversized task: `task_transition(id, action="wont_do", reason="Split into smaller tasks: <list short_ids>")`.
-- Leave a comment on the original linking to the new tasks.
+**You MUST split it now — do not describe the split and leave it in backlog.** Reporting how a task *should* be split without actually creating the subtasks is a wasted session.
+
+A task is oversized when it touches more than ~3 files or requires multiple conceptually distinct changes (e.g., "refactor type + update all call sites + rewrite tests" is 3 tasks, not 1).
+
+1. Create the smaller tasks with `task_create(...)`, each with its own AC and design. Set `blocked_by` to express ordering dependencies between the new tasks.
+2. Close the original: `task_transition(id, action="force_close", replacement_task_ids=["<id1>", "<id2>", ...], reason="Split into smaller tasks")`.
+   - The system **will reject** the close if you haven't actually created the replacement tasks — you must pass their IDs.
+3. Leave a comment on the original linking to the new tasks.
 
 ### If task is underspecified
 
