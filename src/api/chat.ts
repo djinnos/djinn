@@ -38,7 +38,7 @@ export async function sendChatMessage(
           content: message.content,
         })),
         model,
-        project_path: projectPath,
+        project: projectPath,
       }),
       signal: options?.signal,
     });
