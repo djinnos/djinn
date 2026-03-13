@@ -960,6 +960,25 @@ async fn call_task_transition(
         return Ok(task_to_value(&updated));
     }
 
+    // Guard: force_close requires at least one open subtask in the same epic.
+    // Without this, the PM can close a task claiming "decomposition" without
+    // actually creating the replacement subtasks, losing unmerged work.
+    if action == TransitionAction::ForceClose
+        && let Some(ref epic_id) = task.epic_id
+    {
+        let all_in_epic = repo.list_by_epic(epic_id).await.unwrap_or_default();
+        let has_open_subtask = all_in_epic.iter().any(|t| {
+            t.id != task.id
+                && t.status == TaskStatus::Open.as_str()
+                && t.created_at > task.created_at
+        });
+        if !has_open_subtask {
+            return Ok(serde_json::json!({
+                "error": "force_close requires at least one open subtask created after this task in the same epic. Create subtasks with task_create first, then force_close."
+            }));
+        }
+    }
+
     let target = p.target_status
         .as_deref()
         .map(TaskStatus::parse)
