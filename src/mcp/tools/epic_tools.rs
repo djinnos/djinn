@@ -639,13 +639,10 @@ impl DjinnMcpServer {
                 error: Some(epic_not_found_error(&p.id)),
             });
         };
-        if epic.status != "open" && epic.status != "in_review" {
+        if epic.status == "closed" {
             return Json(EpicSingleResponse {
                 epic: None,
-                error: Some(format!(
-                    "epic must be open or in_review to close (current: {})",
-                    epic.status
-                )),
+                error: Some("epic is already closed".to_string()),
             });
         }
         match repo.close(&epic.id).await {
@@ -1145,7 +1142,7 @@ mod tests {
         assert!(result["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("must be open"));
+            .contains("already closed"));
     }
 
     #[tokio::test]

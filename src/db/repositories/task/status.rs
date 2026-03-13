@@ -203,7 +203,7 @@ impl TaskRepository {
         if let Some(epic_id) = new_epic_id {
             let epic_repo = EpicRepository::new(self.db.clone(), self.events.clone());
             if let Some(epic) = epic_repo.get(epic_id).await?
-                && (epic.status == "closed" || epic.status == "in_review")
+                && epic.status == "closed"
             {
                 let _ = epic_repo.reopen(epic_id).await?;
             }
