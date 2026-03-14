@@ -105,6 +105,16 @@ If `pm_approve` fails (e.g. verification still failing, merge conflict), **do no
 
 Never end your session by describing what you *would* do — execute it. If a transition fails, try the next best action in the same session.
 
+## Out-of-Workspace AC
+
+Workers can only modify files inside this project's workspace. If an AC requires changes to code that lives **outside this workspace** (another project, service, repository, or codebase):
+
+1. **Remove the AC** from this task using `task_update`.
+2. **Add a comment** with `task_comment_add` describing what work is needed and where, so the user can handle it on the right project.
+3. If all remaining ACs are met after removal, approve the task.
+
+**Never create subtasks for work outside this workspace.** Workers cannot access other projects — such tasks will fail repeatedly.
+
 ## Rules
 
 - **Check your own history first.** Never intervene blind — always read prior PM activity before choosing a strategy.
