@@ -344,7 +344,20 @@ Steps are ephemeral (in-memory store only). Historical results are available via
 ### Neutral
 
 - **DB columns remain** — `setup_commands` and `verification_commands` stay in the projects table as fallback. Deprecated but not removed.
-- **`project_commands_set`/`get` MCP tools** — kept for backward compatibility and for projects that haven't adopted `.djinn/settings.json` yet. Could add a tool to initialize the file from DB config.
+
+### Part 5: MCP tool changes — remove `project_commands_set`/`get`, add validation
+
+**Remove** the `project_commands_set` and `project_commands_get` MCP tools. With `.djinn/settings.json` in the repo, agents edit the file directly in their worktree — no need for DB-backed command storage or heavy pre-validation that creates temp worktrees and runs all commands.
+
+**Add** a lightweight `project_settings_validate` tool:
+- Reads `.djinn/settings.json` from a given worktree path
+- Validates JSON syntax and schema only (no command execution)
+- Returns `{ valid: bool, errors: String[] }`
+- Fast: pure parsing, no shell execution, no worktree creation
+
+**Agent workflow:** Workers, PMs, and groomers are told about `.djinn/settings.json` in their system prompts. When a task changes the build system, the worker edits the settings file, optionally calls `project_settings_validate` for fast feedback, and commits. Verification runs on the commit and catches any issues — the error feeds back to the worker for correction.
+
+**Error handling for invalid settings:** If `.djinn/settings.json` exists but contains invalid JSON, `load_commands()` returns an error (does NOT silently fall back to DB). If the file is absent, DB fallback applies. This ensures malformed settings are caught immediately rather than masked.
 
 ## Migration Strategy
 
@@ -352,10 +365,11 @@ Steps are ephemeral (in-memory store only). Historical results are available via
 
 1. Add `verification_cache` table migration
 2. Create `VerificationService` with `verify_commit()` function
-3. Add `load_commands()` that reads `.djinn/settings.json` with DB fallback
+3. Add `load_commands()` that reads `.djinn/settings.json` with DB fallback (error on invalid file)
 4. Refactor all 5 call sites to use `VerificationService`
 5. Add commit-hash cache lookup and insertion
 6. Worker setup: always runs setup commands in worktree (no cache for setup side-effects)
+7. Remove `project_commands_set`/`get` tools, add `project_settings_validate`
 
 ### Phase 2: SSE step events (server)
 
@@ -372,12 +386,6 @@ Steps are ephemeral (in-memory store only). Historical results are available via
 4. Enhance sidebar project dot with healthcheck states
 5. Add health flyout panel
 6. Add "Setup & Verification" section to TaskDetailPanel / TaskSessionPage
-
-### Phase 4: Cleanup
-
-1. Add `project_commands_init` MCP tool to generate `.djinn/settings.json` from DB config
-2. Deprecation warnings on `project_commands_set`/`get` when `.djinn/settings.json` exists
-3. Documentation update
 
 ## References
 
