@@ -1,0 +1,21 @@
+{
+  "setup": [
+    {
+      "name": "seed-build-cache",
+      "command": "bash scripts/seed-build-cache.sh",
+      "timeout_secs": 60
+    }
+  ],
+  "verification": [
+    {
+      "name": "clippy",
+      "command": "cargo clippy -- -D warnings",
+      "timeout_secs": 300
+    },
+    {
+      "name": "test",
+      "command": "RUSTFLAGS=\"-D warnings\" cargo test",
+      "timeout_secs": 600
+    }
+  ]
+}

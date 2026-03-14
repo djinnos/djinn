@@ -77,7 +77,6 @@ impl CoordinatorActor {
 
             let project_cfg = match crate::verification::settings::load_commands(
                 std::path::Path::new(&project.path),
-                &project,
             ) {
                 Ok(cfg) => cfg,
                 Err(e) => {
@@ -183,19 +182,10 @@ pub(super) async fn run_project_health_check(
             return Err("failed to resolve non-empty target branch HEAD".to_string());
         }
 
-        let project = ProjectRepository::new(app_state.db().clone(), events_tx.clone())
-            .get(&project_id)
-            .await
-            .map_err(|e| format!("failed to load project for health-check verification: {e}"))?
-            .ok_or_else(|| {
-                format!("failed to load project for health-check verification: project '{project_id}' not found")
-            })?;
-
         let verification = crate::verification::service::verify_commit(
             &project_id,
             &commit_sha,
             &wt_path,
-            &project,
             &app_state,
         )
         .await

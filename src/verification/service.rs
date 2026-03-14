@@ -5,7 +5,6 @@ use crate::commands::CommandResult;
 use crate::commands::run_commands;
 use crate::db::VerificationCacheRepository;
 use crate::error::Result;
-use crate::models::Project;
 use crate::server::AppState;
 
 use super::settings::load_commands;
@@ -28,13 +27,12 @@ pub async fn verify_commit(
     project_id: &str,
     commit_sha: &str,
     worktree_path: &Path,
-    project: &Project,
     app_state: &AppState,
 ) -> Result<VerificationResult> {
     let start = Instant::now();
     let cache_repo = VerificationCacheRepository::new(app_state.db().clone());
 
-    let (setup_commands, verification_commands) = load_commands(worktree_path, project)
+    let (setup_commands, verification_commands) = load_commands(worktree_path)
         .map_err(crate::error::Error::Internal)?;
 
     let setup_results = run_commands(&setup_commands, worktree_path).await?;
@@ -88,36 +86,32 @@ mod tests {
     use crate::commands::CommandResult;
     use crate::db::VerificationCacheRepository;
     use crate::db::connection::Database;
-    use crate::models::Project;
     use crate::server::AppState;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
-
-    fn test_project(setup_commands: &str, verification_commands: &str) -> Project {
-        Project {
-            id: "p1".into(),
-            name: "proj".into(),
-            path: "/tmp/proj".into(),
-            created_at: "now".into(),
-            setup_commands: setup_commands.into(),
-            verification_commands: verification_commands.into(),
-            target_branch: "main".into(),
-            auto_merge: false,
-            sync_enabled: false,
-            sync_remote: None,
-        }
-    }
 
     fn test_state() -> AppState {
         let db = Database::open_in_memory().expect("in-memory db");
         AppState::new(db, CancellationToken::new())
     }
 
+    /// Write a `.djinn/settings.json` into the given directory.
+    fn write_settings(dir: &Path, setup_json: &str, verification_json: &str) {
+        let djinn_dir = dir.join(".djinn");
+        std::fs::create_dir_all(&djinn_dir).expect("create .djinn");
+        std::fs::write(
+            djinn_dir.join("settings.json"),
+            format!(r#"{{"setup": {setup_json}, "verification": {verification_json}}}"#),
+        )
+        .expect("write settings.json");
+    }
+
     #[tokio::test]
     async fn verify_commit_cache_miss_runs_full_pipeline_and_caches() {
         let dir = tempdir().expect("tempdir");
         let marker = dir.path().join("setup_ran");
-        let project = test_project(
+        write_settings(
+            dir.path(),
             &format!(
                 r#"[{{"name":"setup","command":"touch {}","timeout_secs":10}}]"#,
                 marker.display()
@@ -126,7 +120,7 @@ mod tests {
         );
         let state = test_state();
 
-        let result = verify_commit("p1", "sha1", dir.path(), &project, &state)
+        let result = verify_commit("p1", "sha1", dir.path(), &state)
             .await
             .expect("verify");
 
@@ -146,7 +140,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let setup_marker = dir.path().join("setup_ran");
         let verify_marker = dir.path().join("verify_ran");
-        let project = test_project(
+        write_settings(
+            dir.path(),
             &format!(
                 r#"[{{"name":"setup","command":"touch {}","timeout_secs":10}}]"#,
                 setup_marker.display()
@@ -170,7 +165,7 @@ mod tests {
             .await
             .expect("seed cache");
 
-        let result = verify_commit("p1", "sha2", dir.path(), &project, &state)
+        let result = verify_commit("p1", "sha2", dir.path(), &state)
             .await
             .expect("verify");
 
@@ -185,13 +180,14 @@ mod tests {
     #[tokio::test]
     async fn verify_commit_failure_is_not_cached() {
         let dir = tempdir().expect("tempdir");
-        let project = test_project(
+        write_settings(
+            dir.path(),
             r#"[{"name":"setup","command":"echo setup","timeout_secs":10}]"#,
             r#"[{"name":"verify","command":"false","timeout_secs":10}]"#,
         );
         let state = test_state();
 
-        let result = verify_commit("p1", "sha3", dir.path(), &project, &state)
+        let result = verify_commit("p1", "sha3", dir.path(), &state)
             .await
             .expect("verify");
 
@@ -206,47 +202,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_commit_prefers_settings_file_over_db_commands() {
+    async fn verify_commit_no_settings_file_passes_with_no_commands() {
         let dir = tempdir().expect("tempdir");
-        let db_setup_marker = dir.path().join("db_setup");
-        let db_verify_marker = dir.path().join("db_verify");
-        let settings_setup_marker = dir.path().join("settings_setup");
-        let settings_verify_marker = dir.path().join("settings_verify");
-
-        let project = test_project(
-            &format!(
-                r#"[{{"name":"db-setup","command":"touch {}","timeout_secs":10}}]"#,
-                db_setup_marker.display()
-            ),
-            &format!(
-                r#"[{{"name":"db-verify","command":"touch {}","timeout_secs":10}}]"#,
-                db_verify_marker.display()
-            ),
-        );
-
-        std::fs::create_dir_all(dir.path().join(".djinn")).expect("create .djinn");
-        std::fs::write(
-            dir.path().join(".djinn/settings.json"),
-            format!(
-                r#"{{
-                    "setup": [{{"name":"settings-setup","command":"touch {}","timeout_secs":10}}],
-                    "verification": [{{"name":"settings-verify","command":"touch {}","timeout_secs":10}}]
-                }}"#,
-                settings_setup_marker.display(),
-                settings_verify_marker.display()
-            ),
-        )
-        .expect("write settings");
-
         let state = test_state();
-        let result = verify_commit("p1", "sha4", dir.path(), &project, &state)
+
+        let result = verify_commit("p1", "sha5", dir.path(), &state)
             .await
             .expect("verify");
 
         assert!(result.passed);
-        assert!(settings_setup_marker.exists());
-        assert!(settings_verify_marker.exists());
-        assert!(!db_setup_marker.exists());
-        assert!(!db_verify_marker.exists());
+        assert!(!result.cached);
+        assert!(result.setup_results.is_empty());
+        assert!(result.verification_results.is_empty());
     }
 }

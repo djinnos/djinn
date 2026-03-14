@@ -609,8 +609,6 @@ mod tests {
             name: "name".into(),
             path: "/tmp/proj".into(),
             created_at: "2025-01-01T00:00:00Z".into(),
-            setup_commands: "[]".into(),
-            verification_commands: "[]".into(),
             target_branch: "main".into(),
             auto_merge: false,
             sync_enabled: false,

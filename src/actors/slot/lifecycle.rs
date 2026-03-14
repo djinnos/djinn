@@ -22,7 +22,6 @@ use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::provider::create_provider;
 use crate::commands::run_commands;
 use crate::verification::settings::load_commands;
-use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
 use crate::db::TaskRepository;
 use crate::models::SessionStatus;
@@ -333,20 +332,15 @@ pub async fn run_task_lifecycle(
     }
     emit_step(&task.id, "preflight_passed", serde_json::json!({}));
 
-    // ── Project commands ──────────────────────────────────────────────────────
-    let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
-
     // ── Run setup commands before session ─────────────────────────────────────
-    let (prompt_setup_commands, prompt_verification_commands) = if let Ok(Some(project)) = project_repo.get(&task.project_id).await {
-        let (setup_specs, verification_specs) = load_commands(&worktree_path, &project)
+    let (prompt_setup_commands, prompt_verification_commands) = {
+        let (setup_specs, verification_specs) = load_commands(&worktree_path)
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "failed to load project commands, using empty");
                 (Vec::new(), Vec::new())
             });
-        let setup_json = serde_json::to_string(&setup_specs).unwrap_or_else(|_| "[]".to_string());
-        let verification_json = serde_json::to_string(&verification_specs).unwrap_or_else(|_| "[]".to_string());
-        let prompt_setup_commands = format_command_names(&setup_json);
-        let prompt_verification_commands = format_command_names(&verification_json);
+        let prompt_setup_commands = format_command_names(&setup_specs);
+        let prompt_verification_commands = format_command_names(&verification_specs);
         if !setup_specs.is_empty() {
             let setup_start = std::time::Instant::now();
             tracing::info!(
@@ -455,8 +449,6 @@ pub async fn run_task_lifecycle(
             }
         }
         (prompt_setup_commands, prompt_verification_commands)
-    } else {
-        (None, None)
     };
 
     let conflict_files = conflict_ctx.as_ref().map(|m| {
@@ -1156,12 +1148,12 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         }
     };
     let verification_commands = {
-        let repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
-        repo.get_by_path(&project_path)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|p| helpers::format_command_details(&p.verification_commands))
+        let (_, verification_specs) = load_commands(std::path::Path::new(&project_path))
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "failed to load project commands for groomer prompt");
+                (Vec::new(), Vec::new())
+            });
+        helpers::format_command_details(&verification_specs)
     };
 
     // ── Build prompt ──────────────────────────────────────────────────────

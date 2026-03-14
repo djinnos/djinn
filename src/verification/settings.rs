@@ -3,7 +3,6 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::commands::CommandSpec;
-use crate::models::Project;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct DjinnSettings {
@@ -13,17 +12,11 @@ pub struct DjinnSettings {
     pub verification: Vec<CommandSpec>,
 }
 
-fn parse_db_commands(project: &Project) -> (Vec<CommandSpec>, Vec<CommandSpec>) {
-    let setup = serde_json::from_str(&project.setup_commands).unwrap_or_default();
-    let verification = serde_json::from_str(&project.verification_commands).unwrap_or_default();
-    tracing::info!("Loaded commands from DB project config");
-    (setup, verification)
-}
-
-/// Load commands from .djinn/settings.json in worktree, falling back to project DB config only when file is absent.
+/// Load commands from `.djinn/settings.json` in the worktree.
+///
+/// Returns empty vecs when the file is absent. Errors on malformed JSON.
 pub fn load_commands(
     worktree_path: &Path,
-    project: &Project,
 ) -> Result<(Vec<CommandSpec>, Vec<CommandSpec>), String> {
     let settings_path = worktree_path.join(".djinn/settings.json");
 
@@ -39,8 +32,8 @@ pub fn load_commands(
             )),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::info!(path = %settings_path.display(), "No .djinn/settings.json found; falling back to DB");
-            Ok(parse_db_commands(project))
+            tracing::debug!(path = %settings_path.display(), "No .djinn/settings.json found; using empty commands");
+            Ok((Vec::new(), Vec::new()))
         }
         Err(e) => Err(format!(
             "failed to read .djinn/settings.json at {}: {e}",
@@ -53,21 +46,6 @@ pub fn load_commands(
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    fn project_with_db_commands(setup_json: &str, verification_json: &str) -> Project {
-        Project {
-            id: "p1".into(),
-            name: "proj".into(),
-            path: "/tmp/proj".into(),
-            created_at: "now".into(),
-            setup_commands: setup_json.into(),
-            verification_commands: verification_json.into(),
-            target_branch: "main".into(),
-            auto_merge: false,
-            sync_enabled: false,
-            sync_remote: None,
-        }
-    }
 
     #[test]
     fn load_commands_uses_settings_file_when_present() {
@@ -83,8 +61,7 @@ mod tests {
         )
         .unwrap();
 
-        let project = project_with_db_commands("[]", "[]");
-        let (setup, verification) = load_commands(dir.path(), &project).expect("load commands");
+        let (setup, verification) = load_commands(dir.path()).expect("load commands");
 
         assert_eq!(setup.len(), 1);
         assert_eq!(setup[0].name, "build");
@@ -93,19 +70,13 @@ mod tests {
     }
 
     #[test]
-    fn load_commands_falls_back_to_db_when_file_missing() {
+    fn load_commands_returns_empty_when_file_missing() {
         let dir = tempdir().unwrap();
-        let project = project_with_db_commands(
-            r#"[{"name":"db-setup","command":"echo setup","timeout_secs":10}]"#,
-            r#"[{"name":"db-verify","command":"echo verify","timeout_secs":20}]"#,
-        );
 
-        let (setup, verification) = load_commands(dir.path(), &project).expect("load commands");
+        let (setup, verification) = load_commands(dir.path()).expect("load commands");
 
-        assert_eq!(setup.len(), 1);
-        assert_eq!(setup[0].name, "db-setup");
-        assert_eq!(verification.len(), 1);
-        assert_eq!(verification[0].name, "db-verify");
+        assert!(setup.is_empty());
+        assert!(verification.is_empty());
     }
 
     #[test]
@@ -115,12 +86,7 @@ mod tests {
         std::fs::create_dir_all(&djinn_dir).unwrap();
         std::fs::write(djinn_dir.join("settings.json"), "{not valid json").unwrap();
 
-        let project = project_with_db_commands(
-            r#"[{"name":"db-setup","command":"echo setup","timeout_secs":10}]"#,
-            r#"[{"name":"db-verify","command":"echo verify","timeout_secs":20}]"#,
-        );
-
-        let err = load_commands(dir.path(), &project).expect_err("malformed settings should error");
+        let err = load_commands(dir.path()).expect_err("malformed settings should error");
         assert!(err.contains("invalid .djinn/settings.json"));
     }
 
@@ -137,8 +103,7 @@ mod tests {
         )
         .unwrap();
 
-        let project = project_with_db_commands("[]", "[]");
-        let (setup, verification) = load_commands(dir.path(), &project).expect("load commands");
+        let (setup, verification) = load_commands(dir.path()).expect("load commands");
 
         assert_eq!(setup.len(), 1);
         assert!(verification.is_empty());

@@ -26,7 +26,7 @@ impl ProjectRepository {
     pub async fn list(&self) -> Result<Vec<Project>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects ORDER BY name",
+            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects ORDER BY name",
         )
         .fetch_all(self.db.pool())
         .await?)
@@ -35,7 +35,7 @@ impl ProjectRepository {
     pub async fn get(&self, id: &str) -> Result<Option<Project>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
+            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
         )
         .bind(id)
         .fetch_optional(self.db.pool())
@@ -45,7 +45,7 @@ impl ProjectRepository {
     pub async fn get_by_path(&self, path: &str) -> Result<Option<Project>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE path = ?1",
+            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE path = ?1",
         )
         .bind(path)
         .fetch_optional(self.db.pool())
@@ -134,7 +134,7 @@ impl ProjectRepository {
             .execute(self.db.pool())
             .await?;
         let project = sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
+            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
         )
         .bind(&id)
         .fetch_one(self.db.pool())
@@ -155,35 +155,7 @@ impl ProjectRepository {
             .execute(self.db.pool())
             .await?;
         let project = sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
-        )
-        .bind(id)
-        .fetch_one(self.db.pool())
-        .await?;
-
-        let _ = self
-            .events
-            .send(DjinnEvent::ProjectUpdated(project.clone()).into());
-        Ok(project)
-    }
-
-    pub async fn update_commands(
-        &self,
-        id: &str,
-        setup_commands: &str,
-        verification_commands: &str,
-    ) -> Result<Project> {
-        self.db.ensure_initialized().await?;
-        sqlx::query(
-            "UPDATE projects SET setup_commands = ?2, verification_commands = ?3 WHERE id = ?1",
-        )
-        .bind(id)
-        .bind(setup_commands)
-        .bind(verification_commands)
-        .execute(self.db.pool())
-        .await?;
-        let project = sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
+            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
         )
         .bind(id)
         .fetch_one(self.db.pool())
@@ -261,7 +233,7 @@ impl ProjectRepository {
     pub async fn list_sync_enabled(&self) -> Result<Vec<Project>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, setup_commands, verification_commands, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE sync_enabled = 1 ORDER BY name",
+            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE sync_enabled = 1 ORDER BY name",
         )
         .fetch_all(self.db.pool())
         .await?)
