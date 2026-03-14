@@ -359,10 +359,19 @@ fn djinn_bin_dir() -> PathBuf {
 /// ~/.djinn/bin), and auto-install if missing.
 async fn resolve_binary(server: &ServerDef) -> Result<PathBuf, String> {
     let bin_dir = djinn_bin_dir();
+    let system_path = std::env::var("PATH").unwrap_or_default();
+    resolve_binary_inner(server, &bin_dir, &system_path)
+}
+
+/// Core resolution logic, factored out for testing.
+fn resolve_binary_inner(
+    server: &ServerDef,
+    bin_dir: &Path,
+    system_path: &str,
+) -> Result<PathBuf, String> {
     let binary_name = server.cmd[0];
 
     // Build an augmented PATH that includes our managed bin dir.
-    let system_path = std::env::var("PATH").unwrap_or_default();
     let augmented_path = format!("{}:{}", bin_dir.display(), system_path);
 
     // Check if the binary already exists (on PATH or in our bin dir).
@@ -378,13 +387,13 @@ async fn resolve_binary(server: &ServerDef) -> Result<PathBuf, String> {
         "lsp: binary not found, attempting auto-install"
     );
 
-    std::fs::create_dir_all(&bin_dir)
+    std::fs::create_dir_all(bin_dir)
         .map_err(|e| format!("failed to create {}: {e}", bin_dir.display()))?;
 
     match server.install {
         InstallMethod::Npm(packages) => {
             // Find npm
-            let npm = which_in_path("npm", &system_path)
+            let npm = which_in_path("npm", system_path)
                 .ok_or_else(|| "npm not found — cannot auto-install LSP server".to_string())?;
 
             let mut cmd = std::process::Command::new(npm);
@@ -405,7 +414,7 @@ async fn resolve_binary(server: &ServerDef) -> Result<PathBuf, String> {
             }
         }
         InstallMethod::RustComponent(component) => {
-            if let Some(rustup) = which_in_path("rustup", &system_path) {
+            if let Some(rustup) = which_in_path("rustup", system_path) {
                 tracing::info!(component = component, "lsp: running rustup component add");
                 let output = std::process::Command::new(rustup)
                     .args(["component", "add", component])
@@ -418,7 +427,7 @@ async fn resolve_binary(server: &ServerDef) -> Result<PathBuf, String> {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(format!("rustup component add failed: {stderr}"));
                 }
-            } else if let Some(cargo) = which_in_path("cargo", &system_path) {
+            } else if let Some(cargo) = which_in_path("cargo", system_path) {
                 tracing::info!(component = component, "lsp: running cargo install (no rustup found)");
                 let output = std::process::Command::new(cargo)
                     .args(["install", component])
@@ -436,13 +445,13 @@ async fn resolve_binary(server: &ServerDef) -> Result<PathBuf, String> {
             }
         }
         InstallMethod::GoInstall(pkg) => {
-            let go = which_in_path("go", &system_path)
+            let go = which_in_path("go", system_path)
                 .ok_or_else(|| "go not found — cannot auto-install gopls".to_string())?;
 
             tracing::info!(pkg = pkg, gobin = %bin_dir.display(), "lsp: running go install");
             let output = std::process::Command::new(go)
                 .args(["install", &format!("{pkg}@latest")])
-                .env("GOBIN", &bin_dir)
+                .env("GOBIN", bin_dir)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output()
@@ -1412,6 +1421,184 @@ mod tests {
     fn which_in_path_scans_multiple_dirs() {
         let result = which_in_path("ls", "/nonexistent:/usr/bin:/also_fake");
         assert_eq!(result, Some(PathBuf::from("/usr/bin/ls")));
+    }
+
+    // --- resolve_binary_inner ---
+
+    /// Create a fake executable script in a temp dir.
+    fn make_fake_binary(dir: &Path, name: &str, script: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    #[test]
+    fn resolve_binary_finds_existing_on_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("djinn_bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        // Put a fake typescript-language-server on PATH
+        let path_dir = tmp.path().join("fakepath");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        make_fake_binary(&path_dir, "typescript-language-server", "#!/bin/sh\n");
+
+        let server = server_for_path(Path::new("foo.ts")).unwrap();
+        let result = resolve_binary_inner(&server, &bin_dir, &path_dir.to_string_lossy());
+
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            path_dir.join("typescript-language-server")
+        );
+    }
+
+    #[test]
+    fn resolve_binary_finds_existing_in_bin_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("djinn_bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_binary(&bin_dir, "rust-analyzer", "#!/bin/sh\n");
+
+        let server = server_for_path(Path::new("foo.rs")).unwrap();
+        // Empty system PATH — binary only in bin_dir
+        let result = resolve_binary_inner(&server, &bin_dir, "");
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), bin_dir.join("rust-analyzer"));
+    }
+
+    #[test]
+    fn resolve_binary_npm_not_found_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("djinn_bin");
+
+        let server = server_for_path(Path::new("foo.ts")).unwrap();
+        // Empty PATH — no npm, no typescript-language-server
+        let result = resolve_binary_inner(&server, &bin_dir, "");
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("npm not found"));
+    }
+
+    #[test]
+    fn resolve_binary_go_not_found_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("djinn_bin");
+
+        let server = server_for_path(Path::new("foo.go")).unwrap();
+        let result = resolve_binary_inner(&server, &bin_dir, "");
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("go not found"));
+    }
+
+    #[test]
+    fn resolve_binary_rust_no_rustup_no_cargo_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("djinn_bin");
+
+        let server = server_for_path(Path::new("foo.rs")).unwrap();
+        let result = resolve_binary_inner(&server, &bin_dir, "");
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("neither rustup nor cargo found"));
+    }
+
+    #[test]
+    fn resolve_binary_npm_installs_successfully() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("djinn_bin");
+        let path_dir = tmp.path().join("fakepath");
+        std::fs::create_dir_all(&path_dir).unwrap();
+
+        // Create a fake npm that "installs" by creating the binary in bin_dir/bin/
+        let install_target = bin_dir.join("bin");
+        let script = format!(
+            "#!/bin/sh\nmkdir -p '{}'\ntouch '{}/typescript-language-server'\nchmod +x '{}/typescript-language-server'\n",
+            install_target.display(),
+            install_target.display(),
+            install_target.display(),
+        );
+        make_fake_binary(&path_dir, "npm", &script);
+
+        let server = server_for_path(Path::new("foo.ts")).unwrap();
+        let result = resolve_binary_inner(&server, &bin_dir, &path_dir.to_string_lossy());
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert!(result.unwrap().ends_with("typescript-language-server"));
+    }
+
+    #[test]
+    fn resolve_binary_npm_failure_returns_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("djinn_bin");
+        let path_dir = tmp.path().join("fakepath");
+        std::fs::create_dir_all(&path_dir).unwrap();
+
+        // Fake npm that exits with error
+        make_fake_binary(&path_dir, "npm", "#!/bin/sh\necho 'ERR!' >&2\nexit 1\n");
+
+        let server = server_for_path(Path::new("foo.ts")).unwrap();
+        let result = resolve_binary_inner(&server, &bin_dir, &path_dir.to_string_lossy());
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("npm install failed"));
+    }
+
+    #[test]
+    fn resolve_binary_go_installs_successfully() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("djinn_bin");
+        let path_dir = tmp.path().join("fakepath");
+        std::fs::create_dir_all(&path_dir).unwrap();
+
+        // Fake go that "installs" gopls into GOBIN (which is bin_dir)
+        let script = format!(
+            "#!/bin/sh\nmkdir -p '{}'\ntouch '{}/gopls'\nchmod +x '{}/gopls'\n",
+            bin_dir.display(),
+            bin_dir.display(),
+            bin_dir.display(),
+        );
+        make_fake_binary(&path_dir, "go", &script);
+
+        let server = server_for_path(Path::new("foo.go")).unwrap();
+        let result = resolve_binary_inner(&server, &bin_dir, &path_dir.to_string_lossy());
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert!(result.unwrap().ends_with("gopls"));
+    }
+
+    #[test]
+    fn resolve_binary_cargo_fallback_installs_successfully() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("djinn_bin");
+        let path_dir = tmp.path().join("fakepath");
+        std::fs::create_dir_all(&path_dir).unwrap();
+
+        // No rustup, but a fake cargo that "installs" rust-analyzer into
+        // ~/.cargo/bin (simulated via PATH dir)
+        let cargo_bin = tmp.path().join("cargo_bin");
+        std::fs::create_dir_all(&cargo_bin).unwrap();
+        let script = format!(
+            "#!/bin/sh\ntouch '{}/rust-analyzer'\nchmod +x '{}/rust-analyzer'\n",
+            cargo_bin.display(),
+            cargo_bin.display(),
+        );
+        make_fake_binary(&path_dir, "cargo", &script);
+
+        let server = server_for_path(Path::new("foo.rs")).unwrap();
+        // Include cargo_bin in system PATH so the binary is found post-install
+        let sys_path = format!("{}:{}", path_dir.display(), cargo_bin.display());
+        let result = resolve_binary_inner(&server, &bin_dir, &sys_path);
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert!(result.unwrap().ends_with("rust-analyzer"));
     }
 
     // --- format_symbol ---
