@@ -2977,190 +2977,6 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "project": {
-            "description": "Absolute project path.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "project"
-        ],
-        "title": "ProjectCommandsGetParams",
-        "type": "object"
-      },
-      "name": "project_commands_get",
-      "output_schema": {
-        "$defs": {
-          "ProjectCommandSpec": {
-            "description": "A single command entry in a project's setup or verification list.",
-            "properties": {
-              "command": {
-                "description": "Shell command executed via `sh -c`.",
-                "type": "string"
-              },
-              "name": {
-                "description": "Human-readable label for this command.",
-                "type": "string"
-              },
-              "timeout_secs": {
-                "description": "Optional timeout in seconds (default: 300).",
-                "format": "int64",
-                "nullable": true,
-                "type": "integer"
-              }
-            },
-            "required": [
-              "name",
-              "command"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "project": {
-            "type": "string"
-          },
-          "setup_commands": {
-            "items": {
-              "$ref": "#/$defs/ProjectCommandSpec"
-            },
-            "type": "array"
-          },
-          "status": {
-            "type": "string"
-          },
-          "verification_commands": {
-            "items": {
-              "$ref": "#/$defs/ProjectCommandSpec"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "status",
-          "project",
-          "setup_commands",
-          "verification_commands"
-        ],
-        "title": "ProjectCommandsGetResponse",
-        "type": "object"
-      }
-    },
-    {
-      "input_schema": {
-        "$defs": {
-          "ProjectCommandSpec": {
-            "description": "A single command entry in a project's setup or verification list.",
-            "properties": {
-              "command": {
-                "description": "Shell command executed via `sh -c`.",
-                "type": "string"
-              },
-              "name": {
-                "description": "Human-readable label for this command.",
-                "type": "string"
-              },
-              "timeout_secs": {
-                "description": "Optional timeout in seconds (default: 300).",
-                "format": "int64",
-                "nullable": true,
-                "type": "integer"
-              }
-            },
-            "required": [
-              "name",
-              "command"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "project": {
-            "description": "Absolute project path.",
-            "type": "string"
-          },
-          "setup_commands": {
-            "description": "Full replacement for setup commands. Omit to keep existing.",
-            "items": {
-              "$ref": "#/$defs/ProjectCommandSpec"
-            },
-            "nullable": true,
-            "type": "array"
-          },
-          "verification_commands": {
-            "description": "Full replacement for verification commands. Omit to keep existing.",
-            "items": {
-              "$ref": "#/$defs/ProjectCommandSpec"
-            },
-            "nullable": true,
-            "type": "array"
-          }
-        },
-        "required": [
-          "project"
-        ],
-        "title": "ProjectCommandsSetParams",
-        "type": "object"
-      },
-      "name": "project_commands_set",
-      "output_schema": {
-        "$defs": {
-          "CommandValidationError": {
-            "properties": {
-              "command_name": {
-                "type": "string"
-              },
-              "exit_code": {
-                "format": "int64",
-                "type": "integer"
-              },
-              "stderr": {
-                "type": "string"
-              },
-              "stdout": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "command_name",
-              "exit_code",
-              "stdout",
-              "stderr"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "project": {
-            "type": "string"
-          },
-          "status": {
-            "type": "string"
-          },
-          "validation_errors": {
-            "description": "Commands that failed validation (non-zero exit). Empty on success.",
-            "items": {
-              "$ref": "#/$defs/CommandValidationError"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "status",
-          "project",
-          "validation_errors"
-        ],
-        "title": "ProjectCommandsSetResponse",
-        "type": "object"
-      }
-    },
-    {
-      "input_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "project": {
             "type": "string"
           }
         },
@@ -3358,6 +3174,43 @@
           "project"
         ],
         "title": "ProjectRemoveResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "worktree_path": {
+            "description": "Absolute path to the worktree containing .djinn/settings.json",
+            "type": "string"
+          }
+        },
+        "required": [
+          "worktree_path"
+        ],
+        "title": "ProjectSettingsValidateParams",
+        "type": "object"
+      },
+      "name": "project_settings_validate",
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "valid": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "valid",
+          "errors"
+        ],
+        "title": "ProjectSettingsValidateResponse",
         "type": "object"
       }
     },

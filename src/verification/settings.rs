@@ -20,29 +20,32 @@ fn parse_db_commands(project: &Project) -> (Vec<CommandSpec>, Vec<CommandSpec>) 
     (setup, verification)
 }
 
-/// Load commands from .djinn/settings.json in worktree, falling back to project DB config.
-pub fn load_commands(worktree_path: &Path, project: &Project) -> (Vec<CommandSpec>, Vec<CommandSpec>) {
+/// Load commands from .djinn/settings.json in worktree, falling back to project DB config only when file is absent.
+pub fn load_commands(
+    worktree_path: &Path,
+    project: &Project,
+) -> Result<(Vec<CommandSpec>, Vec<CommandSpec>), String> {
     let settings_path = worktree_path.join(".djinn/settings.json");
 
     match std::fs::read_to_string(&settings_path) {
         Ok(content) => match serde_json::from_str::<DjinnSettings>(&content) {
             Ok(settings) => {
                 tracing::info!(path = %settings_path.display(), "Loaded commands from .djinn/settings.json");
-                (settings.setup, settings.verification)
+                Ok((settings.setup, settings.verification))
             }
-            Err(e) => {
-                tracing::warn!(path = %settings_path.display(), error = %e, "Failed to parse .djinn/settings.json; falling back to DB");
-                parse_db_commands(project)
-            }
+            Err(e) => Err(format!(
+                "invalid .djinn/settings.json at {}: {e}",
+                settings_path.display()
+            )),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::info!(path = %settings_path.display(), "No .djinn/settings.json found; falling back to DB");
-            parse_db_commands(project)
+            Ok(parse_db_commands(project))
         }
-        Err(e) => {
-            tracing::warn!(path = %settings_path.display(), error = %e, "Failed to read .djinn/settings.json; falling back to DB");
-            parse_db_commands(project)
-        }
+        Err(e) => Err(format!(
+            "failed to read .djinn/settings.json at {}: {e}",
+            settings_path.display()
+        )),
     }
 }
 
@@ -81,7 +84,7 @@ mod tests {
         .unwrap();
 
         let project = project_with_db_commands("[]", "[]");
-        let (setup, verification) = load_commands(dir.path(), &project);
+        let (setup, verification) = load_commands(dir.path(), &project).expect("load commands");
 
         assert_eq!(setup.len(), 1);
         assert_eq!(setup[0].name, "build");
@@ -97,7 +100,7 @@ mod tests {
             r#"[{"name":"db-verify","command":"echo verify","timeout_secs":20}]"#,
         );
 
-        let (setup, verification) = load_commands(dir.path(), &project);
+        let (setup, verification) = load_commands(dir.path(), &project).expect("load commands");
 
         assert_eq!(setup.len(), 1);
         assert_eq!(setup[0].name, "db-setup");
@@ -106,7 +109,7 @@ mod tests {
     }
 
     #[test]
-    fn load_commands_falls_back_to_db_when_file_malformed() {
+    fn load_commands_errors_when_file_malformed() {
         let dir = tempdir().unwrap();
         let djinn_dir = dir.path().join(".djinn");
         std::fs::create_dir_all(&djinn_dir).unwrap();
@@ -117,12 +120,8 @@ mod tests {
             r#"[{"name":"db-verify","command":"echo verify","timeout_secs":20}]"#,
         );
 
-        let (setup, verification) = load_commands(dir.path(), &project);
-
-        assert_eq!(setup.len(), 1);
-        assert_eq!(setup[0].name, "db-setup");
-        assert_eq!(verification.len(), 1);
-        assert_eq!(verification[0].name, "db-verify");
+        let err = load_commands(dir.path(), &project).expect_err("malformed settings should error");
+        assert!(err.contains("invalid .djinn/settings.json"));
     }
 
     #[test]
@@ -139,7 +138,7 @@ mod tests {
         .unwrap();
 
         let project = project_with_db_commands("[]", "[]");
-        let (setup, verification) = load_commands(dir.path(), &project);
+        let (setup, verification) = load_commands(dir.path(), &project).expect("load commands");
 
         assert_eq!(setup.len(), 1);
         assert!(verification.is_empty());

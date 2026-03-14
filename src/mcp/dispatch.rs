@@ -18,8 +18,8 @@ use crate::mcp::tools::memory_tools::{
     RecentParams, ReindexParams, SearchParams, TaskRefsParams, WriteParams,
 };
 use crate::mcp::tools::project_tools::{
-    ProjectAddParams, ProjectCommandsGetParams, ProjectCommandsSetParams, ProjectConfigGetParams,
-    ProjectConfigSetParams, ProjectRemoveParams,
+    ProjectAddParams, ProjectConfigGetParams, ProjectConfigSetParams, ProjectRemoveParams,
+    ProjectSettingsValidateParams,
 };
 use crate::mcp::tools::provider_tools::{
     ModelHealthInput, ProviderAddCustomInput, ProviderModelLookupInput, ProviderModelsInput,
@@ -183,18 +183,11 @@ impl DjinnMcpServer {
                 )?))
                 .await,
             ),
-            "project_commands_get" => map_json(
+            "project_settings_validate" => map_json(
                 name,
-                self.project_commands_get(Parameters(decode_args::<ProjectCommandsGetParams>(
-                    name, args,
-                )?))
-                .await,
-            ),
-            "project_commands_set" => map_json(
-                name,
-                self.project_commands_set(Parameters(decode_args::<ProjectCommandsSetParams>(
-                    name, args,
-                )?))
+                self.project_settings_validate(Parameters(decode_args::<
+                    ProjectSettingsValidateParams,
+                >(name, args)?))
                 .await,
             ),
             "model_health" => map_json(

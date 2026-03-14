@@ -5,8 +5,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::commands::{CommandSpec, run_commands};
-use crate::db::GitSettingsRepository;
 use crate::db::ProjectRepository;
 use crate::mcp::server::DjinnMcpServer;
 
@@ -164,47 +162,24 @@ pub struct ProjectCommandSpec {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct ProjectCommandsGetParams {
-    /// Absolute project path.
-    pub project: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct ProjectCommandsSetParams {
-    /// Absolute project path.
-    pub project: String,
-    /// Full replacement for setup commands. Omit to keep existing.
-    pub setup_commands: Option<Vec<ProjectCommandSpec>>,
-    /// Full replacement for verification commands. Omit to keep existing.
-    pub verification_commands: Option<Vec<ProjectCommandSpec>>,
+pub struct ProjectSettingsValidateParams {
+    /// Absolute path to the worktree containing .djinn/settings.json
+    pub worktree_path: String,
 }
 
 #[derive(Serialize, JsonSchema)]
-pub struct ProjectCommandsGetResponse {
-    pub status: String,
-    pub project: String,
-    pub setup_commands: Vec<ProjectCommandSpec>,
-    pub verification_commands: Vec<ProjectCommandSpec>,
+pub struct ProjectSettingsValidateResponse {
+    pub valid: bool,
+    pub errors: Vec<String>,
 }
 
-#[derive(Serialize, JsonSchema)]
-pub struct ProjectCommandsSetResponse {
-    pub status: String,
-    pub project: String,
-    /// Commands that failed validation (non-zero exit). Empty on success.
-    pub validation_errors: Vec<CommandValidationError>,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub struct CommandValidationError {
-    pub command_name: String,
-    pub exit_code: i64,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-fn parse_command_specs(json: &str) -> Vec<ProjectCommandSpec> {
-    serde_json::from_str(json).unwrap_or_default()
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictDjinnSettings {
+    #[serde(default, rename = "setup")]
+    _setup: Vec<ProjectCommandSpec>,
+    #[serde(default, rename = "verification")]
+    _verification: Vec<ProjectCommandSpec>,
 }
 
 // ── Tools ────────────────────────────────────────────────────────────────────
@@ -459,206 +434,48 @@ impl DjinnMcpServer {
             }),
         }
     }
-    /// Return the configured setup and verification commands for a project.
-    #[tool(description = "Read setup and verification commands configured for a project.")]
-    pub async fn project_commands_get(
+    #[tool(description = "Validate .djinn/settings.json syntax and schema in a worktree.")]
+    pub async fn project_settings_validate(
         &self,
-        Parameters(input): Parameters<ProjectCommandsGetParams>,
-    ) -> Json<ProjectCommandsGetResponse> {
-        let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
-        match repo.get_by_path(&input.project).await {
-            Ok(Some(project)) => Json(ProjectCommandsGetResponse {
-                status: "ok".to_string(),
-                project: project.path,
-                setup_commands: parse_command_specs(&project.setup_commands),
-                verification_commands: parse_command_specs(&project.verification_commands),
-            }),
-            Ok(None) => Json(ProjectCommandsGetResponse {
-                status: format!("error: project not found: {}", input.project),
-                project: input.project,
-                setup_commands: vec![],
-                verification_commands: vec![],
-            }),
-            Err(e) => Json(ProjectCommandsGetResponse {
-                status: format!("error: {e}"),
-                project: input.project,
-                setup_commands: vec![],
-                verification_commands: vec![],
-            }),
-        }
-    }
+        Parameters(input): Parameters<ProjectSettingsValidateParams>,
+    ) -> Json<ProjectSettingsValidateResponse> {
+        let settings_path = Path::new(&input.worktree_path).join(".djinn/settings.json");
+        let mut errors = Vec::new();
 
-    /// Set setup and/or verification commands for a project.
-    ///
-    /// Commands are validated by running them in a temporary worktree before
-    /// saving. If validation fails, the configuration is NOT saved and the
-    /// failing command's output is returned.
-    #[tool(
-        description = "Set setup and/or verification commands for a project. Commands are validated in a temporary worktree before saving. If validation fails, nothing is saved and the failing output is returned."
-    )]
-    pub async fn project_commands_set(
-        &self,
-        Parameters(input): Parameters<ProjectCommandsSetParams>,
-    ) -> Json<ProjectCommandsSetResponse> {
-        let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
-
-        let project = match repo.get_by_path(&input.project).await {
-            Ok(Some(p)) => p,
-            Ok(None) => {
-                return Json(ProjectCommandsSetResponse {
-                    status: format!("error: project not found: {}", input.project),
-                    project: input.project,
-                    validation_errors: vec![],
-                });
-            }
+        let content = match std::fs::read_to_string(&settings_path) {
+            Ok(c) => c,
             Err(e) => {
-                return Json(ProjectCommandsSetResponse {
-                    status: format!("error: {e}"),
-                    project: input.project,
-                    validation_errors: vec![],
-                });
+                errors.push(format!("failed to read {}: {e}", settings_path.display()));
+                return Json(ProjectSettingsValidateResponse { valid: false, errors });
             }
         };
 
-        // Reject if project has active dispatch (commands could run mid-update).
-        if let Some(coordinator) = self.state.coordinator().await
-            && let Ok(status) = coordinator.get_project_status(&project.id)
-            && !status.paused
-        {
-            return Json(ProjectCommandsSetResponse {
-                status: "error: project has active dispatch — pause execution first (execution_pause) before updating commands".to_string(),
-                project: project.path,
-                validation_errors: vec![],
-            });
-        }
+        let value: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                errors.push(format!("invalid JSON syntax: {e}"));
+                return Json(ProjectSettingsValidateResponse { valid: false, errors });
+            }
+        };
 
-        // Merge new with existing (keep existing when not provided).
-        let new_setup = input
-            .setup_commands
-            .unwrap_or_else(|| parse_command_specs(&project.setup_commands));
-        let new_verification = input
-            .verification_commands
-            .unwrap_or_else(|| parse_command_specs(&project.verification_commands));
-
-        // If no commands to validate, skip worktree creation.
-        let mut validation_errors: Vec<CommandValidationError> = vec![];
-
-        if !new_setup.is_empty() || !new_verification.is_empty() {
-            let project_path = Path::new(&project.path);
-
-            let git_actor = match self.state.git_actor(project_path).await {
-                Ok(a) => a,
-                Err(e) => {
-                    return Json(ProjectCommandsSetResponse {
-                        status: format!("error: failed to get git actor: {e}"),
-                        project: project.path,
-                        validation_errors: vec![],
-                    });
-                }
-            };
-
-            let git_settings =
-                GitSettingsRepository::new(self.state.db().clone(), self.state.events().clone())
-                    .get(&project.id)
-                    .await
-                    .unwrap_or_default();
-
-            let wt_name = format!("cmd-validate-{}", uuid::Uuid::now_v7());
-            let wt_path = match git_actor
-                .create_worktree(&wt_name, &git_settings.target_branch, true)
-                .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    return Json(ProjectCommandsSetResponse {
-                        status: format!("error: failed to create validation worktree: {e}"),
-                        project: project.path,
-                        validation_errors: vec![],
-                    });
-                }
-            };
-
-            // Run setup commands.
-            let setup_specs: Vec<CommandSpec> = new_setup
-                .iter()
-                .map(|c| CommandSpec {
-                    name: c.name.clone(),
-                    command: c.command.clone(),
-                    timeout_secs: c.timeout_secs.map(|t| t as u64),
-                })
-                .collect();
-
-            let mut setup_failed = false;
-            if let Ok(results) = run_commands(&setup_specs, &wt_path).await {
-                for r in results {
-                    if r.exit_code != 0 {
-                        validation_errors.push(CommandValidationError {
-                            command_name: r.name,
-                            exit_code: r.exit_code as i64,
-                            stdout: r.stdout,
-                            stderr: r.stderr,
-                        });
-                        setup_failed = true;
-                    }
+        if let serde_json::Value::Object(map) = &value {
+            for key in map.keys() {
+                if key != "setup" && key != "verification" {
+                    errors.push(format!(
+                        "warning: unknown top-level key '{key}' (allowed: setup, verification)"
+                    ));
                 }
             }
-
-            // Run verification commands only if setup passed.
-            if !setup_failed {
-                let verification_specs: Vec<CommandSpec> = new_verification
-                    .iter()
-                    .map(|c| CommandSpec {
-                        name: c.name.clone(),
-                        command: c.command.clone(),
-                        timeout_secs: c.timeout_secs.map(|t| t as u64),
-                    })
-                    .collect();
-
-                if let Ok(results) = run_commands(&verification_specs, &wt_path).await {
-                    for r in results {
-                        if r.exit_code != 0 {
-                            validation_errors.push(CommandValidationError {
-                                command_name: r.name,
-                                exit_code: r.exit_code as i64,
-                                stdout: r.stdout,
-                                stderr: r.stderr,
-                            });
-                        }
-                    }
-                }
-            }
-
-            // Always clean up the worktree.
-            let _ = git_actor.remove_worktree(&wt_path).await;
         }
 
-        if !validation_errors.is_empty() {
-            return Json(ProjectCommandsSetResponse {
-                status: "validation_failed".to_string(),
-                project: project.path,
-                validation_errors,
-            });
+        if let Err(e) = serde_json::from_value::<StrictDjinnSettings>(value) {
+            errors.push(format!("schema validation failed: {e}"));
+            return Json(ProjectSettingsValidateResponse { valid: false, errors });
         }
 
-        // Persist.
-        let setup_json = serde_json::to_string(&new_setup).unwrap_or_else(|_| "[]".to_string());
-        let verification_json =
-            serde_json::to_string(&new_verification).unwrap_or_else(|_| "[]".to_string());
-
-        match repo
-            .update_commands(&project.id, &setup_json, &verification_json)
-            .await
-        {
-            Ok(_) => Json(ProjectCommandsSetResponse {
-                status: "ok".to_string(),
-                project: project.path,
-                validation_errors: vec![],
-            }),
-            Err(e) => Json(ProjectCommandsSetResponse {
-                status: format!("error: {e}"),
-                project: project.path,
-                validation_errors: vec![],
-            }),
-        }
+        Json(ProjectSettingsValidateResponse {
+            valid: true,
+            errors,
+        })
     }
 }
