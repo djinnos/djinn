@@ -95,7 +95,7 @@ function StatusDot({ state, healthState, tooltip, onClick }: { state: "running" 
           healthState === 'checking' && "bg-yellow-400",
           healthState === 'healthy' && state === "running" && "bg-emerald-400",
           !healthState && state === "running" && "bg-emerald-400",
-          state === "paused" && "bg-yellow-400",
+          state === "paused" && !healthState && "opacity-0",
           !healthState && state === "idle" && "bg-zinc-500",
           state === "idle" && !healthState && "opacity-0"
         )}
@@ -261,7 +261,7 @@ function ProjectListItem({
           )}
           title={isCollapsed ? name : undefined}
         >
-          {(isActive || execState === 'paused' || healthState) ? (
+          {(isActive || healthState) ? (
             <StatusDot
               state={dotState}
               healthState={healthState}
