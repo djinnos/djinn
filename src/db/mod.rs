@@ -15,3 +15,4 @@ pub use repositories::settings::SettingsRepository;
 pub use repositories::task::{
     ActivityQuery, CountQuery, ListQuery, ListResult, ReadyQuery, TaskRepository,
 };
+pub use repositories::verification_cache::{CachedVerification, VerificationCacheRepository};
