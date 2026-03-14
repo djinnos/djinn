@@ -131,41 +131,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_commands_get_set_round_trip() {
+    async fn project_settings_validate_reports_valid_and_invalid() {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let dir = tempdir().expect("tempdir");
+        let djinn = dir.path().join(".djinn");
+        std::fs::create_dir_all(&djinn).expect("create .djinn");
 
-        let _ = mcp_call_tool(
+        std::fs::write(
+            djinn.join("settings.json"),
+            r#"{"setup":[{"name":"setup","command":"echo ok"}],"verification":[{"name":"verify","command":"echo ok"}],"extra":true}"#,
+        )
+        .expect("write settings");
+
+        let valid = mcp_call_tool(
             &app,
             &session_id,
-            "project_add",
-            json!({"name": "proj-cmd", "path": dir.path().to_string_lossy().to_string()}),
+            "project_settings_validate",
+            json!({"worktree_path": dir.path().to_string_lossy().to_string()}),
         )
         .await;
+        assert_eq!(valid["valid"], true);
+        assert!(valid["errors"].as_array().expect("errors").iter().any(|e| {
+            e.as_str()
+                .unwrap_or_default()
+                .contains("warning: unknown top-level key 'extra'")
+        }));
 
-        let set = mcp_call_tool(
+        std::fs::write(djinn.join("settings.json"), r#"{"setup":[{"name":"missing-command"}]}"#)
+            .expect("write invalid settings");
+        let invalid = mcp_call_tool(
             &app,
             &session_id,
-            "project_commands_set",
-            json!({
-                "project": dir.path().to_string_lossy().to_string(),
-                "setup_commands": [{"name": "setup", "command": "echo ok", "timeout_secs": 10}],
-                "verification_commands": [{"name": "verify", "command": "echo pass", "timeout_secs": 10}]
-            }),
+            "project_settings_validate",
+            json!({"worktree_path": dir.path().to_string_lossy().to_string()}),
         )
         .await;
-        assert_eq!(set["status"], "ok");
-
-        let got = mcp_call_tool(
-            &app,
-            &session_id,
-            "project_commands_get",
-            json!({"project": dir.path().to_string_lossy().to_string()}),
-        )
-        .await;
-        assert_eq!(got["status"], "ok");
-        assert_eq!(got["setup_commands"][0]["name"], "setup");
-        assert_eq!(got["verification_commands"][0]["name"], "verify");
+        assert_eq!(invalid["valid"], false);
+        assert!(invalid["errors"].as_array().expect("errors").iter().any(|e| {
+            e.as_str()
+                .unwrap_or_default()
+                .contains("schema validation failed")
+        }));
     }
+
 }
