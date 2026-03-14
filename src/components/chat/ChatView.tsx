@@ -3,7 +3,6 @@ import { useQuery } from '@tanstack/react-query';
 import { fetchProviderModels } from '@/api/settings';
 import { sendChatMessage } from '@/api/chat';
 import { Spinner } from '@/components/ui/spinner';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from '@/lib/toast';
 import { useChatStore, type ChatMessage } from '@/stores/chatStore';
 import { useIsAllProjects, useSelectedProject } from '@/stores/useProjectStore';
@@ -213,36 +212,8 @@ export function ChatView() {
 
   return (
     <section className="flex min-h-0 flex-1 flex-col">
-      <header className="flex items-center gap-2 border-b border-border px-4 py-3 text-sm text-muted-foreground">
-        <span>Model:</span>
-        <Select
-          value={selectedModel}
-          onValueChange={(value) => {
-            if (!value) return;
-            setSelectedModel(value);
-            if (activeSessionId) {
-              setSessionModel(activeSessionId, value);
-            }
-          }}
-        >
-          <SelectTrigger className="h-8 min-w-[280px]">
-            <SelectValue placeholder="Select a model">
-              {selectedModel !== 'unknown/model' ? modelNameById.get(selectedModel) ?? selectedModel : undefined}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            {groupedModels.map((group) => (
-              <SelectGroup key={group.providerId}>
-                <SelectLabel>{group.providerLabel}</SelectLabel>
-                {group.models.map((model) => (
-                  <SelectItem key={model.id} value={model.id}>
-                    {model.name}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            ))}
-          </SelectContent>
-        </Select>
+      <header className="border-b border-border px-4 py-3 text-sm text-muted-foreground">
+        {activeSession?.title ?? 'New Chat'}
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -292,6 +263,16 @@ export function ChatView() {
         }}
         streaming={loading}
         prefillValue={promptSeed}
+        selectedModel={selectedModel}
+        modelNameById={modelNameById}
+        groupedModels={groupedModels}
+        onModelChange={(value) => {
+          if (!value) return;
+          setSelectedModel(value);
+          if (activeSessionId) {
+            setSessionModel(activeSessionId, value);
+          }
+        }}
       />
     </section>
   );
