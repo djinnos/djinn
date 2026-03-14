@@ -328,9 +328,18 @@ export function initSSEEventHandlers(): () => void {
 
     if (!payload.task_id || !payload.step) return;
 
+    // detail is a serde_json::Value — stringify objects to a compact human-readable form
+    let detail: string | undefined;
+    if (typeof payload.detail === "string") {
+      detail = payload.detail;
+    } else if (payload.detail && typeof payload.detail === "object") {
+      const vals = Object.values(payload.detail as Record<string, unknown>);
+      detail = vals.length === 1 ? String(vals[0]) : undefined;
+    }
+
     verificationStore.getState().addLifecycleStep(payload.task_id, {
       step: payload.step,
-      detail: payload.detail,
+      detail,
       timestamp: new Date().toISOString(),
     });
   });
