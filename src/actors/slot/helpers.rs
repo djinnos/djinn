@@ -30,18 +30,13 @@ pub(crate) fn log_snippet(text: &str, max_chars: usize) -> String {
     }
 }
 
-pub(crate) fn format_command_names(json: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct NameOnly {
-        name: String,
-    }
-    let specs: Vec<NameOnly> = serde_json::from_str(json).unwrap_or_default();
+pub(crate) fn format_command_names(specs: &[crate::commands::CommandSpec]) -> Option<String> {
     if specs.is_empty() {
         return None;
     }
     Some(
         specs
-            .into_iter()
+            .iter()
             .map(|s| format!("- `{}`", s.name))
             .collect::<Vec<_>>()
             .join("\n"),
@@ -49,19 +44,13 @@ pub(crate) fn format_command_names(json: &str) -> Option<String> {
 }
 
 /// Format command specs as `- **name**: \`command\`` for display in prompts.
-pub(crate) fn format_command_details(json: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct Spec {
-        name: String,
-        command: String,
-    }
-    let specs: Vec<Spec> = serde_json::from_str(json).unwrap_or_default();
+pub(crate) fn format_command_details(specs: &[crate::commands::CommandSpec]) -> Option<String> {
     if specs.is_empty() {
         return None;
     }
     Some(
         specs
-            .into_iter()
+            .iter()
             .map(|s| format!("- **{}**: `{}`", s.name, s.command))
             .collect::<Vec<_>>()
             .join("\n"),

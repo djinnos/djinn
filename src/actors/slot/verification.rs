@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use crate::db::ProjectRepository;
 use crate::db::TaskRepository;
 use crate::db::VerificationCacheRepository;
 use crate::events::DjinnEvent;
@@ -69,17 +68,11 @@ async fn run_verification_pipeline(
     let project_dir = PathBuf::from(project_path);
     let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
 
-    let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
-    let project = project_repo
-        .get(&task.project_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("project not found: {}", task.project_id))?;
-
     // Create a fresh worktree from the task branch.
     let worktree_path = prepare_worktree(&project_dir, &task, app_state).await?;
     let commit_sha = resolve_head_commit(&worktree_path)?;
 
-    let result = verify_commit(&task.project_id, &commit_sha, &worktree_path, &project, app_state).await?;
+    let result = verify_commit(&task.project_id, &commit_sha, &worktree_path, app_state).await?;
     emit_verification_steps(&task.project_id, Some(task_id), &result, app_state).await;
 
     if !result.passed {
@@ -122,13 +115,6 @@ pub(crate) async fn run_verification_gate(
         .map_err(|e| format!("failed to load task: {e}"))?;
     let project_dir = PathBuf::from(project_path);
 
-    let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
-    let project = project_repo
-        .get(&task.project_id)
-        .await
-        .map_err(|e| format!("failed to load project: {e}"))?
-        .ok_or_else(|| format!("project not found: {}", task.project_id))?;
-
     let branch = format!("task/{}", task.short_id);
     let commit_sha = resolve_head_commit_for_branch(&project_dir, &branch)
         .map_err(|e| format!("failed to resolve branch HEAD: {e}"))?;
@@ -158,7 +144,7 @@ pub(crate) async fn run_verification_gate(
         .await
         .map_err(|e| format!("failed to create verification worktree: {e}"))?;
 
-    let result = verify_commit(&task.project_id, &commit_sha, &worktree_path, &project, app_state)
+    let result = verify_commit(&task.project_id, &commit_sha, &worktree_path, app_state)
         .await
         .map_err(|e| format!("verification execution failed: {e}"))?;
     emit_verification_steps(&task.project_id, Some(task_id), &result, app_state).await;

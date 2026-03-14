@@ -276,6 +276,9 @@ impl AppState {
         // Finalize any sessions left in `running` from a previous process.
         self.interrupt_stale_sessions_on_startup().await;
 
+        // Prune stale verification cache entries (>7 days old).
+        self.prune_verification_cache_on_startup().await;
+
         self.reindex_all_projects_on_startup().await;
 
         // Watch .djinn/ directories for KB note changes and auto-reindex.
@@ -293,6 +296,15 @@ impl AppState {
             Ok(0) => {}
             Ok(n) => tracing::info!(count = n, "interrupted stale sessions from previous run"),
             Err(e) => tracing::warn!(error = %e, "failed to interrupt stale sessions"),
+        }
+    }
+
+    async fn prune_verification_cache_on_startup(&self) {
+        use crate::db::VerificationCacheRepository;
+        let repo = VerificationCacheRepository::new(self.db().clone());
+        match repo.prune_older_than(7).await {
+            Ok(()) => tracing::debug!("pruned stale verification cache entries"),
+            Err(e) => tracing::warn!(error = %e, "failed to prune verification cache"),
         }
     }
 
