@@ -146,6 +146,7 @@ export namespace EpicCloseOutputSchema {
   emoji?: string
   error?: string
   id?: string
+  memory_refs?: string[]
   owner?: string
   short_id?: string
   status?: string
@@ -192,6 +193,10 @@ export namespace EpicCreateInputSchema {
   color?: string
   description?: string
   emoji?: string
+  /**
+   * Memory reference URLs for this epic (e.g. ADR paths).
+   */
+  memory_refs?: string[]
   owner?: string
   /**
    * Absolute project path.
@@ -212,6 +217,7 @@ export namespace EpicCreateOutputSchema {
   emoji?: string
   error?: string
   id?: string
+  memory_refs?: string[]
   owner?: string
   short_id?: string
   status?: string
@@ -286,6 +292,7 @@ export namespace EpicListOutputSchema {
   description: string
   emoji: string
   id: string
+  memory_refs: string[]
   owner: string
   short_id: string
   status: string
@@ -320,6 +327,7 @@ export namespace EpicReopenOutputSchema {
   emoji?: string
   error?: string
   id?: string
+  memory_refs?: string[]
   owner?: string
   short_id?: string
   status?: string
@@ -356,6 +364,7 @@ export namespace EpicShowOutputSchema {
   error?: string
   id?: string
   in_progress_count?: number
+  memory_refs?: string[]
   open_count?: number
   owner?: string
   short_id?: string
@@ -448,6 +457,10 @@ export namespace EpicUpdateInputSchema {
    * Epic UUID or short_id.
    */
   id: string
+  /**
+   * Memory reference URLs for this epic (e.g. ADR paths).
+   */
+  memory_refs?: string[]
   owner?: string
   /**
    * Absolute project path.
@@ -468,6 +481,7 @@ export namespace EpicUpdateOutputSchema {
   emoji?: string
   error?: string
   id?: string
+  memory_refs?: string[]
   owner?: string
   short_id?: string
   status?: string
@@ -1285,103 +1299,6 @@ export namespace ProjectAddOutputSchema {
 
 }
 export type ProjectAddOutput = ProjectAddOutputSchema.ProjectAddOutput;
-export namespace ProjectCommandsGetInputSchema {
-  export interface ProjectCommandsGetInput {
-  /**
-   * Absolute project path.
-   */
-  project: string
-  [k: string]: any
-  }
-
-}
-export type ProjectCommandsGetInput = ProjectCommandsGetInputSchema.ProjectCommandsGetInput;
-export namespace ProjectCommandsGetOutputSchema {
-  export interface ProjectCommandsGetOutput {
-  project: string
-  setup_commands: ProjectCommandSpec[]
-  status: string
-  verification_commands: ProjectCommandSpec[]
-  [k: string]: any
-  }
-  /**
-   * A single command entry in a project's setup or verification list.
-   */
-  export interface ProjectCommandSpec {
-  /**
-   * Shell command executed via `sh -c`.
-   */
-  command: string
-  /**
-   * Human-readable label for this command.
-   */
-  name: string
-  /**
-   * Optional timeout in seconds (default: 300).
-   */
-  timeout_secs?: number
-  [k: string]: any
-  }
-
-}
-export type ProjectCommandsGetOutput = ProjectCommandsGetOutputSchema.ProjectCommandsGetOutput;
-export namespace ProjectCommandsSetInputSchema {
-  export interface ProjectCommandsSetInput {
-  /**
-   * Absolute project path.
-   */
-  project: string
-  /**
-   * Full replacement for setup commands. Omit to keep existing.
-   */
-  setup_commands?: ProjectCommandSpec[]
-  /**
-   * Full replacement for verification commands. Omit to keep existing.
-   */
-  verification_commands?: ProjectCommandSpec[]
-  [k: string]: any
-  }
-  /**
-   * A single command entry in a project's setup or verification list.
-   */
-  export interface ProjectCommandSpec {
-  /**
-   * Shell command executed via `sh -c`.
-   */
-  command: string
-  /**
-   * Human-readable label for this command.
-   */
-  name: string
-  /**
-   * Optional timeout in seconds (default: 300).
-   */
-  timeout_secs?: number
-  [k: string]: any
-  }
-
-}
-export type ProjectCommandsSetInput = ProjectCommandsSetInputSchema.ProjectCommandsSetInput;
-export namespace ProjectCommandsSetOutputSchema {
-  export interface ProjectCommandsSetOutput {
-  project: string
-  status: string
-  /**
-   * Commands that failed validation (non-zero exit). Empty on success.
-   */
-  validation_errors: CommandValidationError[]
-  [k: string]: any
-  }
-  export interface CommandValidationError {
-  command_name: string
-  exit_code: number
-  stderr: string
-  stdout: string
-  [k: string]: any
-  }
-
-}
-export type ProjectCommandsSetOutput = ProjectCommandsSetOutputSchema.ProjectCommandsSetOutput;
 export namespace ProjectConfigGetInputSchema {
   export interface ProjectConfigGetInput {
   project: string
@@ -1473,6 +1390,26 @@ export namespace ProjectRemoveOutputSchema {
 
 }
 export type ProjectRemoveOutput = ProjectRemoveOutputSchema.ProjectRemoveOutput;
+export namespace ProjectSettingsValidateInputSchema {
+  export interface ProjectSettingsValidateInput {
+  /**
+   * Absolute path to the worktree containing .djinn/settings.json
+   */
+  worktree_path: string
+  [k: string]: any
+  }
+
+}
+export type ProjectSettingsValidateInput = ProjectSettingsValidateInputSchema.ProjectSettingsValidateInput;
+export namespace ProjectSettingsValidateOutputSchema {
+  export interface ProjectSettingsValidateOutput {
+  errors: string[]
+  valid: boolean
+  [k: string]: any
+  }
+
+}
+export type ProjectSettingsValidateOutput = ProjectSettingsValidateOutputSchema.ProjectSettingsValidateOutput;
 export namespace ProviderAddCustomInputSchema {
   export interface ProviderAddCustomInput {
   /**
@@ -2051,6 +1988,10 @@ export namespace SettingsSetInputSchema {
    */
   model_priority_conflict_resolver?: string[]
   /**
+   * Ordered model list for the 'groomer' role. Omit to keep current value.
+   */
+  model_priority_groomer?: string[]
+  /**
    * Ordered model list for the 'pm' role. Omit to keep current value.
    */
   model_priority_pm?: string[]
@@ -2316,6 +2257,10 @@ export namespace TaskCreateInputSchema {
    * Absolute project path.
    */
   project: string
+  /**
+   * Optional initial status. Allowed values: "backlog" or "open".
+   */
+  status?: string
   title: string
   [k: string]: any
   }
@@ -2630,6 +2575,10 @@ export namespace TaskSyncStatusOutputSchema {
   last_synced_at?: string
   name: string
   /**
+   * Whether the channel needs attention (3+ failures) (SYNC-16).
+   */
+  needs_attention: boolean
+  /**
    * Sync-enabled project paths (SYNC-07).
    */
   project_paths: string[]
@@ -2806,32 +2755,8 @@ export namespace TaskUpdateOutputSchema {
 
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
-export namespace SetUserIdentityInputSchema {
-  export interface SetUserIdentityInput {
-  /**
-   * User's email address from Clerk authentication
-   */
-  email: string
-  /**
-   * User's unique ID (Clerk sub) for future use
-   */
-  user_id?: string
-  [k: string]: any
-  }
 
-}
-export type SetUserIdentityInput = SetUserIdentityInputSchema.SetUserIdentityInput;
-export namespace SetUserIdentityOutputSchema {
-  export interface SetUserIdentityOutput {
-  status: string
-  email: string
-  [k: string]: any
-  }
-
-}
-export type SetUserIdentityOutput = SetUserIdentityOutputSchema.SetUserIdentityOutput;
-
-export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_commands_get" | "project_commands_set" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "set_user_identity" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "board_health": { input: BoardHealthInput; output: BoardHealthOutput };
@@ -2873,12 +2798,11 @@ export interface McpToolMap {
   "memory_write": { input: MemoryWriteInput; output: MemoryWriteOutput };
   "model_health": { input: ModelHealthInput; output: ModelHealthOutput };
   "project_add": { input: ProjectAddInput; output: ProjectAddOutput };
-  "project_commands_get": { input: ProjectCommandsGetInput; output: ProjectCommandsGetOutput };
-  "project_commands_set": { input: ProjectCommandsSetInput; output: ProjectCommandsSetOutput };
   "project_config_get": { input: ProjectConfigGetInput; output: ProjectConfigGetOutput };
   "project_config_set": { input: ProjectConfigSetInput; output: ProjectConfigSetOutput };
   "project_list": { input: ProjectListInput; output: ProjectListOutput };
   "project_remove": { input: ProjectRemoveInput; output: ProjectRemoveOutput };
+  "project_settings_validate": { input: ProjectSettingsValidateInput; output: ProjectSettingsValidateOutput };
   "provider_add_custom": { input: ProviderAddCustomInput; output: ProviderAddCustomOutput };
   "provider_catalog": { input: ProviderCatalogInput; output: ProviderCatalogOutput };
   "provider_connected": { input: ProviderConnectedInput; output: ProviderConnectedOutput };
@@ -2893,7 +2817,6 @@ export interface McpToolMap {
   "session_list": { input: SessionListInput; output: SessionListOutput };
   "session_messages": { input: SessionMessagesInput; output: SessionMessagesOutput };
   "session_show": { input: SessionShowInput; output: SessionShowOutput };
-  "set_user_identity": { input: SetUserIdentityInput; output: SetUserIdentityOutput };
   "settings_get": { input: SettingsGetInput; output: SettingsGetOutput };
   "settings_reset": { input: SettingsResetInput; output: SettingsResetOutput };
   "settings_set": { input: SettingsSetInput; output: SettingsSetOutput };

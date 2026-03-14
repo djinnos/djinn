@@ -8,6 +8,7 @@ import type { Epic, Task } from "@/api/types";
 import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 import { GitRemoteSetupBanner, useGitRemoteCheck } from "@/components/GitRemoteSetupBanner";
+import { BoardHealthBanner } from "@/components/BoardHealthBanner";
 import {
   ArrowDown01Icon,
   ArrowRight01Icon,
@@ -389,6 +390,10 @@ export function KanbanBoard({
           />
         </InputGroup>
       </div>
+
+      {selectedProject?.path && (
+        <BoardHealthBanner projectPath={selectedProject.path} />
+      )}
 
       {hasRemote === false && selectedProject?.path && (
         <GitRemoteSetupBanner

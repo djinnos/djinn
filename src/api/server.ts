@@ -1,5 +1,5 @@
 import { callMcpTool } from "@/api/mcpClient";
-import type { McpToolOutput, ProjectListOutputSchema, ProjectCommandsGetOutputSchema, ProjectCommandsGetOutput } from "@/api/generated/mcp-tools.gen";
+import type { McpToolOutput, ProjectListOutputSchema } from "@/api/generated/mcp-tools.gen";
 import { getServerPort } from "@/tauri/commands";
 import type { Epic, Task } from "@/api/types";
 import { projectStore } from "@/stores/projectStore";
@@ -10,7 +10,8 @@ import { projectStore } from "@/stores/projectStore";
  */
 export async function setUserIdentity(email: string, userId: string): Promise<void> {
   try {
-    await callMcpTool("set_user_identity", { email, user_id: userId });
+    // Tool removed from server — kept as no-op for call-site compatibility
+    void email; void userId;
   } catch (e) {
     console.warn("Failed to set user identity on server:", e);
   }
@@ -258,11 +259,19 @@ export async function updateProject(projectId: string, updates: { branch?: strin
   });
 }
 
-// Project commands
+// Project commands — tools removed from server (now in .djinn/settings.json)
+// Kept as stubs for call-site compatibility.
 
-export type ProjectCommandSpec = ProjectCommandsGetOutputSchema.ProjectCommandSpec;
+export interface ProjectCommandSpec {
+  name: string;
+  command: string;
+  timeout_secs?: number;
+}
 
-export type ProjectCommands = Pick<ProjectCommandsGetOutput, "setup_commands" | "verification_commands">
+export interface ProjectCommands {
+  setup_commands: ProjectCommandSpec[];
+  verification_commands: ProjectCommandSpec[];
+}
 
 export interface CommandValidationError {
   command_name: string;
@@ -271,23 +280,17 @@ export interface CommandValidationError {
   stdout: string;
 }
 
-export async function fetchProjectCommands(projectPath: string): Promise<ProjectCommands> {
-  const data = await callMcpTool("project_commands_get", { project: projectPath });
-  return {
-    setup_commands: data.setup_commands,
-    verification_commands: data.verification_commands,
-  };
+export async function fetchProjectCommands(_projectPath: string): Promise<ProjectCommands> {
+  // Tools removed — settings.json is now source of truth
+  return { setup_commands: [], verification_commands: [] };
 }
 
 export async function saveProjectCommands(
-  projectPath: string,
-  commands: Partial<ProjectCommands>,
+  _projectPath: string,
+  _commands: Partial<ProjectCommands>,
 ): Promise<CommandValidationError[]> {
-  const result = await callMcpTool("project_commands_set", {
-    project: projectPath,
-    ...commands,
-  });
-  return result.validation_errors;
+  // Tool removed — settings.json is now source of truth
+  return [];
 }
 
 export async function removeProject(projectId: string): Promise<void> {
