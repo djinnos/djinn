@@ -26,6 +26,7 @@ export interface ChatState {
   messagesBySession: Record<string, ChatMessage[]>;
   streamingBySession: Record<string, string>;
   loadingBySession: Record<string, boolean>;
+  thinkingStartTimeBySession: Record<string, number | null>;
   activeSessionId: string | null;
 
   createSession: (projectPath?: string | null, model?: string | null) => string;
@@ -37,6 +38,7 @@ export interface ChatState {
   finalizeStreaming: (sessionId: string, message?: Omit<ChatMessage, 'content'> & { content?: string }) => void;
   updateSessionTitle: (sessionId: string, title: string) => void;
   clearStreaming: (sessionId: string) => void;
+  setThinkingStartTime: (sessionId: string, startTime: number | null) => void;
   getSessionsForProject: (projectPath: string | null) => ChatSession[];
 }
 
@@ -62,6 +64,7 @@ export const useChatStore = create<ChatState>()(
       messagesBySession: {},
       streamingBySession: {},
       loadingBySession: {},
+      thinkingStartTimeBySession: {},
       activeSessionId: null,
 
       createSession: (projectPath = null, model = null) => {
@@ -82,6 +85,7 @@ export const useChatStore = create<ChatState>()(
           messagesBySession: { ...state.messagesBySession, [id]: [] },
           streamingBySession: { ...state.streamingBySession, [id]: '' },
           loadingBySession: { ...state.loadingBySession, [id]: false },
+          thinkingStartTimeBySession: { ...state.thinkingStartTimeBySession, [id]: null },
         }));
 
         return id;
@@ -92,12 +96,14 @@ export const useChatStore = create<ChatState>()(
           const { [sessionId]: _messages, ...messagesBySession } = state.messagesBySession;
           const { [sessionId]: _streaming, ...streamingBySession } = state.streamingBySession;
           const { [sessionId]: _loading, ...loadingBySession } = state.loadingBySession;
+          const { [sessionId]: _thinkingStartTime, ...thinkingStartTimeBySession } = state.thinkingStartTimeBySession;
 
           return {
             sessions: state.sessions.filter((session) => session.id !== sessionId),
             messagesBySession,
             streamingBySession,
             loadingBySession,
+            thinkingStartTimeBySession,
             activeSessionId:
               state.activeSessionId === sessionId
                 ? (state.sessions.find((session) => session.id !== sessionId)?.id ?? null)
@@ -166,6 +172,10 @@ export const useChatStore = create<ChatState>()(
             ...state.loadingBySession,
             [sessionId]: true,
           },
+          thinkingStartTimeBySession: {
+            ...state.thinkingStartTimeBySession,
+            [sessionId]: null,
+          },
         }));
       },
 
@@ -199,6 +209,10 @@ export const useChatStore = create<ChatState>()(
               ...state.loadingBySession,
               [sessionId]: false,
             },
+            thinkingStartTimeBySession: {
+              ...state.thinkingStartTimeBySession,
+              [sessionId]: null,
+            },
             sessions: state.sessions.map((session) =>
               session.id === sessionId ? { ...session, updatedAt: Date.now() } : session
             ),
@@ -229,6 +243,19 @@ export const useChatStore = create<ChatState>()(
             ...state.loadingBySession,
             [sessionId]: false,
           },
+          thinkingStartTimeBySession: {
+            ...state.thinkingStartTimeBySession,
+            [sessionId]: null,
+          },
+        }));
+      },
+
+      setThinkingStartTime: (sessionId, startTime) => {
+        set((state) => ({
+          thinkingStartTimeBySession: {
+            ...state.thinkingStartTimeBySession,
+            [sessionId]: startTime,
+          },
         }));
       },
 
@@ -243,6 +270,7 @@ export const useChatStore = create<ChatState>()(
         messagesBySession: state.messagesBySession,
         streamingBySession: state.streamingBySession,
         loadingBySession: state.loadingBySession,
+        thinkingStartTimeBySession: state.thinkingStartTimeBySession,
         activeSessionId: state.activeSessionId,
       }),
     }

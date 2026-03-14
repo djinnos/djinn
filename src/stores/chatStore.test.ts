@@ -8,6 +8,7 @@ describe('chatStore', () => {
       messagesBySession: {},
       streamingBySession: {},
       loadingBySession: {},
+      thinkingStartTimeBySession: {},
       activeSessionId: null,
     });
   });
@@ -31,6 +32,7 @@ describe('chatStore', () => {
     expect(state.messagesBySession[a]).toBeUndefined();
     expect(state.streamingBySession[a]).toBeUndefined();
     expect(state.loadingBySession[a]).toBeUndefined();
+    expect(state.thinkingStartTimeBySession[a]).toBeUndefined();
     expect(state.activeSessionId).toBe(b);
   });
 
@@ -45,15 +47,18 @@ describe('chatStore', () => {
 
   it('appendStreamingText appends and sets loading', () => {
     const id = useChatStore.getState().createSession(null);
+    useChatStore.getState().setThinkingStartTime(id, 123);
     useChatStore.getState().appendStreamingText(id, 'hel');
     useChatStore.getState().appendStreamingText(id, 'lo');
     const state = useChatStore.getState();
     expect(state.streamingBySession[id]).toBe('hello');
     expect(state.loadingBySession[id]).toBe(true);
+    expect(state.thinkingStartTimeBySession[id]).toBeNull();
   });
 
   it('finalizeStreaming creates assistant message from buffer and clears flags', () => {
     const id = useChatStore.getState().createSession(null);
+    useChatStore.getState().setThinkingStartTime(id, 123);
     useChatStore.getState().appendStreamingText(id, 'stream');
     useChatStore.getState().finalizeStreaming(id);
     const state = useChatStore.getState();
@@ -62,6 +67,7 @@ describe('chatStore', () => {
     expect(state.messagesBySession[id][0].content).toBe('stream');
     expect(state.streamingBySession[id]).toBe('');
     expect(state.loadingBySession[id]).toBe(false);
+    expect(state.thinkingStartTimeBySession[id]).toBeNull();
   });
 
   it('finalizeStreaming with explicit message does not add blank content', () => {
@@ -80,10 +86,21 @@ describe('chatStore', () => {
 
   it('clearStreaming resets streaming and loading', () => {
     const id = useChatStore.getState().createSession(null);
+    useChatStore.getState().setThinkingStartTime(id, 123);
     useChatStore.getState().appendStreamingText(id, 'x');
     useChatStore.getState().clearStreaming(id);
     expect(useChatStore.getState().streamingBySession[id]).toBe('');
     expect(useChatStore.getState().loadingBySession[id]).toBe(false);
+    expect(useChatStore.getState().thinkingStartTimeBySession[id]).toBeNull();
+  });
+
+  it('sets and clears thinking start time per session', () => {
+    const id = useChatStore.getState().createSession(null);
+    useChatStore.getState().setThinkingStartTime(id, 999);
+    expect(useChatStore.getState().thinkingStartTimeBySession[id]).toBe(999);
+
+    useChatStore.getState().setThinkingStartTime(id, null);
+    expect(useChatStore.getState().thinkingStartTimeBySession[id]).toBeNull();
   });
 
   it('filters sessions by project path', () => {

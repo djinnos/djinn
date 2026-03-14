@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchProviderModels } from '@/api/settings';
 import { sendChatMessage } from '@/api/chat';
+import { Spinner } from '@/components/ui/spinner';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from '@/lib/toast';
 import { useChatStore, type ChatMessage } from '@/stores/chatStore';
@@ -30,13 +31,18 @@ export function ChatView() {
   const finalizeStreaming = useChatStore((state) => state.finalizeStreaming);
   const updateSessionTitle = useChatStore((state) => state.updateSessionTitle);
   const clearStreaming = useChatStore((state) => state.clearStreaming);
+  const setThinkingStartTime = useChatStore((state) => state.setThinkingStartTime);
   const messages = useChatStore((state) => (state.activeSessionId ? state.messagesBySession[state.activeSessionId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES));
   const streamingText = useChatStore((state) => (state.activeSessionId ? state.streamingBySession[state.activeSessionId] ?? '' : ''));
   const loading = useChatStore((state) => (state.activeSessionId ? state.loadingBySession[state.activeSessionId] ?? false : false));
+  const thinkingStartTime = useChatStore((state) =>
+    state.activeSessionId ? state.thinkingStartTimeBySession[state.activeSessionId] ?? null : null
+  );
 
   const [promptSeed, setPromptSeed] = useState<string | undefined>(undefined);
   const [abortController, setAbortController] = useState<AbortController | null>(null);
   const [toolCalls, setToolCalls] = useState<string[]>([]);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const { data: models = [] } = useQuery({ queryKey: ['provider-models-connected'], queryFn: fetchProviderModels });
@@ -104,6 +110,25 @@ export function ChatView() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, streamingText, activeSessionId]);
 
+  useEffect(() => {
+    const shouldShowThinking = loading && !streamingText && thinkingStartTime !== null;
+
+    if (!shouldShowThinking || thinkingStartTime === null) {
+      setElapsedSeconds(0);
+      return;
+    }
+
+    setElapsedSeconds(Math.floor((Date.now() - thinkingStartTime) / 1000));
+
+    const intervalId = window.setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - thinkingStartTime) / 1000));
+    }, 1000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [loading, streamingText, thinkingStartTime]);
+
   const send = async (text: string) => {
     const sessionId = activeSessionId ?? createSession(projectPath, selectedModel !== 'unknown/model' ? selectedModel : null);
     if (!activeSessionId) setActiveSession(sessionId);
@@ -117,6 +142,7 @@ export function ChatView() {
     });
 
     clearStreaming(sessionId);
+    setThinkingStartTime(sessionId, Date.now());
     setToolCalls([]);
     const controller = new AbortController();
     setAbortController(controller);
@@ -242,6 +268,15 @@ export function ChatView() {
                 }}
               />
             )}
+            {loading && !streamingText && thinkingStartTime !== null && (
+              <div className="pl-3">
+                <div className="inline-flex items-center gap-2 text-[13px] text-muted-foreground/70">
+                  <Spinner size="xs" />
+                  <span>Thinking...</span>
+                  <span>{elapsedSeconds}s</span>
+                </div>
+              </div>
+            )}
             <div ref={bottomRef} />
           </div>
         )}
@@ -249,7 +284,12 @@ export function ChatView() {
 
       <ChatInput
         onSend={(message) => void send(message)}
-        onStop={() => abortController?.abort()}
+        onStop={() => {
+          abortController?.abort();
+          if (activeSessionId) {
+            clearStreaming(activeSessionId);
+          }
+        }}
         streaming={loading}
         prefillValue={promptSeed}
       />
