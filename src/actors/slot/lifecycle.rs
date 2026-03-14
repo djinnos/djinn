@@ -20,7 +20,8 @@ use crate::agent::AgentType;
 use crate::agent::message::{Conversation, Message};
 use crate::agent::prompts::{TaskContext, render_prompt};
 use crate::agent::provider::create_provider;
-use crate::commands::{CommandSpec, run_commands};
+use crate::commands::run_commands;
+use crate::verification::settings::load_commands;
 use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
 use crate::db::TaskRepository;
@@ -53,6 +54,17 @@ pub async fn run_task_lifecycle(
     pause: CancellationToken,
     event_tx: mpsc::Sender<SlotEvent>,
 ) -> anyhow::Result<()> {
+    let emit_step = |task_id: &str, step: &str, detail: serde_json::Value| {
+        let _ = app_state
+            .events()
+            .send(crate::events::DjinnEvent::TaskLifecycleStep {
+                task_id: task_id.to_string(),
+                step: step.to_string(),
+                detail,
+            }
+            .into());
+    };
+
     // Helper macros for emitting slot events on exit.
     macro_rules! return_free {
         () => {{
@@ -94,8 +106,6 @@ pub async fn run_task_lifecycle(
             return_free!();
         }
     };
-
-    // ── Determine agent type and context ──────────────────────────────────────
     let conflict_ctx = conflict_context_for_dispatch(&task.id, &app_state).await;
     let merge_validation_ctx = merge_validation_context_for_dispatch(&task.id, &app_state).await;
     let agent_type = agent_type_for_task(&task, conflict_ctx.is_some());
@@ -153,6 +163,7 @@ pub async fn run_task_lifecycle(
             return_free!();
         }
     };
+    emit_step(&task.id, "credential_loading", serde_json::json!({"provider_id": catalog_provider_id}));
     let provider_credential = match load_provider_credential(&catalog_provider_id, &app_state).await
     {
         Ok(cred) => cred,
@@ -172,6 +183,8 @@ pub async fn run_task_lifecycle(
     // (same model, same agent type, worktree intact, conversation file present).
     let mut resume_record_id: Option<String> = None;
 
+    emit_step(&task.id, "worktree_creating", serde_json::json!({}));
+    emit_step(&task.id, "branch_creating", serde_json::json!({}));
     let worktree_path = if let Some(paused) = paused {
         if let Some(paused_worktree_path) = paused.worktree_path.as_deref().map(PathBuf::from) {
             if paused.model_id != model_id {
@@ -264,9 +277,17 @@ pub async fn run_task_lifecycle(
     };
 
     // ── Conflict resolver: start merge for conflict markers ───────────────────
+    emit_step(
+        &task.id,
+        "worktree_created",
+        serde_json::json!({"path": worktree_path.display().to_string()}),
+    );
+    emit_step(&task.id, "branch_created", serde_json::json!({}));
+
     if agent_type == AgentType::ConflictResolver
         && let Some(ref ctx) = conflict_ctx
     {
+        emit_step(&task.id, "branch_rebasing", serde_json::json!({"target": ctx.merge_target}));
         let target_ref = format!("origin/{}", ctx.merge_target);
         if let Ok(wt_git) = app_state.git_actor(&worktree_path).await {
             let _ = wt_git
@@ -297,6 +318,7 @@ pub async fn run_task_lifecycle(
         }
     }
 
+    emit_step(&task.id, "preflight_checking", serde_json::json!({}));
     if !worktree_path.exists() || !worktree_path.is_dir() {
         let diag = runtime_fs_diagnostics(&project_path, &worktree_path);
         tracing::warn!(task_id = %task_id, diag = %diag, "Lifecycle: worktree preflight failed");
@@ -309,23 +331,18 @@ pub async fn run_task_lifecycle(
         .await;
         return_free!();
     }
+    emit_step(&task.id, "preflight_passed", serde_json::json!({}));
 
     // ── Project commands ──────────────────────────────────────────────────────
     let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
-    let (prompt_setup_commands, prompt_verification_commands) = {
-        if let Ok(Some(ref p)) = project_repo.get(&task.project_id).await {
-            let setup_names = format_command_names(&p.setup_commands);
-            let verify_names = format_command_names(&p.verification_commands);
-            (setup_names, verify_names)
-        } else {
-            (None, None)
-        }
-    };
 
     // ── Run setup commands before session ─────────────────────────────────────
-    if let Ok(Some(project)) = project_repo.get(&task.project_id).await {
-        let setup_specs: Vec<CommandSpec> =
-            serde_json::from_str(&project.setup_commands).unwrap_or_default();
+    let (prompt_setup_commands, prompt_verification_commands) = if let Ok(Some(project)) = project_repo.get(&task.project_id).await {
+        let (setup_specs, verification_specs) = load_commands(&worktree_path, &project);
+        let setup_json = serde_json::to_string(&setup_specs).unwrap_or_else(|_| "[]".to_string());
+        let verification_json = serde_json::to_string(&verification_specs).unwrap_or_else(|_| "[]".to_string());
+        let prompt_setup_commands = format_command_names(&setup_json);
+        let prompt_verification_commands = format_command_names(&verification_json);
         if !setup_specs.is_empty() {
             let setup_start = std::time::Instant::now();
             tracing::info!(
@@ -333,18 +350,70 @@ pub async fn run_task_lifecycle(
                 command_count = setup_specs.len(),
                 "Lifecycle: running setup commands"
             );
-            let setup_result = run_commands(&setup_specs, &worktree_path).await;
-            match setup_result {
-                Ok(results) => {
+            let mut setup_results = Vec::new();
+            let mut setup_error: Option<anyhow::Error> = None;
+            for spec in &setup_specs {
+                emit_step(
+                    &task.id,
+                    "setup_command_started",
+                    serde_json::json!({"name": spec.name, "command": spec.command}),
+                );
+                match run_commands(std::slice::from_ref(spec), &worktree_path).await {
+                    Ok(mut results) => {
+                        if let Some(result) = results.pop() {
+                            let status = if result.exit_code == 0 { "ok" } else { "error" };
+                            emit_step(
+                                &task.id,
+                                "setup_command_finished",
+                                serde_json::json!({"name": result.name, "status": status, "exit_code": result.exit_code}),
+                            );
+                            setup_results.push(result);
+                            if status == "error" {
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        emit_step(
+                            &task.id,
+                            "setup_command_finished",
+                            serde_json::json!({"name": spec.name, "status": "error", "error": e.to_string()}),
+                        );
+                        setup_error = Some(e.into());
+                        break;
+                    }
+                }
+            }
+
+            match setup_error {
+                Some(e) => {
+                    let reason = format!("Setup commands error: {e}");
+                    tracing::warn!(task_id = %task.short_id, error = %e, "Lifecycle: setup command error");
+                    let task_repo =
+                        TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+                    let _ = task_repo
+                        .transition(
+                            &task.id,
+                            (agent_type.role_config().release_action)(),
+                            "agent-supervisor",
+                            "system",
+                            Some(&reason),
+                            None,
+                        )
+                        .await;
+                    cleanup_worktree(&task.id, &worktree_path, &app_state).await;
+                    return_free!();
+                }
+                None => {
                     crate::actors::slot::commands::log_commands_run_event(
                         &task.id,
                         "setup",
                         &setup_specs,
-                        &results,
+                        &setup_results,
                         &app_state,
                     )
                     .await;
-                    let failed = results.iter().find(|r| r.exit_code != 0);
+                    let failed = setup_results.iter().find(|r| r.exit_code != 0);
                     if let Some(failure) = failed {
                         let reason = format!(
                             "Setup command '{}' failed (exit {})\nstdout: {}\nstderr: {}",
@@ -379,27 +448,12 @@ pub async fn run_task_lifecycle(
                         "Lifecycle: setup commands completed"
                     );
                 }
-                Err(e) => {
-                    let reason = format!("Setup commands error: {e}");
-                    tracing::warn!(task_id = %task.short_id, error = %e, "Lifecycle: setup command error");
-                    let task_repo =
-                        TaskRepository::new(app_state.db().clone(), app_state.events().clone());
-                    let _ = task_repo
-                        .transition(
-                            &task.id,
-                            (agent_type.role_config().release_action)(),
-                            "agent-supervisor",
-                            "system",
-                            Some(&reason),
-                            None,
-                        )
-                        .await;
-                    cleanup_worktree(&task.id, &worktree_path, &app_state).await;
-                    return_free!();
-                }
             }
         }
-    }
+        (prompt_setup_commands, prompt_verification_commands)
+    } else {
+        (None, None)
+    };
 
     let conflict_files = conflict_ctx.as_ref().map(|m| {
         m.conflicting_files
@@ -557,8 +611,8 @@ pub async fn run_task_lifecycle(
             merge_base_branch: conflict_ctx.as_ref().map(|m| m.base_branch.clone()),
             merge_target_branch: conflict_ctx.as_ref().map(|m| m.merge_target.clone()),
             merge_failure_context: merge_validation_ctx,
-            setup_commands: prompt_setup_commands,
-            verification_commands: prompt_verification_commands,
+            setup_commands: prompt_setup_commands.clone(),
+            verification_commands: prompt_verification_commands.clone(),
             activity: activity_text,
             epic_context,
         },
@@ -615,6 +669,7 @@ pub async fn run_task_lifecycle(
     let tools = agent_type.tool_schemas();
 
     // Try to resume from a paused session's saved conversation.
+    emit_step(&task.id, "session_creating", serde_json::json!({"resume": resume_record_id.is_some()}));
     let (current_record_id, mut conversation) = if let Some(ref resume_id) = resume_record_id {
         match super::conversation_store::load(resume_id).await {
             Ok(Some(mut saved_conv)) => {
@@ -737,6 +792,7 @@ pub async fn run_task_lifecycle(
     let current_session_id = current_record_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    emit_step(&task.id, "session_created", serde_json::json!({"session_id": current_session_id}));
 
     // ── Run reply loop ────────────────────────────────────────────────────────
     let (reply_result, final_output, tokens_in_loop, tokens_out_loop) = run_reply_loop(
@@ -770,12 +826,7 @@ pub async fn run_task_lifecycle(
             .insert_messages_batch(record_id, &task.id, &conversation.messages)
             .await
         {
-            tracing::warn!(
-                task_id = %task_id,
-                session_id = %record_id,
-                error = %e,
-                "Lifecycle: failed to persist conversation messages to DB"
-            );
+            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to persist conversation messages to DB");
         }
     }
 
@@ -1093,16 +1144,13 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
             return_free!();
         }
     };
-    let provider_credential = match load_provider_credential(&catalog_provider_id, &app_state).await
-    {
+    let provider_credential = match load_provider_credential(&catalog_provider_id, &app_state).await {
         Ok(cred) => cred,
         Err(e) => {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");
             return_free!();
         }
     };
-
-    // ── Fetch verification commands for the prompt ─────────────────────────
     let verification_commands = {
         let repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
         repo.get_by_path(&project_path)
@@ -1178,12 +1226,9 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
             return_free!();
         }
     };
-
     let current_session_id = current_record_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-
-    // ── Build conversation ────────────────────────────────────────────────
     let tools = agent_type.tool_schemas();
     let mut conversation = Conversation::new();
     conversation.push(Message::system(system_prompt));
