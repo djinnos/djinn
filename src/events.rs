@@ -5,6 +5,7 @@ use crate::models::GitSettings;
 use crate::models::Note;
 use crate::models::Project;
 use crate::models::Task;
+use crate::verification::StepEvent;
 use serde::de::DeserializeOwned;
 
 /// Domain events emitted by repositories after every write.
@@ -124,6 +125,23 @@ pub(crate) enum DjinnEvent {
         error: Option<String>,
     },
 
+    /// Step-level progress during verification command execution.
+    #[allow(dead_code)]
+    VerificationStep {
+        project_id: String,
+        task_id: Option<String>,
+        phase: String,
+        step: StepEvent,
+    },
+
+    /// Step-level progress during task lifecycle setup (before agent session).
+    #[allow(dead_code)]
+    TaskLifecycleStep {
+        task_id: String,
+        step: String,
+        detail: serde_json::Value,
+    },
+
     // Task activity stream
     ActivityLogged {
         task_id: Option<String>,
@@ -189,7 +207,8 @@ impl From<DjinnEvent> for DjinnEventEnvelope {
             DjinnEvent::ProjectConfigUpdated { project_id, .. }
             | DjinnEvent::GitSettingsUpdated { project_id, .. }
             | DjinnEvent::SessionDispatched { project_id, .. }
-            | DjinnEvent::ProjectHealthChanged { project_id, .. } => Some(project_id.clone()),
+            | DjinnEvent::ProjectHealthChanged { project_id, .. }
+            | DjinnEvent::VerificationStep { project_id, .. } => Some(project_id.clone()),
             _ => None,
         };
 
@@ -287,6 +306,26 @@ impl From<DjinnEvent> for DjinnEventEnvelope {
                 "healthy": healthy,
                 "error": error,
             })),
+            DjinnEvent::VerificationStep {
+                project_id,
+                task_id,
+                phase,
+                step,
+            } => serde_json::to_value(serde_json::json!({
+                "project_id": project_id,
+                "task_id": task_id,
+                "phase": phase,
+                "step": step,
+            })),
+            DjinnEvent::TaskLifecycleStep {
+                task_id,
+                step,
+                detail,
+            } => serde_json::to_value(serde_json::json!({
+                "task_id": task_id,
+                "step": step,
+                "detail": detail,
+            })),
             DjinnEvent::ActivityLogged {
                 task_id,
                 action,
@@ -342,6 +381,8 @@ impl DjinnEvent {
             | DjinnEvent::SessionMessage { .. } => "session",
             DjinnEvent::SyncCompleted { .. } => "sync",
             DjinnEvent::ProjectHealthChanged { .. } => "project",
+            DjinnEvent::VerificationStep { .. } => "verification",
+            DjinnEvent::TaskLifecycleStep { .. } => "lifecycle",
             DjinnEvent::ActivityLogged { .. } => "activity",
         }
     }
@@ -373,6 +414,7 @@ impl DjinnEvent {
             DjinnEvent::SyncCompleted { .. } => "completed",
             DjinnEvent::ProjectHealthChanged { healthy: true, .. } => "health_ok",
             DjinnEvent::ProjectHealthChanged { healthy: false, .. } => "health_error",
+            DjinnEvent::VerificationStep { .. } | DjinnEvent::TaskLifecycleStep { .. } => "step",
             DjinnEvent::ActivityLogged { .. } => "logged",
         }
     }
@@ -390,6 +432,7 @@ impl DjinnEvent {
 mod tests {
     use super::{DjinnEvent, DjinnEventEnvelope};
     use crate::models::{Project, Setting, Task};
+    use crate::verification::StepEvent;
     use serde_json::json;
 
     #[test]
@@ -470,6 +513,64 @@ mod tests {
                 "task_id": "t1",
                 "agent_type": "worker",
                 "message": msg,
+            })
+        );
+    }
+
+    #[test]
+    fn envelope_verification_step_maps_entity_action_and_payload() {
+        let event = DjinnEvent::VerificationStep {
+            project_id: "p1".into(),
+            task_id: Some("t1".into()),
+            phase: "verification".into(),
+            step: StepEvent::Started {
+                index: 1,
+                total: 3,
+                name: "clippy".into(),
+                command: "cargo clippy".into(),
+            },
+        };
+        let envelope = DjinnEventEnvelope::from(event);
+
+        assert_eq!(envelope.entity_type(), "verification");
+        assert_eq!(envelope.action(), "step");
+        assert_eq!(envelope.project_id.as_deref(), Some("p1"));
+        assert_eq!(
+            envelope.payload(),
+            &json!({
+                "project_id": "p1",
+                "task_id": "t1",
+                "phase": "verification",
+                "step": {
+                    "Started": {
+                        "index": 1,
+                        "total": 3,
+                        "name": "clippy",
+                        "command": "cargo clippy"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn envelope_task_lifecycle_step_maps_entity_action_and_payload() {
+        let event = DjinnEvent::TaskLifecycleStep {
+            task_id: "t1".into(),
+            step: "worktree_creating".into(),
+            detail: json!({ "path": "/tmp/worktree" }),
+        };
+        let envelope = DjinnEventEnvelope::from(event);
+
+        assert_eq!(envelope.entity_type(), "lifecycle");
+        assert_eq!(envelope.action(), "step");
+        assert_eq!(envelope.project_id, None);
+        assert_eq!(
+            envelope.payload(),
+            &json!({
+                "task_id": "t1",
+                "step": "worktree_creating",
+                "detail": { "path": "/tmp/worktree" }
             })
         );
     }
