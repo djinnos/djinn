@@ -129,7 +129,8 @@ pub(crate) async fn run_verification_gate(
         .map_err(|e| format!("failed to load project: {e}"))?
         .ok_or_else(|| format!("project not found: {}", task.project_id))?;
 
-    let commit_sha = resolve_head_commit_for_branch(&project_dir, &task_id_to_branch(task_id))
+    let branch = format!("task/{}", task.short_id);
+    let commit_sha = resolve_head_commit_for_branch(&project_dir, &branch)
         .map_err(|e| format!("failed to resolve branch HEAD: {e}"))?;
 
     let cache_repo = VerificationCacheRepository::new(app_state.db().clone());
@@ -241,9 +242,6 @@ async fn handle_verification_failure(
 }
 
 
-fn task_id_to_branch(task_id: &str) -> String {
-    format!("task/{}", task_id)
-}
 
 fn resolve_head_commit(worktree_path: &std::path::Path) -> anyhow::Result<String> {
     let output = std::process::Command::new("git")
