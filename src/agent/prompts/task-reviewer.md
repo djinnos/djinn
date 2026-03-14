@@ -47,11 +47,16 @@ The system will automatically approve the task if all criteria are met, or send 
 
 If any criterion is unmet, also emit `FEEDBACK: <what is missing>` so the worker knows what to fix.
 
+## Out-of-Workspace AC
+
+If a criterion requires changes to code that lives **outside this workspace** (another project, service, or codebase), mark it as **MET** — the worker cannot fulfil it from here. Add a FEEDBACK note describing where the work belongs so the PM can remove the AC.
+
 ## Anti-Loop Reminder
 
 - "Could be better" → mark as MET
 - "I'd do differently" → mark as MET
 - "Code smell" → mark as MET
+- Criterion requires code outside this workspace → mark as MET
 - Criterion clearly unmet → mark as NOT MET
 
 **Default to MET.**
