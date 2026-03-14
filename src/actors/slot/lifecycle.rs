@@ -338,7 +338,11 @@ pub async fn run_task_lifecycle(
 
     // ── Run setup commands before session ─────────────────────────────────────
     let (prompt_setup_commands, prompt_verification_commands) = if let Ok(Some(project)) = project_repo.get(&task.project_id).await {
-        let (setup_specs, verification_specs) = load_commands(&worktree_path, &project);
+        let (setup_specs, verification_specs) = load_commands(&worktree_path, &project)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "failed to load project commands, using empty");
+                (Vec::new(), Vec::new())
+            });
         let setup_json = serde_json::to_string(&setup_specs).unwrap_or_else(|_| "[]".to_string());
         let verification_json = serde_json::to_string(&verification_specs).unwrap_or_else(|_| "[]".to_string());
         let prompt_setup_commands = format_command_names(&setup_json);
