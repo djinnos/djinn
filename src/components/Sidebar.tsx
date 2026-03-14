@@ -25,6 +25,9 @@ import { useExecutionControl } from '@/hooks/useExecutionControl';
 import { useProjects, useSelectedProjectId } from '@/stores/useProjectStore';
 import { ALL_PROJECTS } from '@/stores/projectStore';
 import { useProjectRoute } from '@/hooks/useProjectRoute';
+import { useStore } from 'zustand';
+import { verificationStore, type VerificationRun } from '@/stores/verificationStore';
+import { HealthCheckPanel } from '@/components/HealthCheckPanel';
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -75,19 +78,29 @@ function NavItem({ icon, label, hotkey, isActive, isCollapsed, onClick }: NavIte
   );
 }
 
-function StatusDot({ state, pulsing = false }: { state: "running" | "paused" | "idle"; pulsing?: boolean }) {
+function StatusDot({ state, healthState, tooltip, onClick }: { state: "running" | "paused" | "idle"; healthState?: 'checking' | 'healthy' | 'unhealthy'; tooltip?: string; onClick?: () => void; }) {
   return (
     <span className="relative flex h-2.5 w-2.5 shrink-0">
-      {state === "running" && pulsing && (
+      {(healthState === 'healthy' && state === "running") && (
         <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
       )}
-      <span
-        className={cn(
-          "relative inline-flex h-2.5 w-2.5 rounded-full",
-          state === "running" && "bg-emerald-400",
+      {healthState === 'checking' && (
+        <span className="absolute inline-flex h-full w-full animate-pulse rounded-full bg-yellow-400 opacity-75" />
+      )}
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onClick?.(); }}
+        className={cn("relative inline-flex h-2.5 w-2.5 rounded-full", onClick && "cursor-pointer",
+          healthState === 'unhealthy' && "bg-red-500",
+          healthState === 'checking' && "bg-yellow-400",
+          healthState === 'healthy' && state === "running" && "bg-emerald-400",
+          !healthState && state === "running" && "bg-emerald-400",
           state === "paused" && "bg-yellow-400",
-          state === "idle" && "bg-zinc-500"
+          !healthState && state === "idle" && "bg-zinc-500",
+          state === "idle" && !healthState && "opacity-0"
         )}
+        title={tooltip}
+        aria-label={tooltip || 'Project status'}
       />
     </span>
   );
@@ -190,6 +203,7 @@ function ProjectListItem({
   isSelected,
   isCollapsed,
   execState,
+  healthRun,
   onClick,
   toggleSlot,
 }: {
@@ -198,42 +212,82 @@ function ProjectListItem({
   isSelected: boolean;
   isCollapsed: boolean;
   execState?: ProjectExecState;
+  healthRun: VerificationRun | null;
   onClick: () => void;
   toggleSlot?: React.ReactNode;
 }) {
   const isActive = execState === "active";
+  const [healthPanelOpen, setHealthPanelOpen] = useState(false);
+
+  const failedStep = healthRun?.steps.find((step) => step.status === 'failed');
+  const runningStep = healthRun?.steps.find((step) => step.status === 'running');
+  const healthState: 'checking' | 'healthy' | 'unhealthy' | undefined =
+    healthRun?.status === 'running'
+      ? 'checking'
+      : healthRun?.status === 'failed'
+        ? 'unhealthy'
+        : healthRun?.status === 'passed' || healthRun?.status === 'cache_hit'
+          ? 'healthy'
+          : undefined;
+
+  const tooltip =
+    healthState === 'checking'
+      ? `Running health check...${runningStep?.name ? ` ${runningStep.name}` : ''}`
+      : healthState === 'unhealthy'
+        ? (failedStep?.stderr?.split('\n')[0] || failedStep?.stdout?.split('\n')[0] || failedStep?.name || 'Health check failed')
+        : healthState === 'healthy' && isActive
+          ? 'Healthy — running'
+          : execState === 'paused'
+            ? 'Paused'
+            : undefined;
+
+  const dotState: 'running' | 'paused' | 'idle' = execState === 'paused' ? 'paused' : isActive ? 'running' : 'idle';
+  const canOpenPanel = healthState === 'checking' || healthState === 'unhealthy';
 
   return (
-    <div className="group/project relative flex items-center">
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={onClick}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
-        className={cn(
-          'flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors cursor-pointer',
-          isCollapsed ? 'justify-center px-0' : '',
-          isSelected
-            ? 'bg-white/[0.07] text-foreground font-medium'
-            : 'text-muted-foreground hover:bg-white/[0.04] hover:text-foreground'
-        )}
-        title={isCollapsed ? name : undefined}
-      >
-        {isActive ? (
-          <StatusDot state="running" pulsing />
-        ) : (
-          icon ?? <FolderOpen className="h-3.5 w-3.5 shrink-0" />
-        )}
-        {!isCollapsed && (
-          <>
-            <span className="truncate flex-1 text-left">{name}</span>
-            {toggleSlot && (
-              <span className="shrink-0">{toggleSlot}</span>
-            )}
-          </>
-        )}
+    <>
+      <div className="group/project relative flex items-center">
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={onClick}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
+          className={cn(
+            'flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors cursor-pointer',
+            isCollapsed ? 'justify-center px-0' : '',
+            isSelected
+              ? 'bg-white/[0.07] text-foreground font-medium'
+              : 'text-muted-foreground hover:bg-white/[0.04] hover:text-foreground'
+          )}
+          title={isCollapsed ? name : undefined}
+        >
+          {(isActive || execState === 'paused' || healthState) ? (
+            <StatusDot
+              state={dotState}
+              healthState={healthState}
+              tooltip={tooltip}
+              onClick={canOpenPanel ? () => setHealthPanelOpen(true) : undefined}
+            />
+          ) : (
+            icon ?? <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+          )}
+          {!isCollapsed && (
+            <>
+              <span className="truncate flex-1 text-left">{name}</span>
+              {toggleSlot && (
+                <span className="shrink-0">{toggleSlot}</span>
+              )}
+            </>
+          )}
+        </div>
       </div>
-    </div>
+      <HealthCheckPanel
+        projectName={name}
+        run={healthRun}
+        open={healthPanelOpen}
+        onClose={() => setHealthPanelOpen(false)}
+      />
+    </>
   );
 }
 
@@ -255,6 +309,18 @@ function ProjectRow({
 }) {
   const { state, refresh } = useExecutionStatus(projectPath);
   const { start, pause, resume } = useExecutionControl(refresh);
+  const healthRun = useStore(verificationStore, useCallback((storeState) => {
+    if (!projectPath) return null;
+
+    let latest: VerificationRun | null = null;
+    for (const run of storeState.runs.values()) {
+      if (run.projectId !== projectPath) continue;
+      if (!latest || new Date(run.startedAt).getTime() > new Date(latest.startedAt).getTime()) {
+        latest = run;
+      }
+    }
+    return latest;
+  }, [projectPath]));
 
   const execState: ProjectExecState = state === "active" ? "active" : state === "paused" ? "paused" : "idle";
 
@@ -274,6 +340,7 @@ function ProjectRow({
       isSelected={isSelected}
       isCollapsed={isCollapsed}
       execState={execState}
+      healthRun={healthRun}
       onClick={onClick}
       toggleSlot={
         <ProjectExecToggle
