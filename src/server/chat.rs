@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::time::Instant;
 
 use axum::Json;
 use axum::extract::State;
@@ -74,6 +75,8 @@ struct ToolCallPayload {
 #[derive(Serialize)]
 struct ToolResultPayload {
     id: String,
+    output: String,
+    elapsed_ms: u64,
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
@@ -403,11 +406,14 @@ pub(super) async fn completions_handler(
 
                 let args =
                     serde_json::Value::Object(input.as_object().cloned().unwrap_or_default());
+                let started_at = Instant::now();
                 match mcp.dispatch_tool(&name, args).await {
                     Ok(value) => {
+                        let output = value.to_string();
+                        let elapsed_ms = started_at.elapsed().as_millis() as u64;
                         tool_results.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
-                            content: vec![ContentBlock::text(value.to_string())],
+                            content: vec![ContentBlock::text(output.clone())],
                             is_error: false,
                         });
                         let _ = tx
@@ -415,6 +421,8 @@ pub(super) async fn completions_handler(
                                 "tool_result",
                                 &ToolResultPayload {
                                     id,
+                                    output,
+                                    elapsed_ms,
                                     success: true,
                                     message: None,
                                 },
@@ -422,6 +430,7 @@ pub(super) async fn completions_handler(
                             .await;
                     }
                     Err(e) => {
+                        let elapsed_ms = started_at.elapsed().as_millis() as u64;
                         tracing::warn!(tool=%name, error=%e, "tool dispatch failed");
                         tool_results.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
@@ -433,6 +442,8 @@ pub(super) async fn completions_handler(
                                 "tool_result",
                                 &ToolResultPayload {
                                     id,
+                                    output: e.clone(),
+                                    elapsed_ms,
                                     success: false,
                                     message: Some(e),
                                 },
