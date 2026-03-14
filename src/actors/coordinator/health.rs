@@ -75,10 +75,16 @@ impl CoordinatorActor {
                 }
             }
 
-            let project_cfg = crate::verification::settings::load_commands(
+            let project_cfg = match crate::verification::settings::load_commands(
                 std::path::Path::new(&project.path),
                 &project,
-            );
+            ) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    tracing::warn!(project_id = %project.id, error = %e, "CoordinatorActor: failed to load commands for health check");
+                    continue;
+                }
+            };
             if project_cfg.0.is_empty() && project_cfg.1.is_empty() {
                 // No commands configured — always healthy; clear any stale failure.
                 if self.unhealthy_projects.remove(&project.id).is_some() {
