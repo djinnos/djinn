@@ -9,6 +9,7 @@ import { useIsAllProjects, useSelectedProject } from '@/stores/useProjectStore';
 import { ChatMessageBubble } from './ChatMessageBubble';
 import { ChatInput } from './ChatInput';
 import { ChatEmptyState } from './ChatEmptyState';
+import { AnimatePresence, motion } from 'framer-motion';
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
 const MODEL_STORAGE_KEY = 'djinnos-chat-model';
@@ -239,15 +240,23 @@ export function ChatView() {
                 }}
               />
             )}
-            {loading && !streamingText && thinkingStartTime !== null && (
-              <div className="pl-3">
-                <div className="inline-flex items-center gap-2 text-[13px] text-muted-foreground/70">
-                  <Spinner size="xs" />
-                  <span>Thinking...</span>
-                  <span>{elapsedSeconds}s</span>
-                </div>
-              </div>
-            )}
+            <AnimatePresence>
+              {loading && !streamingText && thinkingStartTime !== null && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+                  className="pl-3"
+                >
+                  <div className="inline-flex items-center gap-2 text-[13px] text-muted-foreground/70">
+                    <Spinner size="xs" />
+                    <span>Thinking...</span>
+                    <span>{elapsedSeconds}s</span>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
             <div ref={bottomRef} />
           </div>
         )}
