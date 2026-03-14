@@ -5,7 +5,8 @@
  * Right panel: unified chat thread (ADR-007)
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useStore } from "zustand";
 import { useNavigate, useParams } from "react-router-dom";
 import { useSelectedProject } from "@/stores/useProjectStore";
 import { useTaskStore } from "@/stores/useTaskStore";
@@ -19,6 +20,13 @@ import { cn } from "@/lib/utils";
 import type { AcceptanceCriterion, Task } from "@/api/types";
 import { ArrowLeft02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { verificationStore } from "@/stores/verificationStore";
+import { StepLog } from "@/components/StepLog";
+import {
+  areSetupVerificationViewsEqual,
+  buildSetupVerificationView,
+  EMPTY_SETUP_VERIFICATION,
+} from "@/lib/setupVerificationView";
 
 // ── Status labels ────────────────────────────────────────────────────────────
 
@@ -110,6 +118,37 @@ function TaskSidebar({ task, sessions }: { task: Task; sessions: SessionInfo[] }
   const criteria = (task.acceptance_criteria ?? []).map(parseCriterion);
   const acMet = criteria.filter((c: { met: boolean }) => c.met).length;
   const totalDuration = task.duration_seconds ?? 0;
+  const setupVerification = useStore(verificationStore, (state) => {
+    const next = buildSetupVerificationView(task.id, state);
+    const storeState = state as ReturnType<typeof verificationStore.getState> & {
+      _taskSessionSetupVerificationCache?: Map<string, typeof EMPTY_SETUP_VERIFICATION>;
+    };
+
+    if (!storeState._taskSessionSetupVerificationCache) {
+      storeState._taskSessionSetupVerificationCache = new Map();
+    }
+
+    const prev = storeState._taskSessionSetupVerificationCache.get(task.id);
+    if (prev && areSetupVerificationViewsEqual(prev, next)) {
+      return prev;
+    }
+
+    storeState._taskSessionSetupVerificationCache.set(task.id, next);
+    return next;
+  });
+
+  const [isSetupVerificationCollapsed, setIsSetupVerificationCollapsed] = useState(
+    setupVerification.allPassed
+  );
+
+  const setupVerificationDefaultCollapsed = useMemo(
+    () => setupVerification.allPassed,
+    [setupVerification.allPassed]
+  );
+
+  useEffect(() => {
+    setIsSetupVerificationCollapsed(setupVerificationDefaultCollapsed);
+  }, [setupVerificationDefaultCollapsed]);
 
   return (
     <div className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-border p-4">
@@ -160,6 +199,32 @@ function TaskSidebar({ task, sessions }: { task: Task; sessions: SessionInfo[] }
           <div className="font-medium">P{task.priority}</div>
         </div>
       </div>
+
+      {/* Setup & Verification */}
+      {setupVerification.hasData && (
+        <div className="space-y-2">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between rounded px-1 py-1 text-left hover:bg-muted/30"
+            onClick={() => setIsSetupVerificationCollapsed((prev) => !prev)}
+          >
+            <SectionHeader>Setup & Verification</SectionHeader>
+            <span className="text-xs text-muted-foreground">
+              {isSetupVerificationCollapsed ? "Show" : "Hide"}
+            </span>
+          </button>
+
+          {!isSetupVerificationCollapsed && (
+            <StepLog
+              steps={setupVerification.steps}
+              status={setupVerification.status}
+              originalDurationMs={setupVerification.totalDuration}
+              emphasizedStepId={setupVerification.failedStepId}
+              className="bg-background p-1"
+            />
+          )}
+        </div>
+      )}
 
       {/* Acceptance Criteria */}
       {criteria.length > 0 && (

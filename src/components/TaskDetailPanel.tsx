@@ -7,9 +7,15 @@ import { useEffect, useState } from "react";
 import { useTaskActions } from "@/hooks/useTaskActions";
 import { useExecutionControl } from "@/hooks/useExecutionControl";
 import { useSelectedProject } from "@/stores/useProjectStore";
-import { verificationStore, type StepEntry } from "@/stores/verificationStore";
+import { verificationStore } from "@/stores/verificationStore";
 import { Button } from "@/components/ui/button";
 import { ChevronDown, ChevronRight, Play, Square, RotateCcw, X } from "lucide-react";
+import {
+  areSetupVerificationViewsEqual,
+  buildSetupVerificationView,
+  EMPTY_SETUP_VERIFICATION,
+  type SetupVerificationView,
+} from "@/lib/setupVerificationView";
 
 type TaskDetailPanelProps = {
   task: Task | null;
@@ -69,94 +75,8 @@ function SectionCard({ title, children }: { title: string; children: React.React
   );
 }
 
-type SetupVerificationView = {
-  taskId: string;
-  steps: StepEntry[];
-  status: "running" | "passed" | "failed" | "cache_hit";
-  hasData: boolean;
-  allPassed: boolean;
-  isRunning: boolean;
-  hasFailed: boolean;
-  totalDuration: number;
-  failedStepId: string | null;
-};
-
-const EMPTY_STEPS: StepEntry[] = [];
-const EMPTY_SETUP_VERIFICATION: SetupVerificationView = {
-  taskId: "",
-  steps: EMPTY_STEPS,
-  status: "passed",
-  hasData: false,
-  allPassed: false,
-  isRunning: false,
-  hasFailed: false,
-  totalDuration: 0,
-  failedStepId: null,
-};
-
 function formatSeconds(durationMs: number): string {
   return `${(durationMs / 1000).toFixed(durationMs >= 10000 ? 0 : 1)}s`;
-}
-
-function buildSetupVerificationView(taskId: string, state: ReturnType<typeof verificationStore.getState>): SetupVerificationView {
-  const lifecycle = state.lifecycleSteps.get(taskId) ?? [];
-  const run = Array.from(state.runs.values()).find((candidate) => candidate.taskId === taskId);
-
-  if (lifecycle.length === 0 && (!run || run.steps.length === 0)) {
-    return {
-      ...EMPTY_SETUP_VERIFICATION,
-      taskId,
-    };
-  }
-
-  const mappedLifecycle: StepEntry[] = lifecycle.map((item, index) => ({
-    index,
-    name: item.detail ? `${item.step}: ${item.detail}` : item.step,
-    phase: "setup",
-    status: "passed",
-    stdout: item.timestamp,
-  }));
-
-  const lifecycleOffset = mappedLifecycle.length;
-  const verificationSteps: StepEntry[] = (run?.steps ?? []).map((step, index) => ({
-    ...step,
-    index: lifecycleOffset + index,
-  }));
-
-  const steps = [...mappedLifecycle, ...verificationSteps];
-  const isRunning = steps.some((step) => step.status === "running") || run?.status === "running";
-  const hasFailed = steps.some((step) => step.status === "failed") || run?.status === "failed";
-  const allPassed = steps.length > 0 && steps.every((step) => step.status === "passed") && !isRunning && !hasFailed;
-  const totalDuration = steps.reduce((sum, step) => sum + (step.durationMs ?? 0), 0);
-  const failedStep = steps.find((step) => step.status === "failed");
-  const failedStepId = failedStep ? `step-${failedStep.index}` : null;
-  const status = run?.status ?? (hasFailed ? "failed" : isRunning ? "running" : "passed");
-
-  return {
-    taskId,
-    steps,
-    status,
-    hasData: steps.length > 0,
-    allPassed,
-    isRunning,
-    hasFailed,
-    totalDuration,
-    failedStepId,
-  };
-}
-
-function areViewsEqual(a: SetupVerificationView, b: SetupVerificationView): boolean {
-  return (
-    a.taskId === b.taskId &&
-    a.status === b.status &&
-    a.hasData === b.hasData &&
-    a.allPassed === b.allPassed &&
-    a.isRunning === b.isRunning &&
-    a.hasFailed === b.hasFailed &&
-    a.totalDuration === b.totalDuration &&
-    a.failedStepId === b.failedStepId &&
-    a.steps === b.steps
-  );
 }
 
 function TaskActions({ task }: { task: Task }) {
@@ -238,7 +158,7 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
     };
     const prev = storeState._lastSetupVerificationView;
 
-    if (prev && areViewsEqual(prev, next)) {
+    if (prev && areSetupVerificationViewsEqual(prev, next)) {
       return prev;
     }
 
