@@ -34,7 +34,8 @@ pub async fn verify_commit(
     let start = Instant::now();
     let cache_repo = VerificationCacheRepository::new(app_state.db().clone());
 
-    let (setup_commands, verification_commands) = load_commands(worktree_path, project);
+    let (setup_commands, verification_commands) = load_commands(worktree_path, project)
+        .map_err(crate::error::Error::Internal)?;
 
     let setup_results = run_commands(&setup_commands, worktree_path).await?;
 

@@ -33,11 +33,15 @@ struct LspInner {
 type PendingResponses =
     Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>;
 
+/// Tracks per-file open state: version counter for didChange notifications.
+type OpenedFiles = Arc<Mutex<HashMap<String, i32>>>;
+
 struct LspClient {
     stdin: Arc<Mutex<ChildStdin>>,
     diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
     pending: PendingResponses,
     seq: Arc<AtomicU64>,
+    opened: OpenedFiles,
 }
 
 type ClientStdin = Arc<Mutex<ChildStdin>>;
@@ -98,7 +102,7 @@ impl LspManager {
             let inner = self.inner.lock().await;
             inner.clients.get(&key).map(clone_client_refs)
         };
-        let Some((stdin, diagnostics)) = client else {
+        let Some((stdin, diagnostics, opened)) = client else {
             return;
         };
 
@@ -108,20 +112,68 @@ impl LspManager {
             Err(_) => return,
         };
 
-        let open = json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/didOpen",
-            "params": {
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": language_id_for_path(path).unwrap_or("plaintext"),
-                    "version": 1,
-                    "text": text,
-                }
-            }
-        });
+        let mut opened_guard = opened.lock().await;
+        let prev_version = opened_guard.get(&uri).copied();
 
-        let _ = write_lsp_message(&stdin, &open.to_string()).await;
+        if let Some(version) = prev_version {
+            // File already open — notify LSP that the file changed on disk,
+            // then send didChange with incremented version.
+            let next = version + 1;
+            opened_guard.insert(uri.clone(), next);
+            drop(opened_guard);
+
+            // Clear stale diagnostics so the debounce loop waits for fresh ones.
+            diagnostics.lock().await.remove(&uri);
+
+            let watched = json!({
+                "jsonrpc": "2.0",
+                "method": "workspace/didChangeWatchedFiles",
+                "params": {
+                    "changes": [{ "uri": uri, "type": 2 }]
+                }
+            });
+            let _ = write_lsp_message(&stdin, &watched.to_string()).await;
+
+            let change = json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didChange",
+                "params": {
+                    "textDocument": { "uri": uri, "version": next },
+                    "contentChanges": [{ "text": text }],
+                }
+            });
+            let _ = write_lsp_message(&stdin, &change.to_string()).await;
+        } else {
+            // First time opening this file.
+            opened_guard.insert(uri.clone(), 0);
+            drop(opened_guard);
+
+            // Clear any stale diagnostics from a previous session.
+            diagnostics.lock().await.remove(&uri);
+
+            let watched = json!({
+                "jsonrpc": "2.0",
+                "method": "workspace/didChangeWatchedFiles",
+                "params": {
+                    "changes": [{ "uri": uri, "type": 1 }]
+                }
+            });
+            let _ = write_lsp_message(&stdin, &watched.to_string()).await;
+
+            let open = json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": language_id_for_path(path).unwrap_or("plaintext"),
+                        "version": 0,
+                        "text": text,
+                    }
+                }
+            });
+            let _ = write_lsp_message(&stdin, &open.to_string()).await;
+        }
 
         if wait_for_diagnostics {
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -192,8 +244,8 @@ impl LspManager {
     }
 }
 
-fn clone_client_refs(c: &LspClient) -> (ClientStdin, DiagnosticsMap) {
-    (c.stdin.clone(), c.diagnostics.clone())
+fn clone_client_refs(c: &LspClient) -> (ClientStdin, DiagnosticsMap, OpenedFiles) {
+    (c.stdin.clone(), c.diagnostics.clone(), c.opened.clone())
 }
 
 fn clone_client_request_refs(
@@ -412,6 +464,7 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
         diagnostics,
         pending,
         seq: Arc::new(AtomicU64::new(2)),
+        opened: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -462,26 +515,40 @@ async fn send_request(
 }
 
 /// Ensure the file is opened in the LSP server so queries work.
-async fn ensure_did_open(stdin: &ClientStdin, path: &Path) -> Result<String, String> {
+async fn ensure_did_open(
+    stdin: &ClientStdin,
+    path: &Path,
+    opened: &OpenedFiles,
+) -> Result<String, String> {
     let uri = format!("file://{}", path.display());
     let text = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    let open = json!({
-        "jsonrpc": "2.0",
-        "method": "textDocument/didOpen",
-        "params": {
-            "textDocument": {
-                "uri": uri,
-                "languageId": language_id_for_path(path).unwrap_or("plaintext"),
-                "version": 1,
-                "text": text,
+
+    let mut opened_guard = opened.lock().await;
+    if opened_guard.contains_key(&uri) {
+        // Already opened — no need to re-open for query purposes.
+        drop(opened_guard);
+    } else {
+        opened_guard.insert(uri.clone(), 0);
+        drop(opened_guard);
+
+        let open = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": language_id_for_path(path).unwrap_or("plaintext"),
+                    "version": 0,
+                    "text": text,
+                }
             }
-        }
-    });
-    write_lsp_message(stdin, &open.to_string()).await?;
-    // Give the server a moment to index after open
-    sleep(Duration::from_millis(100)).await;
+        });
+        write_lsp_message(stdin, &open.to_string()).await?;
+        // Give the server a moment to index after open
+        sleep(Duration::from_millis(100)).await;
+    }
     Ok(uri)
 }
 
@@ -579,7 +646,7 @@ impl LspManager {
         &self,
         worktree: &Path,
         path: &Path,
-    ) -> Result<(ClientStdin, PendingResponses, Arc<AtomicU64>), String> {
+    ) -> Result<(ClientStdin, PendingResponses, Arc<AtomicU64>, OpenedFiles), String> {
         let server = server_for_path(path)
             .ok_or_else(|| format!("no LSP server configured for {}", path.display()))?;
         let root = find_root(path, worktree, server.root_markers)
@@ -609,7 +676,8 @@ impl LspManager {
             .clients
             .get(&key)
             .ok_or_else(|| "client disappeared".to_string())?;
-        Ok(clone_client_request_refs(client))
+        let (stdin, pending, seq) = clone_client_request_refs(client);
+        Ok((stdin, pending, seq, client.opened.clone()))
     }
 
     /// Send textDocument/hover and return the hover contents as text.
@@ -620,8 +688,8 @@ impl LspManager {
         line: u32,
         character: u32,
     ) -> Result<String, String> {
-        let (stdin, pending, seq) = self.get_request_refs(worktree, path).await?;
-        let uri = ensure_did_open(&stdin, path).await?;
+        let (stdin, pending, seq, opened) = self.get_request_refs(worktree, path).await?;
+        let uri = ensure_did_open(&stdin, path, &opened).await?;
 
         let result = send_request(
             &stdin,
@@ -674,8 +742,8 @@ impl LspManager {
         line: u32,
         character: u32,
     ) -> Result<String, String> {
-        let (stdin, pending, seq) = self.get_request_refs(worktree, path).await?;
-        let uri = ensure_did_open(&stdin, path).await?;
+        let (stdin, pending, seq, opened) = self.get_request_refs(worktree, path).await?;
+        let uri = ensure_did_open(&stdin, path, &opened).await?;
 
         let result = send_request(
             &stdin,
@@ -715,8 +783,8 @@ impl LspManager {
         line: u32,
         character: u32,
     ) -> Result<String, String> {
-        let (stdin, pending, seq) = self.get_request_refs(worktree, path).await?;
-        let uri = ensure_did_open(&stdin, path).await?;
+        let (stdin, pending, seq, opened) = self.get_request_refs(worktree, path).await?;
+        let uri = ensure_did_open(&stdin, path, &opened).await?;
 
         let result = send_request(
             &stdin,
@@ -756,8 +824,8 @@ impl LspManager {
         worktree: &Path,
         path: &Path,
     ) -> Result<String, String> {
-        let (stdin, pending, seq) = self.get_request_refs(worktree, path).await?;
-        let uri = ensure_did_open(&stdin, path).await?;
+        let (stdin, pending, seq, opened) = self.get_request_refs(worktree, path).await?;
+        let uri = ensure_did_open(&stdin, path, &opened).await?;
 
         let result = send_request(
             &stdin,
@@ -807,4 +875,304 @@ pub fn format_diagnostics_xml(diags: Vec<Diagnostic>) -> String {
         out.push_str("</diagnostics>\n");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn make_diag(file: &str, line: u32, character: u32, severity: u32, msg: &str) -> Diagnostic {
+        Diagnostic {
+            file: file.to_string(),
+            line,
+            character,
+            severity,
+            message: msg.to_string(),
+        }
+    }
+
+    // --- format_diagnostics_xml ---
+
+    #[test]
+    fn format_diagnostics_xml_empty() {
+        assert_eq!(format_diagnostics_xml(vec![]), "");
+    }
+
+    #[test]
+    fn format_diagnostics_xml_filters_non_errors() {
+        let diags = vec![
+            make_diag("file://a.rs", 1, 1, 2, "warning"),
+            make_diag("file://a.rs", 2, 1, 3, "info"),
+            make_diag("file://a.rs", 3, 1, 4, "hint"),
+        ];
+        assert_eq!(format_diagnostics_xml(diags), "");
+    }
+
+    #[test]
+    fn format_diagnostics_xml_includes_errors() {
+        let diags = vec![
+            make_diag("file://a.rs", 10, 5, 1, "expected semicolon"),
+            make_diag("file://a.rs", 20, 1, 2, "unused variable"),
+        ];
+        let xml = format_diagnostics_xml(diags);
+        assert!(xml.contains("ERROR [10:5] expected semicolon"));
+        assert!(!xml.contains("unused variable"));
+    }
+
+    #[test]
+    fn format_diagnostics_xml_groups_by_file() {
+        let diags = vec![
+            make_diag("file://b.rs", 1, 1, 1, "err b"),
+            make_diag("file://a.rs", 1, 1, 1, "err a"),
+        ];
+        let xml = format_diagnostics_xml(diags);
+        // Files sorted alphabetically
+        let a_pos = xml.find("file://a.rs").unwrap();
+        let b_pos = xml.find("file://b.rs").unwrap();
+        assert!(a_pos < b_pos);
+    }
+
+    #[test]
+    fn format_diagnostics_xml_truncates_files() {
+        let diags: Vec<_> = (0..10)
+            .map(|i| make_diag(&format!("file://f{i}.rs"), 1, 1, 1, "err"))
+            .collect();
+        let xml = format_diagnostics_xml(diags);
+        let file_count = xml.matches("<diagnostics file=").count();
+        assert_eq!(file_count, 5);
+    }
+
+    #[test]
+    fn format_diagnostics_xml_truncates_per_file() {
+        let diags: Vec<_> = (0..30)
+            .map(|i| make_diag("file://a.rs", i, 1, 1, &format!("err {i}")))
+            .collect();
+        let xml = format_diagnostics_xml(diags);
+        let error_count = xml.matches("ERROR").count();
+        assert_eq!(error_count, 20);
+    }
+
+    // --- server_for_path ---
+
+    #[test]
+    fn server_for_rust_file() {
+        let s = server_for_path(Path::new("/foo/bar.rs")).unwrap();
+        assert_eq!(s.id, "rust-analyzer");
+    }
+
+    #[test]
+    fn server_for_ts_file() {
+        let s = server_for_path(Path::new("/foo/bar.ts")).unwrap();
+        assert_eq!(s.id, "typescript-language-server");
+    }
+
+    #[test]
+    fn server_for_tsx_file() {
+        let s = server_for_path(Path::new("/foo/bar.tsx")).unwrap();
+        assert_eq!(s.id, "typescript-language-server");
+    }
+
+    #[test]
+    fn server_for_go_file() {
+        let s = server_for_path(Path::new("/foo/bar.go")).unwrap();
+        assert_eq!(s.id, "gopls");
+    }
+
+    #[test]
+    fn server_for_python_file() {
+        let s = server_for_path(Path::new("/foo/bar.py")).unwrap();
+        assert_eq!(s.id, "pyright");
+    }
+
+    #[test]
+    fn server_for_unknown_extension() {
+        assert!(server_for_path(Path::new("/foo/bar.txt")).is_none());
+        assert!(server_for_path(Path::new("/foo/bar")).is_none());
+    }
+
+    // --- language_id_for_path ---
+
+    #[test]
+    fn language_id_mappings() {
+        assert_eq!(language_id_for_path(Path::new("a.rs")), Some("rust"));
+        assert_eq!(language_id_for_path(Path::new("a.go")), Some("go"));
+        assert_eq!(language_id_for_path(Path::new("a.py")), Some("python"));
+        assert_eq!(language_id_for_path(Path::new("a.ts")), Some("typescript"));
+        assert_eq!(
+            language_id_for_path(Path::new("a.tsx")),
+            Some("typescriptreact")
+        );
+        assert_eq!(
+            language_id_for_path(Path::new("a.js")),
+            Some("javascript")
+        );
+        assert_eq!(
+            language_id_for_path(Path::new("a.jsx")),
+            Some("javascriptreact")
+        );
+        assert_eq!(language_id_for_path(Path::new("a.json")), Some("json"));
+        assert_eq!(language_id_for_path(Path::new("a.toml")), Some("toml"));
+        assert_eq!(language_id_for_path(Path::new("a.yaml")), Some("yaml"));
+        assert_eq!(language_id_for_path(Path::new("a.yml")), Some("yaml"));
+        assert_eq!(
+            language_id_for_path(Path::new("a.md")),
+            Some("markdown")
+        );
+        assert_eq!(language_id_for_path(Path::new("a.txt")), None);
+    }
+
+    // --- find_root ---
+
+    #[test]
+    fn find_root_finds_cargo_toml() {
+        // Use the actual project directory which has Cargo.toml
+        let worktree = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let file = worktree.join("src/agent/lsp.rs");
+        let root = find_root(&file, &worktree, &["Cargo.toml"]);
+        assert_eq!(root, Some(worktree));
+    }
+
+    #[test]
+    fn find_root_falls_back_to_worktree() {
+        let worktree = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let file = worktree.join("src/agent/lsp.rs");
+        let root = find_root(&file, &worktree, &["nonexistent_marker.xyz"]);
+        assert_eq!(root, Some(worktree));
+    }
+
+    // --- symbol_kind_name ---
+
+    #[test]
+    fn symbol_kind_names() {
+        assert_eq!(symbol_kind_name(5), "Class");
+        assert_eq!(symbol_kind_name(12), "Function");
+        assert_eq!(symbol_kind_name(23), "Struct");
+        assert_eq!(symbol_kind_name(99), "Unknown");
+    }
+
+    // --- format_location ---
+
+    #[test]
+    fn format_location_with_uri_and_range() {
+        let loc = json!({
+            "uri": "file:///foo/bar.rs",
+            "range": {
+                "start": { "line": 9, "character": 4 },
+                "end": { "line": 9, "character": 10 }
+            }
+        });
+        assert_eq!(format_location(&loc), "/foo/bar.rs:10:5");
+    }
+
+    #[test]
+    fn format_location_with_target_uri() {
+        let loc = json!({
+            "targetUri": "file:///foo/bar.rs",
+            "targetSelectionRange": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 5 }
+            }
+        });
+        assert_eq!(format_location(&loc), "/foo/bar.rs:1:1");
+    }
+
+    // --- LspManager unit tests (no real LSP process) ---
+
+    #[tokio::test]
+    async fn lsp_manager_diagnostics_empty_by_default() {
+        let mgr = LspManager::new();
+        assert!(mgr.diagnostics().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lsp_manager_touch_file_no_server_for_txt() {
+        let mgr = LspManager::new();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        // Should return without error even though no server matches
+        mgr.touch_file(tmp.path(), &file, false).await;
+        assert!(mgr.diagnostics().await.is_empty());
+    }
+
+    // --- Opened files version tracking (unit-level) ---
+
+    #[tokio::test]
+    async fn opened_files_tracks_versions() {
+        let opened: OpenedFiles = Arc::new(Mutex::new(HashMap::new()));
+        let uri = "file:///test.rs".to_string();
+
+        // First time: not present
+        assert!(opened.lock().await.get(&uri).is_none());
+
+        // Simulate first open
+        opened.lock().await.insert(uri.clone(), 0);
+        assert_eq!(*opened.lock().await.get(&uri).unwrap(), 0);
+
+        // Simulate second touch (didChange)
+        let version = *opened.lock().await.get(&uri).unwrap();
+        opened.lock().await.insert(uri.clone(), version + 1);
+        assert_eq!(*opened.lock().await.get(&uri).unwrap(), 1);
+
+        // Third touch
+        let version = *opened.lock().await.get(&uri).unwrap();
+        opened.lock().await.insert(uri.clone(), version + 1);
+        assert_eq!(*opened.lock().await.get(&uri).unwrap(), 2);
+    }
+
+    // --- Diagnostics clearing on re-touch ---
+
+    #[tokio::test]
+    async fn diagnostics_cleared_before_retouch() {
+        let diagnostics: DiagnosticsMap = Arc::new(Mutex::new(HashMap::new()));
+        let uri = "file:///test.rs".to_string();
+
+        // Simulate initial diagnostics from first didOpen
+        diagnostics.lock().await.insert(
+            uri.clone(),
+            vec![make_diag(&uri, 1, 1, 1, "old error")],
+        );
+        assert_eq!(diagnostics.lock().await.get(&uri).unwrap().len(), 1);
+
+        // Simulate clearing before re-touch (what touch_file now does)
+        diagnostics.lock().await.remove(&uri);
+        assert!(diagnostics.lock().await.get(&uri).is_none());
+    }
+
+    // --- format_symbol ---
+
+    #[test]
+    fn format_symbol_with_location() {
+        let sym = json!({
+            "name": "my_func",
+            "kind": 12,
+            "location": {
+                "uri": "file:///foo.rs",
+                "range": { "start": { "line": 5, "character": 0 }, "end": { "line": 5, "character": 10 } }
+            }
+        });
+        let result = format_symbol(&sym, 0);
+        assert!(result.contains("Function my_func"));
+        assert!(result.contains("/foo.rs:6:1"));
+    }
+
+    #[test]
+    fn format_symbol_with_children() {
+        let sym = json!({
+            "name": "MyStruct",
+            "kind": 23,
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 10, "character": 0 } },
+            "children": [
+                {
+                    "name": "field_a",
+                    "kind": 8,
+                    "range": { "start": { "line": 1, "character": 4 }, "end": { "line": 1, "character": 20 } }
+                }
+            ]
+        });
+        let result = format_symbol(&sym, 0);
+        assert!(result.contains("Struct MyStruct"));
+        assert!(result.contains("  Field field_a"));
+    }
 }

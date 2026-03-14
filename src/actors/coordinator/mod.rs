@@ -520,7 +520,7 @@ impl CoordinatorActor {
                     self.dispatch_ready_tasks(Some(&task.project_id)).await;
                 }
             }
-            ("session", "updated") => {
+            ("session", "updated" | "completed" | "interrupted" | "failed") => {
                 let Some(session) = envelope.parse_payload::<crate::models::SessionRecord>() else {
                     return;
                 };
