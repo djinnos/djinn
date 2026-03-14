@@ -27,7 +27,11 @@ export interface ProjectState {
 }
 
 function getInitialSelectedProjectId(): string | null {
-  return localStorage.getItem(STORAGE_KEY);
+  try {
+    return localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return null;
+  }
 }
 
 function getInitialLastViews(): Record<string, ProjectView> {
