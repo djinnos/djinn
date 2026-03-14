@@ -1,6 +1,7 @@
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import type { ChatMessage } from '@/stores/chatStore';
+import { Copy } from 'lucide-react';
 
 interface ChatMessageBubbleProps {
   message: ChatMessage;
@@ -19,14 +20,30 @@ function renderMarkdown(text: string): string {
 export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
   const isUser = message.role === 'user';
 
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(message.content);
+  };
+
   return (
-    <div className={cn('flex w-full', isUser ? 'justify-end' : 'justify-start')}>
+    <div className={cn('group flex w-full', isUser ? 'justify-end' : 'justify-start')}>
       <div
         className={cn(
-          'max-w-[80%] rounded-lg px-4 py-3 text-sm',
-          isUser ? 'bg-muted text-foreground' : 'bg-card text-foreground border border-border'
+          'relative max-w-[80%] px-4 py-3 text-sm',
+          isUser
+            ? 'rounded-2xl bg-foreground/5 text-foreground'
+            : 'rounded-lg border border-border bg-card text-foreground'
         )}
       >
+        {isUser && (
+          <button
+            type="button"
+            onClick={handleCopy}
+            aria-label="Copy message"
+            className="absolute -top-2 -right-2 rounded-md border border-border bg-background/95 p-1 text-muted-foreground opacity-0 shadow-sm transition-opacity hover:text-foreground group-hover:opacity-100"
+          >
+            <Copy className="h-3.5 w-3.5" />
+          </button>
+        )}
         {isUser ? (
           <p className="whitespace-pre-wrap break-words">{message.content}</p>
         ) : (
