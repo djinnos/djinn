@@ -8,7 +8,7 @@
 //! ```text
 //! *** Begin Patch
 //! *** Update File: path/to/file.rs
-//! @@ context_line_from_file @@
+//! @@ context_line_from_file
 //!  context line (unchanged)
 //! -old line to remove
 //! +new line to add
@@ -229,16 +229,16 @@ fn parse_update_chunks(body: &[&str], start: usize) -> Result<(Vec<Chunk>, usize
     Ok((chunks, i))
 }
 
-/// Extract the context text from `@@ some text @@`.
+/// Extract the context text from `@@ some text` or `@@ some text @@`.
+/// The closing `@@` is optional — LLMs frequently omit it.
 fn parse_context_anchor(line: &str) -> Result<String, String> {
     let trimmed = line.trim();
     if !trimmed.starts_with("@@") {
-        return Err(format!("expected @@ context @@ line, got: {line}"));
+        return Err(format!("expected @@ line, got: {line}"));
     }
     let inner = trimmed.strip_prefix("@@").unwrap();
-    let inner = inner
-        .strip_suffix("@@")
-        .ok_or_else(|| format!("@@ line missing closing @@: {line}"))?;
+    // Strip optional closing @@
+    let inner = inner.strip_suffix("@@").unwrap_or(inner);
     Ok(inner.trim().to_string())
 }
 
@@ -327,22 +327,60 @@ fn apply_chunks(content: &str, chunks: &[Chunk], file_path: &str) -> Result<Stri
     Ok(result)
 }
 
+/// Normalize Unicode punctuation to ASCII equivalents.
+/// LLMs frequently substitute these characters when generating patches.
+fn normalize_unicode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            // Single quotes: ', ', ‚, ‛
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => out.push('\''),
+            // Double quotes: ", ", „, ‟
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => out.push('"'),
+            // Dashes: ‐, ‑, ‒, –, —, ―
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}' => {
+                out.push('-');
+            }
+            // Ellipsis: …
+            '\u{2026}' => out.push_str("..."),
+            // Non-breaking space
+            '\u{00A0}' => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Try to match a needle line against file lines using a comparator.
+fn try_match_line(
+    lines: &[String],
+    needle: &str,
+    compare: impl Fn(&str, &str) -> bool,
+) -> Option<usize> {
+    lines.iter().position(|line| compare(line, needle))
+}
+
 /// Find the line index where a chunk should be applied.
+///
+/// Uses a 4-pass matching strategy (inspired by opencode):
+///   1. Exact match
+///   2. Trailing-whitespace-trimmed match
+///   3. Both-ends-trimmed match
+///   4. Unicode-normalized + trimmed match
+///
+/// Falls back to the first context/remove line if the anchor fails.
 fn find_chunk_position(
     lines: &[String],
     chunk: &Chunk,
     file_path: &str,
 ) -> Result<usize, String> {
-    // First, try to find using the context anchor
     let anchor = &chunk.context_anchor;
+
     if !anchor.is_empty() {
-        // Exact match
-        for (i, line) in lines.iter().enumerate() {
-            if line.trim() == anchor.trim() {
-                return Ok(i);
-            }
+        if let Some(pos) = seek_line(lines, anchor) {
+            return Ok(pos);
         }
-        // Fuzzy: contains
+        // Also try contains as a last-resort anchor match
         for (i, line) in lines.iter().enumerate() {
             if line.contains(anchor.trim()) {
                 return Ok(i);
@@ -356,18 +394,50 @@ fn find_chunk_position(
         ChunkLine::Add(_) => None,
     });
 
-    if let Some(text) = first_match_text {
-        for (i, line) in lines.iter().enumerate() {
-            if line.trim() == text.trim() {
-                return Ok(i);
-            }
-        }
+    if let Some(text) = first_match_text
+        && let Some(pos) = seek_line(lines, text)
+    {
+        return Ok(pos);
     }
 
     Err(format!(
-        "could not locate chunk in {file_path}: context anchor '@@\u{a0}{anchor}\u{a0}@@' not found in file. \
+        "could not locate chunk in {file_path}: context anchor '@@ {anchor}' not found in file. \
          Ensure the @@ line contains text that appears verbatim in the file."
     ))
+}
+
+/// 4-pass line search: exact → rstrip → trim → unicode-normalized.
+fn seek_line(lines: &[String], needle: &str) -> Option<usize> {
+    // Pass 1: exact
+    if let Some(pos) = try_match_line(lines, needle, |a, b| a == b) {
+        return Some(pos);
+    }
+    // Pass 2: trailing whitespace trimmed
+    if let Some(pos) = try_match_line(lines, needle, |a, b| a.trim_end() == b.trim_end()) {
+        return Some(pos);
+    }
+    // Pass 3: both ends trimmed
+    if let Some(pos) = try_match_line(lines, needle, |a, b| a.trim() == b.trim()) {
+        return Some(pos);
+    }
+    // Pass 4: unicode-normalized + trimmed
+    try_match_line(lines, needle, |a, b| {
+        normalize_unicode(a.trim()) == normalize_unicode(b.trim())
+    })
+}
+
+/// Check if two lines match using the same 4-pass strategy as anchor search.
+fn lines_match(actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+    if actual.trim_end() == expected.trim_end() {
+        return true;
+    }
+    if actual.trim() == expected.trim() {
+        return true;
+    }
+    normalize_unicode(actual.trim()) == normalize_unicode(expected.trim())
 }
 
 /// Apply a single chunk starting at the given position.
@@ -390,7 +460,7 @@ fn apply_single_chunk(
                     ));
                 }
                 let actual = &lines[actual_idx];
-                if actual.trim() != text.trim() {
+                if !lines_match(actual, text) {
                     return Err(format!(
                         "context mismatch at line {}: expected '{}', found '{}'",
                         actual_idx + 1,
@@ -410,7 +480,7 @@ fn apply_single_chunk(
                     ));
                 }
                 let actual = &lines[actual_idx];
-                if actual.trim() != text.trim() {
+                if !lines_match(actual, text) {
                     return Err(format!(
                         "remove mismatch at line {}: expected '{}', found '{}'",
                         actual_idx + 1,
@@ -722,6 +792,91 @@ mod tests {
 
         let result = apply_chunks(content, &chunks, "test.rs").unwrap();
         assert_eq!(result, "line1\nline2\ninserted\nline3\n");
+    }
+
+    #[test]
+    fn test_parse_anchor_without_closing_at() {
+        let input = "\
+*** Begin Patch
+*** Update File: src/main.rs
+@@ fn main()
+ fn main() {
+-    old();
++    new();
+ }
+*** End Patch";
+
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            FileOp::Update { chunks, .. } => {
+                assert_eq!(chunks[0].context_anchor, "fn main()");
+            }
+            _ => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn test_parse_anchor_with_closing_at_still_works() {
+        let input = "\
+*** Begin Patch
+*** Update File: src/main.rs
+@@ fn main() @@
+ fn main() {
+-    old();
++    new();
+ }
+*** End Patch";
+
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            FileOp::Update { chunks, .. } => {
+                assert_eq!(chunks[0].context_anchor, "fn main()");
+            }
+            _ => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn test_unicode_normalization_matching() {
+        // File uses ASCII quotes, patch uses Unicode smart quotes
+        let content = "let msg = \"hello\";\nlet x = 1;\n";
+        let chunks = vec![Chunk {
+            context_anchor: "let msg = \u{201C}hello\u{201D};".to_string(),
+            lines: vec![
+                ChunkLine::Remove("let msg = \u{201C}hello\u{201D};".to_string()),
+                ChunkLine::Add("let msg = \"world\";".to_string()),
+            ],
+        }];
+
+        let result = apply_chunks(content, &chunks, "test.rs").unwrap();
+        assert_eq!(result, "let msg = \"world\";\nlet x = 1;\n");
+    }
+
+    #[test]
+    fn test_trailing_whitespace_matching() {
+        // File has trailing whitespace, patch doesn't
+        let content = "fn main() {  \n    old();\n}\n";
+        let chunks = vec![Chunk {
+            context_anchor: "fn main() {".to_string(),
+            lines: vec![
+                ChunkLine::Context("fn main() {".to_string()),
+                ChunkLine::Remove("    old();".to_string()),
+                ChunkLine::Add("    new();".to_string()),
+                ChunkLine::Context("}".to_string()),
+            ],
+        }];
+
+        let result = apply_chunks(content, &chunks, "test.rs").unwrap();
+        assert!(result.contains("new()"));
+    }
+
+    #[test]
+    fn test_normalize_unicode() {
+        assert_eq!(normalize_unicode("\u{201C}hello\u{201D}"), "\"hello\"");
+        assert_eq!(normalize_unicode("it\u{2019}s"), "it's");
+        assert_eq!(normalize_unicode("a\u{2014}b"), "a-b");
+        assert_eq!(normalize_unicode("wait\u{2026}"), "wait...");
+        assert_eq!(normalize_unicode("no\u{00A0}break"), "no break");
     }
 
     #[test]

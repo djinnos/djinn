@@ -2640,7 +2640,7 @@ fn tool_apply_patch() -> RmcpTool {
             "Uses content-based context matching (not line numbers). Format:\n\n",
             "*** Begin Patch\n",
             "*** Update File: path/to/file.rs\n",
-            "@@ context_line_from_file @@\n",
+            "@@ context_line_from_file\n",
             " context line (unchanged)\n",
             "-old line to remove\n",
             "+new line to add\n",
