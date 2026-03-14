@@ -15,7 +15,7 @@ pub struct CommandSpec {
     pub timeout_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandResult {
     pub name: String,
     pub exit_code: i32,
