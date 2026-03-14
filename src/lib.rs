@@ -16,6 +16,7 @@ pub mod provider;
 pub mod server;
 pub mod sse;
 pub mod sync;
+pub mod verification;
 pub mod watchers;
 
 #[cfg(test)]
