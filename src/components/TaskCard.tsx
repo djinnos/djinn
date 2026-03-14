@@ -27,6 +27,8 @@ import { useTaskActions } from "@/hooks/useTaskActions";
 import { useExecutionControl } from "@/hooks/useExecutionControl";
 import { useSelectedProject, useIsAllProjects } from "@/stores/useProjectStore";
 import { projectStore } from "@/stores/projectStore";
+import { verificationStore } from "@/stores/verificationStore";
+import { useStoreWithEqualityFn } from "zustand/traditional";
 
 type TaskCardProps = {
   task: Task;
@@ -97,6 +99,30 @@ function StatusBadge({ status, hasSession, allAcMet }: { status: string; hasSess
       {badge.label}
     </span>
   );
+}
+
+function getTaskRunningStep(taskId: string, state: ReturnType<typeof verificationStore.getState>) {
+  const lifecycle = state.lifecycleSteps.get(taskId) ?? [];
+  const run = Array.from(state.runs.values()).find((candidate) => candidate.taskId === taskId);
+  const verificationSteps = run?.steps ?? [];
+
+  const runningLifecycle = lifecycle[lifecycle.length - 1];
+  if (runningLifecycle) {
+    return {
+      phase: "setup" as const,
+      name: runningLifecycle.detail ? `${runningLifecycle.step}: ${runningLifecycle.detail}` : runningLifecycle.step,
+    };
+  }
+
+  const runningVerification = verificationSteps.find((step) => step.status === "running");
+  if (runningVerification) {
+    return {
+      phase: "verification" as const,
+      name: runningVerification.name,
+    };
+  }
+
+  return null;
 }
 
 // --- Card tint based on status ---
@@ -296,6 +322,13 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const acMet = ac.filter((c: { met?: boolean }) => c.met).length;
   const cardTint = getCardTint(task);
   const backlogBadge = getBacklogBadge(task.status);
+  const runningStep = useStoreWithEqualityFn(verificationStore, (state) => getTaskRunningStep(task.id, state));
+  const statusLabel =
+    task.status === "in_progress" && runningStep?.phase === "setup"
+      ? `setting up: ${runningStep.name}`
+      : task.status === "verifying" && runningStep?.phase === "verification"
+        ? `verifying: ${runningStep.name}`
+        : null;
 
   return (
     <Card
@@ -356,7 +389,12 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           <div className="flex-1" />
 
           {/* Status badge for in-flight */}
-          {isInFlight && <StatusBadge status={task.status} hasSession={!!task.active_session} allAcMet={acTotal > 0 && acMet === acTotal} />}
+          {isInFlight && (
+            <span className="inline-flex items-center gap-1" data-testid="taskcard-status-badge">
+              <StatusBadge status={task.status} hasSession={!!task.active_session} allAcMet={acTotal > 0 && acMet === acTotal} />
+              {statusLabel && <span className="text-[10px] font-medium text-muted-foreground">{statusLabel}</span>}
+            </span>
+          )}
 
           {/* Duration & model for in-flight / done */}
           {shouldShowDuration && (
