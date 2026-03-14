@@ -300,8 +300,21 @@ fn clone_client_request_refs(
 
 struct ServerDef {
     id: &'static str,
+    /// The binary name (first element) and fixed args.
     cmd: &'static [&'static str],
     root_markers: &'static [&'static str],
+    /// How to install this server if it's not found on PATH.
+    install: InstallMethod,
+}
+
+#[derive(Clone, Copy)]
+enum InstallMethod {
+    /// Install via `npm install -g <packages..>` into ~/.djinn/bin
+    Npm(&'static [&'static str]),
+    /// Install via `rustup component add` or `cargo install` fallback.
+    RustComponent(&'static str),
+    /// Install via `go install <pkg>@latest` with GOBIN=~/.djinn/bin
+    GoInstall(&'static str),
 }
 
 fn server_for_path(path: &Path) -> Option<ServerDef> {
@@ -310,24 +323,163 @@ fn server_for_path(path: &Path) -> Option<ServerDef> {
             id: "rust-analyzer",
             cmd: &["rust-analyzer"],
             root_markers: &["Cargo.toml"],
+            install: InstallMethod::RustComponent("rust-analyzer"),
         }),
         Some("go") => Some(ServerDef {
             id: "gopls",
             cmd: &["gopls"],
             root_markers: &["go.mod"],
+            install: InstallMethod::GoInstall("golang.org/x/tools/gopls"),
         }),
         Some("ts") | Some("tsx") | Some("js") | Some("jsx") => Some(ServerDef {
             id: "typescript-language-server",
             cmd: &["typescript-language-server", "--stdio"],
             root_markers: &["package.json", "tsconfig.json"],
+            install: InstallMethod::Npm(&["typescript-language-server", "typescript"]),
         }),
         Some("py") => Some(ServerDef {
             id: "pyright",
             cmd: &["pyright-langserver", "--stdio"],
             root_markers: &["pyproject.toml", "setup.py"],
+            install: InstallMethod::Npm(&["pyright"]),
         }),
         _ => None,
     }
+}
+
+/// Djinn-managed binary directory for auto-installed LSP servers.
+fn djinn_bin_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"))
+        .join("djinn")
+        .join("bin")
+}
+
+/// Resolve the binary for an LSP server: check PATH (augmented with
+/// ~/.djinn/bin), and auto-install if missing.
+async fn resolve_binary(server: &ServerDef) -> Result<PathBuf, String> {
+    let bin_dir = djinn_bin_dir();
+    let binary_name = server.cmd[0];
+
+    // Build an augmented PATH that includes our managed bin dir.
+    let system_path = std::env::var("PATH").unwrap_or_default();
+    let augmented_path = format!("{}:{}", bin_dir.display(), system_path);
+
+    // Check if the binary already exists (on PATH or in our bin dir).
+    if let Some(found) = which_in_path(binary_name, &augmented_path) {
+        tracing::debug!(binary = binary_name, path = %found.display(), "lsp: binary found");
+        return Ok(found);
+    }
+
+    // Not found — attempt installation.
+    tracing::info!(
+        server = server.id,
+        binary = binary_name,
+        "lsp: binary not found, attempting auto-install"
+    );
+
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|e| format!("failed to create {}: {e}", bin_dir.display()))?;
+
+    match server.install {
+        InstallMethod::Npm(packages) => {
+            // Find npm
+            let npm = which_in_path("npm", &system_path)
+                .ok_or_else(|| "npm not found — cannot auto-install LSP server".to_string())?;
+
+            let mut cmd = std::process::Command::new(npm);
+            cmd.arg("install")
+                .arg("-g")
+                .arg(format!("--prefix={}", bin_dir.display()));
+            for pkg in packages {
+                cmd.arg(*pkg);
+            }
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+            tracing::info!(packages = ?packages, prefix = %bin_dir.display(), "lsp: running npm install");
+            let output = cmd.output().map_err(|e| format!("npm install failed: {e}"))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("npm install failed: {stderr}"));
+            }
+        }
+        InstallMethod::RustComponent(component) => {
+            if let Some(rustup) = which_in_path("rustup", &system_path) {
+                tracing::info!(component = component, "lsp: running rustup component add");
+                let output = std::process::Command::new(rustup)
+                    .args(["component", "add", component])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .map_err(|e| format!("rustup failed: {e}"))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!("rustup component add failed: {stderr}"));
+                }
+            } else if let Some(cargo) = which_in_path("cargo", &system_path) {
+                tracing::info!(component = component, "lsp: running cargo install (no rustup found)");
+                let output = std::process::Command::new(cargo)
+                    .args(["install", component])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .map_err(|e| format!("cargo install failed: {e}"))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!("cargo install {component} failed: {stderr}"));
+                }
+            } else {
+                return Err(format!("neither rustup nor cargo found — cannot install {component}"));
+            }
+        }
+        InstallMethod::GoInstall(pkg) => {
+            let go = which_in_path("go", &system_path)
+                .ok_or_else(|| "go not found — cannot auto-install gopls".to_string())?;
+
+            tracing::info!(pkg = pkg, gobin = %bin_dir.display(), "lsp: running go install");
+            let output = std::process::Command::new(go)
+                .args(["install", &format!("{pkg}@latest")])
+                .env("GOBIN", &bin_dir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|e| format!("go install failed: {e}"))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("go install failed: {stderr}"));
+            }
+        }
+    }
+
+    // Verify the binary is now available.
+    which_in_path(binary_name, &augmented_path).ok_or_else(|| {
+        format!(
+            "installed {} but binary '{}' still not found in PATH or {}",
+            server.id,
+            binary_name,
+            bin_dir.display()
+        )
+    })
+}
+
+/// Simple which(1) — scan colon-delimited PATH for an executable.
+fn which_in_path(binary: &str, path_var: &str) -> Option<PathBuf> {
+    for dir in path_var.split(':') {
+        let candidate = Path::new(dir).join(binary);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        // npm --prefix puts binaries under bin/
+        let npm_candidate = Path::new(dir).join("bin").join(binary);
+        if npm_candidate.is_file() {
+            return Some(npm_candidate);
+        }
+    }
+    None
 }
 
 fn language_id_for_path(path: &Path) -> Option<&'static str> {
@@ -365,11 +517,27 @@ fn find_root(path: &Path, worktree: &Path, sentinels: &[&str]) -> Option<PathBuf
 }
 
 async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, String> {
-    let mut cmd = Command::new(server.cmd[0]);
+    let binary_path = resolve_binary(server).await?;
+    tracing::info!(server = server.id, binary = %binary_path.display(), "lsp: spawning server");
+
+    let mut cmd = Command::new(&binary_path);
     for arg in server.cmd.iter().skip(1) {
         cmd.arg(arg);
     }
+
+    // Ensure our managed bin dir is on PATH for the LSP process too
+    // (e.g. typescript-language-server needs to find tsserver).
+    let bin_dir = djinn_bin_dir();
+    let system_path = std::env::var("PATH").unwrap_or_default();
+    let augmented_path = format!(
+        "{}:{}:{}",
+        bin_dir.display(),
+        bin_dir.join("bin").display(),
+        system_path
+    );
+
     cmd.current_dir(root)
+        .env("PATH", &augmented_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -377,7 +545,7 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
     let mut child = cmd
         .spawn()
         .map_err(|e| {
-            tracing::error!(server = server.id, binary = server.cmd[0], error = %e, "lsp: spawn failed");
+            tracing::error!(server = server.id, binary = %binary_path.display(), error = %e, "lsp: spawn failed");
             format!("failed to spawn {}: {e}", server.id)
         })?;
 
@@ -1223,6 +1391,27 @@ mod tests {
         // Simulate clearing before re-touch (what touch_file now does)
         diagnostics.lock().await.remove(&uri);
         assert!(diagnostics.lock().await.get(&uri).is_none());
+    }
+
+    // --- which_in_path ---
+
+    #[test]
+    fn which_in_path_finds_existing_binary() {
+        // /usr/bin/ls should exist on any Linux
+        let result = which_in_path("ls", "/usr/bin");
+        assert_eq!(result, Some(PathBuf::from("/usr/bin/ls")));
+    }
+
+    #[test]
+    fn which_in_path_returns_none_for_missing() {
+        let result = which_in_path("definitely_not_a_real_binary_xyz", "/usr/bin");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn which_in_path_scans_multiple_dirs() {
+        let result = which_in_path("ls", "/nonexistent:/usr/bin:/also_fake");
+        assert_eq!(result, Some(PathBuf::from("/usr/bin/ls")));
     }
 
     // --- format_symbol ---
