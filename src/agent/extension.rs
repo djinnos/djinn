@@ -1779,7 +1779,7 @@ async fn call_task_transition(
         let (merge_action, reason) = merge_and_transition(&task.id, state, &PM_MERGE_ACTIONS)
             .await
             .unwrap_or((
-                TransitionAction::PmInterventionRelease,
+                TransitionAction::PmInterventionComplete,
                 Some("merge_and_transition returned None".to_string()),
             ));
         let updated = repo

@@ -42,10 +42,15 @@ pub const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
 };
 
 /// Actions used when PM approves directly from intervention.
+///
+/// `release` uses `PmInterventionComplete` (→ Open) instead of
+/// `PmInterventionRelease` (→ NeedsPmIntervention) so that verification
+/// or git failures route the task back to a worker who can fix the code,
+/// rather than looping the PM in a re-dispatch cycle it cannot resolve.
 pub const PM_MERGE_ACTIONS: MergeActions = MergeActions {
     approve: TransitionAction::PmApprove,
     conflict: TransitionAction::PmApproveConflict,
-    release: TransitionAction::PmInterventionRelease,
+    release: TransitionAction::PmInterventionComplete,
 };
 
 pub async fn merge_after_task_review(
