@@ -258,7 +258,12 @@ impl LspManager {
         }
     }
 
-    pub async fn diagnostics(&self) -> Vec<Diagnostic> {
+    /// Return diagnostics scoped to a specific worktree path.
+    /// Only returns diagnostics whose file URI starts with the worktree prefix,
+    /// preventing cross-project leakage since LspManager is a singleton.
+    pub async fn diagnostics(&self, worktree: &Path) -> Vec<Diagnostic> {
+        let prefix = format!("file://{}", worktree.display());
+
         let (client_count, clients) = {
             let inner = self.inner.lock().await;
             let count = inner.clients.len();
@@ -274,12 +279,17 @@ impl LspManager {
         for d in clients {
             let map = d.lock().await;
             for values in map.values() {
-                out.extend(values.clone());
+                for diag in values {
+                    if diag.file.starts_with(&prefix) {
+                        out.push(diag.clone());
+                    }
+                }
             }
         }
         let errors = out.iter().filter(|d| d.severity == 1).count();
         tracing::info!(
             clients = client_count,
+            worktree = %worktree.display(),
             total = out.len(),
             errors = errors,
             "lsp: diagnostics() called"
@@ -1344,7 +1354,7 @@ mod tests {
     #[tokio::test]
     async fn lsp_manager_diagnostics_empty_by_default() {
         let mgr = LspManager::new();
-        assert!(mgr.diagnostics().await.is_empty());
+        assert!(mgr.diagnostics(Path::new("/tmp")).await.is_empty());
     }
 
     #[tokio::test]
@@ -1355,7 +1365,7 @@ mod tests {
         std::fs::write(&file, "hello").unwrap();
         // Should return without error even though no server matches
         mgr.touch_file(tmp.path(), &file, false).await;
-        assert!(mgr.diagnostics().await.is_empty());
+        assert!(mgr.diagnostics(tmp.path()).await.is_empty());
     }
 
     // --- Opened files version tracking (unit-level) ---
