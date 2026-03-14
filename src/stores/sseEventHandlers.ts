@@ -11,6 +11,7 @@ import { epicStore } from "./epicStore";
 import { projectStore } from "./projectStore";
 import { queryClient } from "@/lib/queryClient";
 import { fetchProjects } from "@/api/server";
+import { verificationStore, type StepEntry } from "./verificationStore";
 import type { Task, Epic } from "@/api/types";
 
 /**
@@ -263,6 +264,82 @@ export function initSSEEventHandlers(): () => void {
       .catch((err) => console.error("Failed to refetch projects after SSE event:", err));
   });
 
+  const verificationStepUnsub = subscribe("verification_step", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as {
+      project_id?: string;
+      task_id?: string;
+      phase?: "setup" | "verification";
+      step?: Record<string, unknown>;
+    };
+
+    if (!payload.project_id || !payload.phase || !payload.step) return;
+
+    const key = payload.task_id ?? payload.project_id;
+    const [variant] = Object.keys(payload.step);
+    const body = payload.step[variant] as Record<string, unknown> | undefined;
+
+    if (!variant) return;
+
+    if (variant === "Started" && body) {
+      verificationStore.getState().clearRun(key);
+      const step: StepEntry = {
+        index: Number(body.index ?? 0),
+        name: String(body.name ?? "step"),
+        command: typeof body.command === "string" ? body.command : undefined,
+        phase: payload.phase,
+        status: "running",
+      };
+      verificationStore.getState().addStep(key, step, {
+        projectId: payload.project_id,
+        taskId: payload.task_id,
+        startedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    if (variant === "Finished" && body) {
+      const index = Number(body.index ?? 0);
+      const exitCode = typeof body.exit_code === "number" ? body.exit_code : undefined;
+      verificationStore.getState().updateStep(key, index, {
+        exitCode,
+        durationMs: typeof body.duration_ms === "number" ? body.duration_ms : undefined,
+        stdout: typeof body.stdout === "string" ? body.stdout : undefined,
+        stderr: typeof body.stderr === "string" ? body.stderr : undefined,
+        status: exitCode === 0 ? "passed" : "failed",
+      });
+      return;
+    }
+
+    if (variant === "PhaseComplete" && body) {
+      const phaseStatus = String(body.status ?? "").toLowerCase();
+      verificationStore.getState().setRunStatus(
+        key,
+        phaseStatus === "passed" ? "passed" : phaseStatus === "failed" ? "failed" : "running",
+      );
+      return;
+    }
+
+    if (variant === "CacheHit") {
+      verificationStore.getState().setRunStatus(key, "cache_hit");
+    }
+  });
+
+  const lifecycleStepUnsub = subscribe("lifecycle_step", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as {
+      task_id?: string;
+      step?: string;
+      detail?: string;
+    };
+
+    if (!payload.task_id || !payload.step) return;
+
+    verificationStore.getState().addLifecycleStep(payload.task_id, {
+      step: payload.step,
+      detail: payload.detail,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
   // Return cleanup function
   return () => {
     taskCreatedUnsub?.();
@@ -276,6 +353,8 @@ export function initSSEEventHandlers(): () => void {
     sessionStartedUnsub?.();
     sessionEndedUnsub?.();
     syncCompletedUnsub?.();
+    verificationStepUnsub?.();
+    lifecycleStepUnsub?.();
   };
 }
 

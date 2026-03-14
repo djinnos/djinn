@@ -64,6 +64,8 @@ export function useEventSource(projectId?: string | null) {
       return "project_changed";
     }
     if (normalized === "sync_completed") return "sync_completed";
+    if (normalized === "verification_step") return "verification_step";
+    if (normalized === "lifecycle_step") return "lifecycle_step";
     return null;
   };
 
@@ -179,6 +181,10 @@ export function useEventSource(projectId?: string | null) {
           "session.failed",
           "session.updated",
           "sync.completed",
+          "verification.step",
+          "verification_step",
+          "lifecycle.step",
+          "lifecycle_step",
         ] as const;
 
         eventTypes.forEach((eventType) => {
