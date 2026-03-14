@@ -2,19 +2,12 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import type { ChatMessage } from '@/stores/chatStore';
 import { Copy } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import rehypeHighlight from 'rehype-highlight';
+import remarkGfm from 'remark-gfm';
 
 interface ChatMessageBubbleProps {
   message: ChatMessage;
-}
-
-function renderMarkdown(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\n/g, '<br />');
 }
 
 export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
@@ -47,10 +40,11 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
         {isUser ? (
           <p className="whitespace-pre-wrap break-words">{message.content}</p>
         ) : (
-          <div
-            className="prose prose-sm prose-invert max-w-none break-words"
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }}
-          />
+          <div className="prose prose-sm max-w-none break-words dark:prose-invert">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+              {message.content}
+            </ReactMarkdown>
+          </div>
         )}
 
         {!isUser && message.toolCalls && message.toolCalls.length > 0 && (
