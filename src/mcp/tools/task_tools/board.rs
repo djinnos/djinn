@@ -19,6 +19,21 @@ pub(super) async fn board_health_impl(
                 {
                     parsed.project_issues = Some(status.unhealthy_projects);
                 }
+
+                // Surface LSP server warnings (missing binaries).
+                let lsp_warnings = server.state.lsp().warnings().await;
+                if !lsp_warnings.is_empty() {
+                    parsed.lsp_warnings = Some(
+                        lsp_warnings
+                            .into_iter()
+                            .map(|w| BoardHealthLspWarning {
+                                server: w.server,
+                                message: w.message,
+                            })
+                            .collect(),
+                    );
+                }
+
                 Json(ErrorOr::Ok(parsed))
             }
             Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),

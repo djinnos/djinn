@@ -476,6 +476,17 @@ pub struct BoardHealthResponse {
     /// Per-project health issues blocking execution (project_id → error message).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_issues: Option<HashMap<String, String>>,
+    /// Missing LSP servers that should be installed for diagnostics to work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_warnings: Option<Vec<BoardHealthLspWarning>>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BoardHealthLspWarning {
+    /// e.g. "rust-analyzer", "typescript-language-server"
+    pub server: String,
+    /// Human-readable install instructions.
+    pub message: String,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
