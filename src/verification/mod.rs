@@ -1,3 +1,4 @@
+pub mod service;
 pub mod settings;
 
 #[derive(Clone, Debug, serde::Serialize)]
