@@ -11,6 +11,7 @@ interface StepLogProps {
   steps: StepEntry[];
   status: RunStatus;
   originalDurationMs?: number;
+  emphasizedStepId?: string | null;
   className?: string;
 }
 
@@ -53,7 +54,7 @@ function StepStatusIcon({ stepStatus }: { stepStatus: StepEntry["status"] }) {
   }
 }
 
-export function StepLog({ steps, status, originalDurationMs, className }: StepLogProps) {
+export function StepLog({ steps, status, originalDurationMs, emphasizedStepId, className }: StepLogProps) {
   if (steps.length === 0) {
     return (
       <div className={cn("rounded-md border border-border bg-card p-3 text-sm text-muted-foreground", className)}>
@@ -80,17 +81,24 @@ export function StepLog({ steps, status, originalDurationMs, className }: StepLo
         {steps.map((step) => {
           const durationLabel = step.status === "skipped" ? "skipped" : formatDuration(step.durationMs);
           const hasOutput = Boolean(step.command || step.stdout || step.stderr);
+          const stepValue = getStepValue(step.index);
+          const isEmphasized = emphasizedStepId === stepValue;
 
           return (
             <AccordionItem
               key={step.index}
-              value={getStepValue(step.index)}
-              className={cn("border-l-2 pl-3 pr-2", getBorderClass(step.status), step.status === "skipped" && "opacity-60")}
+              value={stepValue}
+              className={cn(
+                "border-l-2 pl-3 pr-2",
+                getBorderClass(step.status),
+                step.status === "skipped" && "opacity-60",
+                isEmphasized && "bg-red-500/10 ring-1 ring-red-400/60"
+              )}
             >
               <AccordionTrigger className="py-2 hover:no-underline">
                 <div className="flex w-full items-center gap-2 text-sm">
                   <StepStatusIcon stepStatus={step.status} />
-                  <span className="truncate">{step.name}</span>
+                  <span className={cn("truncate", isEmphasized && "font-semibold text-red-500")}>{step.name}</span>
                   <span className="ml-auto text-muted-foreground">{durationLabel}</span>
                 </div>
               </AccordionTrigger>

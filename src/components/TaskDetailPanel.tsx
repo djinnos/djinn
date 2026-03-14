@@ -1,11 +1,15 @@
 import type { Epic, Task, AcceptanceCriterion } from "@/api/types";
+import { StepLog } from "@/components/StepLog";
+import { useStore } from "zustand";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useEffect, useState } from "react";
 import { useTaskActions } from "@/hooks/useTaskActions";
 import { useExecutionControl } from "@/hooks/useExecutionControl";
 import { useSelectedProject } from "@/stores/useProjectStore";
+import { verificationStore, type StepEntry } from "@/stores/verificationStore";
 import { Button } from "@/components/ui/button";
-import { Play, Square, RotateCcw, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Play, Square, RotateCcw, X } from "lucide-react";
 
 type TaskDetailPanelProps = {
   task: Task | null;
@@ -62,6 +66,96 @@ function SectionCard({ title, children }: { title: string; children: React.React
       <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
       <div className="rounded-md border bg-card p-4 text-sm">{children}</div>
     </section>
+  );
+}
+
+type SetupVerificationView = {
+  taskId: string;
+  steps: StepEntry[];
+  status: "running" | "passed" | "failed" | "cache_hit";
+  hasData: boolean;
+  allPassed: boolean;
+  isRunning: boolean;
+  hasFailed: boolean;
+  totalDuration: number;
+  failedStepId: string | null;
+};
+
+const EMPTY_STEPS: StepEntry[] = [];
+const EMPTY_SETUP_VERIFICATION: SetupVerificationView = {
+  taskId: "",
+  steps: EMPTY_STEPS,
+  status: "passed",
+  hasData: false,
+  allPassed: false,
+  isRunning: false,
+  hasFailed: false,
+  totalDuration: 0,
+  failedStepId: null,
+};
+
+function formatSeconds(durationMs: number): string {
+  return `${(durationMs / 1000).toFixed(durationMs >= 10000 ? 0 : 1)}s`;
+}
+
+function buildSetupVerificationView(taskId: string, state: ReturnType<typeof verificationStore.getState>): SetupVerificationView {
+  const lifecycle = state.lifecycleSteps.get(taskId) ?? [];
+  const run = Array.from(state.runs.values()).find((candidate) => candidate.taskId === taskId);
+
+  if (lifecycle.length === 0 && (!run || run.steps.length === 0)) {
+    return {
+      ...EMPTY_SETUP_VERIFICATION,
+      taskId,
+    };
+  }
+
+  const mappedLifecycle: StepEntry[] = lifecycle.map((item, index) => ({
+    index,
+    name: item.detail ? `${item.step}: ${item.detail}` : item.step,
+    phase: "setup",
+    status: "passed",
+    stdout: item.timestamp,
+  }));
+
+  const lifecycleOffset = mappedLifecycle.length;
+  const verificationSteps: StepEntry[] = (run?.steps ?? []).map((step, index) => ({
+    ...step,
+    index: lifecycleOffset + index,
+  }));
+
+  const steps = [...mappedLifecycle, ...verificationSteps];
+  const isRunning = steps.some((step) => step.status === "running") || run?.status === "running";
+  const hasFailed = steps.some((step) => step.status === "failed") || run?.status === "failed";
+  const allPassed = steps.length > 0 && steps.every((step) => step.status === "passed") && !isRunning && !hasFailed;
+  const totalDuration = steps.reduce((sum, step) => sum + (step.durationMs ?? 0), 0);
+  const failedStep = steps.find((step) => step.status === "failed");
+  const failedStepId = failedStep ? `step-${failedStep.index}` : null;
+  const status = run?.status ?? (hasFailed ? "failed" : isRunning ? "running" : "passed");
+
+  return {
+    taskId,
+    steps,
+    status,
+    hasData: steps.length > 0,
+    allPassed,
+    isRunning,
+    hasFailed,
+    totalDuration,
+    failedStepId,
+  };
+}
+
+function areViewsEqual(a: SetupVerificationView, b: SetupVerificationView): boolean {
+  return (
+    a.taskId === b.taskId &&
+    a.status === b.status &&
+    a.hasData === b.hasData &&
+    a.allPassed === b.allPassed &&
+    a.isRunning === b.isRunning &&
+    a.hasFailed === b.hasFailed &&
+    a.totalDuration === b.totalDuration &&
+    a.failedStepId === b.failedStepId &&
+    a.steps === b.steps
   );
 }
 
@@ -137,6 +231,41 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
   if (!open || !task) return null;
 
   const criteria = (task.acceptance_criteria ?? []).map(parseCriterion);
+  const setupVerification = useStore(verificationStore, (state) => {
+    const next = buildSetupVerificationView(task.id, state);
+    const storeState = state as ReturnType<typeof verificationStore.getState> & {
+      _lastSetupVerificationView?: SetupVerificationView;
+    };
+    const prev = storeState._lastSetupVerificationView;
+
+    if (prev && areViewsEqual(prev, next)) {
+      return prev;
+    }
+
+    const stable = next.hasData ? next : { ...EMPTY_SETUP_VERIFICATION, taskId: task.id };
+    storeState._lastSetupVerificationView = stable;
+    return stable;
+  });
+  const shouldDefaultCollapse = setupVerification.allPassed;
+  const [isCollapsed, setIsCollapsed] = useState(shouldDefaultCollapse);
+
+  useEffect(() => {
+    if (setupVerification.hasFailed || setupVerification.isRunning) {
+      setIsCollapsed(false);
+      return;
+    }
+    if (setupVerification.allPassed) {
+      setIsCollapsed(true);
+    }
+  }, [setupVerification.hasFailed, setupVerification.isRunning, setupVerification.allPassed]);
+
+  const summary = setupVerification.hasFailed
+    ? `Setup failed at ${setupVerification.steps.find((step) => step.status === "failed")?.name ?? "an unknown step"}`
+    : setupVerification.isRunning
+      ? "Setup is running..."
+      : setupVerification.allPassed
+        ? `Setup passed in ${formatSeconds(setupVerification.totalDuration)}`
+        : "Setup pending";
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/40" role="dialog" aria-modal="true">
@@ -178,6 +307,29 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
               <div><span className="font-medium">Updated:</span> {formatRelative(task.updated_at)}</div>
             </div>
           </SectionCard>
+
+          {setupVerification.hasData && (
+            <SectionCard title="Setup & Verification">
+              <div className="space-y-3">
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between rounded border px-3 py-2 text-left"
+                  onClick={() => setIsCollapsed((value) => !value)}
+                >
+                  <span className={setupVerification.hasFailed ? "font-medium text-red-500" : "text-muted-foreground"}>{summary}</span>
+                  {isCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                </button>
+                {!isCollapsed && (
+                  <StepLog
+                    steps={setupVerification.steps}
+                    status={setupVerification.status}
+                    originalDurationMs={setupVerification.totalDuration}
+                    emphasizedStepId={setupVerification.failedStepId}
+                  />
+                )}
+              </div>
+            </SectionCard>
+          )}
 
           <SectionCard title="Description">
             <div className="prose prose-sm max-w-none dark:prose-invert">
