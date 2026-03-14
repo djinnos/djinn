@@ -432,6 +432,46 @@ impl CoordinatorActor {
         }
     }
 
+    /// Check whether a project has any tasks in `backlog` status.
+    /// Used by the safety-net tick to find projects needing groomer dispatch
+    /// even when no backlog event was recorded (e.g. after daemon restart).
+    async fn has_backlog_tasks(&self, project_id: &str) -> bool {
+        let repo = self.task_repo();
+        match repo
+            .list_filtered(crate::db::ListQuery {
+                project_id: Some(project_id.to_owned()),
+                status: Some("backlog".to_owned()),
+                issue_type: Some("task".to_owned()),
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(result) => result.total_count > 0,
+            Err(e) => {
+                tracing::warn!(project_id, error = %e, "CoordinatorActor: has_backlog_tasks query failed");
+                false
+            }
+        }
+    }
+
+    /// Return IDs of all registered projects that are dispatch-enabled
+    /// (not paused, not unhealthy).
+    async fn enabled_project_ids(&self) -> Vec<String> {
+        let repo = crate::db::ProjectRepository::new(self.db.clone(), self.events_tx.clone());
+        match repo.list().await {
+            Ok(projects) => projects
+                .into_iter()
+                .filter(|p| self.is_project_dispatch_enabled(&p.id))
+                .map(|p| p.id)
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: failed to list projects for groomer scan");
+                Vec::new()
+            }
+        }
+    }
+
     pub(crate) async fn dispatch_groomer_for_project(
         &mut self,
         project_id: &str,
@@ -495,6 +535,23 @@ impl CoordinatorActor {
             self.backlog_debounce.remove(&project_id);
             if self.backlog_count(&project_id).await > 0 {
                 let _ = self.dispatch_groomer_for_project(&project_id).await;
+            }
+        }
+
+        // Safety net: on unscoped ticks, scan all enabled projects for backlog
+        // tasks that may have been missed (e.g. after daemon restart when the
+        // debounce map is empty).
+        if project_filter.is_none() {
+            let project_ids: Vec<String> = self
+                .enabled_project_ids()
+                .await
+                .into_iter()
+                .filter(|pid| !self.active_groomer_sessions.contains(pid))
+                .collect();
+            for project_id in project_ids {
+                if self.has_backlog_tasks(&project_id).await {
+                    let _ = self.dispatch_groomer_for_project(&project_id).await;
+                }
             }
         }
     }
