@@ -19,6 +19,14 @@ pub struct Diagnostic {
     pub message: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct LspWarning {
+    /// e.g. "rust-analyzer", "typescript-language-server"
+    pub server: String,
+    /// Human-readable install instructions.
+    pub message: String,
+}
+
 #[derive(Clone)]
 pub struct LspManager {
     inner: Arc<Mutex<LspInner>>,
@@ -27,6 +35,8 @@ pub struct LspManager {
 struct LspInner {
     clients: HashMap<String, LspClient>,
     broken_servers: std::collections::HashSet<String>,
+    /// Warnings for missing LSP servers, surfaced to the user via board_health.
+    warnings: Vec<LspWarning>,
 }
 
 /// Pending response channels keyed by JSON-RPC request id.
@@ -59,6 +69,7 @@ impl LspManager {
             inner: Arc::new(Mutex::new(LspInner {
                 clients: HashMap::new(),
                 broken_servers: std::collections::HashSet::new(),
+                warnings: Vec::new(),
             })),
         }
     }
@@ -97,6 +108,13 @@ impl LspManager {
                     }
                     Err(e) => {
                         tracing::error!(server = server.id, error = %e, "lsp: failed to spawn client");
+                        // Add a user-facing warning if not already present.
+                        if !inner.warnings.iter().any(|w| w.server == server.id) {
+                            inner.warnings.push(LspWarning {
+                                server: server.id.to_string(),
+                                message: e.clone(),
+                            });
+                        }
                         inner.broken_servers.insert(key);
                         return;
                     }
@@ -296,6 +314,12 @@ impl LspManager {
         );
         out
     }
+
+    /// Return any warnings about missing/broken LSP servers.
+    /// These are surfaced to the user via board_health so they can install them.
+    pub async fn warnings(&self) -> Vec<LspWarning> {
+        self.inner.lock().await.warnings.clone()
+    }
 }
 
 fn clone_client_refs(c: &LspClient) -> (ClientStdin, DiagnosticsMap, OpenedFiles) {
@@ -321,8 +345,10 @@ struct ServerDef {
 enum InstallMethod {
     /// Install via `npm install -g <packages..>` into ~/.djinn/bin
     Npm(&'static [&'static str]),
-    /// Install via `rustup component add` or `cargo install` fallback.
-    RustComponent(&'static str),
+    /// Install via `rustup component add`, or download from GitHub releases.
+    /// Fields: (component_name, github_repo, asset_pattern_fragment)
+    /// asset_pattern_fragment is matched against release asset names (e.g. "x86_64-unknown-linux-gnu").
+    RustAnalyzer,
     /// Install via `go install <pkg>@latest` with GOBIN=~/.djinn/bin
     GoInstall(&'static str),
 }
@@ -333,7 +359,7 @@ fn server_for_path(path: &Path) -> Option<ServerDef> {
             id: "rust-analyzer",
             cmd: &["rust-analyzer"],
             root_markers: &["Cargo.toml"],
-            install: InstallMethod::RustComponent("rust-analyzer"),
+            install: InstallMethod::RustAnalyzer,
         }),
         Some("go") => Some(ServerDef {
             id: "gopls",
@@ -423,11 +449,11 @@ fn resolve_binary_inner(
                 return Err(format!("npm install failed: {stderr}"));
             }
         }
-        InstallMethod::RustComponent(component) => {
+        InstallMethod::RustAnalyzer => {
             if let Some(rustup) = which_in_path("rustup", system_path) {
-                tracing::info!(component = component, "lsp: running rustup component add");
+                tracing::info!("lsp: running rustup component add rust-analyzer");
                 let output = std::process::Command::new(rustup)
-                    .args(["component", "add", component])
+                    .args(["component", "add", "rust-analyzer"])
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .output()
@@ -437,21 +463,14 @@ fn resolve_binary_inner(
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(format!("rustup component add failed: {stderr}"));
                 }
-            } else if let Some(cargo) = which_in_path("cargo", system_path) {
-                tracing::info!(component = component, "lsp: running cargo install (no rustup found)");
-                let output = std::process::Command::new(cargo)
-                    .args(["install", component])
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .output()
-                    .map_err(|e| format!("cargo install failed: {e}"))?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(format!("cargo install {component} failed: {stderr}"));
-                }
             } else {
-                return Err(format!("neither rustup nor cargo found — cannot install {component}"));
+                // rust-analyzer isn't a standalone crate — can't cargo install it.
+                // Must be installed via rustup or system package manager.
+                return Err(
+                    "rust-analyzer not found — install via `rustup component add rust-analyzer` \
+                     or your system package manager (e.g. `pacman -S rust-analyzer`)"
+                        .to_string(),
+                );
             }
         }
         InstallMethod::GoInstall(pkg) => {
@@ -1509,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_binary_rust_no_rustup_no_cargo_errors() {
+    fn resolve_binary_rust_no_rustup_errors_with_help() {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin_dir = tmp.path().join("djinn_bin");
 
@@ -1517,7 +1536,9 @@ mod tests {
         let result = resolve_binary_inner(&server, &bin_dir, "");
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("neither rustup nor cargo found"));
+        let err = result.unwrap_err();
+        assert!(err.contains("rust-analyzer not found"), "got: {err}");
+        assert!(err.contains("rustup component add"), "got: {err}");
     }
 
     #[test]
@@ -1585,26 +1606,25 @@ mod tests {
     }
 
     #[test]
-    fn resolve_binary_cargo_fallback_installs_successfully() {
+    fn resolve_binary_rustup_installs_successfully() {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin_dir = tmp.path().join("djinn_bin");
         let path_dir = tmp.path().join("fakepath");
         std::fs::create_dir_all(&path_dir).unwrap();
 
-        // No rustup, but a fake cargo that "installs" rust-analyzer into
-        // ~/.cargo/bin (simulated via PATH dir)
-        let cargo_bin = tmp.path().join("cargo_bin");
-        std::fs::create_dir_all(&cargo_bin).unwrap();
+        // Fake rustup that "installs" rust-analyzer onto PATH
+        let rustup_bin_dir = tmp.path().join("rustup_bin");
+        std::fs::create_dir_all(&rustup_bin_dir).unwrap();
         let script = format!(
             "#!/bin/sh\ntouch '{}/rust-analyzer'\nchmod +x '{}/rust-analyzer'\n",
-            cargo_bin.display(),
-            cargo_bin.display(),
+            rustup_bin_dir.display(),
+            rustup_bin_dir.display(),
         );
-        make_fake_binary(&path_dir, "cargo", &script);
+        make_fake_binary(&path_dir, "rustup", &script);
 
         let server = server_for_path(Path::new("foo.rs")).unwrap();
-        // Include cargo_bin in system PATH so the binary is found post-install
-        let sys_path = format!("{}:{}", path_dir.display(), cargo_bin.display());
+        // Include rustup_bin_dir in system PATH so the binary is found post-install
+        let sys_path = format!("{}:{}", path_dir.display(), rustup_bin_dir.display());
         let result = resolve_binary_inner(&server, &bin_dir, &sys_path);
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
