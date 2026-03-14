@@ -17,42 +17,37 @@ import type { Task, Epic } from "@/api/types";
 /**
  * Unwrap SSE event payload.
  *
- * The server serialises events using Rust's externally-tagged enum format:
- *   {"TaskUpdated": {"task": {...}}}
- *   {"SessionDispatched": {"task_id": "...", ...}}
- *   {"EpicCreated": {...}}
+ * The server sends DjinnEventEnvelope format:
+ *   {"entity_type":"task","action":"created","payload":{"task":{...},"from_sync":false}}
  *
- * This helper strips the outer variant key and, when present, an inner
- * entity key (e.g. "task" inside TaskCreated/TaskUpdated) so callers
- * receive the flat entity/payload object.
+ * For entity events (task/epic), the payload nests the entity under a key
+ * matching the entity_type (e.g. payload.task). This helper extracts the
+ * inner entity so callers receive the flat entity object.
  */
 function unwrapPayload(raw: unknown): Record<string, unknown> {
   const obj = raw as Record<string, unknown>;
   if (!obj || typeof obj !== "object") return obj;
 
+  // DjinnEventEnvelope format: extract payload field
+  if ("entity_type" in obj && "payload" in obj && typeof obj.payload === "object" && obj.payload !== null) {
+    const payload = obj.payload as Record<string, unknown>;
+    const entityType = obj.entity_type as string;
+
+    // Entity events nest under entity_type key, e.g. payload.task for task events
+    if (entityType in payload) {
+      const entity = payload[entityType];
+      if (entity && typeof entity === "object") {
+        return entity as Record<string, unknown>;
+      }
+    }
+
+    // Non-entity events (session, verification, etc.) — return payload directly
+    return payload;
+  }
+
   // Legacy format: {data: {...entity...}}
   if ("data" in obj && typeof obj.data === "object") {
     return obj.data as Record<string, unknown>;
-  }
-
-  // Rust externally-tagged enum: single key wrapping the payload
-  const keys = Object.keys(obj);
-  if (keys.length === 1) {
-    const inner = obj[keys[0]];
-    if (inner && typeof inner === "object") {
-      const innerObj = inner as Record<string, unknown>;
-      // Some variants nest further, e.g. TaskUpdated has {"task": {...}}
-      // Unwrap if the inner object has a single key whose value is an object
-      // with an "id" field (entity-like).
-      const innerKeys = Object.keys(innerObj);
-      if (innerKeys.length === 1) {
-        const nested = innerObj[innerKeys[0]];
-        if (nested && typeof nested === "object" && "id" in (nested as Record<string, unknown>)) {
-          return nested as Record<string, unknown>;
-        }
-      }
-      return innerObj;
-    }
   }
 
   return obj;
