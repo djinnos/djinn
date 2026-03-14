@@ -8,3 +8,4 @@ pub mod session;
 pub mod session_message;
 pub mod settings;
 pub mod task;
+pub mod verification_cache;
