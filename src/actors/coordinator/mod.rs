@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::actors::git::GitActorHandle;
 use crate::actors::slot::{PoolError, SlotPoolHandle};
 use crate::agent::roles::RoleRegistry;
-use crate::commands::{CommandSpec, run_commands};
+use crate::server::AppState;
 use crate::db::GitSettingsRepository;
 use crate::db::ProjectRepository;
 use crate::db::connection::Database;

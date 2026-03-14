@@ -1,4 +1,5 @@
 use super::*;
+use crate::verification::StepEvent;
 
 impl CoordinatorActor {
     /// Spawn background health-check tasks for all projects (or one) that have
@@ -19,11 +20,6 @@ impl CoordinatorActor {
             {
                 continue;
             }
-
-            let setup_cmds: Vec<CommandSpec> =
-                serde_json::from_str(&project.setup_commands).unwrap_or_default();
-            let verify_cmds: Vec<CommandSpec> =
-                serde_json::from_str(&project.verification_commands).unwrap_or_default();
 
             // ── Pre-flight: verify git remote 'origin' exists ────────────
             // The squash-merge flow assumes `origin` is available. Without it,
@@ -79,7 +75,11 @@ impl CoordinatorActor {
                 }
             }
 
-            if setup_cmds.is_empty() && verify_cmds.is_empty() {
+            let project_cfg = crate::verification::settings::load_commands(
+                std::path::Path::new(&project.path),
+                &project,
+            );
+            if project_cfg.0.is_empty() && project_cfg.1.is_empty() {
                 // No commands configured — always healthy; clear any stale failure.
                 if self.unhealthy_projects.remove(&project.id).is_some() {
                     let _ = self.events_tx.send(DjinnEvent::ProjectHealthChanged {
@@ -92,15 +92,15 @@ impl CoordinatorActor {
             }
 
             let sender = self.self_sender.clone();
-            let db = self.db.clone();
             let events_tx = self.events_tx.clone();
             let project_id = project.id.clone();
             let path = project.path.clone();
+            let app_state = AppState::new(self.db.clone(), tokio_util::sync::CancellationToken::new());
 
             tracing::info!(
                 project_id = %project_id,
-                setup_count = setup_cmds.len(),
-                verify_count = verify_cmds.len(),
+                setup_count = project_cfg.0.len(),
+                verify_count = project_cfg.1.len(),
                 "CoordinatorActor: spawning project health check"
             );
 
@@ -108,9 +108,7 @@ impl CoordinatorActor {
                 let (healthy, error) = match run_project_health_check(
                     project_id.clone(),
                     path,
-                    setup_cmds,
-                    verify_cmds,
-                    db,
+                    app_state,
                     events_tx,
                 )
                 .await
@@ -137,15 +135,13 @@ impl CoordinatorActor {
 pub(super) async fn run_project_health_check(
     project_id: String,
     path: String,
-    setup_cmds: Vec<CommandSpec>,
-    verify_cmds: Vec<CommandSpec>,
-    db: Database,
+    app_state: AppState,
     events_tx: broadcast::Sender<DjinnEventEnvelope>,
 ) -> Result<(), String> {
     let project_path = std::path::PathBuf::from(&path);
 
     // Resolve target branch (falls back to "main").
-    let target_branch = GitSettingsRepository::new(db, events_tx)
+    let target_branch = GitSettingsRepository::new(app_state.db().clone(), events_tx.clone())
         .get(&project_id)
         .await
         .map(|s| s.target_branch)
@@ -172,33 +168,104 @@ pub(super) async fn run_project_health_check(
         .map_err(|e| format!("failed to create health-check worktree: {e}"))?;
 
     let result = async {
-        if !setup_cmds.is_empty() {
-            let results = run_commands(&setup_cmds, &wt_path)
-                .await
-                .map_err(|e| format!("setup error: {e}"))?;
-            if let Some(f) = results.last().filter(|r| r.exit_code != 0) {
-                return Err(format!(
-                    "setup command '{}' failed (exit {}): {}",
-                    f.name,
-                    f.exit_code,
-                    f.stderr.trim()
-                ));
+        let head = git
+            .run_command(vec!["rev-parse".into(), "HEAD".into()])
+            .await
+            .map_err(|e| format!("failed to resolve target branch HEAD: {e}"))?;
+        let commit_sha = head.stdout.trim().to_string();
+        if commit_sha.is_empty() {
+            return Err("failed to resolve non-empty target branch HEAD".to_string());
+        }
+
+        let project = ProjectRepository::new(app_state.db().clone(), events_tx.clone())
+            .get(&project_id)
+            .await
+            .map_err(|e| format!("failed to load project for health-check verification: {e}"))?
+            .ok_or_else(|| {
+                format!("failed to load project for health-check verification: project '{project_id}' not found")
+            })?;
+
+        let verification = crate::verification::service::verify_commit(
+            &project_id,
+            &commit_sha,
+            &wt_path,
+            &project,
+            &app_state,
+        )
+        .await
+        .map_err(|e| format!("health-check verification error: {e}"))?;
+
+        for r in &verification.setup_results {
+            let _ = events_tx.send(
+                DjinnEvent::VerificationStep {
+                    project_id: project_id.clone(),
+                    task_id: None,
+                    phase: "setup".to_string(),
+                    step: StepEvent::Finished {
+                        index: 0,
+                        name: r.name.clone(),
+                        exit_code: r.exit_code,
+                        duration_ms: r.duration_ms,
+                        stdout: r.stdout.clone(),
+                        stderr: r.stderr.clone(),
+                    },
+                }
+                .into(),
+            );
+        }
+
+        if verification.cached {
+            let _ = events_tx.send(
+                DjinnEvent::VerificationStep {
+                    project_id: project_id.clone(),
+                    task_id: None,
+                    phase: "verification".to_string(),
+                    step: StepEvent::CacheHit {
+                        commit_sha: commit_sha.clone(),
+                        cached_at: String::new(),
+                        original_duration_ms: verification.total_duration_ms,
+                    },
+                }
+                .into(),
+            );
+        } else {
+            for r in &verification.verification_results {
+                let _ = events_tx.send(
+                    DjinnEvent::VerificationStep {
+                        project_id: project_id.clone(),
+                        task_id: None,
+                        phase: "verification".to_string(),
+                        step: StepEvent::Finished {
+                            index: 0,
+                            name: r.name.clone(),
+                            exit_code: r.exit_code,
+                            duration_ms: r.duration_ms,
+                            stdout: r.stdout.clone(),
+                            stderr: r.stderr.clone(),
+                        },
+                    }
+                    .into(),
+                );
             }
         }
-        if !verify_cmds.is_empty() {
-            let results = run_commands(&verify_cmds, &wt_path)
-                .await
-                .map_err(|e| format!("verification error: {e}"))?;
-            if let Some(f) = results.last().filter(|r| r.exit_code != 0) {
-                return Err(format!(
-                    "verification command '{}' failed (exit {}): {}",
-                    f.name,
-                    f.exit_code,
-                    f.stderr.trim()
-                ));
-            }
+
+        if verification.passed {
+            Ok(())
+        } else {
+            let msg = verification
+                .verification_results
+                .last()
+                .map(|f| {
+                    format!(
+                        "verification command '{}' failed (exit {}): {}",
+                        f.name,
+                        f.exit_code,
+                        f.stderr.trim()
+                    )
+                })
+                .unwrap_or_else(|| "verification failed".to_string());
+            Err(msg)
         }
-        Ok(())
     }
     .await;
 
