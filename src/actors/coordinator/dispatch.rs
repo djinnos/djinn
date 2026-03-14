@@ -413,29 +413,10 @@ impl CoordinatorActor {
         );
     }
 
-    pub(crate) async fn backlog_count(&self, project_id: &str) -> i64 {
-        let repo = self.task_repo();
-        match repo
-            .list_ready(ReadyQuery {
-                project_id: Some(project_id.to_owned()),
-                issue_type: Some("task".to_string()),
-                limit: 1,
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(tasks) => tasks.len() as i64,
-            Err(e) => {
-                tracing::warn!(project_id, error = %e, "CoordinatorActor: backlog_count list_ready failed");
-                0
-            }
-        }
-    }
-
     /// Check whether a project has any tasks in `backlog` status.
     /// Used by the safety-net tick to find projects needing groomer dispatch
     /// even when no backlog event was recorded (e.g. after daemon restart).
-    async fn has_backlog_tasks(&self, project_id: &str) -> bool {
+    pub(crate) async fn has_backlog_tasks(&self, project_id: &str) -> bool {
         let repo = self.task_repo();
         match repo
             .list_filtered(crate::db::ListQuery {
@@ -533,7 +514,7 @@ impl CoordinatorActor {
 
         for project_id in due_projects {
             self.backlog_debounce.remove(&project_id);
-            if self.backlog_count(&project_id).await > 0 {
+            if self.has_backlog_tasks(&project_id).await {
                 let _ = self.dispatch_groomer_for_project(&project_id).await;
             }
         }

@@ -525,10 +525,13 @@ impl CoordinatorActor {
                     return;
                 };
                 if session.agent_type == "groomer"
-                    && matches!(session.status.as_str(), "completed" | "interrupted")
+                    && matches!(
+                        session.status.as_str(),
+                        "completed" | "interrupted" | "failed"
+                    )
                 {
                     self.active_groomer_sessions.remove(&session.project_id);
-                    if self.backlog_count(&session.project_id).await > 0 {
+                    if self.has_backlog_tasks(&session.project_id).await {
                         let _ = self.dispatch_groomer_for_project(&session.project_id).await;
                     }
                 }
