@@ -13,6 +13,7 @@
 import { useEffect, useRef } from "react";
 import { sseStore, type SSEEvent, type SSEEventType } from "../stores/sseStore";
 import { getServerPort } from "../tauri";
+import { retryServerDiscovery } from "../tauri/commands";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
 import { fetchKanbanSnapshot } from "@/api/server";
 import { useSelectedProject } from "@/stores/useProjectStore";
@@ -25,7 +26,6 @@ import { listen } from "@tauri-apps/api/event";
 const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
 const RECONNECT_MULTIPLIER = 2;
-const MAX_RECONNECT_ATTEMPTS = 10;
 
 export function useEventSource(projectId?: string | null) {
   const selectedProject = useSelectedProject();
@@ -225,38 +225,31 @@ export function useEventSource(projectId?: string | null) {
 
         es.onerror = () => {
           if (!isActive) return;
-          
+
           sseStore.getState().setConnected(false);
-          
-          const { reconnectAttempt } = sseStore.getState();
-          
-          if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
-            // Max retries reached, set error status
-            sseStore.getState().setConnectionStatus("error");
-            sseStore.getState().setError(new Error("EventSource max reconnect attempts reached"));
-          } else {
-            // Still trying to reconnect
-            sseStore.getState().setConnectionStatus("reconnecting");
-            sseStore.getState().setError(new Error("EventSource connection error"));
-          }
-          
+          sseStore.getState().setConnectionStatus("reconnecting");
+
           es.close();
           eventSourceRef.current = null;
 
-          // Only schedule reconnect if we haven't hit max attempts
-          if (reconnectAttempt < MAX_RECONNECT_ATTEMPTS) {
-            const delay = Math.min(
-              INITIAL_RECONNECT_DELAY * Math.pow(RECONNECT_MULTIPLIER, reconnectAttempt),
-              MAX_RECONNECT_DELAY
-            );
-            sseStore.getState().incrementReconnectAttempt();
+          const { reconnectAttempt } = sseStore.getState();
+          const delay = Math.min(
+            INITIAL_RECONNECT_DELAY * Math.pow(RECONNECT_MULTIPLIER, reconnectAttempt),
+            MAX_RECONNECT_DELAY
+          );
+          sseStore.getState().incrementReconnectAttempt();
 
-            reconnectTimerRef.current = setTimeout(() => {
-              if (isActive) {
-                connect();
-              }
-            }, delay);
-          }
+          reconnectTimerRef.current = setTimeout(async () => {
+            if (!isActive) return;
+            // Re-discover daemon port from daemon.json (handles server restart on new port)
+            try {
+              await retryServerDiscovery();
+              await resetMcpClient();
+            } catch {
+              // Discovery failed — server might not be up yet, connect() will fail and retry
+            }
+            connect();
+          }, delay);
         };
       } catch (err) {
         if (!isActive) return;
