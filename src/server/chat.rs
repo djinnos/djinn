@@ -68,6 +68,7 @@ struct DeltaPayload {
 struct ToolCallPayload {
     name: String,
     id: String,
+    input: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -395,6 +396,7 @@ pub(super) async fn completions_handler(
                         &ToolCallPayload {
                             name: name.clone(),
                             id: id.clone(),
+                            input: input.clone(),
                         },
                     ))
                     .await;
@@ -454,7 +456,9 @@ pub(super) async fn completions_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{DJINN_CHAT_SYSTEM_PROMPT, compose_system_prompt};
+    use super::{
+        DJINN_CHAT_SYSTEM_PROMPT, ToolCallPayload, compose_system_prompt, sse_json_event,
+    };
     use crate::mcp::server::DjinnMcpServer;
     use crate::server::AppState;
     use crate::test_helpers;
@@ -561,5 +565,42 @@ mod tests {
         let prompt = compose_system_prompt(DJINN_CHAT_SYSTEM_PROMPT, None, Some(client_system));
         assert!(prompt.starts_with(DJINN_CHAT_SYSTEM_PROMPT.trim()));
         assert!(prompt.ends_with(client_system));
+    }
+
+    #[test]
+    fn tool_call_sse_payload_includes_id_input_and_name() {
+        let payload = ToolCallPayload {
+            name: "task_list".to_string(),
+            id: "call-123".to_string(),
+            input: json!({"project": "/tmp/demo", "limit": 10}),
+        };
+
+        let event = sse_json_event("tool_call", &payload);
+        let serialized = format!("{event:?}");
+
+        assert!(serialized.contains("event: tool_call"));
+
+        let value = serde_json::to_value(payload).expect("payload serializes");
+        assert_eq!(value.get("name").and_then(|v| v.as_str()), Some("task_list"));
+        assert_eq!(value.get("id").and_then(|v| v.as_str()), Some("call-123"));
+        assert_eq!(
+            value.get("input"),
+            Some(&json!({"project": "/tmp/demo", "limit": 10}))
+        );
+    }
+
+    #[test]
+    fn tool_call_payload_serialization_keeps_existing_keys_for_backward_compat() {
+        let payload = ToolCallPayload {
+            name: "memory_search".to_string(),
+            id: "call-456".to_string(),
+            input: json!({"query": "foo"}),
+        };
+
+        let value = serde_json::to_value(payload).expect("payload serializes");
+
+        assert_eq!(value.get("name").and_then(|v| v.as_str()), Some("memory_search"));
+        assert_eq!(value.get("id").and_then(|v| v.as_str()), Some("call-456"));
+        assert_eq!(value.get("input"), Some(&json!({"query": "foo"})));
     }
 }
