@@ -445,17 +445,45 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
     });
 
     let stdin = Arc::new(Mutex::new(stdin));
-    let init = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
+    let seq = Arc::new(AtomicU64::new(2));
+
+    // Send initialize and wait for the response — the LSP spec requires the
+    // client to wait before sending `initialized` or any other notification.
+    let init_result = send_request(
+        &stdin,
+        &pending,
+        &seq,
+        "initialize",
+        json!({
             "processId": null,
             "rootUri": format!("file://{}", root.display()),
-            "capabilities": {}
-        }
-    });
-    write_lsp_message(&stdin, &init.to_string()).await?;
+            "capabilities": {
+                "textDocument": {
+                    "synchronization": {
+                        "didOpen": true,
+                        "didChange": true,
+                        "willSave": false,
+                        "didSave": true,
+                    },
+                    "publishDiagnostics": {
+                        "versionSupport": true,
+                    },
+                },
+            },
+        }),
+    )
+    .await
+    .map_err(|e| format!("LSP initialize failed for {}: {e}", server.id))?;
+
+    // Log server name for debugging
+    if let Some(name) = init_result
+        .get("serverInfo")
+        .and_then(|s| s.get("name"))
+        .and_then(|n| n.as_str())
+    {
+        tracing::debug!("LSP server initialized: {name}");
+    }
+
     let inited = json!({"jsonrpc":"2.0","method":"initialized","params":{}});
     write_lsp_message(&stdin, &inited.to_string()).await?;
 
@@ -463,7 +491,7 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
         stdin,
         diagnostics,
         pending,
-        seq: Arc::new(AtomicU64::new(2)),
+        seq,
         opened: Arc::new(Mutex::new(HashMap::new())),
     })
 }
