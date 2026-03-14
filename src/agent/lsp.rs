@@ -71,10 +71,12 @@ impl LspManager {
 
     pub async fn touch_file(&self, worktree: &Path, path: &Path, wait_for_diagnostics: bool) {
         let Some(server) = server_for_path(path) else {
+            tracing::debug!(path = %path.display(), "lsp: no server configured for file extension");
             return;
         };
 
         let Some(root) = find_root(path, worktree, server.root_markers) else {
+            tracing::warn!(path = %path.display(), server = server.id, "lsp: could not find project root");
             return;
         };
 
@@ -83,14 +85,18 @@ impl LspManager {
         {
             let mut inner = self.inner.lock().await;
             if inner.broken_servers.contains(&key) {
+                tracing::debug!(key = %key, "lsp: skipping broken server");
                 return;
             }
             if !inner.clients.contains_key(&key) {
+                tracing::info!(server = server.id, root = %root.display(), "lsp: spawning new LSP client");
                 match spawn_client(&server, &root).await {
                     Ok(client) => {
+                        tracing::info!(server = server.id, "lsp: client spawned successfully");
                         inner.clients.insert(key.clone(), client);
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        tracing::error!(server = server.id, error = %e, "lsp: failed to spawn client");
                         inner.broken_servers.insert(key);
                         return;
                     }
@@ -109,7 +115,10 @@ impl LspManager {
         let uri = format!("file://{}", path.display());
         let text = match tokio::fs::read_to_string(path).await {
             Ok(v) => v,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "lsp: could not read file for touch");
+                return;
+            }
         };
 
         let mut opened_guard = opened.lock().await;
@@ -121,6 +130,8 @@ impl LspManager {
             let next = version + 1;
             opened_guard.insert(uri.clone(), next);
             drop(opened_guard);
+
+            tracing::info!(uri = %uri, version = next, "lsp: sending didChange");
 
             // Clear stale diagnostics so the debounce loop waits for fresh ones.
             diagnostics.lock().await.remove(&uri);
@@ -145,8 +156,11 @@ impl LspManager {
             let _ = write_lsp_message(&stdin, &change.to_string()).await;
         } else {
             // First time opening this file.
+            let lang = language_id_for_path(path).unwrap_or("plaintext");
             opened_guard.insert(uri.clone(), 0);
             drop(opened_guard);
+
+            tracing::info!(uri = %uri, lang = lang, "lsp: sending didOpen (first touch)");
 
             // Clear any stale diagnostics from a previous session.
             diagnostics.lock().await.remove(&uri);
@@ -166,7 +180,7 @@ impl LspManager {
                 "params": {
                     "textDocument": {
                         "uri": uri,
-                        "languageId": language_id_for_path(path).unwrap_or("plaintext"),
+                        "languageId": lang,
                         "version": 0,
                         "text": text,
                     }
@@ -176,7 +190,8 @@ impl LspManager {
         }
 
         if wait_for_diagnostics {
-            let deadline = Instant::now() + Duration::from_secs(3);
+            let start = Instant::now();
+            let deadline = start + Duration::from_secs(3);
             let debounce = Duration::from_millis(150);
             let mut last_change = Instant::now();
             let mut prev_snapshot: Option<usize> = None;
@@ -184,6 +199,12 @@ impl LspManager {
             loop {
                 let now = Instant::now();
                 if now >= deadline {
+                    tracing::info!(
+                        uri = %uri,
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        final_count = prev_snapshot.unwrap_or(0),
+                        "lsp: diagnostic wait timed out (3s)"
+                    );
                     break;
                 }
 
@@ -197,22 +218,36 @@ impl LspManager {
                     (None, None) => {}
                     // First diagnostics arrived — reset debounce
                     (None, Some(len)) => {
+                        tracing::info!(
+                            uri = %uri,
+                            count = len,
+                            elapsed_ms = start.elapsed().as_millis() as u64,
+                            "lsp: first diagnostics arrived"
+                        );
                         prev_snapshot = Some(len);
                         last_change = Instant::now();
                     }
                     // Count changed — reset debounce
                     (Some(prev), Some(len)) if prev != len => {
+                        tracing::debug!(uri = %uri, prev = prev, now = len, "lsp: diagnostic count changed");
                         prev_snapshot = Some(len);
                         last_change = Instant::now();
                     }
                     // Diagnostics present but unchanged — check debounce expiry
                     (Some(_), Some(_)) => {
                         if now.duration_since(last_change) >= debounce {
+                            tracing::info!(
+                                uri = %uri,
+                                count = prev_snapshot.unwrap_or(0),
+                                elapsed_ms = start.elapsed().as_millis() as u64,
+                                "lsp: diagnostics settled after debounce"
+                            );
                             break;
                         }
                     }
                     // Diagnostics cleared (shouldn't happen normally)
                     (Some(_), None) => {
+                        tracing::debug!(uri = %uri, "lsp: diagnostics were cleared unexpectedly");
                         prev_snapshot = None;
                         last_change = Instant::now();
                     }
@@ -224,13 +259,15 @@ impl LspManager {
     }
 
     pub async fn diagnostics(&self) -> Vec<Diagnostic> {
-        let clients = {
+        let (client_count, clients) = {
             let inner = self.inner.lock().await;
-            inner
+            let count = inner.clients.len();
+            let maps = inner
                 .clients
                 .values()
                 .map(|c| c.diagnostics.clone())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (count, maps)
         };
 
         let mut out = Vec::new();
@@ -240,6 +277,13 @@ impl LspManager {
                 out.extend(values.clone());
             }
         }
+        let errors = out.iter().filter(|d| d.severity == 1).count();
+        tracing::info!(
+            clients = client_count,
+            total = out.len(),
+            errors = errors,
+            "lsp: diagnostics() called"
+        );
         out
     }
 }
@@ -332,7 +376,10 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("failed to spawn {}: {e}", server.id))?;
+        .map_err(|e| {
+            tracing::error!(server = server.id, binary = server.cmd[0], error = %e, "lsp: spawn failed");
+            format!("failed to spawn {}: {e}", server.id)
+        })?;
 
     let stdin = child
         .stdin
@@ -383,9 +430,8 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
                             continue;
                         }
 
-                        if v.get("method").and_then(|m| m.as_str())
-                            == Some("textDocument/publishDiagnostics")
-                        {
+                        let method = v.get("method").and_then(|m| m.as_str());
+                        if method == Some("textDocument/publishDiagnostics") {
                             let params = v.get("params").cloned().unwrap_or_default();
                             let uri = params
                                 .get("uri")
@@ -397,6 +443,15 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
                                 .and_then(|x| x.as_array())
                                 .cloned()
                                 .unwrap_or_default();
+                            let error_count = ds.iter().filter(|d| {
+                                d.get("severity").and_then(|s| s.as_u64()) == Some(1)
+                            }).count();
+                            tracing::info!(
+                                uri = %uri,
+                                total = ds.len(),
+                                errors = error_count,
+                                "lsp: received publishDiagnostics"
+                            );
                             let mut out = Vec::new();
                             for d in ds {
                                 let sev = d
@@ -434,6 +489,8 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
                                 });
                             }
                             diagnostics_reader.lock().await.insert(uri, out);
+                        } else if let Some(m) = method {
+                            tracing::debug!(method = m, "lsp: received server notification");
                         }
                     } else if let Some(v) = line.strip_prefix("Content-Length:") {
                         content_length = v.trim().parse::<usize>().unwrap_or(0);
