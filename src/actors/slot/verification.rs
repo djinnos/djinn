@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 
-use crate::commands::CommandSpec;
 use crate::db::ProjectRepository;
 use crate::db::TaskRepository;
+use crate::db::VerificationCacheRepository;
+use crate::events::DjinnEvent;
 use crate::models::TransitionAction;
 use crate::server::AppState;
+use crate::verification::service::verify_commit;
+use crate::verification::StepEvent;
 
 use super::*;
 
@@ -66,43 +69,21 @@ async fn run_verification_pipeline(
     let project_dir = PathBuf::from(project_path);
     let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
 
-    // Fast path: if no setup or verification commands are configured, skip
-    // worktree creation entirely and go straight to needs_task_review.
     let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
-    if let Ok(Some(project)) = project_repo.get(&task.project_id).await {
-        let setup: Vec<CommandSpec> =
-            serde_json::from_str(&project.setup_commands).unwrap_or_default();
-        let verify: Vec<CommandSpec> =
-            serde_json::from_str(&project.verification_commands).unwrap_or_default();
-        if setup.is_empty() && verify.is_empty() {
-            tracing::info!(task_id = %task_id, "Verification: no commands configured; skipping");
-            let _ = task_repo
-                .transition(
-                    task_id,
-                    TransitionAction::VerificationPass,
-                    "agent-supervisor",
-                    "system",
-                    None,
-                    None,
-                )
-                .await;
-            return Ok(());
-        }
-    }
+    let project = project_repo
+        .get(&task.project_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("project not found: {}", task.project_id))?;
 
     // Create a fresh worktree from the task branch.
     let worktree_path = prepare_worktree(&project_dir, &task, app_state).await?;
+    let commit_sha = resolve_head_commit(&worktree_path)?;
 
-    // Run setup commands (e.g. npm install, cargo fetch).
-    if let Some(feedback) = run_setup_commands_checked(task_id, &worktree_path, app_state).await {
-        tracing::info!(task_id = %task_id, "Verification: setup commands failed");
-        handle_verification_failure(task_id, &feedback, &task_repo, app_state).await;
-        cleanup_worktree(task_id, &worktree_path, app_state).await;
-        return Ok(());
-    }
+    let result = verify_commit(&task.project_id, &commit_sha, &worktree_path, &project, app_state).await?;
+    emit_verification_steps(&task.project_id, Some(task_id), &result, app_state).await;
 
-    // Run verification commands (e.g. cargo check, cargo test).
-    if let Some(feedback) = run_verification_commands(task_id, &worktree_path, app_state).await {
+    if !result.passed {
+        let feedback = format_verification_failure_feedback(&result);
         tracing::info!(task_id = %task_id, "Verification: verification commands failed");
         handle_verification_failure(task_id, &feedback, &task_repo, app_state).await;
         cleanup_worktree(task_id, &worktree_path, app_state).await;
@@ -141,36 +122,48 @@ pub(crate) async fn run_verification_gate(
         .map_err(|e| format!("failed to load task: {e}"))?;
     let project_dir = PathBuf::from(project_path);
 
-    // Check if there are any commands to run.
     let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
-    if let Ok(Some(project)) = project_repo.get(&task.project_id).await {
-        let setup: Vec<CommandSpec> =
-            serde_json::from_str(&project.setup_commands).unwrap_or_default();
-        let verify: Vec<CommandSpec> =
-            serde_json::from_str(&project.verification_commands).unwrap_or_default();
-        if setup.is_empty() && verify.is_empty() {
-            return Ok(());
-        }
+    let project = project_repo
+        .get(&task.project_id)
+        .await
+        .map_err(|e| format!("failed to load project: {e}"))?
+        .ok_or_else(|| format!("project not found: {}", task.project_id))?;
+
+    let commit_sha = resolve_head_commit_for_branch(&project_dir, &task_id_to_branch(task_id))
+        .map_err(|e| format!("failed to resolve branch HEAD: {e}"))?;
+
+    let cache_repo = VerificationCacheRepository::new(app_state.db().clone());
+    if cache_repo
+        .get(&task.project_id, &commit_sha)
+        .await
+        .map_err(|e| format!("failed to query verification cache: {e}"))?
+        .is_some()
+    {
+        let event = DjinnEvent::VerificationStep {
+            project_id: task.project_id.clone(),
+            task_id: Some(task_id.to_string()),
+            phase: "verification".to_string(),
+            step: StepEvent::CacheHit {
+                commit_sha: commit_sha.clone(),
+                cached_at: String::new(),
+                original_duration_ms: 0,
+            },
+        };
+        let _ = app_state.events().send(event.into());
+        return Ok(());
     }
 
     let worktree_path = prepare_worktree(&project_dir, &task, app_state)
         .await
         .map_err(|e| format!("failed to create verification worktree: {e}"))?;
 
-    // Run setup commands.
-    if let Some(feedback) = run_setup_commands_checked(task_id, &worktree_path, app_state).await {
-        cleanup_worktree(task_id, &worktree_path, app_state).await;
-        return Err(feedback);
-    }
-
-    // Run verification commands.
-    if let Some(feedback) = run_verification_commands(task_id, &worktree_path, app_state).await {
-        cleanup_worktree(task_id, &worktree_path, app_state).await;
-        return Err(feedback);
-    }
+    let result = verify_commit(&task.project_id, &commit_sha, &worktree_path, &project, app_state)
+        .await
+        .map_err(|e| format!("verification execution failed: {e}"))?;
+    emit_verification_steps(&task.project_id, Some(task_id), &result, app_state).await;
 
     cleanup_worktree(task_id, &worktree_path, app_state).await;
-    Ok(())
+    if result.passed { Ok(()) } else { Err(format_verification_failure_feedback(&result)) }
 }
 
 /// Log verification failure and transition appropriately.
@@ -244,5 +237,94 @@ async fn handle_verification_failure(
                 None,
             )
             .await;
+    }
+}
+
+
+fn task_id_to_branch(task_id: &str) -> String {
+    format!("task/{}", task_id)
+}
+
+fn resolve_head_commit(worktree_path: &std::path::Path) -> anyhow::Result<String> {
+    let output = std::process::Command::new("git")
+        .arg("rev-parse")
+        .arg("HEAD")
+        .current_dir(worktree_path)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("git rev-parse HEAD failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn resolve_head_commit_for_branch(project_dir: &std::path::Path, branch_name: &str) -> anyhow::Result<String> {
+    let output = std::process::Command::new("git")
+        .arg("rev-parse")
+        .arg(branch_name)
+        .current_dir(project_dir)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("git rev-parse {} failed: {}", branch_name, String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn emit_verification_steps(
+    project_id: &str,
+    task_id: Option<&str>,
+    result: &crate::verification::service::VerificationResult,
+    app_state: &AppState,
+) {
+    for (idx, r) in result.setup_results.iter().enumerate() {
+        let _ = app_state.events().send(
+            DjinnEvent::VerificationStep {
+                project_id: project_id.to_string(),
+                task_id: task_id.map(|t| t.to_string()),
+                phase: "setup".to_string(),
+                step: StepEvent::Finished {
+                    index: (idx + 1) as u32,
+                    name: r.name.clone(),
+                    exit_code: r.exit_code,
+                    duration_ms: r.duration_ms,
+                    stdout: r.stdout.clone(),
+                    stderr: r.stderr.clone(),
+                },
+            }
+            .into(),
+        );
+    }
+    for (idx, r) in result.verification_results.iter().enumerate() {
+        let _ = app_state.events().send(
+            DjinnEvent::VerificationStep {
+                project_id: project_id.to_string(),
+                task_id: task_id.map(|t| t.to_string()),
+                phase: "verification".to_string(),
+                step: StepEvent::Finished {
+                    index: (idx + 1) as u32,
+                    name: r.name.clone(),
+                    exit_code: r.exit_code,
+                    duration_ms: r.duration_ms,
+                    stdout: r.stdout.clone(),
+                    stderr: r.stderr.clone(),
+                },
+            }
+            .into(),
+        );
+    }
+}
+
+fn format_verification_failure_feedback(result: &crate::verification::service::VerificationResult) -> String {
+    let failed = result
+        .setup_results
+        .iter()
+        .chain(result.verification_results.iter())
+        .find(|r| r.exit_code != 0);
+    if let Some(cmd) = failed {
+        format!(
+            "Verification command '{}' failed with exit code {}.\n\nstdout:\n{}\nstderr:\n{}",
+            cmd.name, cmd.exit_code, cmd.stdout, cmd.stderr
+        )
+    } else {
+        "Verification failed".to_string()
     }
 }
