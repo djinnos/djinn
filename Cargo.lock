@@ -591,6 +591,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-db"
+version = "0.1.0"
+dependencies = [
+ "refinery",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "djinn-git"
 version = "0.1.0"
 dependencies = [
@@ -612,6 +621,8 @@ dependencies = [
  "bytes",
  "clap",
  "dirs",
+ "djinn-core",
+ "djinn-db",
  "djinn-git",
  "futures",
  "git2",

@@ -8,6 +8,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+djinn-core = { path = "crates/djinn-core" }
+djinn-db = { path = "crates/djinn-db" }
 djinn-git = { path = "crates/djinn-git" }
 anyhow = "1"
 axum = "0.8"

@@ -6,7 +6,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Executor, SqlitePool};
 use tokio::sync::OnceCell;
 
-use crate::db::migrations;
+use djinn_db::migrations;
 use crate::error::Result;
 
 /// Default database path: `~/.djinn/djinn.db`.
