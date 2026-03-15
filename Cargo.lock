@@ -582,6 +582,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-core"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "djinn-server"
 version = "0.1.0"
 dependencies = [
@@ -592,6 +601,7 @@ dependencies = [
  "bytes",
  "clap",
  "dirs",
+ "djinn-core",
  "futures",
  "git2",
  "http-body-util",
