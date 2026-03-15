@@ -93,6 +93,93 @@ impl TaskRepository {
         Ok(())
     }
 
+    /// Atomically apply a batch of blocker additions and removals inside a
+    /// single transaction.  This prevents a race where `list_ready` / `claim`
+    /// can see the task with zero blockers between individual remove + add calls.
+    pub async fn update_blockers_atomic(
+        &self,
+        task_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+
+        // Removals first (so adds can reference the freed edges if needed).
+        for blocking_id in remove {
+            sqlx::query("DELETE FROM blockers WHERE task_id = ?1 AND blocking_task_id = ?2")
+                .bind(task_id)
+                .bind(blocking_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        // Additions with cycle detection.
+        for blocking_id in add {
+            if task_id == blocking_id {
+                return Err(Error::Internal("task cannot block itself".into()));
+            }
+            let would_cycle: i64 = sqlx::query_scalar(
+                "WITH RECURSIVE reach(id) AS (
+                     SELECT task_id FROM blockers WHERE blocking_task_id = ?1
+                     UNION
+                     SELECT b.task_id FROM blockers b JOIN reach r ON b.blocking_task_id = r.id
+                 )
+                 SELECT EXISTS(SELECT 1 FROM reach WHERE id = ?2)",
+            )
+            .bind(task_id)
+            .bind(blocking_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if would_cycle > 0 {
+                return Err(Error::Internal(
+                    "would create circular blocker dependency".into(),
+                ));
+            }
+            let result =
+                sqlx::query("INSERT INTO blockers (task_id, blocking_task_id) VALUES (?1, ?2)")
+                    .bind(task_id)
+                    .bind(blocking_id)
+                    .execute(&mut *tx)
+                    .await;
+            match result {
+                Ok(_) => {}
+                Err(sqlx::Error::Database(ref e))
+                    if e.message().contains("UNIQUE constraint failed") =>
+                {
+                    // Duplicate blocker — idempotent, silently skip.
+                }
+                Err(e) => {
+                    return Err(Error::Internal(format!(
+                        "failed to add blocker {blocking_id} → {task_id}: {e}"
+                    )));
+                }
+            }
+        }
+
+        tx.commit().await?;
+
+        // Emit events for all affected tasks (after commit).
+        let mut notified = std::collections::HashSet::new();
+        notified.insert(task_id.to_owned());
+        for id in add.iter().chain(remove.iter()) {
+            notified.insert(id.clone());
+        }
+        for id in &notified {
+            if let Some(task) = self.get(id).await? {
+                let _ = self.events.send(
+                    DjinnEvent::TaskUpdated {
+                        task,
+                        from_sync: false,
+                    }
+                    .into(),
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// List tasks that are blocking `task_id`, with title and status info.
     pub async fn list_blockers(&self, task_id: &str) -> Result<Vec<BlockerRef>> {
         self.db.ensure_initialized().await?;
