@@ -172,16 +172,24 @@ impl DjinnMcpServer {
             }
         }
 
-        // Apply blocked_by relationships atomically at creation.
+        // Apply blocked_by relationships atomically at creation to prevent a
+        // race where the dispatcher claims the task before blockers are set.
         if let Some(ref blockers) = p.blocked_by {
+            let mut blocker_ids = Vec::new();
             for blocker_ref in blockers {
-                let blocking_id = match self.resolve_task_not_epic(&project_id, blocker_ref).await {
-                    Ok(id) => id,
-                    Err(e) => return Json(ErrorOr::Error(e)),
-                };
-                if let Err(e) = repo.add_blocker(&task.id, &blocking_id).await {
-                    return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
-                }
+                let blocking_id =
+                    match self.resolve_task_not_epic(&project_id, blocker_ref).await {
+                        Ok(id) => id,
+                        Err(e) => return Json(ErrorOr::Error(e)),
+                    };
+                blocker_ids.push(blocking_id);
+            }
+            if !blocker_ids.is_empty()
+                && let Err(e) = repo
+                    .update_blockers_atomic(&task.id, &blocker_ids, &[])
+                    .await
+            {
+                return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
             }
         }
 
