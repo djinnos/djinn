@@ -1,0 +1,9 @@
+[package]
+name = "djinn-db"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+refinery = { version = "0.9", features = ["int8-versions"] }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros"] }
+tokio = { version = "1", features = ["full"] }

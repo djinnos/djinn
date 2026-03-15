@@ -1,0 +1,1 @@
+ALTER TABLE epics ADD COLUMN memory_refs TEXT NOT NULL DEFAULT '[]';
