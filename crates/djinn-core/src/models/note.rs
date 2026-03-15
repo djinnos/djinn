@@ -1,0 +1,161 @@
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+/// A knowledge base note. Source of truth is the markdown file on disk;
+/// this struct represents the SQLite index row.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Note {
+    pub id: String,
+    pub project_id: String,
+    /// Slug path unique within a project, e.g. "decisions/my-adr".
+    pub permalink: String,
+    pub title: String,
+    /// Absolute path to the markdown file on disk.
+    pub file_path: String,
+    pub note_type: String,
+    pub folder: String,
+    pub tags: String,    // JSON array string, e.g. '["rust","db"]'
+    pub content: String, // Markdown body without frontmatter
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_accessed: String,
+}
+
+impl Note {
+    /// Parse the JSON tags string into a `Vec<String>`.
+    pub fn parsed_tags(&self) -> Vec<String> {
+        serde_json::from_str(&self.tags).unwrap_or_default()
+    }
+
+    /// Convert to a `serde_json::Value` with parsed tags.
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "project_id": self.project_id,
+            "permalink": self.permalink,
+            "title": self.title,
+            "file_path": self.file_path,
+            "note_type": self.note_type,
+            "folder": self.folder,
+            "tags": self.parsed_tags(),
+            "content": self.content,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "last_accessed": self.last_accessed,
+        })
+    }
+}
+
+/// A compact search result from FTS5 with BM25 score and content snippet.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NoteSearchResult {
+    pub id: String,
+    pub permalink: String,
+    pub title: String,
+    pub folder: String,
+    pub note_type: String,
+    /// HTML snippet with `<b>…</b>` highlights around matched terms.
+    pub snippet: String,
+}
+
+/// Compact note summary (no full content) for list and recent queries.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct NoteCompact {
+    pub id: String,
+    pub permalink: String,
+    pub title: String,
+    pub note_type: String,
+    pub folder: String,
+    pub updated_at: String,
+}
+
+/// A single git commit entry for note history.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GitLogEntry {
+    pub sha: String,
+    pub message: String,
+    pub author: String,
+    pub date: String,
+}
+
+/// Health report for a project's knowledge base.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct HealthReport {
+    pub total_notes: i64,
+    pub broken_link_count: i64,
+    pub orphan_note_count: i64,
+    pub stale_notes_by_folder: Vec<StaleFolder>,
+}
+
+/// Stale-note count for one folder.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct StaleFolder {
+    pub folder: String,
+    pub count: i64,
+}
+
+/// Context built from a seed note + linked related notes.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BuildContextResponse {
+    /// Full-content notes at the seed.
+    pub primary: Vec<Note>,
+    /// Summary-only notes reached by link traversal.
+    pub related: Vec<NoteCompact>,
+}
+
+/// Result of a filesystem-to-index reconciliation pass.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ReindexSummary {
+    pub updated: i64,
+    pub created: i64,
+    pub deleted: i64,
+    pub unchanged: i64,
+}
+
+// ── Wikilink graph types ──────────────────────────────────────────────────────
+
+/// A knowledge graph node (note with connection metadata).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GraphNode {
+    pub id: String,
+    pub permalink: String,
+    pub title: String,
+    pub note_type: String,
+    pub folder: String,
+    /// Total resolved edges incident to this node (inbound + outbound).
+    pub connection_count: i64,
+}
+
+/// A resolved wikilink edge between two notes.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GraphEdge {
+    pub source_id: String,
+    pub target_id: String,
+    pub raw_text: String,
+}
+
+/// Full knowledge graph: all nodes and all resolved edges.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct GraphResponse {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
+/// A wikilink pointing to a note that does not exist.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BrokenLink {
+    pub source_id: String,
+    pub source_permalink: String,
+    pub source_title: String,
+    pub raw_text: String,
+}
+
+/// A note with zero inbound wikilinks (potential dead-end).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OrphanNote {
+    pub id: String,
+    pub permalink: String,
+    pub title: String,
+    pub note_type: String,
+    pub folder: String,
+}
