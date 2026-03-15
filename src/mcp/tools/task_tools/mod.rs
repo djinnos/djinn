@@ -348,27 +348,36 @@ impl DjinnMcpServer {
             updated
         };
 
-        // Apply blocker changes if requested.
-        if let Some(ref add) = p.blocked_by_add {
-            for blocker_ref in add {
-                let blocking_id = match self.resolve_task_not_epic(&project_id, blocker_ref).await {
-                    Ok(id) => id,
-                    Err(e) => return Json(ErrorOr::Error(e)),
-                };
-                if let Err(e) = repo.add_blocker(&updated.id, &blocking_id).await {
-                    return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
+        // Apply blocker changes atomically to prevent a race where the
+        // dispatcher sees zero blockers between individual remove/add calls.
+        if p.blocked_by_add.is_some() || p.blocked_by_remove.is_some() {
+            let mut add_ids = Vec::new();
+            if let Some(ref add) = p.blocked_by_add {
+                for blocker_ref in add {
+                    let blocking_id =
+                        match self.resolve_task_not_epic(&project_id, blocker_ref).await {
+                            Ok(id) => id,
+                            Err(e) => return Json(ErrorOr::Error(e)),
+                        };
+                    add_ids.push(blocking_id);
                 }
             }
-        }
-        if let Some(ref remove) = p.blocked_by_remove {
-            for blocker_ref in remove {
-                let blocking_id = match self.resolve_task_not_epic(&project_id, blocker_ref).await {
-                    Ok(id) => id,
-                    Err(e) => return Json(ErrorOr::Error(e)),
-                };
-                if let Err(e) = repo.remove_blocker(&updated.id, &blocking_id).await {
-                    return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
+            let mut remove_ids = Vec::new();
+            if let Some(ref remove) = p.blocked_by_remove {
+                for blocker_ref in remove {
+                    let blocking_id =
+                        match self.resolve_task_not_epic(&project_id, blocker_ref).await {
+                            Ok(id) => id,
+                            Err(e) => return Json(ErrorOr::Error(e)),
+                        };
+                    remove_ids.push(blocking_id);
                 }
+            }
+            if let Err(e) = repo
+                .update_blockers_atomic(&updated.id, &add_ids, &remove_ids)
+                .await
+            {
+                return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
             }
         }
 
