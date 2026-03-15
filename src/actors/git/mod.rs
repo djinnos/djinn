@@ -12,45 +12,7 @@ use std::path::{Path, PathBuf};
 
 use tokio::sync::{mpsc, oneshot};
 
-pub(super) const PUSH_MAX_ATTEMPTS: u32 = 3;
-pub(super) const REBASE_MAX_ATTEMPTS: u32 = 3;
-
-pub(super) fn is_retryable_git_command_error(err: &GitError) -> bool {
-    let GitError::CommandFailed { stderr, .. } = err else {
-        return false;
-    };
-    let s = stderr.to_lowercase();
-    [
-        "cannot lock ref",
-        "failed to lock",
-        "another git process",
-        "resource temporarily unavailable",
-        "connection reset",
-        "connection timed out",
-        "timed out",
-        "remote end hung up unexpectedly",
-    ]
-    .iter()
-    .any(|needle| s.contains(needle))
-}
-
-pub(super) fn is_non_fast_forward_error(err: &GitError) -> bool {
-    let GitError::CommandFailed { stderr, .. } = err else {
-        return false;
-    };
-    let s = stderr.to_lowercase();
-    s.contains("non-fast-forward") || s.contains("fetch first") || s.contains("rejected")
-}
-
-pub(super) fn retry_delay(attempt: u32) -> std::time::Duration {
-    let exp = attempt.saturating_sub(1).min(4);
-    let base_ms = 200u64.saturating_mul(1u64 << exp);
-    let jitter_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| (d.as_millis() as u64) % 151)
-        .unwrap_or(0);
-    std::time::Duration::from_millis(base_ms + jitter_ms)
-}
+use djinn_git as gitlib;
 
 // ─── Error ───────────────────────────────────────────────────────────────────
 
@@ -137,6 +99,77 @@ pub struct WorktreeInfo {
     pub head: String,
 }
 
+impl From<gitlib::CommandOutput> for CommandOutput {
+    fn from(value: gitlib::CommandOutput) -> Self {
+        Self {
+            stdout: value.stdout,
+            stderr: value.stderr,
+            code: value.code,
+        }
+    }
+}
+
+impl From<gitlib::MergeResult> for MergeResult {
+    fn from(value: gitlib::MergeResult) -> Self {
+        Self {
+            commit_sha: value.commit_sha,
+        }
+    }
+}
+
+impl From<gitlib::WorktreeInfo> for WorktreeInfo {
+    fn from(value: gitlib::WorktreeInfo) -> Self {
+        Self {
+            path: value.path,
+            branch: value.branch,
+            head: value.head,
+        }
+    }
+}
+
+impl From<gitlib::GitError> for GitError {
+    fn from(value: gitlib::GitError) -> Self {
+        match value {
+            gitlib::GitError::Git(e) => Self::Git(e),
+            gitlib::GitError::CommandFailed {
+                code,
+                command,
+                cwd,
+                stdout,
+                stderr,
+            } => Self::CommandFailed {
+                code,
+                command,
+                cwd,
+                stdout,
+                stderr,
+            },
+            gitlib::GitError::CommitRejected {
+                code,
+                command,
+                cwd,
+                stdout,
+                stderr,
+            } => Self::CommitRejected {
+                code,
+                command,
+                cwd,
+                stdout,
+                stderr,
+            },
+            gitlib::GitError::MergeConflict {
+                target_branch,
+                files,
+            } => Self::MergeConflict {
+                target_branch,
+                files,
+            },
+            gitlib::GitError::Io(e) => Self::Io(e),
+            gitlib::GitError::Other(e) => Self::Io(std::io::Error::other(e.to_string())),
+        }
+    }
+}
+
 // ─── Messages ─────────────────────────────────────────────────────────────────
 
 pub(super) type Reply<T> = oneshot::Sender<Result<T, GitError>>;
@@ -201,8 +234,6 @@ pub(super) enum GitMessage {
 
 mod actor;
 mod handle;
-mod merge_ops;
-mod worktree;
 
 use actor::GitActor;
 pub use handle::{GitActorHandle, get_or_spawn};

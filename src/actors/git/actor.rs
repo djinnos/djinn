@@ -47,7 +47,7 @@ impl GitActor {
                 // Clone path so no &self reference crosses the await point
                 // (git2::Repository is Send but not Sync).
                 let path = self.path.clone();
-                let result = Self::run_git_command(path, args).await;
+                let result = gitlib::run_git_command(path, args).await.map(Into::into).map_err(Into::into);
                 let _ = respond_to.send(result);
             }
             GitMessage::BranchExists { branch, respond_to } => {
@@ -64,7 +64,7 @@ impl GitActor {
                 respond_to,
             } => {
                 let path = self.path.clone();
-                let result = Self::create_branch_impl(path, short_id, target_branch).await;
+                let result = gitlib::create_branch(path, short_id, target_branch).await.map_err(Into::into);
                 let _ = respond_to.send(result);
             }
             GitMessage::SquashMerge {
@@ -74,12 +74,12 @@ impl GitActor {
                 respond_to,
             } => {
                 let path = self.path.clone();
-                let result = Self::squash_merge_impl(path, branch, target_branch, message).await;
+                let result = gitlib::squash_merge(path, branch, target_branch, message).await.map(Into::into).map_err(Into::into);
                 let _ = respond_to.send(result);
             }
             GitMessage::DeleteBranch { branch, respond_to } => {
                 let path = self.path.clone();
-                let result = Self::delete_branch_impl(path, branch).await;
+                let result = gitlib::delete_branch(path, branch).await.map_err(Into::into);
                 let _ = respond_to.send(result);
             }
             GitMessage::CreateWorktree {
@@ -89,7 +89,7 @@ impl GitActor {
                 respond_to,
             } => {
                 let path = self.path.clone();
-                let result = Self::create_worktree_impl(path, task_short_id, branch, detach).await;
+                let result = gitlib::create_worktree(path, task_short_id, branch, detach).await.map_err(Into::into);
                 let _ = respond_to.send(result);
             }
             GitMessage::RemoveWorktree {
@@ -97,12 +97,15 @@ impl GitActor {
                 respond_to,
             } => {
                 let path = self.path.clone();
-                let result = Self::remove_worktree_impl(path, wt_path).await;
+                let result = gitlib::remove_worktree(path, wt_path).await.map_err(Into::into);
                 let _ = respond_to.send(result);
             }
             GitMessage::ListWorktrees { respond_to } => {
                 let path = self.path.clone();
-                let result = Self::list_worktrees_impl(path).await;
+                let result = gitlib::list_worktrees(path)
+                    .await
+                    .map(|items| items.into_iter().map(Into::into).collect())
+                    .map_err(Into::into);
                 let _ = respond_to.send(result);
             }
         }
@@ -180,105 +183,4 @@ impl GitActor {
         }
     }
 
-    // ── CLI writes ────────────────────────────────────────────────────────────
-
-    /// Static so no `&self` crosses the await point (git2::Repository: !Sync).
-    pub(super) async fn run_git_command(
-        path: PathBuf,
-        args: Vec<String>,
-    ) -> Result<CommandOutput, GitError> {
-        use std::process::Stdio;
-        let mut cmd = std::process::Command::new("git");
-        cmd.args(&args)
-            .current_dir(&path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let output = crate::process::output(cmd).await.map_err(|e| {
-            tracing::error!(
-                error = %e,
-                args = %args.join(" "),
-                cwd = %path.display(),
-                "git command failed"
-            );
-            e
-        })?;
-
-        let code = output.status.code().unwrap_or(-1);
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-
-        if !output.status.success() {
-            return Err(GitError::CommandFailed {
-                code,
-                command: args.join(" "),
-                cwd: path.display().to_string(),
-                stdout,
-                stderr,
-            });
-        }
-
-        Ok(CommandOutput {
-            stdout,
-            stderr,
-            code,
-        })
-    }
-
-    /// Create local `task/{short_id}` from `target_branch` (GIT-01).
-    pub(super) async fn create_branch_impl(
-        path: PathBuf,
-        short_id: String,
-        target_branch: String,
-    ) -> Result<(), GitError> {
-        let branch_name = format!("task/{short_id}");
-
-        // Fetch latest from remote (best effort — local-only repos just skip this).
-        let _ = Self::run_git_command(
-            path.clone(),
-            vec!["fetch".into(), "origin".into(), target_branch.clone()],
-        )
-        .await;
-
-        // Prefer remote tracking ref; fall back to local branch.
-        // IMPORTANT: do not checkout in repo root; create branch ref only.
-        let remote_ref = format!("origin/{target_branch}");
-        let create = Self::run_git_command(
-            path.clone(),
-            vec!["branch".into(), branch_name.clone(), remote_ref],
-        )
-        .await;
-
-        if create.is_err() {
-            Self::run_git_command(
-                path.clone(),
-                vec!["branch".into(), branch_name.clone(), target_branch],
-            )
-            .await?;
-        }
-
-        Ok(())
-    }
-
-    /// Force-delete `branch` locally; also removes from origin (best effort).
-    ///
-    /// Uses `-D` because squash merges don't produce a merge commit, so git
-    /// considers task branches "unmerged" even after a successful squash.
-    pub(super) async fn delete_branch_impl(path: PathBuf, branch: String) -> Result<(), GitError> {
-        // Force-delete local branch.
-        Self::run_git_command(
-            path.clone(),
-            vec!["branch".into(), "-D".into(), branch.clone()],
-        )
-        .await?;
-
-        // Delete remote branch (best effort — ignore if not pushed or no remote).
-        let _ = Self::run_git_command(
-            path,
-            vec!["push".into(), "origin".into(), "--delete".into(), branch],
-        )
-        .await;
-
-        Ok(())
-    }
 }

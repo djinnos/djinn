@@ -591,6 +591,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-git"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "git2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "djinn-server"
 version = "0.1.0"
 dependencies = [
@@ -601,7 +612,7 @@ dependencies = [
  "bytes",
  "clap",
  "dirs",
- "djinn-core",
+ "djinn-git",
  "futures",
  "git2",
  "http-body-util",

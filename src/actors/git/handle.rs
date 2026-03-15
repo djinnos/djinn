@@ -71,44 +71,15 @@ impl GitActorHandle {
 
     /// Rebase onto `upstream` with short retry/jitter for transient git-state failures.
     pub async fn rebase_with_retry(&self, upstream: &str) -> Result<(), GitError> {
-        let mut last_error: Option<GitError> = None;
-        for attempt in 1..=REBASE_MAX_ATTEMPTS {
-            match self
-                .run_command(vec!["rebase".into(), upstream.to_string()])
-                .await
-            {
-                Ok(_) => {
-                    last_error = None;
-                    break;
-                }
-                Err(e) if attempt < REBASE_MAX_ATTEMPTS && is_retryable_git_command_error(&e) => {
-                    let _ = self
-                        .run_command(vec!["rebase".into(), "--abort".into()])
-                        .await;
-                    let delay = retry_delay(attempt);
-                    tracing::warn!(
-                        attempt,
-                        max_attempts = REBASE_MAX_ATTEMPTS,
-                        delay_ms = delay.as_millis() as u64,
-                        error = %e,
-                        upstream = %upstream,
-                        "rebase failed with transient error; retrying"
-                    );
-                    last_error = Some(e);
-                    tokio::time::sleep(delay).await;
-                }
-                Err(e) => {
-                    let _ = self
-                        .run_command(vec!["rebase".into(), "--abort".into()])
-                        .await;
-                    return Err(e);
-                }
-            }
-        }
-        if let Some(e) = last_error {
-            return Err(e);
-        }
-        Ok(())
+        let cwd = self.current_dir().await?;
+        gitlib::rebase_with_retry(cwd.as_path(), upstream)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn current_dir(&self) -> Result<PathBuf, GitError> {
+        let out = self.run_command(vec!["rev-parse".into(), "--show-toplevel".into()]).await?;
+        Ok(PathBuf::from(out.stdout.trim()))
     }
 
     /// Create local `task/{short_id}` from `target_branch` (GIT-01).
