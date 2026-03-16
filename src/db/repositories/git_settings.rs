@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::{DjinnEvent, DjinnEventEnvelope};
+use crate::events::DjinnEventEnvelope;
 use crate::models::GitSettings;
 
 pub struct GitSettingsRepository {
@@ -72,12 +72,10 @@ impl GitSettingsRepository {
         .bind(branch)
         .execute(self.db.pool())
         .await?;
-        let _ = self.events.send(DjinnEvent::GitSettingsUpdated {
-            project_id: project_id.to_owned(),
-            settings: GitSettings {
-                target_branch: branch.to_owned(),
-            },
-        }.into());
+        let _ = self.events.send(DjinnEventEnvelope::git_settings_updated(
+            project_id,
+            &GitSettings { target_branch: branch.to_owned() },
+        ));
         Ok(())
     }
 
@@ -94,12 +92,10 @@ impl GitSettingsRepository {
         .bind(branch)
         .execute(self.db.pool())
         .await?;
-        let _ = self.events.send(DjinnEvent::GitSettingsUpdated {
-            project_id: "global".into(),
-            settings: GitSettings {
-                target_branch: branch.to_owned(),
-            },
-        }.into());
+        let _ = self.events.send(DjinnEventEnvelope::git_settings_updated(
+            "global",
+            &GitSettings { target_branch: branch.to_owned() },
+        ));
         Ok(())
     }
 }

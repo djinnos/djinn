@@ -87,11 +87,11 @@ impl CoordinatorActor {
             if project_cfg.0.is_empty() && project_cfg.1.is_empty() {
                 // No commands configured — always healthy; clear any stale failure.
                 if self.unhealthy_projects.remove(&project.id).is_some() {
-                    let _ = self.events_tx.send(DjinnEvent::ProjectHealthChanged {
-                        project_id: project.id.clone(),
-                        healthy: true,
-                        error: None,
-                    }.into());
+                    let _ = self.events_tx.send(DjinnEventEnvelope::project_health_changed(
+                        &project.id,
+                        true,
+                        None,
+                    ));
                 }
                 continue;
             }
@@ -192,12 +192,39 @@ pub(super) async fn run_project_health_check(
         .map_err(|e| format!("health-check verification error: {e}"))?;
 
         for r in &verification.setup_results {
-            let _ = events_tx.send(
-                DjinnEvent::VerificationStep {
-                    project_id: project_id.clone(),
-                    task_id: None,
-                    phase: "setup".to_string(),
-                    step: StepEvent::Finished {
+            let _ = events_tx.send(DjinnEventEnvelope::verification_step(
+                &project_id,
+                None,
+                "setup",
+                &StepEvent::Finished {
+                    index: 0,
+                    name: r.name.clone(),
+                    exit_code: r.exit_code,
+                    duration_ms: r.duration_ms,
+                    stdout: r.stdout.clone(),
+                    stderr: r.stderr.clone(),
+                },
+            ));
+        }
+
+        if verification.cached {
+            let _ = events_tx.send(DjinnEventEnvelope::verification_step(
+                &project_id,
+                None,
+                "verification",
+                &StepEvent::CacheHit {
+                    commit_sha: commit_sha.clone(),
+                    cached_at: String::new(),
+                    original_duration_ms: verification.total_duration_ms,
+                },
+            ));
+        } else {
+            for r in &verification.verification_results {
+                let _ = events_tx.send(DjinnEventEnvelope::verification_step(
+                    &project_id,
+                    None,
+                    "verification",
+                    &StepEvent::Finished {
                         index: 0,
                         name: r.name.clone(),
                         exit_code: r.exit_code,
@@ -205,43 +232,7 @@ pub(super) async fn run_project_health_check(
                         stdout: r.stdout.clone(),
                         stderr: r.stderr.clone(),
                     },
-                }
-                .into(),
-            );
-        }
-
-        if verification.cached {
-            let _ = events_tx.send(
-                DjinnEvent::VerificationStep {
-                    project_id: project_id.clone(),
-                    task_id: None,
-                    phase: "verification".to_string(),
-                    step: StepEvent::CacheHit {
-                        commit_sha: commit_sha.clone(),
-                        cached_at: String::new(),
-                        original_duration_ms: verification.total_duration_ms,
-                    },
-                }
-                .into(),
-            );
-        } else {
-            for r in &verification.verification_results {
-                let _ = events_tx.send(
-                    DjinnEvent::VerificationStep {
-                        project_id: project_id.clone(),
-                        task_id: None,
-                        phase: "verification".to_string(),
-                        step: StepEvent::Finished {
-                            index: 0,
-                            name: r.name.clone(),
-                            exit_code: r.exit_code,
-                            duration_ms: r.duration_ms,
-                            stdout: r.stdout.clone(),
-                            stderr: r.stderr.clone(),
-                        },
-                    }
-                    .into(),
-                );
+                ));
             }
         }
 

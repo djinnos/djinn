@@ -26,7 +26,7 @@ use crate::db::GitSettingsRepository;
 use crate::db::ProjectRepository;
 use crate::db::connection::Database;
 use crate::db::{ReadyQuery, TaskRepository};
-use crate::events::{DjinnEvent, DjinnEventEnvelope};
+use crate::events::DjinnEventEnvelope;
 use crate::provider::catalog::CatalogService;
 use crate::provider::health::HealthTracker;
 
@@ -435,11 +435,11 @@ impl CoordinatorActor {
                 // Emit SSE event on health change.
                 let changed = healthy && was_unhealthy || !healthy && !was_unhealthy;
                 if changed {
-                    let _ = self.events_tx.send(DjinnEvent::ProjectHealthChanged {
-                        project_id: project_id.clone(),
+                    let _ = self.events_tx.send(DjinnEventEnvelope::project_health_changed(
+                        &project_id,
                         healthy,
-                        error,
-                    }.into());
+                        error.as_deref(),
+                    ));
                 }
                 self.publish_status();
                 // If project just became healthy and dispatch is enabled, trigger a dispatch pass.

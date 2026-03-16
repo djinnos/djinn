@@ -5,7 +5,7 @@ use sqlx::SqlitePool;
 use crate::db::EpicRepository;
 use crate::db::connection::Database;
 use crate::error::{Error, Result};
-use crate::events::{DjinnEvent, DjinnEventEnvelope};
+use crate::events::DjinnEventEnvelope;
 use crate::models::{ActivityEntry, Task, TaskStatus, TransitionAction, compute_transition};
 
 mod activity;

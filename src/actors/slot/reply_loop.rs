@@ -8,7 +8,7 @@ use crate::agent::message::{ContentBlock, Conversation, Message, MessageMeta, Ro
 use crate::agent::output_parser::ParsedAgentOutput;
 use crate::agent::provider::telemetry;
 use crate::agent::provider::{LlmProvider, StreamEvent};
-use crate::events::DjinnEvent;
+use crate::events::DjinnEventEnvelope;
 use crate::server::AppState;
 
 use super::*;
@@ -322,16 +322,16 @@ pub(super) async fn run_reply_loop(
                         match evt {
                             StreamEvent::Delta(ContentBlock::Text { text }) => {
                                 // Emit streaming delta SSE event.
-                                let _ = app_state.events().send(DjinnEvent::SessionMessage {
-                                    session_id: session_id.to_owned(),
-                                    task_id: task_id.to_owned(),
-                                    agent_type: role_name.to_owned(),
-                                    message: serde_json::json!({
+                                let _ = app_state.events().send(DjinnEventEnvelope::session_message(
+                                    session_id,
+                                    task_id,
+                                    role_name,
+                                    &serde_json::json!({
                                         "type": "delta",
                                         "role": "assistant",
                                         "text": text,
                                     }),
-                                }.into());
+                                ));
                                 turn_text.push_str(&text);
                             }
                             StreamEvent::Delta(tool_use @ ContentBlock::ToolUse { .. }) => {
@@ -351,14 +351,14 @@ pub(super) async fn run_reply_loop(
                                 } else {
                                     0.0
                                 };
-                                let _ = app_state.events().send(DjinnEvent::SessionTokenUpdate {
-                                    session_id: session_id.to_owned(),
-                                    task_id: task_id.to_owned(),
-                                    tokens_in: total_tokens_in as i64,
-                                    tokens_out: total_tokens_out as i64,
+                                let _ = app_state.events().send(DjinnEventEnvelope::session_token_update(
+                                    session_id,
+                                    task_id,
+                                    total_tokens_in as i64,
+                                    total_tokens_out as i64,
                                     context_window,
                                     usage_pct,
-                                }.into());
+                                ));
                             }
                             StreamEvent::Done => {
                                 break;
@@ -494,12 +494,12 @@ pub(super) async fn run_reply_loop(
             assistant_message_count += 1;
 
             // Emit the complete assistant message as an SSE event.
-            let _ = app_state.events().send(DjinnEvent::SessionMessage {
-                session_id: session_id.to_owned(),
-                task_id: task_id.to_owned(),
-                agent_type: role_name.to_owned(),
-                message: serialize_message(&assistant_msg),
-            }.into());
+            let _ = app_state.events().send(DjinnEventEnvelope::session_message(
+                session_id,
+                task_id,
+                role_name,
+                &serialize_message(&assistant_msg),
+            ));
 
             conversation.push(assistant_msg);
 
