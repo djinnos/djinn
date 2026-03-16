@@ -594,7 +594,9 @@ dependencies = [
 name = "djinn-db"
 version = "0.1.0"
 dependencies = [
+ "djinn-core",
  "refinery",
+ "serde_json",
  "sqlx",
  "tokio",
 ]
