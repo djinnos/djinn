@@ -17,6 +17,45 @@ use super::*;
 /// Keeps the user-message payload reasonable (clippy stderr can be huge).
 const MAX_VERIFICATION_CHARS: usize = 3000;
 
+/// Return the most recent N high-signal comments (PM, reviewer, verification)
+/// from the activity log, in chronological order (oldest first).
+/// Each entry is formatted as "**Label:** body".
+fn recent_feedback(activity: &[crate::models::ActivityEntry], max: usize) -> Vec<String> {
+    let high_signal: Vec<&crate::models::ActivityEntry> = activity
+        .iter()
+        .rev()
+        .filter(|e| {
+            e.event_type == "comment"
+                && (e.actor_role == "pm"
+                    || e.actor_role == "task_reviewer"
+                    || e.actor_role == "verification")
+        })
+        .take(max)
+        .collect();
+
+    // Reverse back to chronological order
+    high_signal
+        .into_iter()
+        .rev()
+        .filter_map(|e| {
+            let payload = serde_json::from_str::<serde_json::Value>(&e.payload).ok()?;
+            let body = payload.get("body").and_then(|v| v.as_str())?;
+            let label = match e.actor_role.as_str() {
+                "pm" => "PM guidance",
+                "task_reviewer" => "Reviewer feedback",
+                "verification" => "Verification failure",
+                _ => "Feedback",
+            };
+            let trimmed = if e.actor_role == "verification" {
+                truncate_feedback(body, MAX_VERIFICATION_CHARS)
+            } else {
+                body.to_string()
+            };
+            Some(format!("**{label}:**\n{trimmed}"))
+        })
+        .collect()
+}
+
 // ─── Utility functions ────────────────────────────────────────────────────────
 
 /// Truncate feedback text to `max` characters, appending a notice if trimmed.
@@ -280,38 +319,9 @@ reviewer determined it was NOT. You MUST use your tools (shell, editor, etc.) \
 to make concrete changes before stopping. A text-only response with no tool \
 calls will be treated as a failure.\n\n";
 
-    // Collect ALL high-signal feedback: PM guidance, reviewer feedback, AND
-    // verification failures. Previously we returned on the first PM/reviewer
-    // comment found, which meant verification errors were lost when a PM
-    // comment existed.
-    let mut sections: Vec<String> = Vec::new();
-
-    // Most recent verification failure (actor_role="verification")
-    if let Some(entry) = activity.iter().rev().find(|e| {
-        e.event_type == "comment" && e.actor_role == "verification"
-    })
-        && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
-        && let Some(body) = payload.get("body").and_then(|v| v.as_str())
-    {
-        let trimmed = truncate_feedback(body, MAX_VERIFICATION_CHARS);
-        sections.push(format!("Verification failure:\n\n{trimmed}"));
-    }
-
-    // Most recent PM or reviewer comment
-    if let Some(entry) = activity.iter().rev().find(|e| {
-        e.event_type == "comment"
-            && (e.actor_role == "task_reviewer" || e.actor_role == "pm")
-    })
-        && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
-        && let Some(body) = payload.get("body").and_then(|v| v.as_str())
-    {
-        let label = if entry.actor_role == "pm" {
-            "PM intervention guidance"
-        } else {
-            "Reviewer feedback"
-        };
-        sections.push(format!("{label}:\n\n{body}"));
-    }
+    // Last 3 high-signal comments (PM, reviewer, verification) in
+    // chronological order. Simple and gives the worker full recent context.
+    let sections = recent_feedback(&activity, 3);
 
     if !sections.is_empty() {
         return format!(
@@ -368,34 +378,7 @@ pub(crate) async fn initial_user_message_for_task(task_id: &str, app_state: &App
     let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
 
-    let mut sections: Vec<String> = Vec::new();
-
-    // Most recent verification failure
-    if let Some(entry) = activity.iter().rev().find(|e| {
-        e.event_type == "comment" && e.actor_role == "verification"
-    })
-        && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
-        && let Some(body) = payload.get("body").and_then(|v| v.as_str())
-    {
-        let trimmed = truncate_feedback(body, MAX_VERIFICATION_CHARS);
-        sections.push(format!("**Verification failure from previous attempt:**\n\n{trimmed}"));
-    }
-
-    // Most recent PM or reviewer comment
-    if let Some(entry) = activity.iter().rev().find(|e| {
-        e.event_type == "comment"
-            && (e.actor_role == "task_reviewer" || e.actor_role == "pm")
-    })
-        && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
-        && let Some(body) = payload.get("body").and_then(|v| v.as_str())
-    {
-        let label = if entry.actor_role == "pm" {
-            "PM intervention guidance"
-        } else {
-            "Reviewer feedback"
-        };
-        sections.push(format!("**{label}:**\n\n{body}"));
-    }
+    let sections = recent_feedback(&activity, 3);
 
     if sections.is_empty() {
         "Start by understanding the task context and execute it fully before stopping.".to_string()
