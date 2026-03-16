@@ -80,8 +80,6 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
 
-    use tokio::sync::broadcast;
-
     use crate::db::CredentialRepository;
     use crate::models::DjinnSettings;
     use crate::server::{self, AppState};
