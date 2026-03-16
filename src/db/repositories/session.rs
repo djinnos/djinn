@@ -28,6 +28,7 @@ impl SessionRepository {
         .fetch_one(self.db.pool())
         .await?;
         let action = match session.status.as_str() {
+            "running" => "started",
             "completed" => "completed",
             "interrupted" => "interrupted",
             "failed" => "failed",
@@ -79,7 +80,7 @@ impl SessionRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEventEnvelope {
+        let receivers = self.events.send(DjinnEventEnvelope {
             entity_type: "session",
             action: "started",
             payload: serde_json::to_value(&session).unwrap_or_default(),
@@ -87,6 +88,12 @@ impl SessionRepository {
             project_id: None,
             from_sync: false,
         });
+        tracing::info!(
+            session_id = %session.id,
+            task_id = ?session.task_id,
+            sse_receivers = ?receivers.ok(),
+            "SessionRepository: emitted session.started SSE event"
+        );
         Ok(session)
     }
 

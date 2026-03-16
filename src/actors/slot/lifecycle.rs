@@ -129,7 +129,7 @@ pub async fn run_task_lifecycle(
 
     // Notify the frontend immediately so it can show the agent avatar while
     // worktree/setup is still running.
-    let _ = app_state
+    let dispatched_receivers = app_state
         .events()
         .send(crate::events::DjinnEvent::SessionDispatched {
             project_id: task.project_id.clone(),
@@ -137,6 +137,11 @@ pub async fn run_task_lifecycle(
             model_id: model_id.clone(),
             agent_type: agent_type.as_str().to_string(),
         }.into());
+    tracing::info!(
+        task_id = %task_id,
+        sse_receivers = ?dispatched_receivers.ok(),
+        "Lifecycle: emitted session.dispatched SSE event"
+    );
 
     // ── Parse model ID and load credentials ───────────────────────────────────
     let (catalog_provider_id, model_name) = match parse_model_id(&model_id) {
@@ -1103,7 +1108,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         return_free!();
     }
 
-    let _ = app_state
+    let cont_dispatched_receivers = app_state
         .events()
         .send(crate::events::DjinnEvent::SessionDispatched {
             project_id: project_id.clone(),
@@ -1111,6 +1116,11 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
             model_id: model_id.clone(),
             agent_type: agent_type.as_str().to_string(),
         }.into());
+    tracing::info!(
+        task_id = %task_id,
+        sse_receivers = ?cont_dispatched_receivers.ok(),
+        "Lifecycle(continuation): emitted session.dispatched SSE event"
+    );
 
     tracing::info!(
         task_id = %task_id,
