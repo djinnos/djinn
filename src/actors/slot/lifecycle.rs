@@ -669,10 +669,14 @@ pub async fn run_task_lifecycle(
     // ── Create or resume session record + build conversation ─────────────────
     let tools = agent_type.tool_schemas();
 
-    // Compute the initial user message for fresh sessions. This checks the
-    // activity log for PM/reviewer/verification feedback and includes it
-    // prominently so the worker acts on it immediately.
-    let fresh_user_message = initial_user_message_for_task(&task_id, &app_state).await;
+    // For workers, check the activity log for PM/reviewer/verification feedback
+    // and surface it in the user message. Other agent types (PM, groomer, etc.)
+    // get the generic kickoff — they read activity via tools themselves.
+    let fresh_user_message = if agent_type == AgentType::Worker {
+        initial_user_message_for_task(&task_id, &app_state).await
+    } else {
+        "Start by understanding the task context and execute it fully before stopping.".to_string()
+    };
 
     // Try to resume from a paused session's saved conversation.
     emit_step(&task.id, "session_creating", serde_json::json!({"resume": resume_record_id.is_some()}));

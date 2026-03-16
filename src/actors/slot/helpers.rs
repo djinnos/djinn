@@ -11,7 +11,29 @@ use crate::server::AppState;
 
 use super::*;
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/// Max characters for verification output included in user messages.
+/// Keeps the user-message payload reasonable (clippy stderr can be huge).
+const MAX_VERIFICATION_CHARS: usize = 3000;
+
 // ─── Utility functions ────────────────────────────────────────────────────────
+
+/// Truncate feedback text to `max` characters, appending a notice if trimmed.
+fn truncate_feedback(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    // Find a safe UTF-8 boundary
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n\n… [truncated — use `task_activity_list` for full output]",
+        &text[..end]
+    )
+}
 
 #[allow(dead_code)]
 pub(crate) fn log_snippet(text: &str, max_chars: usize) -> String {
@@ -271,7 +293,8 @@ calls will be treated as a failure.\n\n";
         && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
         && let Some(body) = payload.get("body").and_then(|v| v.as_str())
     {
-        sections.push(format!("Verification failure:\n\n{body}"));
+        let trimmed = truncate_feedback(body, MAX_VERIFICATION_CHARS);
+        sections.push(format!("Verification failure:\n\n{trimmed}"));
     }
 
     // Most recent PM or reviewer comment
@@ -354,7 +377,8 @@ pub(crate) async fn initial_user_message_for_task(task_id: &str, app_state: &App
         && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
         && let Some(body) = payload.get("body").and_then(|v| v.as_str())
     {
-        sections.push(format!("**Verification failure from previous attempt:**\n\n{body}"));
+        let trimmed = truncate_feedback(body, MAX_VERIFICATION_CHARS);
+        sections.push(format!("**Verification failure from previous attempt:**\n\n{trimmed}"));
     }
 
     // Most recent PM or reviewer comment
