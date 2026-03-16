@@ -24,6 +24,15 @@ impl From<sqlx::Error> for Error {
     }
 }
 
+impl From<djinn_core::error::Error> for Error {
+    fn from(value: djinn_core::error::Error) -> Self {
+        match value {
+            djinn_core::error::Error::Internal(msg) => Self::Internal(msg),
+            djinn_core::error::Error::InvalidTransition(msg) => Self::InvalidTransition(msg),
+        }
+    }
+}
+
 impl Error {
     pub fn is_database_locked(&self) -> bool {
         let Self::Database(err) = self else {
