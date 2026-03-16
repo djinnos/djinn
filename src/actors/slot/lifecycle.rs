@@ -3,19 +3,6 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// Truncate a `String` to at most `max_bytes` bytes, rounding down to the
-/// nearest UTF-8 char boundary so we never panic.
-fn truncate_utf8(s: &mut String, max_bytes: usize) {
-    if s.len() <= max_bytes {
-        return;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s.truncate(end);
-}
-
 use crate::agent::AgentType;
 use crate::agent::message::{Conversation, Message};
 use crate::agent::prompts::{TaskContext, render_prompt};
@@ -464,99 +451,42 @@ pub async fn run_task_lifecycle(
             .join("\n")
     });
 
-    // Fetch activity log for the prompt. Split into two tiers:
-    // 1. Feedback (PM + reviewer comments) — shown prominently and in full
-    // 2. History (worker notes, transitions, verification) — summarized
-    // Agents can use `task_activity_list` with filters for deeper queries.
-    const MAX_FEEDBACK_CHARS: usize = 2000;
-    const MAX_HISTORY_ENTRY_CHARS: usize = 400;
-    const MAX_HISTORY_ENTRIES: usize = 10;
-    const MAX_TOTAL_CHARS: usize = 6000;
+    // Fetch activity log for the prompt: last 3 high-signal comments plus a
+    // summary of total counts by role so the agent knows what to look up.
     let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
     let activity_text = match task_repo.list_activity(&task.id).await {
         Ok(entries) if !entries.is_empty() => {
-            // Tier 1: PM and reviewer feedback — high-signal, shown in full
-            let feedback_lines: Vec<String> = entries
-                .iter()
-                .filter(|e| {
-                    e.event_type == "comment"
-                        && (e.actor_role == "pm" || e.actor_role == "task_reviewer")
-                })
-                .map(|e| {
-                    let body = serde_json::from_str::<serde_json::Value>(&e.payload)
-                        .ok()
-                        .and_then(|v| v.get("body").and_then(|s| s.as_str().map(String::from)))
-                        .unwrap_or_default();
-                    let label = if e.actor_role == "pm" {
-                        "PM guidance"
-                    } else {
-                        "Reviewer feedback"
-                    };
-                    let mut line = format!("- **{label}**: {body}");
-                    if line.len() > MAX_FEEDBACK_CHARS {
-                        truncate_utf8(&mut line, MAX_FEEDBACK_CHARS);
-                        line.push_str("… [truncated]");
-                    }
-                    line
-                })
-                .collect();
+            // Last 3 high-signal comments (PM, reviewer, verification)
+            let feedback = recent_feedback(&entries, 3);
 
-            // Tier 2: Everything else — compact summary
-            let history_lines: Vec<String> = entries
+            // Count comments by role for the summary line
+            let mut counts: std::collections::BTreeMap<&str, usize> =
+                std::collections::BTreeMap::new();
+            for e in &entries {
+                if e.event_type == "comment" {
+                    *counts.entry(e.actor_role.as_str()).or_default() += 1;
+                }
+            }
+            let count_summary: String = counts
                 .iter()
-                .filter(|e| {
-                    // Skip feedback (already shown above) and noisy events
-                    if e.event_type == "comment"
-                        && (e.actor_role == "pm" || e.actor_role == "task_reviewer")
-                    {
-                        return false;
-                    }
-                    e.event_type == "comment"
-                        || e.event_type == "status_changed"
-                        || e.event_type == "merge_conflict"
-                })
-                .take(MAX_HISTORY_ENTRIES)
-                .map(|e| {
-                    let preview = serde_json::from_str::<serde_json::Value>(&e.payload)
-                        .ok()
-                        .and_then(|v| {
-                            v.get("body")
-                                .or_else(|| v.get("to_status"))
-                                .and_then(|s| s.as_str().map(String::from))
-                        })
-                        .unwrap_or_default();
-                    let mut line =
-                        format!("- **{}** ({}): {}", e.event_type, e.actor_role, preview);
-                    if line.len() > MAX_HISTORY_ENTRY_CHARS {
-                        truncate_utf8(&mut line, MAX_HISTORY_ENTRY_CHARS);
-                        line.push('…');
-                    }
-                    line
-                })
-                .collect();
+                .map(|(role, n)| format!("{n} {role}"))
+                .collect::<Vec<_>>()
+                .join(", ");
 
-            let mut sections = Vec::new();
-            if !feedback_lines.is_empty() {
-                sections.push(format!(
-                    "**Feedback (action required):**\n{}",
-                    feedback_lines.join("\n")
+            let mut parts = Vec::new();
+            if !feedback.is_empty() {
+                parts.push(format!(
+                    "**Recent feedback (newest last):**\n{}",
+                    feedback.join("\n\n---\n")
                 ));
             }
-            if !history_lines.is_empty() {
-                sections.push(format!("**History:**\n{}", history_lines.join("\n")));
+            if !count_summary.is_empty() {
+                parts.push(format!(
+                    "**Activity totals:** {count_summary} comments. Use `task_activity_list` with `actor_role` filter for full history."
+                ));
             }
-            if sections.is_empty() {
-                None
-            } else {
-                let mut joined = sections.join("\n\n");
-                if joined.len() > MAX_TOTAL_CHARS {
-                    truncate_utf8(&mut joined, MAX_TOTAL_CHARS);
-                    joined.push_str(
-                        "\n… [truncated — use `task_activity_list` with filters for full history]",
-                    );
-                }
-                Some(joined)
-            }
+
+            if parts.is_empty() { None } else { Some(parts.join("\n\n")) }
         }
         _ => None,
     };

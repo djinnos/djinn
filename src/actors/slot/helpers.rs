@@ -20,7 +20,7 @@ const MAX_VERIFICATION_CHARS: usize = 3000;
 /// Return the most recent N high-signal comments (PM, reviewer, verification)
 /// from the activity log, in chronological order (oldest first).
 /// Each entry is formatted as "**Label:** body".
-fn recent_feedback(activity: &[crate::models::ActivityEntry], max: usize) -> Vec<String> {
+pub(crate) fn recent_feedback(activity: &[crate::models::ActivityEntry], max: usize) -> Vec<String> {
     let high_signal: Vec<&crate::models::ActivityEntry> = activity
         .iter()
         .rev()
