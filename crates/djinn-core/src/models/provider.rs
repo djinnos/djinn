@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// A single LLM provider from the models.dev catalog or a custom registry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 pub struct Provider {
     pub id: String,
     pub name: String,
@@ -44,6 +45,7 @@ pub struct SeedModel {
 
 /// A user-registered OpenAI-compatible provider stored in the `custom_providers` table.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 pub struct CustomProvider {
     pub id: String,
     pub name: String,
