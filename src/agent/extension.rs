@@ -1861,8 +1861,10 @@ async fn call_task_transition(
             }));
         }
 
-        // Validate replacement task IDs if provided
-        if let Some(ref ids) = p.replacement_task_ids {
+        // Validate replacement task IDs if provided (skip empty arrays)
+        if let Some(ref ids) = p.replacement_task_ids
+            && !ids.is_empty()
+        {
             let mut missing = Vec::new();
             for id in ids {
                 match repo.resolve(id).await {
