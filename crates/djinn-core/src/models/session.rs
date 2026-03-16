@@ -23,7 +23,8 @@ impl SessionStatus {
 }
 
 /// Persisted lifecycle record for a supervisor-run agent session.
-#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 pub struct SessionRecord {
     pub id: String,
     pub project_id: String,
