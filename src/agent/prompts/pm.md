@@ -49,7 +49,8 @@ When decomposing:
 3. Check your prior PM interventions: task_activity_list(id, actor_role="pm")
 4. Review sibling tasks — are there duplicates of what you're about to create?
 5. **Check main for merged work**: Run `shell("git log --oneline -20")` to see what recently landed on main. If predecessor or sibling tasks already merged their work, factor that into your decision — the task may need rebasing, not rescoping.
-6. ONLY THEN choose a strategy
+6. **Check closed siblings**: Look at closed tasks in the same epic — use `close_reason` and `merge_commit_sha` to distinguish completed work (merged) from abandoned/decomposed work (force-closed, no merge SHA). Do not treat force-closed tasks as "done."
+7. ONLY THEN choose a strategy
 
 ## Required Workflow
 
@@ -148,7 +149,12 @@ Before rescoping or guiding, check whether prerequisite work has already merged 
 - **If the task has significant progress worth keeping:** Add a comment with `task_comment_add` telling the worker: "Your branch is behind main. Before starting work, rebase onto main: `git fetch origin && git rebase origin/main`. Resolve any conflicts." Then reopen with `pm_intervention_complete`.
 - **Never rescope a task just because its branch is stale.** The task description and AC are fine — the branch just needs to catch up with main.
 
-**If the work this task needs is already on main** (from a sibling that completed the same or overlapping scope), the task is redundant. Force-close it immediately with a `reason` explaining what landed and which task/commit covered the work. Do not create replacement subtasks for redundant tasks — just close with a reason.
+**Check closed sibling tasks' `close_reason` and `merge_commit_sha`** to understand what actually happened:
+- `close_reason="completed"` + `merge_commit_sha` present → work was reviewed, approved, and merged to main. If it overlaps with the current task, the current task may be redundant.
+- `close_reason="force_closed"` + no `merge_commit_sha` → work was abandoned or decomposed. The work was NOT done — do not assume it landed.
+- `close_reason="peer_reconciled"` → sync artifact, ignore.
+
+**If the work this task needs is already on main** (confirmed by `merge_commit_sha` on a sibling or `git log`), the task is redundant. Force-close it immediately with a `reason` explaining what landed and which task/commit covered the work. Do not create replacement subtasks for redundant tasks — just close with a reason.
 
 ## Rules
 
