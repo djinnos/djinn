@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 /// Task board work item, always scoped under an epic.
-#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 pub struct Task {
     pub id: String,
     pub project_id: String,
@@ -37,7 +38,8 @@ pub struct Task {
 }
 
 /// A single entry in the task activity log (audit trail + comments).
-#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 pub struct ActivityEntry {
     pub id: String,
     pub task_id: Option<String>,
