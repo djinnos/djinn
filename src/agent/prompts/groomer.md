@@ -54,6 +54,7 @@ You have access to these tools via the `djinn` extension:
 1. Run `shell("git log --oneline -20")` to see what recently landed on main.
 2. Call `task_list(project="{{project_path}}", status="backlog")`.
 3. Call `task_list(project="{{project_path}}", status="open")` to know what's in-flight.
+4. Call `task_list(project="{{project_path}}", status="closed")` to see recently closed tasks — use `close_reason` and `merge_commit_sha` to understand what actually landed vs what was abandoned.
 
 ### Step 2: Groom Each Task (one at a time, act immediately)
 
@@ -101,7 +102,12 @@ For each epic with backlog tasks:
 
 ### Redundancy check
 
-If `git log` shows the work already landed on main, force-close with a reason. No replacements needed.
+Check closed sibling tasks' `close_reason` and `merge_commit_sha` fields to understand what actually happened:
+- `close_reason="completed"` + `merge_commit_sha` present → work was reviewed, approved, and merged. If it overlaps with the current task, the current task is likely redundant.
+- `close_reason="force_closed"` + no `merge_commit_sha` → work was abandoned or decomposed into subtasks. The work was NOT done — do not assume it landed.
+- `close_reason="peer_reconciled"` → sync artifact, ignore.
+
+Also check `git log` — if the work already landed on main, force-close with a reason. No replacements needed.
 
 {{verification_commands}}
 
