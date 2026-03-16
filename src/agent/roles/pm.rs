@@ -21,6 +21,10 @@ impl AgentRole for PmRole {
         crate::agent::prompts::render_prompt(crate::agent::AgentType::PM, task, ctx)
     }
 
+    fn needs_epic_context(&self) -> bool {
+        true
+    }
+
     fn on_complete<'a>(
         &'a self,
         task_id: &'a str,

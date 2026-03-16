@@ -1,12 +1,14 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::AgentType;
 use crate::agent::message::{Conversation, Message};
-use crate::agent::prompts::{TaskContext, render_prompt};
+use crate::agent::prompts::TaskContext;
 use crate::agent::provider::create_provider;
+use crate::agent::roles::{AgentRole, role_for_task_dispatch};
 use crate::commands::run_commands;
 use crate::verification::settings::load_commands;
 use crate::db::SessionRepository;
@@ -16,7 +18,6 @@ use crate::models::TransitionAction;
 use crate::server::AppState;
 
 use super::reply_loop::run_reply_loop;
-use super::task_review::success_transition;
 use super::*;
 use crate::db::repositories::task::transitions::interrupt_paused_worker_session;
 
@@ -89,14 +90,14 @@ pub async fn run_task_lifecycle(
     };
     let conflict_ctx = conflict_context_for_dispatch(&task.id, &app_state).await;
     let merge_validation_ctx = merge_validation_context_for_dispatch(&task.id, &app_state).await;
-    let agent_type = agent_type_for_task(&task, conflict_ctx.is_some());
+    let role: Arc<dyn AgentRole> = role_for_task_dispatch(&task, conflict_ctx.is_some());
 
     tracing::info!(
         task_id = %task.short_id,
         task_uuid = %task.id,
         project_id = %task.project_id,
         model_id = %model_id,
-        agent_type = %agent_type.as_str(),
+        role = %role.config().name,
         task_status = %task.status,
         has_conflict_context = conflict_ctx.is_some(),
         has_merge_validation_context = merge_validation_ctx.is_some(),
@@ -104,7 +105,7 @@ pub async fn run_task_lifecycle(
     );
 
     // ── Transition task to in-progress ────────────────────────────────────────
-    if let Err(e) = transition_start(&task, agent_type, &app_state).await {
+    if let Err(e) = transition_start(&task, role.config().start_action, &app_state).await {
         tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: transition_start failed");
         return_free!();
     }
@@ -117,7 +118,7 @@ pub async fn run_task_lifecycle(
             &task.project_id,
             &task.id,
             &model_id,
-            agent_type.as_str(),
+            role.config().name,
         ));
     tracing::info!(
         task_id = %task_id,
@@ -145,7 +146,7 @@ pub async fn run_task_lifecycle(
         }
         Err(e) => {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: invalid model ID");
-            transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+            transition_interrupted(&task_id, role.config().release_action, &e.to_string(), &app_state).await;
             return_free!();
         }
     };
@@ -155,7 +156,7 @@ pub async fn run_task_lifecycle(
         Ok(cred) => cred,
         Err(e) => {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");
-            transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+            transition_interrupted(&task_id, role.config().release_action, &e.to_string(), &app_state).await;
             return_free!();
         }
     };
@@ -163,7 +164,7 @@ pub async fn run_task_lifecycle(
     // ── Prepare worktree / paused-session resume context ──────────────────────
     let project_dir = PathBuf::from(&project_path);
 
-    let paused = find_paused_session_record(&task_id, agent_type, &app_state).await;
+    let paused = find_paused_session_record(&task_id, role.config().name, &app_state).await;
 
     // `resume_record_id` is set when we can resume a paused worker session
     // (same model, same agent type, worktree intact, conversation file present).
@@ -187,11 +188,11 @@ pub async fn run_task_lifecycle(
                         return_free!();
                     }
                 }
-            } else if paused.agent_type != agent_type.as_str() {
+            } else if paused.agent_type != role.config().name {
                 tracing::info!(
                     task_id = %task_id,
                     paused_agent_type = %paused.agent_type,
-                    needed_agent_type = %agent_type.as_str(),
+                    needed_agent_type = %role.config().name,
                     "Lifecycle: paused session agent type mismatch; starting fresh session"
                 );
                 match prepare_worktree(&project_dir, &task, &app_state).await {
@@ -262,7 +263,7 @@ pub async fn run_task_lifecycle(
         }
     };
 
-    // ── Conflict resolver: start merge for conflict markers ───────────────────
+    // ── Role-specific worktree preparation (e.g. conflict resolver merge) ────
     emit_step(
         &task.id,
         "worktree_created",
@@ -270,39 +271,7 @@ pub async fn run_task_lifecycle(
     );
     emit_step(&task.id, "branch_created", serde_json::json!({}));
 
-    if agent_type == AgentType::ConflictResolver
-        && let Some(ref ctx) = conflict_ctx
-    {
-        emit_step(&task.id, "branch_rebasing", serde_json::json!({"target": ctx.merge_target}));
-        let target_ref = format!("origin/{}", ctx.merge_target);
-        if let Ok(wt_git) = app_state.git_actor(&worktree_path).await {
-            let _ = wt_git
-                .run_command(vec![
-                    "fetch".into(),
-                    "origin".into(),
-                    ctx.merge_target.clone(),
-                ])
-                .await;
-            let merge_result = wt_git
-                .run_command(vec![
-                    "merge".into(),
-                    target_ref.clone(),
-                    "--no-commit".into(),
-                ])
-                .await;
-            if merge_result.is_ok() {
-                let _ = wt_git
-                    .run_command(vec!["merge".into(), "--abort".into()])
-                    .await;
-            } else {
-                tracing::info!(
-                    task_id = %task.short_id,
-                    target_ref = %target_ref,
-                    "Lifecycle: started merge in worktree for conflict resolver"
-                );
-            }
-        }
-    }
+    let _ = role.prepare_worktree(&worktree_path, &task, &app_state).await;
 
     emit_step(&task.id, "preflight_checking", serde_json::json!({}));
     if !worktree_path.exists() || !worktree_path.is_dir() {
@@ -310,7 +279,7 @@ pub async fn run_task_lifecycle(
         tracing::warn!(task_id = %task_id, diag = %diag, "Lifecycle: worktree preflight failed");
         transition_interrupted(
             &task_id,
-            agent_type,
+            role.config().release_action,
             "worktree preflight failed",
             &app_state,
         )
@@ -379,7 +348,7 @@ pub async fn run_task_lifecycle(
                     let _ = task_repo
                         .transition(
                             &task.id,
-                            (agent_type.role_config().release_action)(),
+                            (role.config().release_action)(),
                             "agent-supervisor",
                             "system",
                             Some(&reason),
@@ -417,7 +386,7 @@ pub async fn run_task_lifecycle(
                         let _ = task_repo
                             .transition(
                                 &task.id,
-                                (agent_type.role_config().release_action)(),
+                                (role.config().release_action)(),
                                 "agent-supervisor",
                                 "system",
                                 Some(&reason),
@@ -486,8 +455,8 @@ pub async fn run_task_lifecycle(
         _ => None,
     };
 
-    // ── Build epic context for PM agents ────────────────────────────────────
-    let epic_context = if agent_type == AgentType::PM {
+    // ── Build epic context for roles that need it (e.g. PM) ─────────────────
+    let epic_context = if role.needs_epic_context() {
         if let Some(ref epic_id) = task.epic_id {
             let epic_repo = crate::db::EpicRepository::new(app_state.db().clone(), app_state.event_bus());
             let task_repo_ctx = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
@@ -523,8 +492,7 @@ pub async fn run_task_lifecycle(
         None
     };
 
-    let system_prompt = render_prompt(
-        agent_type,
+    let system_prompt = role.render_prompt(
         &task,
         &TaskContext {
             project_path: project_path.clone(),
@@ -553,7 +521,7 @@ pub async fn run_task_lifecycle(
     let session_repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
 
     // ── Build Djinn-native provider ───────────────────────────────────────────
-    let telemetry_meta = build_telemetry_meta(agent_type, &task_id);
+    let telemetry_meta = build_telemetry_meta(role.config().name, &task_id);
 
     let provider_config = match provider_credential {
         ProviderCredential::OAuthConfig(mut cfg) => {
@@ -592,16 +560,11 @@ pub async fn run_task_lifecycle(
     let provider = create_provider(provider_config);
 
     // ── Create or resume session record + build conversation ─────────────────
-    let tools = agent_type.tool_schemas();
+    let tools = (role.config().tool_schemas)();
 
-    // For workers, check the activity log for PM/reviewer/verification feedback
-    // and surface it in the user message. Other agent types (PM, groomer, etc.)
-    // get the generic kickoff — they read activity via tools themselves.
-    let fresh_user_message = if agent_type == AgentType::Worker {
-        initial_user_message_for_task(&task_id, &app_state).await
-    } else {
-        "Start by understanding the task context and execute it fully before stopping.".to_string()
-    };
+    // Workers include recent feedback in the initial message; other roles use
+    // a generic kickoff (they read activity via tools themselves).
+    let fresh_user_message = role.initial_user_message(&task_id, &app_state).await;
 
     // Try to resume from a paused session's saved conversation.
     emit_step(&task.id, "session_creating", serde_json::json!({"resume": resume_record_id.is_some()}));
@@ -626,7 +589,7 @@ pub async fn run_task_lifecycle(
                     &task_id,
                     &app_state,
                     crate::agent::compaction::CompactionContext::PreResume(
-                        agent_type.as_str().to_string(),
+                        role.config().name.to_string(),
                     ),
                     context_window,
                 )
@@ -670,7 +633,7 @@ pub async fn run_task_lifecycle(
                         &task.project_id,
                         Some(&task.id),
                         &model_id,
-                        agent_type.as_str(),
+                        role.config().name,
                         worktree_path.to_str(),
                         None,
                     )
@@ -679,7 +642,7 @@ pub async fn run_task_lifecycle(
                     Ok(r) => Some(r.id),
                     Err(e) => {
                         tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
-                        transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state)
+                        transition_interrupted(&task_id, role.config().release_action, &e.to_string(), &app_state)
                             .await;
                         cleanup_worktree(&task_id, &worktree_path, &app_state).await;
                         return_free!();
@@ -698,7 +661,7 @@ pub async fn run_task_lifecycle(
                 &task.project_id,
                 Some(&task.id),
                 &model_id,
-                agent_type.as_str(),
+                role.config().name,
                 worktree_path.to_str(),
                 None,
             )
@@ -707,7 +670,7 @@ pub async fn run_task_lifecycle(
             Ok(r) => Some(r.id),
             Err(e) => {
                 tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
-                transition_interrupted(&task_id, agent_type, &e.to_string(), &app_state).await;
+                transition_interrupted(&task_id, role.config().release_action, &e.to_string(), &app_state).await;
                 cleanup_worktree(&task_id, &worktree_path, &app_state).await;
                 return_free!();
             }
@@ -734,7 +697,7 @@ pub async fn run_task_lifecycle(
         &current_session_id,
         &project_path,
         &worktree_path,
-        agent_type.as_str(),
+        role.config().name,
         &cancel,
         &pause,
         &app_state,
@@ -786,7 +749,7 @@ pub async fn run_task_lifecycle(
         )
         .await;
         cleanup_worktree(&task_id, &worktree_path, &app_state).await;
-        transition_interrupted(&task_id, agent_type, "session cancelled", &app_state).await;
+        transition_interrupted(&task_id, role.config().release_action, "session cancelled", &app_state).await;
         return_killed!();
     }
 
@@ -803,8 +766,7 @@ pub async fn run_task_lifecycle(
     }
     app_state.persist_model_health_state().await;
 
-    let is_worker_done = final_result.is_ok()
-        && matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver);
+    let is_worker_done = final_result.is_ok() && role.config().preserves_session;
 
     // Worktree: commit final work.  For workers, preserve the worktree and
     // save the conversation so the session can be resumed after review.
@@ -879,7 +841,7 @@ pub async fn run_task_lifecycle(
     if let Err(reason) = &final_result {
         let payload = serde_json::json!({
             "error": reason.to_string(),
-            "agent_type": agent_type.as_str(),
+            "agent_type": role.config().name,
         })
         .to_string();
         let _ = task_repo
@@ -897,7 +859,7 @@ pub async fn run_task_lifecycle(
     {
         let payload = serde_json::json!({
             "error": reason,
-            "agent_type": agent_type.as_str(),
+            "agent_type": role.config().name,
         })
         .to_string();
         let _ = task_repo
@@ -913,14 +875,14 @@ pub async fn run_task_lifecycle(
 
     // Determine transition.
     let transition = match final_result {
-        Ok(()) => success_transition(&task_id, agent_type, &final_output, &app_state).await,
-        Err(reason) => Some(((agent_type.role_config().release_action)(), Some(reason.to_string()))),
+        Ok(()) => role.on_complete(&task_id, &final_output, &app_state).await,
+        Err(reason) => Some(((role.config().release_action)(), Some(reason.to_string()))),
     };
 
     if let Some((action, reason)) = transition {
         tracing::info!(
             task_id = %task_id,
-            agent_type = %agent_type.as_str(),
+            role = %role.config().name,
             transition_action = ?action,
             transition_reason = reason.as_deref().unwrap_or("<none>"),
             tokens_in,
@@ -963,7 +925,7 @@ pub async fn run_task_lifecycle(
     } else {
         tracing::info!(
             task_id = %task_id,
-            agent_type = %agent_type.as_str(),
+            role = %role.config().name,
             tokens_in,
             tokens_out,
             "Lifecycle: session completed with no task transition"
@@ -1111,7 +1073,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     let session_repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
 
     // ── Build provider ────────────────────────────────────────────────────
-    let telemetry_meta = build_telemetry_meta(agent_type, &task_id);
+    let telemetry_meta = build_telemetry_meta(agent_type.as_str(), &task_id);
     let provider_config = match provider_credential {
         ProviderCredential::OAuthConfig(mut cfg) => {
             cfg.model_id = model_name.clone();

@@ -10,6 +10,7 @@ use crate::server::AppState;
 use futures::future::BoxFuture;
 
 use super::{AgentRole, CompactionPrompts, RoleConfig};
+use crate::actors::slot::helpers::initial_user_message_for_task;
 
 pub(crate) struct WorkerRole;
 
@@ -30,6 +31,14 @@ impl AgentRole for WorkerRole {
         _app_state: &'a AppState,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
         Box::pin(async { Some((TransitionAction::SubmitVerification, None)) })
+    }
+
+    fn initial_user_message<'a>(
+        &'a self,
+        task_id: &'a str,
+        app_state: &'a AppState,
+    ) -> BoxFuture<'a, String> {
+        Box::pin(initial_user_message_for_task(task_id, app_state))
     }
 }
 

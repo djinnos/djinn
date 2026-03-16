@@ -1,123 +1,7 @@
-use crate::agent::AgentType;
-use crate::agent::output_parser::ParsedAgentOutput;
 use crate::db::TaskRepository;
-use crate::db::repositories::task::transitions::merge_after_task_review;
-use crate::models::TransitionAction;
 use crate::server::AppState;
 
 pub(crate) const STALE_ESCALATION_THRESHOLD: i64 = 3;
-
-// ─── Success transition ───────────────────────────────────────────────────────
-
-/// Determine the post-session transition for a successfully completed session.
-///
-/// - **Workers/ConflictResolvers**: always proceed to task review (the agent
-///   stopping tool calls is the completion signal).
-/// - **TaskReviewers**: check acceptance criteria on the task — all met means
-///   approve (merge), any unmet means reject back to worker.
-pub(crate) async fn success_transition(
-    task_id: &str,
-    agent_type: AgentType,
-    output: &ParsedAgentOutput,
-    app_state: &AppState,
-) -> Option<(TransitionAction, Option<String>)> {
-    match agent_type {
-        AgentType::Worker | AgentType::ConflictResolver => {
-            // Worker completed — submit for background verification.
-            Some((TransitionAction::SubmitVerification, None))
-        }
-        AgentType::PM => {
-            // Check if the PM already transitioned the task via tools during
-            // its session (e.g. pm_intervention_complete, force_close).  If the
-            // task is no longer in_pm_intervention, the PM acted — no fallback
-            // transition needed.
-            let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
-            if let Ok(Some(task)) = repo.get(task_id).await
-                && task.status != "in_pm_intervention"
-            {
-                tracing::info!(
-                    task_id = %task_id,
-                    current_status = %task.status,
-                    "PM agent: task already transitioned by PM tools — no fallback needed"
-                );
-                return None;
-            }
-            // PM session ended without acting — release back so it gets re-dispatched.
-            tracing::warn!(task_id = %task_id, "PM agent: session ended without explicit completion → releasing back to needs_pm_intervention");
-            Some((
-                TransitionAction::PmInterventionRelease,
-                Some("PM session ended without completing intervention".to_string()),
-            ))
-        }
-        AgentType::Groomer => {
-            // Groomer has no lifecycle transition wiring yet.
-            None
-        }
-        AgentType::TaskReviewer => {
-            // Derive verdict from acceptance criteria state on the task.
-            let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
-            match repo.get(task_id).await {
-                Ok(Some(task)) => {
-                    if all_acceptance_criteria_met(&task.acceptance_criteria) {
-                        tracing::info!(task_id = %task_id, "task reviewer: all AC met → approve");
-                        merge_after_task_review(task_id, app_state).await
-                    } else {
-                        let feedback = output.reviewer_feedback.clone().unwrap_or_else(|| {
-                            "reviewer found unmet acceptance criteria".to_string()
-                        });
-
-                        // Detect stale reopen cycle: check AC met-state against snapshot from
-                        // when the current review cycle started.
-                        let is_stale =
-                            is_stale_review_cycle(task_id, &task.acceptance_criteria, app_state)
-                                .await;
-                        let continuation_count = task.continuation_count;
-
-                        if is_stale && continuation_count + 1 >= STALE_ESCALATION_THRESHOLD {
-                            tracing::info!(
-                                task_id = %task_id,
-                                continuation_count = continuation_count,
-                                "task reviewer: stale cycle limit reached → escalating to PM intervention"
-                            );
-                            Some((
-                                TransitionAction::Escalate,
-                                Some(format!(
-                                    "stale reopen limit reached after {} cycles: {}",
-                                    continuation_count + 1,
-                                    feedback
-                                )),
-                            ))
-                        } else if is_stale {
-                            tracing::info!(
-                                task_id = %task_id,
-                                continuation_count = continuation_count,
-                                "task reviewer: stale cycle detected → increment continuation"
-                            );
-                            Some((TransitionAction::TaskReviewRejectStale, Some(feedback)))
-                        } else {
-                            tracing::info!(task_id = %task_id, "task reviewer: unmet AC, AC progress detected → reject");
-                            Some((TransitionAction::TaskReviewReject, Some(feedback)))
-                        }
-                    }
-                }
-                Ok(None) => {
-                    tracing::warn!(task_id = %task_id, "task missing during reviewer verdict");
-                    Some((
-                        TransitionAction::ReleaseTaskReview,
-                        Some("task not found during reviewer verdict".to_string()),
-                    ))
-                }
-                Err(e) => {
-                    tracing::warn!(task_id = %task_id, error = %e, "failed to load task for reviewer verdict");
-                    Some((
-                        TransitionAction::ReleaseTaskReview,
-                        Some(format!("failed to load task for verdict: {e}")),
-                    ))
-                }
-            }
-        }
-    }
-}
 
 /// Check if all acceptance criteria are met.
 pub(crate) fn all_acceptance_criteria_met(ac_json: &str) -> bool {
@@ -187,9 +71,9 @@ mod tests {
 #[cfg(test)]
 mod transition_tests {
     use super::*;
-    use crate::models::TransitionAction;
     use crate::test_helpers;
 
+    #[allow(dead_code)]
     async fn set_task_status(app: &AppState, task_id: &str, status: &str) {
         sqlx::query("UPDATE tasks SET status = ?1 WHERE id = ?2")
             .bind(status)
@@ -199,6 +83,7 @@ mod transition_tests {
             .expect("update task status");
     }
 
+    #[allow(dead_code)]
     async fn set_task_ac(app: &AppState, task_id: &str, ac_json: &str) {
         sqlx::query("UPDATE tasks SET acceptance_criteria = ?1 WHERE id = ?2")
             .bind(ac_json)
@@ -208,6 +93,7 @@ mod transition_tests {
             .expect("update AC");
     }
 
+    #[allow(dead_code)]
     async fn set_continuation_count(app: &AppState, task_id: &str, count: i64) {
         sqlx::query("UPDATE tasks SET continuation_count = ?1 WHERE id = ?2")
             .bind(count)
@@ -236,12 +122,6 @@ mod transition_tests {
                 .collect::<Vec<_>>(),
         )
         .expect("serialize AC json")
-    }
-
-    fn parsed_output_with_feedback(feedback: &str) -> ParsedAgentOutput {
-        let mut out = ParsedAgentOutput::new(AgentType::TaskReviewer);
-        out.reviewer_feedback = Some(feedback.to_string());
-        out
     }
 
     #[tokio::test]
@@ -273,109 +153,4 @@ mod transition_tests {
         assert!(!is_stale_review_cycle(&task3.id, &five, &app).await);
     }
 
-    #[tokio::test]
-    async fn success_transition_agent_variants_and_stale_threshold() {
-        let db = test_helpers::create_test_db();
-        let app = crate::server::AppState::new(db, tokio_util::sync::CancellationToken::new());
-        let project = test_helpers::create_test_project(app.db()).await;
-        let epic = test_helpers::create_test_epic(app.db(), &project.id).await;
-
-        let worker_task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
-        let out = ParsedAgentOutput::new(AgentType::Worker);
-        assert_eq!(
-            success_transition(&worker_task.id, AgentType::Worker, &out, &app).await,
-            Some((TransitionAction::SubmitVerification, None))
-        );
-        let conflict_out = ParsedAgentOutput::new(AgentType::ConflictResolver);
-        assert_eq!(
-            success_transition(
-                &worker_task.id,
-                AgentType::ConflictResolver,
-                &conflict_out,
-                &app
-            )
-            .await,
-            Some((TransitionAction::SubmitVerification, None))
-        );
-
-        let pm_task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
-        set_task_status(&app, &pm_task.id, "in_pm_intervention").await;
-        let pm_out = ParsedAgentOutput::new(AgentType::PM);
-        assert_eq!(
-            success_transition(&pm_task.id, AgentType::PM, &pm_out, &app).await,
-            Some((
-                TransitionAction::PmInterventionRelease,
-                Some("PM session ended without completing intervention".to_string())
-            ))
-        );
-
-        let pm_done_task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
-        set_task_status(&app, &pm_done_task.id, "closed").await;
-        assert_eq!(
-            success_transition(&pm_done_task.id, AgentType::PM, &pm_out, &app).await,
-            None
-        );
-
-        let groomer_out = ParsedAgentOutput::new(AgentType::Groomer);
-        assert_eq!(
-            success_transition(&worker_task.id, AgentType::Groomer, &groomer_out, &app).await,
-            None
-        );
-
-        let reviewer_task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
-        set_task_ac(&app, &reviewer_task.id, &ac(&[true, false])).await;
-        insert_review_snapshot(&app, &reviewer_task.id, &ac(&[true, true])).await;
-        let reviewer_out = parsed_output_with_feedback("needs work");
-        assert_eq!(
-            success_transition(
-                &reviewer_task.id,
-                AgentType::TaskReviewer,
-                &reviewer_out,
-                &app
-            )
-            .await,
-            Some((
-                TransitionAction::TaskReviewReject,
-                Some("needs work".to_string())
-            ))
-        );
-
-        let stale_task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
-        let stale_ac = ac(&[false]);
-        set_task_ac(&app, &stale_task.id, &stale_ac).await;
-        set_continuation_count(&app, &stale_task.id, 0).await;
-        insert_review_snapshot(&app, &stale_task.id, &stale_ac).await;
-        assert_eq!(
-            success_transition(&stale_task.id, AgentType::TaskReviewer, &reviewer_out, &app).await,
-            Some((
-                TransitionAction::TaskReviewRejectStale,
-                Some("needs work".to_string())
-            ))
-        );
-
-        let escalate_task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
-        set_task_ac(&app, &escalate_task.id, &stale_ac).await;
-        set_continuation_count(&app, &escalate_task.id, 2).await;
-        insert_review_snapshot(&app, &escalate_task.id, &stale_ac).await;
-        let escalation = success_transition(
-            &escalate_task.id,
-            AgentType::TaskReviewer,
-            &reviewer_out,
-            &app,
-        )
-        .await;
-        assert!(matches!(escalation, Some((TransitionAction::Escalate, _))));
-
-        let missing = success_transition(
-            "00000000-0000-0000-0000-000000000000",
-            AgentType::TaskReviewer,
-            &reviewer_out,
-            &app,
-        )
-        .await;
-        assert!(matches!(
-            missing,
-            Some((TransitionAction::ReleaseTaskReview, _))
-        ));
-    }
 }
