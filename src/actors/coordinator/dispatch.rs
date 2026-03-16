@@ -304,23 +304,25 @@ impl CoordinatorActor {
                     continue;
                 }
 
-                let release_to = match task.status.as_str() {
-                    "in_task_review" => "needs_task_review",
-                    "in_pm_intervention" => "needs_pm_intervention",
-                    _ => "open",
+                let (release_action, release_to) = match task.status.as_str() {
+                    "in_task_review" => (TransitionAction::ReleaseTaskReview, "needs_task_review"),
+                    "in_pm_intervention" => {
+                        (TransitionAction::PmInterventionRelease, "needs_pm_intervention")
+                    }
+                    _ => (TransitionAction::Release, "open"),
                 };
 
                 match repo
                     .transition(
                         &task.id,
-                        TransitionAction::Release,
+                        release_action,
                         "coordinator",
                         "system",
                         Some(&format!(
                             "Recovered by coordinator: no active slot session for {}",
                             task.status
                         )),
-                        Some(TaskStatus::parse(release_to).expect("valid task status")),
+                        None,
                     )
                     .await
                 {
