@@ -70,7 +70,7 @@ impl CustomProviderRepository {
         .await?;
         let _ = self
             .events
-            .send(DjinnEventEnvelope::custom_provider_upserted(&provider));
+            .send(DjinnEventEnvelope::custom_provider_upserted(provider));
         Ok(())
     }
 

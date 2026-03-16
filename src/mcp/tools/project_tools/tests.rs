@@ -67,12 +67,13 @@ mod tests {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let dir = tempdir().expect("tempdir");
+        let path = dir.path().to_string_lossy().to_string();
 
         let _ = mcp_call_tool(
             &app,
             &session_id,
             "project_add",
-            json!({"name": "proj-remove", "path": dir.path().to_string_lossy().to_string()}),
+            json!({"name": "proj-remove", "path": path}),
         )
         .await;
 
@@ -80,7 +81,7 @@ mod tests {
             &app,
             &session_id,
             "project_remove",
-            json!({"name": "proj-remove"}),
+            json!({"name": "proj-remove", "path": path}),
         )
         .await;
         assert_eq!(removed["status"], "ok");
@@ -89,10 +90,44 @@ mod tests {
             &app,
             &session_id,
             "project_remove",
-            json!({"name": "proj-remove"}),
+            json!({"name": "proj-remove", "path": path}),
         )
         .await;
         assert!(missing["status"].as_str().unwrap_or_default().starts_with("error:"));
+    }
+
+    #[tokio::test]
+    async fn project_remove_wrong_path_is_rejected() {
+        let app = create_test_app();
+        let session_id = initialize_mcp_session(&app).await;
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().to_string_lossy().to_string();
+
+        let _ = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            json!({"name": "proj-guard", "path": path}),
+        )
+        .await;
+
+        // Correct name but wrong path — must be rejected
+        let rejected = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_remove",
+            json!({"name": "proj-guard", "path": "/wrong/path"}),
+        )
+        .await;
+        assert!(rejected["status"].as_str().unwrap_or_default().starts_with("error:"));
+
+        // Confirm the project is still there
+        let listed = mcp_call_tool(&app, &session_id, "project_list", json!({})).await;
+        assert!(listed["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "proj-guard"));
     }
 
     #[tokio::test]
