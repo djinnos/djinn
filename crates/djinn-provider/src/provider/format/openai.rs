@@ -5,9 +5,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::pin::Pin;
 
-use crate::agent::message::{ContentBlock, Conversation, Role};
-use crate::agent::provider::client::ApiClient;
-use crate::agent::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
+use crate::message::{ContentBlock, Conversation, Role};
+use crate::provider::client::ApiClient;
+use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
 
 pub struct OpenAIProvider {
     config: ProviderConfig,

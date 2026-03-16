@@ -617,6 +617,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-provider"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "base64",
+ "bytes",
+ "futures",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "djinn-server"
 version = "0.1.0"
 dependencies = [
@@ -630,6 +650,7 @@ dependencies = [
  "djinn-core",
  "djinn-db",
  "djinn-git",
+ "djinn-provider",
  "futures",
  "git2",
  "http-body-util",
