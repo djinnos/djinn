@@ -596,8 +596,43 @@ pub(super) async fn run_reply_loop(
                     });
 
                     Some(async move {
+                        // Retry logic for SQLite BUSY errors (concurrent tool
+                        // calls from the same generation can contend on the
+                        // write lock).
+                        let mut result =
+                            extension::call_tool(app_state, &name, args.clone(), worktree_path)
+                                .await;
+                        {
+                            let mut retries = 0u32;
+                            while retries < 5 {
+                                match &result {
+                                    Err(e) if e.contains("database is locked") => {
+                                        retries += 1;
+                                        let backoff = std::time::Duration::from_millis(
+                                            100 * (1 << retries.min(4)),
+                                        );
+                                        tracing::warn!(
+                                            task_id = %task_id,
+                                            tool = %name,
+                                            retry = retries,
+                                            backoff_ms = backoff.as_millis() as u64,
+                                            "ReplyLoop: database locked, retrying"
+                                        );
+                                        tokio::time::sleep(backoff).await;
+                                        result = extension::call_tool(
+                                            app_state,
+                                            &name,
+                                            args.clone(),
+                                            worktree_path,
+                                        )
+                                        .await;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                        }
                         let (content, is_error) =
-                            match extension::call_tool(app_state, &name, args, worktree_path).await {
+                            match result {
                                 Ok(value) => {
                                     let mut text = if value.is_string() {
                                         value.as_str().unwrap_or("").to_string()
