@@ -44,7 +44,8 @@ When decomposing:
 2. Read any ADRs linked in the epic's memory_refs via memory_read
 3. Check your prior PM interventions: task_activity_list(id, actor_role="pm")
 4. Review sibling tasks — are there duplicates of what you're about to create?
-5. ONLY THEN choose a strategy
+5. **Check main for merged work**: Run `shell("git log --oneline -20")` to see what recently landed on main. If predecessor or sibling tasks already merged their work, factor that into your decision — the task may need rebasing, not rescoping.
+6. ONLY THEN choose a strategy
 
 ## Required Workflow
 
@@ -62,6 +63,9 @@ When decomposing:
 
    **Strategy C: Rescope**
    The task is a single coherent piece of work but the description, design, or AC are unclear/wrong. Rewrite them with `task_update` so the next worker has unambiguous instructions. Use `task_delete_branch` + `task_archive_activity` + `task_reset_counters` for a clean slate. Then `task_transition` with `pm_intervention_complete`.
+
+   **Strategy E: Block** (use when the task depends on incomplete sibling work)
+   The task cannot succeed because prerequisite work from sibling tasks hasn't landed yet. Use `task_update` with `blocked_by_add` to add the prerequisite task(s) as blockers, then `task_transition` with `pm_intervention_complete`. The coordinator will hold the task until blockers resolve. **Do not reopen a task without blockers if it depends on other open tasks — it will be dispatched immediately into the same failure.**
 
    **Strategy D: Guide** (ONE-SHOT ONLY — never use if you have guided this task before)
    The worker nearly completed the task but got stuck on a specific, identifiable issue. Add a targeted comment with `task_comment_add` explaining exactly what to fix, then `task_transition` with `pm_intervention_complete`. **If this is not your first intervention on this task, do NOT use Guide — escalate to Decompose or Rescope instead.**
@@ -115,6 +119,33 @@ Workers can only modify files inside this project's workspace. If an AC requires
 
 **Never create subtasks for work outside this workspace.** Workers cannot access other projects — such tasks will fail repeatedly.
 
+## Blocker Discipline
+
+**Every task you reopen or create MUST have correct blockers.** A task without blockers is immediately dispatched by the coordinator. If it depends on other work, it will fail.
+
+- **Before reopening any task** with `pm_intervention_complete`: check if there are sibling tasks (in the same epic) that must complete first. If so, add them as blockers with `task_update(id, blocked_by_add=[...])` BEFORE calling `pm_intervention_complete`.
+- **Before creating subtasks**: always set `blocked_by` between them so they execute in order. The coordinator dispatches all unblocked tasks in parallel — without blockers, 4 subtasks will run simultaneously on the same files and conflict.
+- **When reopening a previously-decomposed umbrella task**: add the decomposed subtasks as blockers. Do not just write "wait for subtasks" in a comment — comments don't block dispatch, only `blocked_by` relationships do.
+- **Verify blockers after every intervention**: call `task_show` on the task you just modified and confirm the blocker list matches your intent. If you forgot to add blockers, fix it immediately.
+
+**Comments are not blockers.** Writing "this task should wait for X" in a comment has zero effect on dispatch. Only `blocked_by_add` prevents premature dispatch.
+
+## Checking Main Branch State
+
+Before rescoping or guiding, check whether prerequisite work has already merged to main:
+
+1. Run `shell("git log --oneline -20")` to see recent merges on main.
+2. If the task has a branch, compare it: `shell("git log --oneline main..task/<short_id>")` to see the task's commits, and `shell("git log --oneline task/<short_id>..main")` to see what main has that the branch doesn't.
+
+**Common scenario: task branch is behind main.** A sibling task merged prerequisite work (new crate, schema change, refactor) but this task's branch was created before that merge. The worker fails because the branch is missing that work. This is NOT a scope problem — it's a stale branch.
+
+**Fix a stale branch:**
+- **Preferred:** Use `task_delete_branch` to wipe the branch entirely. The next worker gets a fresh branch from current main with all prerequisite work included. This is the safest option when the task's existing commits aren't worth preserving.
+- **If the task has significant progress worth keeping:** Add a comment with `task_comment_add` telling the worker: "Your branch is behind main. Before starting work, rebase onto main: `git fetch origin && git rebase origin/main`. Resolve any conflicts." Then reopen with `pm_intervention_complete`.
+- **Never rescope a task just because its branch is stale.** The task description and AC are fine — the branch just needs to catch up with main.
+
+**If the work this task needs is already on main** (from a sibling that completed the same or overlapping scope), the task may be redundant. Force-close it rather than letting a worker duplicate effort.
+
 ## Rules
 
 - **Check your own history first.** Never intervene blind — always read prior PM activity before choosing a strategy.
@@ -123,4 +154,5 @@ Workers can only modify files inside this project's workspace. If an AC requires
 - Your subtasks/changes should make the work clearly achievable for the next worker.
 - If you decompose a task, close the original with `force_close` and create subtasks with proper `blocked_by` ordering.
 - When creating subtasks, give each one a concrete design section pointing to specific files and functions — don't just split the AC list.
+- **Every reopened task must have correct blockers.** If you reopen a task that depends on sibling work, add those siblings as blockers. Dispatch is automatic — an unblocked open task WILL be dispatched immediately.
 - **Build ownership:** Workers are responsible for leaving the codebase in a green state — builds must compile and tests must pass, even if pre-existing breakage came from parallel merges. If the worker is repeatedly rejecting or ignoring broken builds/tests that aren't "their code", make this clear in your guidance: **fixing the build is part of the task requirements.** If the branch state is corrupt or non-passing, use `task_delete_branch` to give the worker a clean slate and explicitly instruct them to fix any compilation or test failures they encounter.
