@@ -4,6 +4,8 @@ pub mod git_settings;
 pub mod note;
 pub mod project;
 pub mod provider;
+pub mod session;
+pub mod session_message;
 pub mod settings;
 
 pub use credential::Credential;
@@ -15,6 +17,8 @@ pub use note::{
 };
 pub use project::Project;
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
+pub use session::{SessionRecord, SessionStatus};
+pub use session_message::SessionMessage;
 pub use settings::{DjinnSettings, Setting};
 
 /// Parse a JSON array string (e.g. '["a","b"]') into a `Vec<String>`.
