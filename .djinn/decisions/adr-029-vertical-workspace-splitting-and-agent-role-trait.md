@@ -6,9 +6,47 @@ tags: ["adr","architecture","workspace","cargo","agent","trait","vertical-slice"
 
 # ADR-029: Vertical Workspace Splitting and Agent Role Trait
 
-## Status: Draft
+## Status: In Progress
 
 Date: 2026-03-13
+
+## Implementation Status (updated 2026-03-16)
+
+### Part 1: Vertical Workspace Split — Partially Complete
+
+**Completed crates:**
+- `djinn-db` — Database, migrations, error types. Done.
+- `djinn-git` — Git operations (worktree, merge, branch, rebase). Done. Git actor/handle still in server (task `3sjw`).
+- `djinn-core` — All models (11), state machine, DjinnEventEnvelope + EventBus. Done.
+
+**Decoupling work (ADR-033) — Complete:**
+- Phase 1: DjinnEvent enum deleted, envelope constructors everywhere (commit `b47d121`)
+- Phase 2: Model re-exports consolidated — src/models/ is pure re-exports from djinn-core (commit `8a63839`)
+- Phase 3: EventBus newtype in djinn-core, all 10 repos migrated from broadcast::Sender (commits `3a8afb4`, `e617ba5`)
+- Phase 4: Intentionally skipped — repos stay in server; moving to djinn-db would conflict with future verticalization
+
+**Not started (deferred):**
+- `djinn-provider` — LLM provider vertical (reqwest, OAuth, telemetry cluster)
+- `djinn-agent` — Agent execution engine (depends on AgentRole trait completing first)
+- `djinn-mcp` — MCP tool handlers
+
+**Decision: sync/ and watchers/ stay in server** — they depend on repositories which remain in the server crate.
+
+### Part 2: Agent Role Trait — Foundation Only
+
+**Completed:**
+- RoleConfig struct with all fields
+- 5 role configs (Worker, TaskReviewer, PM, Groomer, ConflictResolver)
+- CompactionPrompts struct
+- RoleRegistry with dispatch rules, wired into CoordinatorActor
+- AgentType delegates to role_config() for dispatch_role, tool_schemas, etc.
+- Equivalence tests proving role configs match AgentType behavior
+
+**Remaining (epic `53sw`, 4 tasks):**
+1. Define AgentRole trait (config, render_prompt, on_complete, prepare_worktree) — task `qw07`
+2. Implement trait for all 5 roles — task `1wfy`
+3. Make lifecycle/slot pool role-generic via `&dyn AgentRole` — task `lyku`
+4. Strip remaining AgentType behavioral dispatch sites — task `w8fo`
 
 ## Context
 
