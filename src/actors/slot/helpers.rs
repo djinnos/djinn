@@ -267,29 +267,27 @@ calls will be treated as a failure.\n\n";
     // Most recent verification failure (actor_role="verification")
     if let Some(entry) = activity.iter().rev().find(|e| {
         e.event_type == "comment" && e.actor_role == "verification"
-    }) {
-        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
-            && let Some(body) = payload.get("body").and_then(|v| v.as_str())
-        {
-            sections.push(format!("Verification failure:\n\n{body}"));
-        }
+    })
+        && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
+        && let Some(body) = payload.get("body").and_then(|v| v.as_str())
+    {
+        sections.push(format!("Verification failure:\n\n{body}"));
     }
 
     // Most recent PM or reviewer comment
     if let Some(entry) = activity.iter().rev().find(|e| {
         e.event_type == "comment"
             && (e.actor_role == "task_reviewer" || e.actor_role == "pm")
-    }) {
-        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
-            && let Some(body) = payload.get("body").and_then(|v| v.as_str())
-        {
-            let label = if entry.actor_role == "pm" {
-                "PM intervention guidance"
-            } else {
-                "Reviewer feedback"
-            };
-            sections.push(format!("{label}:\n\n{body}"));
-        }
+    })
+        && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
+        && let Some(body) = payload.get("body").and_then(|v| v.as_str())
+    {
+        let label = if entry.actor_role == "pm" {
+            "PM intervention guidance"
+        } else {
+            "Reviewer feedback"
+        };
+        sections.push(format!("{label}:\n\n{body}"));
     }
 
     if !sections.is_empty() {
@@ -352,29 +350,27 @@ pub(crate) async fn initial_user_message_for_task(task_id: &str, app_state: &App
     // Most recent verification failure
     if let Some(entry) = activity.iter().rev().find(|e| {
         e.event_type == "comment" && e.actor_role == "verification"
-    }) {
-        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
-            && let Some(body) = payload.get("body").and_then(|v| v.as_str())
-        {
-            sections.push(format!("**Verification failure from previous attempt:**\n\n{body}"));
-        }
+    })
+        && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
+        && let Some(body) = payload.get("body").and_then(|v| v.as_str())
+    {
+        sections.push(format!("**Verification failure from previous attempt:**\n\n{body}"));
     }
 
     // Most recent PM or reviewer comment
     if let Some(entry) = activity.iter().rev().find(|e| {
         e.event_type == "comment"
             && (e.actor_role == "task_reviewer" || e.actor_role == "pm")
-    }) {
-        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
-            && let Some(body) = payload.get("body").and_then(|v| v.as_str())
-        {
-            let label = if entry.actor_role == "pm" {
-                "PM intervention guidance"
-            } else {
-                "Reviewer feedback"
-            };
-            sections.push(format!("**{label}:**\n\n{body}"));
-        }
+    })
+        && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
+        && let Some(body) = payload.get("body").and_then(|v| v.as_str())
+    {
+        let label = if entry.actor_role == "pm" {
+            "PM intervention guidance"
+        } else {
+            "Reviewer feedback"
+        };
+        sections.push(format!("**{label}:**\n\n{body}"));
     }
 
     if sections.is_empty() {
