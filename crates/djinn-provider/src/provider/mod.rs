@@ -6,7 +6,7 @@ use std::pin::Pin;
 
 use serde_json::Value;
 
-use crate::agent::message::{ContentBlock, Conversation};
+use crate::message::{ContentBlock, Conversation};
 
 // ─── Token usage ──────────────────────────────────────────────────────────────
 

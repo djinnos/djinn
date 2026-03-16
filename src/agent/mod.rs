@@ -3,12 +3,12 @@ pub mod config;
 pub(crate) mod extension;
 pub mod file_time;
 pub mod lsp;
-pub mod message;
+pub use djinn_provider::message;
 pub mod oauth;
 pub(crate) mod output_parser;
 pub(crate) mod patch;
 pub mod prompts;
-pub mod provider;
+pub use djinn_provider::provider;
 pub(crate) mod roles;
 pub mod sandbox;
 

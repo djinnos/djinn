@@ -5,9 +5,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::pin::Pin;
 
-use crate::agent::message::{ContentBlock, Conversation};
-use crate::agent::provider::client::ApiClient;
-use crate::agent::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
+use crate::message::{ContentBlock, Conversation};
+use crate::provider::client::ApiClient;
+use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
@@ -380,8 +380,8 @@ impl LlmProvider for OpenAIResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::message::{Message, Role};
-    use crate::agent::provider::{AuthMethod, FormatFamily, ProviderCapabilities};
+    use crate::message::{Message, Role};
+    use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities};
 
     fn test_provider() -> OpenAIResponsesProvider {
         OpenAIResponsesProvider::new(ProviderConfig {

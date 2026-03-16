@@ -4,9 +4,9 @@ use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
 use std::pin::Pin;
 
-use crate::agent::message::{ContentBlock, Conversation};
-use crate::agent::provider::client::ApiClient;
-use crate::agent::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
+use crate::message::{ContentBlock, Conversation};
+use crate::provider::client::ApiClient;
+use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
 
 pub struct GoogleProvider {
     config: ProviderConfig,

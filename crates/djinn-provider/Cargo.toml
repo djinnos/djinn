@@ -1,0 +1,20 @@
+[package]
+name = "djinn-provider"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+async-stream = "0.3"
+base64 = "0.22"
+bytes = "1"
+futures = "0.3"
+opentelemetry = "0.31"
+opentelemetry-otlp = { version = "0.31", features = ["reqwest-rustls"] }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio-util = "0.7"
+tracing = "0.1"

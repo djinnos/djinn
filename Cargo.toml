@@ -11,6 +11,7 @@ edition = "2024"
 djinn-core = { path = "crates/djinn-core", features = ["sqlx"] }
 djinn-db = { path = "crates/djinn-db" }
 djinn-git = { path = "crates/djinn-git" }
+djinn-provider = { path = "crates/djinn-provider" }
 anyhow = "1"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
