@@ -14,10 +14,14 @@ pub async fn events_handler(
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let rx = state.events().subscribe();
     let cancel = state.cancel().clone();
+    tracing::info!("SSE: new client connected");
 
     let event_stream = BroadcastStream::new(rx).filter_map(|result| match result {
         Ok(envelope) => {
             let event_name = format!("{}.{}", envelope.entity_type, envelope.action);
+            if envelope.entity_type == "session" {
+                tracing::debug!(event_name = %event_name, "SSE: sending session event to client");
+            }
             serde_json::to_string(&envelope)
                 .ok()
                 .map(|data| Ok::<Event, Infallible>(Event::default().event(event_name).data(data)))
