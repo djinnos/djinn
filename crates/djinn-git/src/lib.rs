@@ -78,6 +78,28 @@ pub enum GitError {
 
     #[error("{0}")]
     Other(#[from] anyhow::Error),
+
+    #[error("actor channel closed")]
+    ActorDead,
+
+    #[error("no response from actor")]
+    NoResponse,
+}
+
+pub mod actor;
+pub use actor::{GitActorHandle, get_or_spawn};
+
+#[derive(Debug, Clone)]
+pub struct StatusSummary {
+    pub staged: Vec<String>,
+    pub modified: Vec<String>,
+    pub untracked: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::actors::git::GitError;
+use djinn_git::GitError;
 use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
 use crate::server::AppState;
@@ -19,7 +19,7 @@ use super::*;
 /// This is a safety net for `prepare_worktree`; the primary bootstrap happens
 /// in `project_add` via `ensure_git_repo_ready`.
 async fn ensure_target_branch_ready(
-    git: &crate::actors::git::GitActorHandle,
+    git: &djinn_git::GitActorHandle,
     target_branch: &str,
 ) -> anyhow::Result<()> {
     // Fast path: target branch already exists (git2 — no process spawn).

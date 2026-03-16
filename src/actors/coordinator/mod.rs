@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{self, Instant, Interval};
 use tokio_util::sync::CancellationToken;
 
-use crate::actors::git::GitActorHandle;
+use djinn_git::GitActorHandle;
 use crate::actors::slot::{PoolError, SlotPoolHandle};
 use crate::agent::roles::RoleRegistry;
 use crate::server::AppState;

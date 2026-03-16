@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::actors::git::GitError;
+use djinn_git::GitError;
 use crate::db::{ProjectRepository, SessionRepository, TaskRepository};
 use crate::models::{SessionStatus, TransitionAction};
 use crate::server::AppState;
