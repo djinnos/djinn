@@ -258,10 +258,29 @@ reviewer determined it was NOT. You MUST use your tools (shell, editor, etc.) \
 to make concrete changes before stopping. A text-only response with no tool \
 calls will be treated as a failure.\n\n";
 
-    for entry in activity.iter().rev() {
-        if entry.event_type == "comment"
-            && (entry.actor_role == "task_reviewer" || entry.actor_role == "pm")
-            && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
+    // Collect ALL high-signal feedback: PM guidance, reviewer feedback, AND
+    // verification failures. Previously we returned on the first PM/reviewer
+    // comment found, which meant verification errors were lost when a PM
+    // comment existed.
+    let mut sections: Vec<String> = Vec::new();
+
+    // Most recent verification failure (actor_role="verification")
+    if let Some(entry) = activity.iter().rev().find(|e| {
+        e.event_type == "comment" && e.actor_role == "verification"
+    }) {
+        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
+            && let Some(body) = payload.get("body").and_then(|v| v.as_str())
+        {
+            sections.push(format!("Verification failure:\n\n{body}"));
+        }
+    }
+
+    // Most recent PM or reviewer comment
+    if let Some(entry) = activity.iter().rev().find(|e| {
+        e.event_type == "comment"
+            && (e.actor_role == "task_reviewer" || e.actor_role == "pm")
+    }) {
+        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
             && let Some(body) = payload.get("body").and_then(|v| v.as_str())
         {
             let label = if entry.actor_role == "pm" {
@@ -269,10 +288,15 @@ calls will be treated as a failure.\n\n";
             } else {
                 "Reviewer feedback"
             };
-            return format!(
-                "{RESUME_PREAMBLE}{label}:\n\n{body}\n\nAddress this feedback, make the necessary changes, then stop."
-            );
+            sections.push(format!("{label}:\n\n{body}"));
         }
+    }
+
+    if !sections.is_empty() {
+        return format!(
+            "{RESUME_PREAMBLE}{}\n\nAddress this feedback, make the necessary changes, then stop.",
+            sections.join("\n\n---\n\n")
+        );
     }
 
     if let Some(context) = merge_validation_context_for_dispatch(task_id, app_state).await {
@@ -314,6 +338,53 @@ calls will be treated as a failure.\n\n";
     format!(
         "{RESUME_PREAMBLE}Your previous submission was rejected. Re-read the task acceptance criteria with `task_show`, identify what is unmet, make changes, then stop."
     )
+}
+
+/// Build an initial user message for a fresh worker session. If the activity
+/// log contains PM or reviewer feedback, include it prominently so the worker
+/// acts on it immediately rather than discovering it buried in the system prompt.
+pub(crate) async fn initial_user_message_for_task(task_id: &str, app_state: &AppState) -> String {
+    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
+
+    let mut sections: Vec<String> = Vec::new();
+
+    // Most recent verification failure
+    if let Some(entry) = activity.iter().rev().find(|e| {
+        e.event_type == "comment" && e.actor_role == "verification"
+    }) {
+        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
+            && let Some(body) = payload.get("body").and_then(|v| v.as_str())
+        {
+            sections.push(format!("**Verification failure from previous attempt:**\n\n{body}"));
+        }
+    }
+
+    // Most recent PM or reviewer comment
+    if let Some(entry) = activity.iter().rev().find(|e| {
+        e.event_type == "comment"
+            && (e.actor_role == "task_reviewer" || e.actor_role == "pm")
+    }) {
+        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
+            && let Some(body) = payload.get("body").and_then(|v| v.as_str())
+        {
+            let label = if entry.actor_role == "pm" {
+                "PM intervention guidance"
+            } else {
+                "Reviewer feedback"
+            };
+            sections.push(format!("**{label}:**\n\n{body}"));
+        }
+    }
+
+    if sections.is_empty() {
+        "Start by understanding the task context and execute it fully before stopping.".to_string()
+    } else {
+        format!(
+            "The activity log contains important feedback from prior sessions. Read it carefully and act on it:\n\n{}\n\nAddress this feedback, make the necessary changes, then stop.",
+            sections.join("\n\n---\n\n")
+        )
+    }
 }
 
 // ─── Retry helper for SQLite lock contention ─────────────────────────────────

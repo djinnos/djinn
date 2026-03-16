@@ -669,6 +669,11 @@ pub async fn run_task_lifecycle(
     // ── Create or resume session record + build conversation ─────────────────
     let tools = agent_type.tool_schemas();
 
+    // Compute the initial user message for fresh sessions. This checks the
+    // activity log for PM/reviewer/verification feedback and includes it
+    // prominently so the worker acts on it immediately.
+    let fresh_user_message = initial_user_message_for_task(&task_id, &app_state).await;
+
     // Try to resume from a paused session's saved conversation.
     emit_step(&task.id, "session_creating", serde_json::json!({"resume": resume_record_id.is_some()}));
     let (current_record_id, mut conversation) = if let Some(ref resume_id) = resume_record_id {
@@ -753,9 +758,7 @@ pub async fn run_task_lifecycle(
                 };
                 let mut conv = Conversation::new();
                 conv.push(Message::system(system_prompt.clone()));
-                conv.push(Message::user(
-                    "Start by understanding the task context and execute it fully before stopping.",
-                ));
+                conv.push(Message::user(fresh_user_message.clone()));
                 (record_id, conv)
             }
         }
@@ -782,9 +785,7 @@ pub async fn run_task_lifecycle(
         };
         let mut conv = Conversation::new();
         conv.push(Message::system(system_prompt.clone()));
-        conv.push(Message::user(
-            "Start by understanding the task context and execute it fully before stopping.",
-        ));
+        conv.push(Message::user(fresh_user_message));
         (record_id, conv)
     };
 
@@ -793,7 +794,6 @@ pub async fn run_task_lifecycle(
     let current_session_id = current_record_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-    emit_step(&task.id, "session_created", serde_json::json!({"session_id": current_session_id}));
 
     // ── Run reply loop ────────────────────────────────────────────────────────
     let (reply_result, final_output, tokens_in_loop, tokens_out_loop) = run_reply_loop(
