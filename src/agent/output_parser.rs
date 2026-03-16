@@ -1,5 +1,3 @@
-use super::AgentType;
-
 /// Parsed output from an agent session.
 ///
 /// After removing markers and nudging (see ADR-022 revision), this struct only
@@ -8,21 +6,21 @@ use super::AgentType;
 /// Reviewer verdict is determined by acceptance criteria state on the task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedAgentOutput {
-    agent_type: AgentType,
+    captures_feedback: bool,
     pub runtime_error: Option<String>,
     pub reviewer_feedback: Option<String>,
 }
 
 impl Default for ParsedAgentOutput {
     fn default() -> Self {
-        Self::new(AgentType::Worker)
+        Self::new(false)
     }
 }
 
 impl ParsedAgentOutput {
-    pub(crate) fn new(agent_type: AgentType) -> Self {
+    pub(crate) fn new(captures_feedback: bool) -> Self {
         Self {
-            agent_type,
+            captures_feedback,
             runtime_error: None,
             reviewer_feedback: None,
         }
@@ -37,7 +35,7 @@ impl ParsedAgentOutput {
             }
 
             // Extract reviewer feedback if present (still useful for logging).
-            if matches!(self.agent_type, AgentType::TaskReviewer)
+            if self.captures_feedback
                 && let Some(payload) = marker_payload(&line, "FEEDBACK")
             {
                 let feedback = payload.trim();
@@ -82,7 +80,7 @@ mod tests {
 
     #[test]
     fn extracts_runtime_execution_errors() {
-        let mut out = ParsedAgentOutput::new(AgentType::Worker);
+        let mut out = ParsedAgentOutput::new(false);
         out.ingest_text("Error: Execution error: No such file or directory (os error 2)");
         assert_eq!(
             out.runtime_error.as_deref(),
@@ -92,7 +90,7 @@ mod tests {
 
     #[test]
     fn extracts_reviewer_feedback() {
-        let mut out = ParsedAgentOutput::new(AgentType::TaskReviewer);
+        let mut out = ParsedAgentOutput::new(true);
         out.ingest_text("FEEDBACK: missing test for malformed payload");
         assert_eq!(
             out.reviewer_feedback.as_deref(),
@@ -102,7 +100,7 @@ mod tests {
 
     #[test]
     fn ignores_feedback_for_non_reviewer() {
-        let mut out = ParsedAgentOutput::new(AgentType::Worker);
+        let mut out = ParsedAgentOutput::new(false);
         out.ingest_text("FEEDBACK: something");
         assert_eq!(out.reviewer_feedback, None);
     }

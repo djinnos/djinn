@@ -79,7 +79,7 @@ pub(crate) const CONFLICT_RESOLVER_CONFIG: RoleConfig = RoleConfig {
     name: "conflict_resolver",
     display_name: "Conflict Resolver",
     dispatch_role: "worker",
-    tool_schemas: || extension::tool_schemas(crate::agent::AgentType::ConflictResolver),
+    tool_schemas: extension::tool_schemas_worker,
     start_action: |status| match status {
         "open" => Some(TransitionAction::Start),
         _ => None,

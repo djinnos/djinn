@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use crate::agent::AgentType;
 use crate::db::CredentialRepository;
 use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
@@ -654,11 +653,6 @@ pub(crate) fn parse_model_id(model_id: &str) -> anyhow::Result<(String, String)>
         ));
     };
     Ok((provider_id.to_owned(), model_name.to_owned()))
-}
-
-#[allow(dead_code)]
-pub(crate) fn agent_type_for_task(task: &Task, has_conflict_context: bool) -> AgentType {
-    AgentType::for_task_status(task.status.as_str(), has_conflict_context)
 }
 
 /// Build telemetry metadata for OTel span instrumentation.

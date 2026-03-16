@@ -103,7 +103,7 @@ pub(crate) const TASK_REVIEWER_CONFIG: RoleConfig = RoleConfig {
     name: "task_reviewer",
     display_name: "Task Reviewer",
     dispatch_role: "task_reviewer",
-    tool_schemas: || extension::tool_schemas(crate::agent::AgentType::TaskReviewer),
+    tool_schemas: extension::tool_schemas_reviewer,
     start_action: |status| match status {
         "needs_task_review" => Some(TransitionAction::TaskReviewStart),
         _ => None,
