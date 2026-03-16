@@ -187,7 +187,7 @@ mod tests {
 #[cfg(test)]
 mod transition_tests {
     use super::*;
-    use crate::models::task::TransitionAction;
+    use crate::models::TransitionAction;
     use crate::test_helpers;
 
     async fn set_task_status(app: &AppState, task_id: &str, status: &str) {
