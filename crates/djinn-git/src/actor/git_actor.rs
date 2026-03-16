@@ -44,10 +44,8 @@ impl GitActor {
                 let _ = respond_to.send(result);
             }
             GitMessage::RunCommand { args, respond_to } => {
-                // Clone path so no &self reference crosses the await point
-                // (git2::Repository is Send but not Sync).
                 let path = self.path.clone();
-                let result = gitlib::run_git_command(path, args).await.map(Into::into).map_err(Into::into);
+                let result = crate::run_git_command(path, args).await;
                 let _ = respond_to.send(result);
             }
             GitMessage::BranchExists { branch, respond_to } => {
@@ -64,7 +62,7 @@ impl GitActor {
                 respond_to,
             } => {
                 let path = self.path.clone();
-                let result = gitlib::create_branch(path, short_id, target_branch).await.map_err(Into::into);
+                let result = crate::create_branch(path, short_id, target_branch).await;
                 let _ = respond_to.send(result);
             }
             GitMessage::SquashMerge {
@@ -74,12 +72,12 @@ impl GitActor {
                 respond_to,
             } => {
                 let path = self.path.clone();
-                let result = gitlib::squash_merge(path, branch, target_branch, message).await.map(Into::into).map_err(Into::into);
+                let result = crate::squash_merge(path, branch, target_branch, message).await;
                 let _ = respond_to.send(result);
             }
             GitMessage::DeleteBranch { branch, respond_to } => {
                 let path = self.path.clone();
-                let result = gitlib::delete_branch(path, branch).await.map_err(Into::into);
+                let result = crate::delete_branch(path, branch).await;
                 let _ = respond_to.send(result);
             }
             GitMessage::CreateWorktree {
@@ -89,7 +87,7 @@ impl GitActor {
                 respond_to,
             } => {
                 let path = self.path.clone();
-                let result = gitlib::create_worktree(path, task_short_id, branch, detach).await.map_err(Into::into);
+                let result = crate::create_worktree(path, task_short_id, branch, detach).await;
                 let _ = respond_to.send(result);
             }
             GitMessage::RemoveWorktree {
@@ -97,15 +95,12 @@ impl GitActor {
                 respond_to,
             } => {
                 let path = self.path.clone();
-                let result = gitlib::remove_worktree(path, wt_path).await.map_err(Into::into);
+                let result = crate::remove_worktree(path, wt_path).await;
                 let _ = respond_to.send(result);
             }
             GitMessage::ListWorktrees { respond_to } => {
                 let path = self.path.clone();
-                let result = gitlib::list_worktrees(path)
-                    .await
-                    .map(|items| items.into_iter().map(Into::into).collect())
-                    .map_err(Into::into);
+                let result = crate::list_worktrees(path).await;
                 let _ = respond_to.send(result);
             }
         }
@@ -182,5 +177,4 @@ impl GitActor {
             Err(e) => Err(GitError::Git(e)),
         }
     }
-
 }

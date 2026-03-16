@@ -1,10 +1,20 @@
 use super::*;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
-/// Spin up a GitActorHandle on the server's own repo and verify basic reads.
+/// Walk up from `start` to find the nearest ancestor directory containing `.git`.
+fn find_git_root(start: &std::path::Path) -> PathBuf {
+    start
+        .ancestors()
+        .find(|p| p.join(".git").exists())
+        .expect("no git repo found above CARGO_MANIFEST_DIR")
+        .to_path_buf()
+}
+
+/// Spin up a GitActorHandle on the workspace repo and verify basic reads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reads_from_server_repo() {
-    let repo_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_path = find_git_root(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
     let handle = GitActorHandle::spawn(repo_path).expect("failed to spawn actor");
 
     let branch = handle.current_branch().await.expect("current_branch");
@@ -20,7 +30,7 @@ async fn reads_from_server_repo() {
 /// Verify that RunCommand works for a read-only git command.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_command_git_log() {
-    let repo_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_path = find_git_root(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
     let handle = GitActorHandle::spawn(repo_path).expect("spawn");
 
     let out = handle

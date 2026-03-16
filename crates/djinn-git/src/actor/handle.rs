@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use super::*;
 
 // ─── Handle ──────────────────────────────────────────────────────────────────
@@ -72,13 +74,13 @@ impl GitActorHandle {
     /// Rebase onto `upstream` with short retry/jitter for transient git-state failures.
     pub async fn rebase_with_retry(&self, upstream: &str) -> Result<(), GitError> {
         let cwd = self.current_dir().await?;
-        gitlib::rebase_with_retry(cwd.as_path(), upstream)
-            .await
-            .map_err(Into::into)
+        crate::rebase_with_retry(cwd.as_path(), upstream).await
     }
 
     async fn current_dir(&self) -> Result<PathBuf, GitError> {
-        let out = self.run_command(vec!["rev-parse".into(), "--show-toplevel".into()]).await?;
+        let out = self
+            .run_command(vec!["rev-parse".into(), "--show-toplevel".into()])
+            .await?;
         Ok(PathBuf::from(out.stdout.trim()))
     }
 
@@ -122,10 +124,7 @@ impl GitActorHandle {
     /// Create a worktree at `.djinn/worktrees/{task_short_id}/` on `branch` (GIT-02).
     ///
     /// When `detach` is true, passes `--detach` to `git worktree add` so the
-    /// worktree gets a detached HEAD instead of checking out the branch.  Use
-    /// this for ephemeral worktrees (health checks, validation) that only need
-    /// the code at a point-in-time and would otherwise fail when the branch is
-    /// already checked out in the main working tree.
+    /// worktree gets a detached HEAD instead of checking out the branch.
     pub async fn create_worktree(
         &self,
         task_short_id: &str,

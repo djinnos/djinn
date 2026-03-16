@@ -6,7 +6,7 @@ use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::actors::coordinator::CoordinatorHandle;
-use crate::actors::git::{GitActorHandle, GitError};
+use djinn_git::{GitActorHandle, GitError};
 use crate::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use crate::agent::file_time::FileTime;
 use crate::agent::lsp::LspManager;
@@ -115,7 +115,7 @@ impl AppState {
     /// Get or spawn a `GitActorHandle` for the given project path (GIT-04).
     pub async fn git_actor(&self, path: &Path) -> Result<GitActorHandle, GitError> {
         let mut map = self.inner.git_actors.lock().await;
-        crate::actors::git::get_or_spawn(&mut map, path)
+        djinn_git::get_or_spawn(&mut map, path)
     }
 
     pub fn catalog(&self) -> &CatalogService {
