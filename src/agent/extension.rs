@@ -2521,10 +2521,7 @@ where
     serde_json::from_value(value)
 }
 
-/// Returns the JSON tool schemas for the given agent type, suitable for
-/// passing directly to the `LlmProvider::stream` call in the Djinn-native
-/// reply loop.
-pub(crate) fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
+fn base_tool_schemas() -> Vec<serde_json::Value> {
     let mut tool_values = vec![
         serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
         serde_json::to_value(tool_task_list()).expect("serialize tool_task_list"),
@@ -2534,49 +2531,56 @@ pub(crate) fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
         serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
         serde_json::to_value(tool_memory_list()).expect("serialize tool_memory_list"),
     ];
-
     tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
     tool_values.push(serde_json::to_value(tool_read()).expect("serialize tool_read"));
     tool_values.push(serde_json::to_value(tool_lsp()).expect("serialize tool_lsp"));
+    tool_values
+}
 
-    if matches!(agent_type, AgentType::Worker | AgentType::ConflictResolver) {
-        tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
-        tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
-        tool_values
-            .push(serde_json::to_value(tool_apply_patch()).expect("serialize tool_apply_patch"));
-        tool_values
-            .push(serde_json::to_value(tool_request_pm()).expect("serialize tool_request_pm"));
+/// Tool schemas for Worker and ConflictResolver: base + file-editing tools.
+pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
+    tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
+    tool_values
+        .push(serde_json::to_value(tool_apply_patch()).expect("serialize tool_apply_patch"));
+    tool_values
+        .push(serde_json::to_value(tool_request_pm()).expect("serialize tool_request_pm"));
+    tool_values
+}
+
+/// Tool schemas for TaskReviewer: base + acceptance-criteria update tool.
+pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    tool_values.push(
+        serde_json::to_value(tool_task_update_ac()).expect("serialize tool_task_update_ac"),
+    );
+    tool_values
+}
+
+/// Tool schemas for PM and Groomer: base + task/epic management tools.
+pub(crate) fn tool_schemas_pm_groomer() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    for value in [
+        serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
+        serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
+        serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
+        serde_json::to_value(tool_task_delete_branch())
+            .expect("serialize tool_task_delete_branch"),
+        serde_json::to_value(tool_task_archive_activity())
+            .expect("serialize tool_task_archive_activity"),
+        serde_json::to_value(tool_task_reset_counters())
+            .expect("serialize tool_task_reset_counters"),
+        serde_json::to_value(tool_task_kill_session())
+            .expect("serialize tool_task_kill_session"),
+        serde_json::to_value(tool_task_blocked_list())
+            .expect("serialize tool_task_blocked_list"),
+        serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
+        serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
+        serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
+    ] {
+        tool_values.push(value);
     }
-
-    if matches!(agent_type, AgentType::TaskReviewer) {
-        tool_values.push(
-            serde_json::to_value(tool_task_update_ac()).expect("serialize tool_task_update_ac"),
-        );
-    }
-
-    if matches!(agent_type, AgentType::PM | AgentType::Groomer) {
-        for value in [
-            serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
-            serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
-            serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
-            serde_json::to_value(tool_task_delete_branch())
-                .expect("serialize tool_task_delete_branch"),
-            serde_json::to_value(tool_task_archive_activity())
-                .expect("serialize tool_task_archive_activity"),
-            serde_json::to_value(tool_task_reset_counters())
-                .expect("serialize tool_task_reset_counters"),
-            serde_json::to_value(tool_task_kill_session())
-                .expect("serialize tool_task_kill_session"),
-            serde_json::to_value(tool_task_blocked_list())
-                .expect("serialize tool_task_blocked_list"),
-            serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
-            serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
-            serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
-        ] {
-            tool_values.push(value);
-        }
-    }
-
     tool_values
 }
 
@@ -2690,8 +2694,8 @@ mod tests {
 
     #[test]
     fn tool_schemas_include_role_specific_tools() {
-        fn names(agent: AgentType) -> Vec<String> {
-            tool_schemas(agent)
+        fn schema_names(schemas: Vec<serde_json::Value>) -> Vec<String> {
+            schemas
                 .into_iter()
                 .filter_map(|v| {
                     v.get("name")
@@ -2701,22 +2705,23 @@ mod tests {
                 .collect()
         }
 
-        let worker = names(AgentType::Worker);
+        let worker = schema_names(tool_schemas_worker());
         assert!(worker.len() > 1);
         assert!(worker.iter().any(|n| n == "shell"));
         assert!(worker.iter().any(|n| n == "write"));
         assert!(worker.iter().any(|n| n == "edit"));
 
-        let reviewer = names(AgentType::TaskReviewer);
+        let reviewer = schema_names(tool_schemas_reviewer());
         assert!(reviewer.len() > 1);
         assert!(reviewer.iter().any(|n| n == "task_update_ac"));
 
-        let pm = names(AgentType::PM);
+        let pm = schema_names(tool_schemas_pm_groomer());
         assert!(pm.len() > 1);
         assert!(pm.iter().any(|n| n == "task_create"));
         assert!(pm.iter().any(|n| n == "task_transition"));
 
-        let groomer = names(AgentType::Groomer);
+        // groomer shares the pm schema set
+        let groomer = schema_names(tool_schemas_pm_groomer());
         assert!(groomer.len() > 1);
         assert!(groomer.iter().any(|n| n == "task_create"));
         assert!(groomer.iter().any(|n| n == "task_transition"));
