@@ -1796,37 +1796,47 @@ async fn call_task_transition(
         return Ok(task_to_value(&updated));
     }
 
-    // Guard: force_close requires explicit replacement_task_ids that exist and are open.
-    // Without this, the PM can close a task claiming "decomposition" without
-    // actually creating the replacement subtasks, losing unmerged work.
+    // Guard: force_close requires either replacement_task_ids (for decomposition)
+    // or a reason (for redundant/already-landed tasks). This prevents the PM from
+    // silently closing tasks without explanation while still allowing closure of
+    // tasks whose work already landed on main.
     if action == TransitionAction::ForceClose {
-        let ids = match p.replacement_task_ids {
-            Some(ref ids) if !ids.is_empty() => ids,
-            _ => {
+        let has_replacements = p
+            .replacement_task_ids
+            .as_ref()
+            .is_some_and(|ids| !ids.is_empty());
+        let has_reason = p.reason.as_ref().is_some_and(|r: &String| !r.is_empty());
+
+        if !has_replacements && !has_reason {
+            return Ok(serde_json::json!({
+                "error": "force_close requires either replacement_task_ids (array of subtask IDs created as replacements) or a reason string explaining why the task is being closed (e.g. work already landed on main, task is redundant)."
+            }));
+        }
+
+        // Validate replacement task IDs if provided
+        if let Some(ref ids) = p.replacement_task_ids {
+            let mut missing = Vec::new();
+            for id in ids {
+                match repo.resolve(id).await {
+                    Ok(Some(t))
+                        if t.status == TaskStatus::Open.as_str()
+                            || t.status == TaskStatus::Closed.as_str() => {}
+                    Ok(Some(t)) => {
+                        missing.push(format!("{} (status: {})", id, t.status));
+                    }
+                    _ => {
+                        missing.push(format!("{} (not found)", id));
+                    }
+                }
+            }
+            if !missing.is_empty() {
                 return Ok(serde_json::json!({
-                    "error": "force_close requires replacement_task_ids: an array of task IDs (UUID or short ID) for the replacement tasks you created. Create subtasks with task_create first, then pass their IDs to force_close."
+                    "error": format!(
+                        "force_close replacement tasks must exist and be open or closed. Problems: {}",
+                        missing.join(", ")
+                    )
                 }));
             }
-        };
-        let mut missing = Vec::new();
-        for id in ids {
-            match repo.resolve(id).await {
-                Ok(Some(t)) if t.status == TaskStatus::Open.as_str() => {}
-                Ok(Some(t)) => {
-                    missing.push(format!("{} (status: {})", id, t.status));
-                }
-                _ => {
-                    missing.push(format!("{} (not found)", id));
-                }
-            }
-        }
-        if !missing.is_empty() {
-            return Ok(serde_json::json!({
-                "error": format!(
-                    "force_close replacement tasks must exist and be open. Problems: {}",
-                    missing.join(", ")
-                )
-            }));
         }
     }
 
@@ -2310,7 +2320,7 @@ fn tool_task_update() -> RmcpTool {
 fn tool_task_transition() -> RmcpTool {
     RmcpTool::new(
         "task_transition".to_string(),
-        "Execute a state machine transition on a task. PM can use: pm_intervention_complete (rescope and reopen for worker), pm_approve (approve implementation and merge), force_close (requires replacement_task_ids), escalate.".to_string(),
+        "Execute a state machine transition on a task. PM can use: pm_intervention_complete (rescope and reopen for worker), pm_approve (approve implementation and merge), force_close (requires replacement_task_ids for decomposition OR reason for redundant/already-landed tasks), escalate.".to_string(),
         object!({
             "type": "object",
             "required": ["id", "action"],
@@ -2319,7 +2329,7 @@ fn tool_task_transition() -> RmcpTool {
                 "action": {"type": "string", "description": "Transition action"},
                 "reason": {"type": "string"},
                 "target_status": {"type": "string"},
-                "replacement_task_ids": {"type": "array", "items": {"type": "string"}, "description": "Required for force_close: IDs of replacement tasks created before closing this one"}
+                "replacement_task_ids": {"type": "array", "items": {"type": "string"}, "description": "For force_close with decomposition: IDs of replacement subtasks. Not required if closing a redundant task with a reason."}
             }
         }),
     )
