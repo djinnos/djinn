@@ -1,6 +1,11 @@
 use super::AgentType;
+use crate::agent::output_parser::ParsedAgentOutput;
+use crate::agent::prompts::TaskContext;
 use crate::models::{Task, TransitionAction};
+use crate::server::AppState;
+use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 mod conflict;
 mod groomer;
@@ -46,6 +51,29 @@ pub(crate) fn config_for(agent_type: AgentType) -> &'static RoleConfig {
         AgentType::TaskReviewer => &TASK_REVIEWER_CONFIG,
         AgentType::PM => &PM_CONFIG,
         AgentType::Groomer => &GROOMER_CONFIG,
+    }
+}
+
+/// Thin role trait that every agent role must implement.
+///
+/// Object-safe: async methods return `BoxFuture` so `dyn AgentRole` works.
+#[allow(dead_code)]
+pub(crate) trait AgentRole: Send + Sync + 'static {
+    fn config(&self) -> &RoleConfig;
+    fn render_prompt(&self, ctx: &TaskContext) -> String;
+    fn on_complete<'a>(
+        &'a self,
+        task_id: &'a str,
+        output: &'a ParsedAgentOutput,
+        app_state: &'a AppState,
+    ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>>;
+    fn prepare_worktree<'a>(
+        &'a self,
+        _worktree: &'a Path,
+        _task: &'a Task,
+        _app_state: &'a AppState,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
