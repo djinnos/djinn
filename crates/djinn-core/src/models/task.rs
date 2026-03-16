@@ -33,7 +33,7 @@ pub struct Task {
     pub memory_refs: String,
     /// Number of unresolved blocker tasks (blocking tasks not yet closed).
     /// Populated by list queries via subquery; defaults to 0 elsewhere.
-    #[sqlx(default)]
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub unresolved_blocker_count: i64,
 }
 

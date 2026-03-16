@@ -299,6 +299,9 @@ pub struct TaskResponse {
     pub closed_at: Option<String>,
     pub close_reason: Option<String>,
     pub merge_commit_sha: Option<String>,
+    /// Set when force_close unblocks downstream tasks that may need replacement blockers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -587,6 +590,7 @@ pub fn task_to_response(t: &Task) -> TaskResponse {
         closed_at: t.closed_at.clone(),
         close_reason: t.close_reason.clone(),
         merge_commit_sha: t.merge_commit_sha.clone(),
+        warning: None,
     }
 }
 

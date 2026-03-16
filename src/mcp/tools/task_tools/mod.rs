@@ -792,6 +792,27 @@ impl DjinnMcpServer {
 
         let reason = p.reason.as_deref();
 
+        // Check for downstream dependents before force_close.
+        let downstream_warning = if action == TransitionAction::ForceClose {
+            let downstream = repo.list_blocked_by(&task.id).await.unwrap_or_default();
+            if downstream.is_empty() {
+                None
+            } else {
+                let names: Vec<String> = downstream
+                    .iter()
+                    .map(|b| format!("{} ({})", b.short_id, b.title))
+                    .collect();
+                Some(format!(
+                    "WARNING: {} task(s) were blocked by this task and are now unblocked: {}. \
+                     If replacement work exists, add blockers to these tasks to prevent premature dispatch.",
+                    downstream.len(),
+                    names.join(", ")
+                ))
+            }
+        } else {
+            None
+        };
+
         match repo
             .transition(
                 &task.id,
@@ -803,7 +824,13 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(updated) => Json(ErrorOr::Ok(task_to_response(&updated))),
+            Ok(updated) => {
+                let mut resp = task_to_response(&updated);
+                if let Some(warning) = downstream_warning {
+                    resp.warning = Some(warning);
+                }
+                Json(ErrorOr::Ok(resp))
+            }
             Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
         }
     }
