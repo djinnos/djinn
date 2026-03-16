@@ -1,8 +1,55 @@
 use crate::agent::compaction::{GENERIC_PROMPT, SUMMARISER_SYSTEM_GENERIC};
 use crate::agent::extension;
-use crate::models::TransitionAction;
+use crate::agent::output_parser::ParsedAgentOutput;
+use crate::agent::prompts::TaskContext;
+use crate::db::TaskRepository;
+use crate::models::{Task, TransitionAction};
+use crate::server::AppState;
+use futures::future::BoxFuture;
 
-use super::{CompactionPrompts, RoleConfig};
+use super::{AgentRole, CompactionPrompts, RoleConfig};
+
+pub(crate) struct PmRole;
+
+#[allow(dead_code)]
+impl AgentRole for PmRole {
+    fn config(&self) -> &RoleConfig {
+        &PM_CONFIG
+    }
+
+    fn render_prompt(&self, task: &Task, ctx: &TaskContext) -> String {
+        crate::agent::prompts::render_prompt(crate::agent::AgentType::PM, task, ctx)
+    }
+
+    fn on_complete<'a>(
+        &'a self,
+        task_id: &'a str,
+        _output: &'a ParsedAgentOutput,
+        app_state: &'a AppState,
+    ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
+        Box::pin(async move {
+            let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
+            if let Ok(Some(task)) = repo.get(task_id).await
+                && task.status != "in_pm_intervention"
+            {
+                tracing::info!(
+                    task_id = %task_id,
+                    current_status = %task.status,
+                    "PM agent: task already transitioned by PM tools — no fallback needed"
+                );
+                return None;
+            }
+            tracing::warn!(
+                task_id = %task_id,
+                "PM agent: session ended without explicit completion → releasing back"
+            );
+            Some((
+                TransitionAction::PmInterventionRelease,
+                Some("PM session ended without completing intervention".to_string()),
+            ))
+        })
+    }
+}
 
 pub(crate) const PM_CONFIG: RoleConfig = RoleConfig {
     name: "pm",

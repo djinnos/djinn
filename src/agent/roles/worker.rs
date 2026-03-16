@@ -3,9 +3,35 @@ use crate::agent::compaction::{
     SUMMARISER_SYSTEM_WORKER_PRE_RESUME,
 };
 use crate::agent::extension;
-use crate::models::TransitionAction;
+use crate::agent::output_parser::ParsedAgentOutput;
+use crate::agent::prompts::TaskContext;
+use crate::models::{Task, TransitionAction};
+use crate::server::AppState;
+use futures::future::BoxFuture;
 
-use super::{CompactionPrompts, RoleConfig};
+use super::{AgentRole, CompactionPrompts, RoleConfig};
+
+pub(crate) struct WorkerRole;
+
+#[allow(dead_code)]
+impl AgentRole for WorkerRole {
+    fn config(&self) -> &RoleConfig {
+        &WORKER_CONFIG
+    }
+
+    fn render_prompt(&self, task: &Task, ctx: &TaskContext) -> String {
+        crate::agent::prompts::render_prompt(crate::agent::AgentType::Worker, task, ctx)
+    }
+
+    fn on_complete<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _output: &'a ParsedAgentOutput,
+        _app_state: &'a AppState,
+    ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
+        Box::pin(async { Some((TransitionAction::SubmitVerification, None)) })
+    }
+}
 
 pub(crate) const WORKER_CONFIG: RoleConfig = RoleConfig {
     name: "worker",
