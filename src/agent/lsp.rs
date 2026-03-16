@@ -416,6 +416,25 @@ fn resolve_binary_inner(
         return Ok(found);
     }
 
+    // For rustup-managed binaries, system-packaged rustup (e.g. Arch) doesn't
+    // create proxy shims on PATH.  Ask `rustup which` before attempting install.
+    if matches!(server.install, InstallMethod::RustAnalyzer)
+        && let Some(rustup) = which_in_path("rustup", system_path)
+        && let Some(o) = std::process::Command::new(rustup)
+            .args(["which", binary_name])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .ok()
+        && o.status.success()
+    {
+        let p = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string());
+        if p.is_file() {
+            tracing::debug!(binary = binary_name, path = %p.display(), "lsp: found via rustup which");
+            return Ok(p);
+        }
+    }
+
     // Not found — attempt installation.
     tracing::info!(
         server = server.id,
@@ -452,7 +471,7 @@ fn resolve_binary_inner(
         InstallMethod::RustAnalyzer => {
             if let Some(rustup) = which_in_path("rustup", system_path) {
                 tracing::info!("lsp: running rustup component add rust-analyzer");
-                let output = std::process::Command::new(rustup)
+                let output = std::process::Command::new(&rustup)
                     .args(["component", "add", "rust-analyzer"])
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -462,6 +481,28 @@ fn resolve_binary_inner(
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(format!("rustup component add failed: {stderr}"));
+                }
+
+                // System-packaged rustup (e.g. Arch `pacman -S rustup`) doesn't
+                // create proxy shims in ~/.cargo/bin, so the binary won't appear
+                // on PATH even after a successful component add.  Ask rustup
+                // directly where the binary lives and return early if found.
+                if which_in_path(binary_name, &augmented_path).is_none()
+                    && let Some(o) = std::process::Command::new(&rustup)
+                        .args(["which", binary_name])
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .output()
+                        .ok()
+                    && o.status.success()
+                {
+                    let p = PathBuf::from(
+                        String::from_utf8_lossy(&o.stdout).trim().to_string(),
+                    );
+                    if p.is_file() {
+                        tracing::info!(path = %p.display(), "lsp: resolved via rustup which");
+                        return Ok(p);
+                    }
                 }
             } else {
                 // rust-analyzer isn't a standalone crate — can't cargo install it.
@@ -1629,6 +1670,66 @@ mod tests {
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         assert!(result.unwrap().ends_with("rust-analyzer"));
+    }
+
+    #[test]
+    fn resolve_binary_rustup_which_fallback_when_not_on_path() {
+        // Simulates system-packaged rustup (e.g. Arch) where `component add`
+        // succeeds but the binary doesn't appear on PATH.  The code should
+        // fall back to `rustup which rust-analyzer` to locate the toolchain binary.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("djinn_bin");
+        let path_dir = tmp.path().join("fakepath");
+        std::fs::create_dir_all(&path_dir).unwrap();
+
+        // The toolchain binary lives here — NOT on PATH
+        let toolchain_bin = tmp.path().join("toolchain_bin");
+        std::fs::create_dir_all(&toolchain_bin).unwrap();
+        make_fake_binary(&toolchain_bin, "rust-analyzer", "#!/bin/sh\n");
+
+        // Fake rustup: `component add` succeeds (no-op), `which` prints the
+        // toolchain path.  Note: the binary does NOT get placed on PATH.
+        let ra_path = toolchain_bin.join("rust-analyzer");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"which\" ]; then echo '{}'; else true; fi\n",
+            ra_path.display(),
+        );
+        make_fake_binary(&path_dir, "rustup", &script);
+
+        let server = server_for_path(Path::new("foo.rs")).unwrap();
+        // System PATH only has the dir with our fake rustup — no rust-analyzer
+        let result = resolve_binary_inner(&server, &bin_dir, &path_dir.to_string_lossy());
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert_eq!(result.unwrap(), ra_path);
+    }
+
+    #[test]
+    fn resolve_binary_rustup_which_finds_existing_without_install() {
+        // When rust-analyzer is already installed via system rustup, `rustup which`
+        // should find it during the initial lookup — no `component add` needed.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("djinn_bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let path_dir = tmp.path().join("fakepath");
+        std::fs::create_dir_all(&path_dir).unwrap();
+
+        let toolchain_bin = tmp.path().join("toolchain_bin");
+        std::fs::create_dir_all(&toolchain_bin).unwrap();
+        let ra_path = make_fake_binary(&toolchain_bin, "rust-analyzer", "#!/bin/sh\n");
+
+        // Fake rustup that only handles `which`
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"which\" ]; then echo '{}'; else exit 1; fi\n",
+            ra_path.display(),
+        );
+        make_fake_binary(&path_dir, "rustup", &script);
+
+        let server = server_for_path(Path::new("foo.rs")).unwrap();
+        let result = resolve_binary_inner(&server, &bin_dir, &path_dir.to_string_lossy());
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert_eq!(result.unwrap(), ra_path);
     }
 
     // --- format_symbol ---
