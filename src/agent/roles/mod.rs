@@ -6,6 +6,7 @@ use crate::server::AppState;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 mod conflict;
 mod groomer;
@@ -75,6 +76,39 @@ pub(crate) trait AgentRole: Send + Sync + 'static {
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
+    /// Whether this role should build epic context for the prompt.
+    fn needs_epic_context(&self) -> bool {
+        false
+    }
+    /// Build the initial user message for a fresh session.
+    /// Workers override this to include recent feedback from the activity log.
+    fn initial_user_message<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _app_state: &'a AppState,
+    ) -> BoxFuture<'a, String> {
+        Box::pin(async {
+            "Start by understanding the task context and execute it fully before stopping."
+                .to_string()
+        })
+    }
+}
+
+/// Resolve the concrete `AgentRole` implementation for an `AgentType`.
+pub(crate) fn role_impl_for(agent_type: AgentType) -> Arc<dyn AgentRole> {
+    match agent_type {
+        AgentType::Worker => Arc::new(WorkerRole),
+        AgentType::ConflictResolver => Arc::new(ConflictResolverRole),
+        AgentType::TaskReviewer => Arc::new(TaskReviewerRole),
+        AgentType::PM => Arc::new(PmRole),
+        AgentType::Groomer => Arc::new(GroomerRole),
+    }
+}
+
+/// Resolve `Arc<dyn AgentRole>` directly from a task and dispatch context,
+/// without exposing `AgentType` to the caller.
+pub(crate) fn role_for_task_dispatch(task: &Task, has_conflict_context: bool) -> Arc<dyn AgentRole> {
+    role_impl_for(AgentType::for_task_status(task.status.as_str(), has_conflict_context))
 }
 
 #[derive(Default)]

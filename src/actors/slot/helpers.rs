@@ -6,7 +6,7 @@ use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
 use crate::db::TaskRepository;
 use crate::models::Task;
-use crate::models::{SessionRecord, SessionStatus};
+use crate::models::{SessionRecord, SessionStatus, TransitionAction};
 use crate::server::AppState;
 
 use super::*;
@@ -224,11 +224,11 @@ pub(crate) async fn project_path_for_id(project_id: &str, app_state: &AppState) 
 
 pub(crate) async fn find_paused_session_record(
     task_id: &str,
-    agent_type: AgentType,
+    role_name: &str,
     app_state: &AppState,
 ) -> Option<SessionRecord> {
     let repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
-    repo.paused_for_task_by_type(task_id, agent_type.as_str())
+    repo.paused_for_task_by_type(task_id, role_name)
         .await
         .ok()
         .flatten()
@@ -425,10 +425,10 @@ where
 
 pub(crate) async fn transition_start(
     task: &Task,
-    agent_type: AgentType,
+    start_action: fn(&str) -> Option<TransitionAction>,
     app_state: &AppState,
 ) -> anyhow::Result<()> {
-    if let Some(action) = (agent_type.role_config().start_action)(task.status.as_str()) {
+    if let Some(action) = start_action(task.status.as_str()) {
         let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
         retry_on_locked(|| async {
             repo.transition(
@@ -449,11 +449,11 @@ pub(crate) async fn transition_start(
 
 pub(crate) async fn transition_interrupted(
     task_id: &str,
-    agent_type: AgentType,
+    release_action: fn() -> TransitionAction,
     reason: &str,
     app_state: &AppState,
 ) {
-    let action = (agent_type.role_config().release_action)();
+    let action = release_action();
 
     let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     let reason = reason.to_owned();
@@ -656,18 +656,19 @@ pub(crate) fn parse_model_id(model_id: &str) -> anyhow::Result<(String, String)>
     Ok((provider_id.to_owned(), model_name.to_owned()))
 }
 
+#[allow(dead_code)]
 pub(crate) fn agent_type_for_task(task: &Task, has_conflict_context: bool) -> AgentType {
     AgentType::for_task_status(task.status.as_str(), has_conflict_context)
 }
 
 /// Build telemetry metadata for OTel span instrumentation.
 pub(crate) fn build_telemetry_meta(
-    agent_type: AgentType,
+    agent_type_str: &str,
     task_id: &str,
 ) -> crate::agent::provider::TelemetryMeta {
     crate::agent::provider::TelemetryMeta {
         task_id: Some(task_id.to_owned()),
-        agent_type: Some(agent_type.as_str().to_owned()),
+        agent_type: Some(agent_type_str.to_owned()),
         session_id: Some(task_id.to_owned()),
     }
 }
