@@ -1885,6 +1885,23 @@ async fn call_task_transition(
                     )
                 }));
             }
+
+            // Auto-transfer downstream blocker edges: any task that was blocked by
+            // the closing task should now be blocked by the last replacement task.
+            // This prevents premature dispatch when force_close auto-resolves blockers
+            // on the transition that follows.
+            let last_replacement_id = ids.last().unwrap();
+            if let Ok(Some(last_task)) = repo.resolve(last_replacement_id).await {
+                let downstream = repo
+                    .list_blocked_by(&task.id)
+                    .await
+                    .unwrap_or_default();
+                for blocked_ref in &downstream {
+                    let _ = repo
+                        .add_blocker(&blocked_ref.task_id, &last_task.id)
+                        .await;
+                }
+            }
         }
     }
 
