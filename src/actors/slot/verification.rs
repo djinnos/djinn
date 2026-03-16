@@ -297,6 +297,21 @@ async fn emit_verification_steps(
     }
 }
 
+/// Max chars per stdout/stderr field in verification feedback.
+/// Keeps the activity log entry and downstream prompts reasonable.
+const MAX_OUTPUT_CHARS: usize = 3000;
+
+fn truncate_output(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 fn format_verification_failure_feedback(result: &crate::verification::service::VerificationResult) -> String {
     let failed = result
         .setup_results
@@ -304,11 +319,75 @@ fn format_verification_failure_feedback(result: &crate::verification::service::V
         .chain(result.verification_results.iter())
         .find(|r| r.exit_code != 0);
     if let Some(cmd) = failed {
-        format!(
-            "Verification command '{}' failed with exit code {}.\n\nstdout:\n{}\nstderr:\n{}",
-            cmd.name, cmd.exit_code, cmd.stdout, cmd.stderr
-        )
+        let stdout = truncate_output(&cmd.stdout, MAX_OUTPUT_CHARS);
+        let stderr = truncate_output(&cmd.stderr, MAX_OUTPUT_CHARS);
+        let mut msg = format!(
+            "Verification command '{}' failed with exit code {}.\n\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            cmd.name, cmd.exit_code,
+        );
+        if cmd.stdout.len() > MAX_OUTPUT_CHARS || cmd.stderr.len() > MAX_OUTPUT_CHARS {
+            msg.push_str("\n\n… [output truncated]");
+        }
+        msg
     } else {
         "Verification failed".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::CommandResult;
+    use crate::verification::service::VerificationResult;
+
+    fn make_result(stdout: &str, stderr: &str) -> VerificationResult {
+        VerificationResult {
+            passed: false,
+            cached: false,
+            setup_results: vec![],
+            verification_results: vec![CommandResult {
+                name: "cargo clippy".into(),
+                exit_code: 101,
+                stdout: stdout.into(),
+                stderr: stderr.into(),
+                duration_ms: 5000,
+            }],
+            total_duration_ms: 5000,
+        }
+    }
+
+    #[test]
+    fn feedback_truncates_large_stderr() {
+        let huge_stderr = "e".repeat(10_000);
+        let result = make_result("", &huge_stderr);
+        let feedback = format_verification_failure_feedback(&result);
+
+        assert!(
+            feedback.len() < 7_000,
+            "feedback should be under 7k chars, got {}",
+            feedback.len()
+        );
+        assert!(feedback.contains("[output truncated]"));
+        assert!(feedback.contains("cargo clippy"));
+        assert!(feedback.contains("exit code 101"));
+    }
+
+    #[test]
+    fn feedback_not_truncated_when_small() {
+        let result = make_result("ok", "error[E0599]: something");
+        let feedback = format_verification_failure_feedback(&result);
+
+        assert!(!feedback.contains("[output truncated]"));
+        assert!(feedback.contains("error[E0599]: something"));
+    }
+
+    #[test]
+    fn feedback_truncates_large_stdout() {
+        let huge_stdout = "o".repeat(10_000);
+        let result = make_result(&huge_stdout, "small error");
+        let feedback = format_verification_failure_feedback(&result);
+
+        assert!(feedback.contains("[output truncated]"));
+        assert!(feedback.len() < 7_000);
     }
 }
