@@ -3129,10 +3129,15 @@
           "name": {
             "description": "Project name to remove.",
             "type": "string"
+          },
+          "path": {
+            "description": "Absolute path of the project to remove. Must match the registered path exactly.",
+            "type": "string"
           }
         },
         "required": [
-          "name"
+          "name",
+          "path"
         ],
         "title": "ProjectRemoveParams",
         "type": "object"

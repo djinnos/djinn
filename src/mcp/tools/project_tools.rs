@@ -1,5 +1,9 @@
 use std::path::Path;
 
+#[cfg(test)]
+#[path = "project_tools/tests.rs"]
+mod tests;
+
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -98,6 +102,8 @@ pub struct ProjectAddParams {
 pub struct ProjectRemoveParams {
     /// Project name to remove.
     pub name: String,
+    /// Absolute path of the project to remove. Must match the registered path exactly.
+    pub path: String,
 }
 
 // ── Response structs ─────────────────────────────────────────────────────────
@@ -174,7 +180,6 @@ pub struct ProjectSettingsValidateResponse {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct StrictDjinnSettings {
     #[serde(default, rename = "setup")]
     _setup: Vec<ProjectCommandSpec>,
@@ -269,14 +274,16 @@ impl DjinnMcpServer {
     }
 
     /// Unregister a project from Djinn.
-    #[tool(description = "Remove a project from the Djinn registry by name.")]
+    #[tool(
+        description = "Remove a project from the Djinn registry by name and path. Both name and path must match exactly to prevent accidental deletion when duplicate names exist."
+    )]
     pub async fn project_remove(
         &self,
         Parameters(input): Parameters<ProjectRemoveParams>,
     ) -> Json<ProjectRemoveResponse> {
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
 
-        // Find the project by name
+        // Find the project by name AND path to prevent accidental deletion of duplicates
         let projects = match repo.list().await {
             Ok(p) => p,
             Err(e) => {
@@ -285,19 +292,26 @@ impl DjinnMcpServer {
                     project: ProjectInfo {
                         id: String::new(),
                         name: input.name,
-                        path: String::new(),
+                        path: input.path,
                     },
                 });
             }
         };
 
-        let Some(project) = projects.into_iter().find(|p| p.name == input.name) else {
+        let path = input.path.trim_end_matches('/');
+        let Some(project) = projects
+            .into_iter()
+            .find(|p| p.name == input.name && p.path.trim_end_matches('/') == path)
+        else {
             return Json(ProjectRemoveResponse {
-                status: format!("error: project '{}' not found", input.name),
+                status: format!(
+                    "error: no project named '{}' with path '{}' found",
+                    input.name, path
+                ),
                 project: ProjectInfo {
                     id: String::new(),
                     name: input.name,
-                    path: String::new(),
+                    path: path.to_string(),
                 },
             });
         };
