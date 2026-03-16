@@ -10,6 +10,11 @@ use serde::Deserialize;
 use super::AgentType;
 use crate::models::Task;
 
+/// Hard cap on rendered system prompt size (chars). Individual sections have
+/// their own soft limits, but this catches cases where multiple sections
+/// combine to blow past a reasonable size.
+const MAX_SYSTEM_PROMPT_CHARS: usize = 30_000;
+
 // ─── Embedded templates ────────────────────────────────────────────────────────
 
 const BASE_TEMPLATE: &str = include_str!("prompts/base.md");
@@ -179,6 +184,23 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
         _ => String::new(),
     };
     out = out.replace("{{activity_section}}", &activity_section);
+
+    // Hard cap: truncate the rendered system prompt to prevent context window
+    // blowout when individual sections escape their soft limits.
+    if out.len() > MAX_SYSTEM_PROMPT_CHARS {
+        let mut end = MAX_SYSTEM_PROMPT_CHARS;
+        while end > 0 && !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+        out.push_str("\n\n… [system prompt truncated — use task_show and task_activity_list for full details]");
+        tracing::warn!(
+            agent_type = %agent_type.as_str(),
+            original_len = out.len() + (MAX_SYSTEM_PROMPT_CHARS - end),
+            truncated_to = out.len(),
+            "system prompt exceeded hard cap and was truncated"
+        );
+    }
 
     out
 }
@@ -377,5 +399,33 @@ mod tests {
 
         assert!(!prompt.contains("Automated Verification"));
         assert!(!prompt.contains("{{verification_section}}"));
+    }
+
+    #[test]
+    fn system_prompt_truncated_when_exceeding_hard_cap() {
+        let task = make_task();
+        // Inject a massive activity log that blows past the 30k char cap.
+        let huge_activity = "x".repeat(40_000);
+        let ctx = TaskContext {
+            activity: Some(huge_activity),
+            ..make_ctx()
+        };
+        let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+        assert!(
+            prompt.len() <= super::MAX_SYSTEM_PROMPT_CHARS + 200, // +200 for the truncation notice
+            "prompt should be truncated to ~30k chars, got {}",
+            prompt.len()
+        );
+        assert!(prompt.contains("[system prompt truncated"));
+    }
+
+    #[test]
+    fn system_prompt_not_truncated_when_under_cap() {
+        let task = make_task();
+        let ctx = make_ctx();
+        let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+        assert!(!prompt.contains("[system prompt truncated"));
     }
 }
