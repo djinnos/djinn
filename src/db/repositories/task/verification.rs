@@ -48,7 +48,7 @@ pub(crate) async fn run_setup_commands_checked(
     let body = format!("Setup commands failed before verification:\n{}", summary);
 
     if let Some(task_id) = task_id {
-        let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+        let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
         let payload = serde_json::json!({ "body": body }).to_string();
         let _ = repo
             .log_activity(
@@ -102,7 +102,7 @@ pub(crate) async fn run_verification_commands(
         summary
     );
 
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     let payload = serde_json::json!({ "body": body }).to_string();
     let _ = repo
         .log_activity(
@@ -123,7 +123,7 @@ pub(crate) async fn log_commands_run_event(
     results: &[CommandResult],
     app_state: &AppState,
 ) {
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     for r in results {
         let payload = serde_json::json!({
             "phase": phase,

@@ -191,7 +191,7 @@ impl TaskRepository {
         let task = Some(task);
 
         if let Some(ref t) = task {
-            let _ = self.events.send(DjinnEventEnvelope::task_updated(t, false));
+            self.events.send(DjinnEventEnvelope::task_updated(t, false));
         }
         Ok(task)
     }
@@ -472,7 +472,7 @@ impl TaskRepository {
         tx.commit().await?;
 
         for task in &healed {
-            let _ = events_tx.send(DjinnEventEnvelope::task_updated(task, false));
+            events_tx.send(DjinnEventEnvelope::task_updated(task, false));
         }
 
         let healed_short_ids: Vec<&str> = healed.iter().map(|t| t.short_id.as_str()).collect();

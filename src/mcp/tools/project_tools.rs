@@ -199,7 +199,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(input): Parameters<ProjectAddParams>,
     ) -> Json<ProjectAddResponse> {
-        let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
         let path = input.path.trim_end_matches('/');
 
         // Validate path exists
@@ -281,7 +281,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(input): Parameters<ProjectRemoveParams>,
     ) -> Json<ProjectRemoveResponse> {
-        let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
 
         // Find the project by name AND path to prevent accidental deletion of duplicates
         let projects = match repo.list().await {
@@ -337,7 +337,7 @@ impl DjinnMcpServer {
     /// List all registered projects.
     #[tool(description = "List all projects registered with Djinn.")]
     pub async fn project_list(&self) -> Json<ProjectListResponse> {
-        let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
 
         match repo.list().await {
             Ok(projects) => Json(ProjectListResponse {
@@ -359,7 +359,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(input): Parameters<ProjectConfigGetParams>,
     ) -> Json<ProjectConfigResponse> {
-        let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo.get_by_path(&input.project).await {
             Ok(Some(project)) => Json(ProjectConfigResponse {
                 status: "ok".into(),
@@ -393,7 +393,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(input): Parameters<ProjectConfigSetParams>,
     ) -> Json<ProjectConfigResponse> {
-        let repo = ProjectRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
         let project = match repo.get_by_path(&input.project).await {
             Ok(Some(project)) => project,
             Ok(None) => {

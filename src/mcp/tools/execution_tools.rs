@@ -513,7 +513,7 @@ impl DjinnMcpServer {
         let max_sessions: u32 = pool_status.per_model.values().map(|c| c.total).sum();
 
         let session_repo =
-            SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+            SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let mut sessions = Vec::new();
         for running in pool_status.running_tasks {
             let db_session = session_repo
@@ -640,7 +640,7 @@ impl DjinnMcpServer {
                 });
             }
         };
-        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let Some(task) = task_repo
             .resolve_in_project(&project_id, &p.task_id)
             .await
@@ -689,7 +689,7 @@ impl DjinnMcpServer {
         };
 
         let session_repo =
-            SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+            SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let db_session = session_repo.active_for_task(&task.id).await.ok().flatten();
 
         match running {

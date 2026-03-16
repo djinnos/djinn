@@ -1,8 +1,8 @@
-use tokio::sync::broadcast;
+
 
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::DjinnEventEnvelope;
+use crate::events::{DjinnEventEnvelope, EventBus};
 use crate::models::{SessionRecord, SessionStatus};
 
 /// Column list shared by all session SELECT queries.
@@ -11,11 +11,11 @@ const SESSION_COLS: &str = "id, project_id, task_id, model_id, agent_type, start
 
 pub struct SessionRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEventEnvelope>,
+    events: EventBus,
 }
 
 impl SessionRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
+    pub fn new(db: Database, events: EventBus) -> Self {
         Self { db, events }
     }
 
@@ -34,7 +34,7 @@ impl SessionRepository {
             "failed" => "failed",
             _ => "updated",
         };
-        let _ = self.events.send(DjinnEventEnvelope {
+        self.events.send(DjinnEventEnvelope {
             entity_type: "session",
             action,
             payload: serde_json::to_value(&session).unwrap_or_default(),
@@ -80,7 +80,7 @@ impl SessionRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let receivers = self.events.send(DjinnEventEnvelope {
+        self.events.send(DjinnEventEnvelope {
             entity_type: "session",
             action: "started",
             payload: serde_json::to_value(&session).unwrap_or_default(),
@@ -91,7 +91,6 @@ impl SessionRepository {
         tracing::info!(
             session_id = %session.id,
             task_id = ?session.task_id,
-            sse_receivers = ?receivers.ok(),
             "SessionRepository: emitted session.started SSE event"
         );
         Ok(session)
@@ -335,12 +334,14 @@ impl SessionRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::broadcast;
     use crate::db::EpicRepository;
     use crate::db::TaskRepository;
+    use crate::events::event_bus_for;
     use crate::test_helpers;
 
     async fn create_task(
-        repo_events: broadcast::Sender<DjinnEventEnvelope>,
+        repo_events: EventBus,
         db: Database,
     ) -> (String, String) {
         let epic_repo = EpicRepository::new(db.clone(), repo_events.clone());
@@ -361,8 +362,8 @@ mod tests {
     async fn complete_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
-        let (project_id, task_id) = create_task(tx.clone(), db.clone()).await;
-        let repo = SessionRepository::new(db, tx);
+        let (project_id, task_id) = create_task(event_bus_for(&tx), db.clone()).await;
+        let repo = SessionRepository::new(db, event_bus_for(&tx));
 
         let created = repo
             .create(
@@ -415,8 +416,8 @@ mod tests {
     async fn interrupt_all_running_emits_session_updated_for_each_interrupted_session() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
-        let (project_id, task_id) = create_task(tx.clone(), db.clone()).await;
-        let repo = SessionRepository::new(db, tx);
+        let (project_id, task_id) = create_task(event_bus_for(&tx), db.clone()).await;
+        let repo = SessionRepository::new(db, event_bus_for(&tx));
 
         let first = repo
             .create(
@@ -466,8 +467,8 @@ mod tests {
     async fn list_and_active_queries() {
         let db = test_helpers::create_test_db();
         let (tx, _) = broadcast::channel(1024);
-        let (project_id, task_id) = create_task(tx.clone(), db.clone()).await;
-        let repo = SessionRepository::new(db, tx);
+        let (project_id, task_id) = create_task(event_bus_for(&tx), db.clone()).await;
+        let repo = SessionRepository::new(db, event_bus_for(&tx));
 
         let first = repo
             .create(

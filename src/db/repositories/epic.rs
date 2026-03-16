@@ -1,9 +1,8 @@
 use sqlx::Row;
-use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
 use crate::error::{Error, Result};
-use crate::events::DjinnEventEnvelope;
+use crate::events::{DjinnEventEnvelope, EventBus};
 use crate::models::Epic;
 
 // ── Query / result types ─────────────────────────────────────────────────────
@@ -71,11 +70,11 @@ pub type EpicUpdateInput<'a> = EpicCreateInput<'a>;
 
 pub struct EpicRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEventEnvelope>,
+    events: EventBus,
 }
 
 impl EpicRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
+    pub fn new(db: Database, events: EventBus) -> Self {
         Self { db, events }
     }
 
@@ -170,7 +169,7 @@ impl EpicRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEventEnvelope::epic_created(&epic));
+        self.events.send(DjinnEventEnvelope::epic_created(&epic));
         Ok(epic)
     }
 
@@ -200,7 +199,7 @@ impl EpicRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        self.events.send(DjinnEventEnvelope::epic_updated(&epic));
         Ok(epic)
     }
 
@@ -224,7 +223,7 @@ impl EpicRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        self.events.send(DjinnEventEnvelope::epic_updated(&epic));
         Ok(epic)
     }
 
@@ -235,7 +234,7 @@ impl EpicRepository {
             .execute(self.db.pool())
             .await?;
 
-        let _ = self
+        self
             .events
             .send(DjinnEventEnvelope::epic_deleted(id));
         Ok(())
@@ -306,7 +305,7 @@ impl EpicRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        self.events.send(DjinnEventEnvelope::epic_updated(&epic));
         Ok(epic)
     }
 
@@ -534,13 +533,15 @@ async fn short_id_exists(pool: &sqlx::SqlitePool, table: &str, short_id: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::broadcast;
+    use crate::events::event_bus_for;
     use crate::test_helpers;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_and_get_epic() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, tx);
+        let repo = EpicRepository::new(db, event_bus_for(&tx));
 
         let epic = repo
             .create("My Epic", "", "🚀", "#8b5cf6", "user@example.com", None)
@@ -558,7 +559,7 @@ mod tests {
     async fn short_id_lookup() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, tx);
+        let repo = EpicRepository::new(db, event_bus_for(&tx));
 
         let epic = repo.create("Lookup", "", "", "", "", None).await.unwrap();
         let found = repo.get_by_short_id(&epic.short_id).await.unwrap().unwrap();
@@ -569,7 +570,7 @@ mod tests {
     async fn create_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, tx);
+        let repo = EpicRepository::new(db, event_bus_for(&tx));
 
         repo.create("Event Epic", "", "", "", "", None)
             .await
@@ -585,7 +586,7 @@ mod tests {
     async fn update_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, tx);
+        let repo = EpicRepository::new(db, event_bus_for(&tx));
 
         let epic = repo.create("Old", "", "", "", "", None).await.unwrap();
         let _ = rx.recv().await.unwrap();
@@ -607,7 +608,7 @@ mod tests {
     async fn close_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, tx);
+        let repo = EpicRepository::new(db, event_bus_for(&tx));
 
         let epic = repo
             .create("Closeable", "", "", "", "", None)
@@ -631,7 +632,7 @@ mod tests {
     async fn reopen_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, tx);
+        let repo = EpicRepository::new(db, event_bus_for(&tx));
 
         let epic = repo.create("Reopen", "", "", "", "", None).await.unwrap();
         let _ = rx.recv().await.unwrap();
@@ -654,7 +655,7 @@ mod tests {
     async fn delete_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, tx);
+        let repo = EpicRepository::new(db, event_bus_for(&tx));
 
         let epic = repo
             .create("Delete me", "", "", "", "", None)
@@ -675,7 +676,7 @@ mod tests {
     async fn resolve_by_id_and_short_id() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, tx);
+        let repo = EpicRepository::new(db, event_bus_for(&tx));
 
         let epic = repo.create("Resolve", "", "", "", "", None).await.unwrap();
 
@@ -692,7 +693,7 @@ mod tests {
     async fn reopen_from_closed() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, tx);
+        let repo = EpicRepository::new(db, event_bus_for(&tx));
 
         let epic = repo.create("Reopen", "", "", "", "", None).await.unwrap();
         repo.close(&epic.id).await.unwrap();
@@ -706,7 +707,7 @@ mod tests {
     async fn reopen_from_open_is_error() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, tx);
+        let repo = EpicRepository::new(db, event_bus_for(&tx));
 
         let epic = repo.create("Open", "", "", "", "", None).await.unwrap();
         assert!(repo.reopen(&epic.id).await.is_err());
@@ -716,8 +717,8 @@ mod tests {
     async fn task_counts_aggregation() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let task_repo = crate::db::TaskRepository::new(db, tx);
+        let epic_repo = EpicRepository::new(db.clone(),  event_bus_for(&tx));
+        let task_repo = crate::db::TaskRepository::new(db, event_bus_for(&tx));
 
         let epic = epic_repo
             .create("Counts", "", "", "", "", None)
@@ -747,8 +748,8 @@ mod tests {
     async fn delete_with_count_returns_child_count() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
-        let task_repo = crate::db::TaskRepository::new(db, tx);
+        let epic_repo = EpicRepository::new(db.clone(),  event_bus_for(&tx));
+        let task_repo = crate::db::TaskRepository::new(db, event_bus_for(&tx));
 
         let epic = epic_repo
             .create("Delete", "", "", "", "", None)

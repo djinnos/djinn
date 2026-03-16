@@ -89,7 +89,7 @@ pub(crate) async fn log_commands_run_event(
         "commands": commands,
     });
 
-    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     if let Err(e) = task_repo
         .log_activity(
             Some(task_id),

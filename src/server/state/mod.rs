@@ -104,6 +104,10 @@ impl AppState {
         &self.inner.events
     }
 
+    pub fn event_bus(&self) -> crate::events::EventBus {
+        crate::events::event_bus_for(&self.inner.events)
+    }
+
     pub fn sync_user_id(&self) -> &str {
         &self.inner.sync_user_id
     }
@@ -219,7 +223,7 @@ impl AppState {
         use crate::models::{Model, Provider};
 
         // Load custom providers from DB → merge into in-memory catalog.
-        let repo = CustomProviderRepository::new(self.db().clone(), self.events().clone());
+        let repo = CustomProviderRepository::new(self.db().clone(), self.event_bus());
         match repo.list().await {
             Ok(providers) => {
                 for cp in providers {
@@ -291,7 +295,7 @@ impl AppState {
 
     async fn interrupt_stale_sessions_on_startup(&self) {
         use crate::db::SessionRepository;
-        let repo = SessionRepository::new(self.db().clone(), self.events().clone());
+        let repo = SessionRepository::new(self.db().clone(), self.event_bus());
         match repo.interrupt_all_running().await {
             Ok(0) => {}
             Ok(n) => tracing::info!(count = n, "interrupted stale sessions from previous run"),
@@ -309,8 +313,8 @@ impl AppState {
     }
 
     async fn reindex_all_projects_on_startup(&self) {
-        let project_repo = ProjectRepository::new(self.db().clone(), self.events().clone());
-        let note_repo = NoteRepository::new(self.db().clone(), self.events().clone());
+        let project_repo = ProjectRepository::new(self.db().clone(), self.event_bus());
+        let note_repo = NoteRepository::new(self.db().clone(), self.event_bus());
         let projects = match project_repo.list().await {
             Ok(projects) => projects,
             Err(e) => {
@@ -342,7 +346,7 @@ impl AppState {
     }
 
     pub async fn persist_model_health_state(&self) {
-        let repo = SettingsRepository::new(self.db().clone(), self.events().clone());
+        let repo = SettingsRepository::new(self.db().clone(), self.event_bus());
         let snapshot = self.health_tracker().all_health();
         match serde_json::to_string(&snapshot) {
             Ok(raw) => {
@@ -355,7 +359,7 @@ impl AppState {
     }
 
     async fn restore_model_health_state(&self) {
-        let repo = SettingsRepository::new(self.db().clone(), self.events().clone());
+        let repo = SettingsRepository::new(self.db().clone(), self.event_bus());
         let raw = repo
             .get(MODEL_HEALTH_STATE_KEY)
             .await

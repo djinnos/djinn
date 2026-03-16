@@ -1,8 +1,8 @@
-use tokio::sync::broadcast;
+
 
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::DjinnEventEnvelope;
+use crate::events::{DjinnEventEnvelope, EventBus};
 use crate::models::Project;
 
 #[derive(Clone, Debug, serde::Serialize, sqlx::FromRow)]
@@ -15,11 +15,11 @@ pub struct ProjectConfig {
 
 pub struct ProjectRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEventEnvelope>,
+    events: EventBus,
 }
 
 impl ProjectRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
+    pub fn new(db: Database, events: EventBus) -> Self {
         Self { db, events }
     }
 
@@ -140,7 +140,7 @@ impl ProjectRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self
+        self
             .events
             .send(DjinnEventEnvelope::project_created(&project));
         Ok(project)
@@ -161,7 +161,7 @@ impl ProjectRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self
+        self
             .events
             .send(DjinnEventEnvelope::project_updated(&project));
         Ok(project)
@@ -222,7 +222,7 @@ impl ProjectRepository {
         let Some(config) = self.get_config(id).await? else {
             return Ok(None);
         };
-        let _ = self.events.send(DjinnEventEnvelope::project_config_updated(id, &config));
+        self.events.send(DjinnEventEnvelope::project_config_updated(id, &config));
         Ok(Some(config))
     }
 
@@ -290,7 +290,7 @@ impl ProjectRepository {
             .execute(self.db.pool())
             .await?;
 
-        let _ = self
+        self
             .events
             .send(DjinnEventEnvelope::project_deleted(id));
         Ok(())
@@ -300,13 +300,15 @@ impl ProjectRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::broadcast;
+    use crate::events::event_bus_for;
     use crate::test_helpers;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_and_get_project() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
-        let repo = ProjectRepository::new(db, tx);
+        let repo = ProjectRepository::new(db, event_bus_for(&tx));
 
         let project = repo.create("myapp", "/home/user/myapp").await.unwrap();
         assert_eq!(project.name, "myapp");
@@ -321,7 +323,7 @@ mod tests {
     async fn create_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
-        let repo = ProjectRepository::new(db, tx);
+        let repo = ProjectRepository::new(db, event_bus_for(&tx));
 
         repo.create("proj", "/tmp/proj").await.unwrap();
 
@@ -336,7 +338,7 @@ mod tests {
     async fn update_project() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
-        let repo = ProjectRepository::new(db, tx);
+        let repo = ProjectRepository::new(db, event_bus_for(&tx));
 
         let project = repo.create("old", "/old").await.unwrap();
         let _ = rx.recv().await.unwrap(); // consume create event
@@ -356,7 +358,7 @@ mod tests {
     async fn delete_project() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
-        let repo = ProjectRepository::new(db, tx);
+        let repo = ProjectRepository::new(db, event_bus_for(&tx));
 
         let project = repo.create("del", "/del").await.unwrap();
         let _ = rx.recv().await.unwrap(); // consume create event
@@ -374,7 +376,7 @@ mod tests {
     async fn list_projects() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
-        let repo = ProjectRepository::new(db, tx);
+        let repo = ProjectRepository::new(db, event_bus_for(&tx));
 
         repo.create("beta", "/beta").await.unwrap();
         repo.create("alpha", "/alpha").await.unwrap();
@@ -390,7 +392,7 @@ mod tests {
     async fn get_by_path_returns_project() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
-        let repo = ProjectRepository::new(db, tx);
+        let repo = ProjectRepository::new(db, event_bus_for(&tx));
 
         let project = repo.create("lookup", "/lookup/path").await.unwrap();
         let found = repo.get_by_path("/lookup/path").await.unwrap().unwrap();

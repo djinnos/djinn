@@ -177,7 +177,7 @@ async fn task_timeline_returns_chronological_session_and_message_history() {
     let s1 = create_test_session(&db, &project.id, &task.id).await;
     let s2 = create_test_session(&db, &project.id, &task.id).await;
 
-    let msg_repo = SessionMessageRepository::new(db.clone(), tokio::sync::broadcast::channel(16).0);
+    let msg_repo = SessionMessageRepository::new(db.clone(), crate::events::EventBus::noop());
     msg_repo
         .insert_message(
             &s1.id,
@@ -254,7 +254,7 @@ async fn session_messages_returns_messages_for_valid_session_id() {
     let task = create_test_task(&db, &project.id, &epic.id).await;
     let sess = create_test_session(&db, &project.id, &task.id).await;
 
-    let msg_repo = SessionMessageRepository::new(db.clone(), tokio::sync::broadcast::channel(16).0);
+    let msg_repo = SessionMessageRepository::new(db.clone(), crate::events::EventBus::noop());
     msg_repo
         .insert_message(
             &sess.id,

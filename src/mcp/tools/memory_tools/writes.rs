@@ -22,7 +22,7 @@ impl DjinnMcpServer {
             .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
             .unwrap_or_else(|| "[]".to_string());
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
 
         // For singletons, upsert: try create, fall back to update if already exists.
         use crate::db::is_singleton;
@@ -81,7 +81,7 @@ impl DjinnMcpServer {
             )));
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
 
         // Resolve note by permalink or title.
         let note = match resolve_note_by_identifier(&repo, &project_id, &p.identifier).await {
@@ -147,7 +147,7 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
 
         let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await else {
             return Json(MemoryDeleteResponse {
@@ -183,7 +183,7 @@ impl DjinnMcpServer {
             )));
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
 
         let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await else {
             return Json(MemoryNoteResponse::error(format!(

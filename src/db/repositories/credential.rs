@@ -1,19 +1,18 @@
-use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::crypto;
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::DjinnEventEnvelope;
+use crate::events::{DjinnEventEnvelope, EventBus};
 use crate::models::Credential;
 
 pub struct CredentialRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEventEnvelope>,
+    events: EventBus,
 }
 
 impl CredentialRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
+    pub fn new(db: Database, events: EventBus) -> Self {
         Self { db, events }
     }
 
@@ -66,11 +65,11 @@ impl CredentialRepository {
         .await?;
 
         if is_new {
-            let _ = self
+            self
                 .events
                 .send(DjinnEventEnvelope::credential_created(&cred));
         } else {
-            let _ = self
+            self
                 .events
                 .send(DjinnEventEnvelope::credential_updated(&cred));
         }
@@ -107,7 +106,7 @@ impl CredentialRepository {
         }
 
         if let Some(id) = deleted_id {
-            let _ = self.events.send(DjinnEventEnvelope::credential_deleted(&id));
+            self.events.send(DjinnEventEnvelope::credential_deleted(&id));
             Ok(true)
         } else {
             Ok(false)
@@ -134,7 +133,7 @@ impl CredentialRepository {
             .await?;
 
         for id in ids {
-            let _ = self.events.send(DjinnEventEnvelope::credential_deleted(&id));
+            self.events.send(DjinnEventEnvelope::credential_deleted(&id));
         }
 
         Ok(result.rows_affected())
@@ -162,12 +161,13 @@ impl CredentialRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::event_bus_for;
     use crate::test_helpers;
+    use tokio::sync::broadcast;
 
     fn make_repo() -> CredentialRepository {
         let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(1024);
-        CredentialRepository::new(db, tx)
+        CredentialRepository::new(db, EventBus::noop())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -189,7 +189,7 @@ mod tests {
     async fn set_emits_created_then_updated() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
-        let repo = CredentialRepository::new(db, tx);
+        let repo = CredentialRepository::new(db, event_bus_for(&tx));
 
         repo.set("anthropic", "ANTHROPIC_API_KEY", "key-v1")
             .await
@@ -228,7 +228,7 @@ mod tests {
     async fn delete_removes_and_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
-        let repo = CredentialRepository::new(db, tx);
+        let repo = CredentialRepository::new(db, event_bus_for(&tx));
 
         let cred = repo
             .set("anthropic", "ANTHROPIC_API_KEY", "val")

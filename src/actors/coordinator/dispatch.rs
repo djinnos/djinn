@@ -441,7 +441,7 @@ impl CoordinatorActor {
     /// Return IDs of all registered projects that are dispatch-enabled
     /// (not paused, not unhealthy).
     async fn enabled_project_ids(&self) -> Vec<String> {
-        let repo = crate::db::ProjectRepository::new(self.db.clone(), self.events_tx.clone());
+        let repo = crate::db::ProjectRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
         match repo.list().await {
             Ok(projects) => projects
                 .into_iter()

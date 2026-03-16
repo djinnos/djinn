@@ -1,11 +1,11 @@
-use tokio::sync::broadcast;
+
 
 use sqlx::SqlitePool;
 
 use crate::db::EpicRepository;
 use crate::db::connection::Database;
 use crate::error::{Error, Result};
-use crate::events::DjinnEventEnvelope;
+use crate::events::{DjinnEventEnvelope, EventBus};
 use crate::models::{ActivityEntry, Task, TaskStatus, TransitionAction, compute_transition};
 
 mod activity;
@@ -136,11 +136,11 @@ impl Default for ReadyQuery {
 
 pub struct TaskRepository {
     pub(super) db: Database,
-    pub(super) events: broadcast::Sender<DjinnEventEnvelope>,
+    pub(super) events: EventBus,
 }
 
 impl TaskRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
+    pub fn new(db: Database, events: EventBus) -> Self {
         Self { db, events }
     }
 

@@ -9,7 +9,7 @@ use crate::test_helpers::{
     create_test_app, create_test_app_with_db, create_test_db, create_test_epic,
     create_test_project, initialize_mcp_session, mcp_call_tool,
 };
-use tokio::sync::broadcast;
+use crate::events::EventBus;
 
 #[tokio::test]
 async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
@@ -35,12 +35,12 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     assert_eq!(created["note_type"], "adr");
     assert!(created.get("permalink").and_then(|v| v.as_str()).is_some());
 
-    let project_repo = ProjectRepository::new(db.clone(), broadcast::channel(16).0);
+    let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
     let project = project_repo
         .resolve_or_create("/tmp/mcp-memory-write")
         .await
         .unwrap();
-    let note_repo = NoteRepository::new(db.clone(), broadcast::channel(16).0);
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let note = note_repo
         .get_by_permalink(&project, created["permalink"].as_str().unwrap())
         .await

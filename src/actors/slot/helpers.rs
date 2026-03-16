@@ -177,7 +177,7 @@ pub(crate) async fn update_session_record(
     let Some(record_id) = record_id else {
         return;
     };
-    let repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
     if let Err(e) = repo.update(record_id, status, tokens_in, tokens_out).await {
         tracing::warn!(record_id = %record_id, error = %e, "failed to update session record");
     }
@@ -192,7 +192,7 @@ pub(crate) async fn update_session_record_paused(
     let Some(record_id) = record_id else {
         return;
     };
-    let repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
     if let Err(e) = repo.pause(record_id, tokens_in, tokens_out).await {
         tracing::warn!(record_id = %record_id, error = %e, "failed to pause session record");
     }
@@ -201,7 +201,7 @@ pub(crate) async fn update_session_record_paused(
 // ─── Task / project helpers ───────────────────────────────────────────────────
 
 pub(crate) async fn load_task(task_id: &str, app_state: &AppState) -> anyhow::Result<Task> {
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     let task = repo
         .get(task_id)
         .await
@@ -210,7 +210,7 @@ pub(crate) async fn load_task(task_id: &str, app_state: &AppState) -> anyhow::Re
 }
 
 pub(crate) async fn default_target_branch(project_id: &str, app_state: &AppState) -> String {
-    let repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = ProjectRepository::new(app_state.db().clone(), app_state.event_bus());
     if let Ok(Some(config)) = repo.get_config(project_id).await {
         return config.target_branch;
     }
@@ -218,7 +218,7 @@ pub(crate) async fn default_target_branch(project_id: &str, app_state: &AppState
 }
 
 pub(crate) async fn project_path_for_id(project_id: &str, app_state: &AppState) -> Option<String> {
-    let repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = ProjectRepository::new(app_state.db().clone(), app_state.event_bus());
     repo.get_path(project_id).await.ok().flatten()
 }
 
@@ -227,7 +227,7 @@ pub(crate) async fn find_paused_session_record(
     agent_type: AgentType,
     app_state: &AppState,
 ) -> Option<SessionRecord> {
-    let repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
     repo.paused_for_task_by_type(task_id, agent_type.as_str())
         .await
         .ok()
@@ -241,7 +241,7 @@ pub(crate) async fn find_paused_session_record(
 /// transitions (e.g. verification failures cycling through verifying→open)
 /// don't obscure the original rejection reason.
 async fn last_review_rejection_reason(task_id: &str, app_state: &AppState) -> Option<String> {
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     let activity = repo.list_activity(task_id).await.ok()?;
     let rejection = activity.iter().rev().find(|e| {
         if e.event_type != "status_changed" {
@@ -276,7 +276,7 @@ pub(crate) async fn conflict_context_for_dispatch(
     // Fallback: look for a merge_conflict activity event directly.
     // This covers cases where the status_changed reason was lost or
     // the rejection used a different prefix format.
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     let activity = repo.list_activity(task_id).await.ok()?;
     activity
         .iter()
@@ -307,7 +307,7 @@ pub(crate) fn parse_merge_validation_metadata(
 }
 
 pub(crate) async fn resume_context_for_task(task_id: &str, app_state: &AppState) -> String {
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
 
     // Preamble reminding the model that any prior "I'm done" statements are
@@ -375,7 +375,7 @@ calls will be treated as a failure.\n\n";
 /// log contains PM or reviewer feedback, include it prominently so the worker
 /// acts on it immediately rather than discovering it buried in the system prompt.
 pub(crate) async fn initial_user_message_for_task(task_id: &str, app_state: &AppState) -> String {
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
 
     let sections = recent_feedback(&activity, 3);
@@ -429,7 +429,7 @@ pub(crate) async fn transition_start(
     app_state: &AppState,
 ) -> anyhow::Result<()> {
     if let Some(action) = (agent_type.role_config().start_action)(task.status.as_str()) {
-        let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+        let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
         retry_on_locked(|| async {
             repo.transition(
                 &task.id,
@@ -455,7 +455,7 @@ pub(crate) async fn transition_interrupted(
 ) {
     let action = (agent_type.role_config().release_action)();
 
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     let reason = reason.to_owned();
     if let Err(e) = retry_on_locked(|| async {
         repo.transition(
@@ -560,7 +560,7 @@ pub(crate) async fn load_provider_credential(
         other => crate::provider::builtin::resolve_oauth_provider(other).unwrap_or(other),
     };
     let credential_repo =
-        CredentialRepository::new(app_state.db().clone(), app_state.events().clone());
+        CredentialRepository::new(app_state.db().clone(), app_state.event_bus());
     match effective_oauth_id {
         "chatgpt_codex" => {
             if let Some(tokens) =

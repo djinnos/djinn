@@ -54,7 +54,7 @@ impl AppState {
             .await?;
         let raw =
             serde_json::to_string(settings).map_err(|e| format!("serialize settings: {e}"))?;
-        let repo = SettingsRepository::new(self.db().clone(), self.events().clone());
+        let repo = SettingsRepository::new(self.db().clone(), self.event_bus());
         repo.set(SETTINGS_RAW_KEY, &raw)
             .await
             .map_err(|e| e.to_string())?;
@@ -86,7 +86,7 @@ impl AppState {
             return Ok(());
         }
 
-        let repo = CredentialRepository::new(self.db().clone(), self.events().clone());
+        let repo = CredentialRepository::new(self.db().clone(), self.event_bus());
         let credentials = repo
             .list()
             .await
@@ -127,7 +127,7 @@ impl AppState {
     }
 
     pub(super) async fn apply_runtime_settings_from_db(&self) {
-        let repo = SettingsRepository::new(self.db().clone(), self.events().clone());
+        let repo = SettingsRepository::new(self.db().clone(), self.event_bus());
         let raw = repo
             .get(SETTINGS_RAW_KEY)
             .await

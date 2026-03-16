@@ -293,7 +293,7 @@ impl SlotPool {
 
     async fn project_id_for_task(&self, task_id: &str) -> Option<String> {
         let task_repo =
-            TaskRepository::new(self.app_state.db().clone(), self.app_state.events().clone());
+            TaskRepository::new(self.app_state.db().clone(), self.app_state.event_bus());
         task_repo
             .get(task_id)
             .await

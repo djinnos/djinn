@@ -65,7 +65,7 @@ pub async fn merge_and_transition(
     app_state: &AppState,
     actions: &MergeActions,
 ) -> Option<(TransitionAction, Option<String>)> {
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     let task = match repo.get(task_id).await {
         Ok(Some(task)) => task,
         Ok(None) => {
@@ -241,7 +241,7 @@ async fn run_verification_gate(
 }
 
 pub(crate) async fn cleanup_paused_worker_session(task_id: &str, app_state: &AppState) {
-    let repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
     let Ok(Some(paused)) = repo.paused_for_task(task_id).await else {
         return;
     };
@@ -268,7 +268,7 @@ pub(crate) async fn cleanup_paused_worker_session(task_id: &str, app_state: &App
 }
 
 pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &AppState) {
-    let repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
     let Ok(Some(paused)) = repo.paused_for_task(task_id).await else {
         return;
     };
@@ -294,12 +294,12 @@ pub(crate) async fn resolve_project_path_for_id(
     project_id: &str,
     app_state: &AppState,
 ) -> Option<String> {
-    let repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = ProjectRepository::new(app_state.db().clone(), app_state.event_bus());
     repo.get_path(project_id).await.ok().flatten()
 }
 
 async fn default_target_branch(project_id: &str, app_state: &AppState) -> String {
-    let repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = ProjectRepository::new(app_state.db().clone(), app_state.event_bus());
     if let Ok(Some(config)) = repo.get_config(project_id).await {
         return config.target_branch;
     }

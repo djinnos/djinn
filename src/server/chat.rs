@@ -91,7 +91,7 @@ fn normalize_brief_excerpt(content: &str, max_chars: usize) -> String {
 }
 
 async fn build_project_context_block(state: &AppState, project_ref: &str) -> Option<String> {
-    let project_repo = ProjectRepository::new(state.db().clone(), state.events().clone());
+    let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
     let project_id = match project_repo.resolve(project_ref).await {
         Ok(Some(id)) => id,
         Ok(None) => return None,
@@ -104,9 +104,9 @@ async fn build_project_context_block(state: &AppState, project_ref: &str) -> Opt
         Err(_) => return None,
     };
 
-    let epic_repo = EpicRepository::new(state.db().clone(), state.events().clone());
-    let task_repo = TaskRepository::new(state.db().clone(), state.events().clone());
-    let note_repo = NoteRepository::new(state.db().clone(), state.events().clone());
+    let epic_repo = EpicRepository::new(state.db().clone(), state.event_bus());
+    let task_repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
 
     let open_epics = epic_repo
         .count_grouped(EpicCountQuery {

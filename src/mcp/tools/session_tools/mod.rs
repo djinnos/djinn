@@ -172,7 +172,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<SessionListParams>,
     ) -> Json<SessionListResponse> {
-        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
@@ -206,7 +206,7 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo.list_for_task_in_project(&project_id, &task.id).await {
             Ok(sessions) => Json(SessionListResponse {
                 task_id: Some(task.id),
@@ -247,7 +247,7 @@ impl DjinnMcpServer {
             });
         };
         let coordinator = self.state.coordinator().await;
-        let repo = SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo.list_active_in_project(&project_id).await {
             Ok(sessions) => {
                 let mut runtime_sessions = Vec::new();
@@ -318,7 +318,7 @@ impl DjinnMcpServer {
                 });
             }
         };
-        let repo = SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo.get_in_project(&project_id, &p.id).await {
             Ok(Some(session)) => Json(SessionShowResponse {
                 session: Some(session.into()),
@@ -359,7 +359,7 @@ impl DjinnMcpServer {
         };
 
         let session_repo =
-            SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+            SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let session = match session_repo.get_in_project(&project_id, &p.id).await {
             Ok(Some(s)) => s,
             Ok(None) => return err(format!("session not found: {}", p.id)),
@@ -367,7 +367,7 @@ impl DjinnMcpServer {
         };
 
         let msg_repo =
-            SessionMessageRepository::new(self.state.db().clone(), self.state.events().clone());
+            SessionMessageRepository::new(self.state.db().clone(), self.state.event_bus());
         let conversation = match msg_repo.load_conversation(&session.id).await {
             Ok(c) => c,
             Err(e) => {
@@ -433,7 +433,7 @@ impl DjinnMcpServer {
             Err(e) => return err(e),
         };
 
-        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let task_id = match p.task_id.as_deref() {
             Some(id) => id,
             None => return err("task_id is required".to_string()),
@@ -445,9 +445,9 @@ impl DjinnMcpServer {
         };
 
         let session_repo =
-            SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+            SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let msg_repo =
-            SessionMessageRepository::new(self.state.db().clone(), self.state.events().clone());
+            SessionMessageRepository::new(self.state.db().clone(), self.state.event_bus());
 
         // 1. Get sessions
         let sessions = match session_repo

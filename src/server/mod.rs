@@ -753,10 +753,7 @@ mod tests {
         let epic = test_helpers::create_test_epic(&db, &project.id).await;
         let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
 
-        let repo = crate::db::TaskRepository::new(db.clone(), {
-            let (tx, _rx) = broadcast::channel(256);
-            tx
-        });
+        let repo = crate::db::TaskRepository::new(db.clone(), crate::events::EventBus::noop());
         repo.set_status(&task.id, "in_progress").await.unwrap();
         sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1")
             .bind(&task.id)
@@ -919,7 +916,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let state = AppState::new(db, CancellationToken::new());
 
-        let cred_repo = CredentialRepository::new(state.db().clone(), state.events().clone());
+        let cred_repo = CredentialRepository::new(state.db().clone(), state.event_bus());
         cred_repo
             .set("synthetic", "SYNTHETIC_API_KEY", "sk-test")
             .await

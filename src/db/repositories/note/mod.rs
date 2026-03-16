@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use sqlx::Sqlite;
-use tokio::sync::broadcast;
+
 
 use crate::db::connection::Database;
 use crate::error::{Error, Result};
-use crate::events::DjinnEventEnvelope;
+use crate::events::{DjinnEventEnvelope, EventBus};
 use crate::models::{
     BrokenLink, GraphEdge, GraphNode, GraphResponse, HealthReport, Note, NoteCompact,
     NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
@@ -33,11 +33,11 @@ const NOTE_SELECT_WHERE_ID: &str = "SELECT id, project_id, permalink, title, fil
 
 pub struct NoteRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEventEnvelope>,
+    events: EventBus,
 }
 
 impl NoteRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
+    pub fn new(db: Database, events: EventBus) -> Self {
         Self { db, events }
     }
 }
@@ -47,16 +47,17 @@ impl NoteRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::ProjectRepository;
-    use crate::test_helpers;
     use tokio::sync::broadcast;
+    use crate::db::ProjectRepository;
+    use crate::events::event_bus_for;
+    use crate::test_helpers;
 
     async fn make_project(
         db: &Database,
         tx: broadcast::Sender<DjinnEventEnvelope>,
         path: &Path,
     ) -> crate::models::Project {
-        ProjectRepository::new(db.clone(), tx)
+        ProjectRepository::new(db.clone(), event_bus_for(&tx))
             .create("test-project", path.to_str().unwrap())
             .await
             .unwrap()
@@ -68,7 +69,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let note = repo
             .create(
@@ -102,7 +103,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let note = repo
             .create(
@@ -126,7 +127,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let note = repo
             .create(
@@ -155,7 +156,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
         let _ = rx.recv().await.unwrap(); // ProjectCreated
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let note = repo
             .create(
@@ -191,7 +192,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
         let _ = rx.recv().await.unwrap();
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let note = repo
             .create(
@@ -223,7 +224,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         repo.create(
             &project.id,
@@ -262,7 +263,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         repo.create(
             &project.id,
@@ -299,7 +300,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         repo.create(&project.id, tmp.path(), "First ADR", "body", "adr", "[]")
             .await
@@ -333,7 +334,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         repo.create(&project.id, tmp.path(), "ADR One", "body", "adr", "[]")
             .await
@@ -364,7 +365,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
         let _ = rx.recv().await.unwrap();
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         repo.create(
             &project.id,
@@ -399,7 +400,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
         let _ = rx.recv().await.unwrap();
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let note = repo
             .create(
@@ -458,7 +459,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         // Create target first.
         let target = repo
@@ -497,7 +498,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         repo.create(
             &project.id,
@@ -522,7 +523,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         // Two notes: source links to target, isolated is orphaned.
         let target = repo
@@ -573,7 +574,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         // Create source first (target doesn't exist yet → broken link).
         repo.create(
@@ -602,7 +603,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let repo = NoteRepository::new(db, tx);
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let decisions_dir = tmp.path().join(".djinn").join("decisions");
         std::fs::create_dir_all(&decisions_dir).unwrap();

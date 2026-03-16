@@ -91,7 +91,7 @@ impl DjinnMcpServer {
             });
         }
 
-        let repo = CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
 
         match repo
             .set(&input.provider_id, &input.key_name, &input.api_key)
@@ -122,7 +122,7 @@ impl DjinnMcpServer {
         description = "List all stored credentials. Never returns raw key values — only metadata (id, provider_id, key_name, timestamps)."
     )]
     pub async fn credential_list(&self) -> Json<CredentialListResponse> {
-        let repo = CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
 
         let credentials = match repo.list().await {
             Ok(creds) => creds
@@ -152,7 +152,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(input): Parameters<CredentialDeleteInput>,
     ) -> Json<CredentialDeleteResponse> {
-        let repo = CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
 
         match repo.delete(&input.key_name).await {
             Ok(deleted) => Json(CredentialDeleteResponse {

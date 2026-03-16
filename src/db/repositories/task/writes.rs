@@ -83,7 +83,7 @@ impl TaskRepository {
             }
         }
 
-        let _ = self.events.send(DjinnEventEnvelope::task_created(&task, false));
+        self.events.send(DjinnEventEnvelope::task_created(&task, false));
         Ok(task)
     }
 
@@ -123,7 +123,7 @@ impl TaskRepository {
             .fetch_one(self.db.pool())
             .await?;
 
-        let _ = self.events.send(DjinnEventEnvelope::task_created(&task, false));
+        self.events.send(DjinnEventEnvelope::task_created(&task, false));
         Ok(task)
     }
 
@@ -163,7 +163,7 @@ impl TaskRepository {
             .fetch_one(self.db.pool())
             .await?;
 
-        let _ = self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+        self.events.send(DjinnEventEnvelope::task_updated(&task, false));
         Ok(task)
     }
 
@@ -174,7 +174,7 @@ impl TaskRepository {
             .execute(self.db.pool())
             .await?;
 
-        let _ = self
+        self
             .events
             .send(DjinnEventEnvelope::task_deleted(id));
         Ok(())
@@ -198,7 +198,7 @@ impl TaskRepository {
             .fetch_one(self.db.pool())
             .await?;
 
-        let _ = self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+        self.events.send(DjinnEventEnvelope::task_updated(&task, false));
         Ok(task)
     }
 
@@ -218,7 +218,7 @@ impl TaskRepository {
             .get(id)
             .await?
             .ok_or_else(|| Error::Internal(format!("task not found: {id}")))?;
-        let _ = self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+        self.events.send(DjinnEventEnvelope::task_updated(&task, false));
 
         Ok(())
     }
@@ -240,7 +240,7 @@ impl TaskRepository {
             .fetch_one(self.db.pool())
             .await?;
 
-        let _ = self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+        self.events.send(DjinnEventEnvelope::task_updated(&task, false));
         Ok(task)
     }
 }
