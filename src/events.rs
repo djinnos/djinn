@@ -16,6 +16,10 @@ use serde::de::DeserializeOwned;
 /// Conventions:
 ///   - `Created` / `Updated` variants carry the full entity clone.
 ///   - `Deleted` variants carry only the `id` string.
+///
+/// NOTE: Variants are only constructed inside this module (in the `From` impl
+/// and tests). External callers use `DjinnEventEnvelope::*` constructors directly.
+#[allow(dead_code)]
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) enum DjinnEvent {
     // Projects

@@ -1,6 +1,6 @@
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::{DjinnEvent, DjinnEventEnvelope};
+use crate::events::DjinnEventEnvelope;
 use crate::models::{CustomProvider, SeedModel};
 use tokio::sync::broadcast;
 
@@ -70,7 +70,7 @@ impl CustomProviderRepository {
         .await?;
         let _ = self
             .events
-            .send(DjinnEvent::CustomProviderUpserted(provider.clone()).into());
+            .send(DjinnEventEnvelope::custom_provider_upserted(&provider));
         Ok(())
     }
 
@@ -85,7 +85,7 @@ impl CustomProviderRepository {
         if deleted {
             let _ = self
                 .events
-                .send(DjinnEvent::CustomProviderDeleted { id: id.to_string() }.into());
+                .send(DjinnEventEnvelope::custom_provider_deleted(id));
         }
         Ok(deleted)
     }

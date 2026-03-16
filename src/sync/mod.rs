@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::ProjectRepository;
 use crate::db::connection::Database;
-use crate::events::{DjinnEvent, DjinnEventEnvelope};
+use crate::events::DjinnEventEnvelope;
 use backoff::BackoffState;
 pub use tasks_channel::TaskSyncError;
 
@@ -318,12 +318,12 @@ impl SyncManager {
                                 st.last_error = None;
                             }
                         }
-                        let _ = self.inner.events_tx.send(DjinnEvent::SyncCompleted {
-                            channel: def.name.to_string(),
-                            direction: "export".to_string(),
+                        let _ = self.inner.events_tx.send(DjinnEventEnvelope::sync_completed(
+                            def.name,
+                            "export",
                             count,
-                            error: None,
-                        }.into());
+                            None,
+                        ));
                         results.push(SyncResult {
                             channel: def.name.to_string(),
                             ok: true,
@@ -342,12 +342,12 @@ impl SyncManager {
                                 })
                                 .unwrap_or(Duration::ZERO)
                         };
-                        let _ = self.inner.events_tx.send(DjinnEvent::SyncCompleted {
-                            channel: def.name.to_string(),
-                            direction: "export".to_string(),
-                            count: 0,
-                            error: Some(e.to_string()),
-                        }.into());
+                        let _ = self.inner.events_tx.send(DjinnEventEnvelope::sync_completed(
+                            def.name,
+                            "export",
+                            0,
+                            Some(e.to_string().as_str()),
+                        ));
                         tracing::warn!(
                             channel = def.name,
                             project = project.name,
@@ -410,12 +410,12 @@ impl SyncManager {
                                 st.last_error = None;
                             }
                         }
-                        let _ = self.inner.events_tx.send(DjinnEvent::SyncCompleted {
-                            channel: def.name.to_string(),
-                            direction: "import".to_string(),
+                        let _ = self.inner.events_tx.send(DjinnEventEnvelope::sync_completed(
+                            def.name,
+                            "import",
                             count,
-                            error: None,
-                        }.into());
+                            None,
+                        ));
                         results.push(SyncResult {
                             channel: def.name.to_string(),
                             ok: true,
@@ -436,12 +436,12 @@ impl SyncManager {
                                 st.last_error = Some(e.to_string());
                             }
                         }
-                        let _ = self.inner.events_tx.send(DjinnEvent::SyncCompleted {
-                            channel: def.name.to_string(),
-                            direction: "import".to_string(),
-                            count: 0,
-                            error: Some(e.to_string()),
-                        }.into());
+                        let _ = self.inner.events_tx.send(DjinnEventEnvelope::sync_completed(
+                            def.name,
+                            "import",
+                            0,
+                            Some(e.to_string().as_str()),
+                        ));
                         results.push(SyncResult {
                             channel: def.name.to_string(),
                             ok: false,
@@ -794,7 +794,9 @@ mod tests {
 
     #[test]
     fn sse_envelope_excludes_from_sync_field() {
-        // Verify that serde serialization of DjinnEvent skips the from_sync field.
+        // Verify that DjinnEventEnvelope serialization skips the top-level from_sync
+        // field (it is #[serde(skip)]). The from_sync value is accessible via
+        // envelope.from_sync() for sync-loop detection but must not leak to the wire.
         let task = crate::models::Task {
             id: "test-id".to_string(),
             project_id: "proj".to_string(),
@@ -821,22 +823,25 @@ mod tests {
             unresolved_blocker_count: 0,
         };
 
-        let evt = DjinnEvent::TaskUpdated {
-            task,
-            from_sync: true,
-        };
+        let envelope = DjinnEventEnvelope::task_updated(&task, true);
+        assert!(envelope.from_sync, "from_sync should be true in-memory");
 
-        let json = serde_json::to_string(&evt).unwrap();
+        // Top-level JSON must not have a "from_sync" key at the envelope root.
+        let value: serde_json::Value = serde_json::to_value(&envelope).unwrap();
         assert!(
-            !json.contains("from_sync"),
-            "from_sync should be skipped in serialization: {json}"
+            value.get("from_sync").is_none(),
+            "top-level from_sync should not appear in serialized envelope"
         );
     }
 
     #[test]
     fn background_task_match_filters_from_sync_true() {
-        // Verify the pattern matching logic: from_sync=true events should NOT
-        // match the arm that sets pending=true.
+        // Verify the envelope-based filter logic: from_sync=true events should NOT
+        // trigger export (spawn_background_task checks entity_type == "task" && !from_sync).
+        let should_trigger = |env: &DjinnEventEnvelope| -> bool {
+            env.entity_type == "task" && !env.from_sync
+        };
+
         let task = crate::models::Task {
             id: "t".to_string(),
             project_id: "p".to_string(),
@@ -863,65 +868,36 @@ mod tests {
             unresolved_blocker_count: 0,
         };
 
-        // Simulate the match logic from spawn_background_task.
-        let should_trigger = |evt: &DjinnEvent| -> bool {
-            matches!(
-                evt,
-                DjinnEvent::TaskCreated {
-                    from_sync: false,
-                    ..
-                } | DjinnEvent::TaskUpdated {
-                    from_sync: false,
-                    ..
-                } | DjinnEvent::TaskDeleted { .. }
-            )
-        };
-
         // Local event → should trigger export.
-        let local_created = DjinnEvent::TaskCreated {
-            task: task.clone(),
-            from_sync: false,
-        };
         assert!(
-            should_trigger(&local_created),
+            should_trigger(&DjinnEventEnvelope::task_created(&task, false)),
             "local TaskCreated should trigger export"
         );
-
-        let local_updated = DjinnEvent::TaskUpdated {
-            task: task.clone(),
-            from_sync: false,
-        };
         assert!(
-            should_trigger(&local_updated),
+            should_trigger(&DjinnEventEnvelope::task_updated(&task, false)),
             "local TaskUpdated should trigger export"
         );
 
         // Sync event → should NOT trigger export.
-        let sync_created = DjinnEvent::TaskCreated {
-            task: task.clone(),
-            from_sync: true,
-        };
         assert!(
-            !should_trigger(&sync_created),
+            !should_trigger(&DjinnEventEnvelope::task_created(&task, true)),
             "sync TaskCreated should NOT trigger export"
         );
-
-        let sync_updated = DjinnEvent::TaskUpdated {
-            task: task.clone(),
-            from_sync: true,
-        };
         assert!(
-            !should_trigger(&sync_updated),
+            !should_trigger(&DjinnEventEnvelope::task_updated(&task, true)),
             "sync TaskUpdated should NOT trigger export"
         );
 
-        // Delete always triggers.
-        let deleted = DjinnEvent::TaskDeleted {
-            id: "t".to_string(),
-        };
+        // Delete always triggers (from_sync is always false for deletes).
         assert!(
-            should_trigger(&deleted),
+            should_trigger(&DjinnEventEnvelope::task_deleted("t")),
             "TaskDeleted should always trigger export"
+        );
+
+        // Non-task events should not trigger.
+        assert!(
+            !should_trigger(&DjinnEventEnvelope::note_deleted("n")),
+            "non-task events should not trigger export"
         );
     }
 
@@ -929,13 +905,8 @@ mod tests {
 
     #[test]
     fn sync_completed_serializes_correctly() {
-        let evt = DjinnEvent::SyncCompleted {
-            channel: "tasks".to_string(),
-            direction: "export".to_string(),
-            count: 5,
-            error: None,
-        };
-        let json = serde_json::to_string(&evt).unwrap();
+        let envelope = DjinnEventEnvelope::sync_completed("tasks", "export", 5, None);
+        let json = serde_json::to_string(&envelope).unwrap();
         assert!(json.contains("\"channel\":\"tasks\""), "json: {json}");
         assert!(json.contains("\"direction\":\"export\""), "json: {json}");
         assert!(json.contains("\"count\":5"), "json: {json}");
@@ -943,13 +914,9 @@ mod tests {
 
     #[test]
     fn sync_completed_with_error_serializes() {
-        let evt = DjinnEvent::SyncCompleted {
-            channel: "tasks".to_string(),
-            direction: "import".to_string(),
-            count: 0,
-            error: Some("git push failed".to_string()),
-        };
-        let json = serde_json::to_string(&evt).unwrap();
+        let envelope =
+            DjinnEventEnvelope::sync_completed("tasks", "import", 0, Some("git push failed"));
+        let json = serde_json::to_string(&envelope).unwrap();
         assert!(
             json.contains("\"error\":\"git push failed\""),
             "json: {json}"
@@ -958,23 +925,9 @@ mod tests {
 
     #[test]
     fn sync_completed_does_not_trigger_export() {
-        // SyncCompleted events should NOT be matched by the background task listener.
-        let evt = DjinnEvent::SyncCompleted {
-            channel: "tasks".to_string(),
-            direction: "export".to_string(),
-            count: 5,
-            error: None,
-        };
-        let triggers = matches!(
-            evt,
-            DjinnEvent::TaskCreated {
-                from_sync: false,
-                ..
-            } | DjinnEvent::TaskUpdated {
-                from_sync: false,
-                ..
-            } | DjinnEvent::TaskDeleted { .. }
-        );
+        // SyncCompleted events (entity_type == "sync") should NOT trigger background export.
+        let envelope = DjinnEventEnvelope::sync_completed("tasks", "export", 5, None);
+        let triggers = envelope.entity_type == "task" && !envelope.from_sync;
         assert!(
             !triggers,
             "SyncCompleted should not trigger background export"

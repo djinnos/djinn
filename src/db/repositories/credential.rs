@@ -4,7 +4,7 @@ use uuid::Uuid;
 use crate::crypto;
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::{DjinnEvent, DjinnEventEnvelope};
+use crate::events::DjinnEventEnvelope;
 use crate::models::Credential;
 
 pub struct CredentialRepository {
@@ -68,11 +68,11 @@ impl CredentialRepository {
         if is_new {
             let _ = self
                 .events
-                .send(DjinnEvent::CredentialCreated(cred.clone()).into());
+                .send(DjinnEventEnvelope::credential_created(&cred));
         } else {
             let _ = self
                 .events
-                .send(DjinnEvent::CredentialUpdated(cred.clone()).into());
+                .send(DjinnEventEnvelope::credential_updated(&cred));
         }
 
         Ok(cred)
@@ -107,7 +107,7 @@ impl CredentialRepository {
         }
 
         if let Some(id) = deleted_id {
-            let _ = self.events.send(DjinnEvent::CredentialDeleted { id }.into());
+            let _ = self.events.send(DjinnEventEnvelope::credential_deleted(&id));
             Ok(true)
         } else {
             Ok(false)
@@ -134,7 +134,7 @@ impl CredentialRepository {
             .await?;
 
         for id in ids {
-            let _ = self.events.send(DjinnEvent::CredentialDeleted { id }.into());
+            let _ = self.events.send(DjinnEventEnvelope::credential_deleted(&id));
         }
 
         Ok(result.rows_affected())

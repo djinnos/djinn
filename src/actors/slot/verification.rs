@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::db::TaskRepository;
 use crate::db::VerificationCacheRepository;
-use crate::events::DjinnEvent;
+use crate::events::DjinnEventEnvelope;
 use crate::models::TransitionAction;
 use crate::server::AppState;
 use crate::verification::service::verify_commit;
@@ -126,17 +126,16 @@ pub(crate) async fn run_verification_gate(
         .map_err(|e| format!("failed to query verification cache: {e}"))?
         .is_some()
     {
-        let event = DjinnEvent::VerificationStep {
-            project_id: task.project_id.clone(),
-            task_id: Some(task_id.to_string()),
-            phase: "verification".to_string(),
-            step: StepEvent::CacheHit {
+        let _ = app_state.events().send(DjinnEventEnvelope::verification_step(
+            &task.project_id,
+            Some(task_id),
+            "verification",
+            &StepEvent::CacheHit {
                 commit_sha: commit_sha.clone(),
                 cached_at: String::new(),
                 original_duration_ms: 0,
             },
-        };
-        let _ = app_state.events().send(event.into());
+        ));
         return Ok(());
     }
 
@@ -260,40 +259,34 @@ async fn emit_verification_steps(
     app_state: &AppState,
 ) {
     for (idx, r) in result.setup_results.iter().enumerate() {
-        let _ = app_state.events().send(
-            DjinnEvent::VerificationStep {
-                project_id: project_id.to_string(),
-                task_id: task_id.map(|t| t.to_string()),
-                phase: "setup".to_string(),
-                step: StepEvent::Finished {
-                    index: (idx + 1) as u32,
-                    name: r.name.clone(),
-                    exit_code: r.exit_code,
-                    duration_ms: r.duration_ms,
-                    stdout: r.stdout.clone(),
-                    stderr: r.stderr.clone(),
-                },
-            }
-            .into(),
-        );
+        let _ = app_state.events().send(DjinnEventEnvelope::verification_step(
+            project_id,
+            task_id,
+            "setup",
+            &StepEvent::Finished {
+                index: (idx + 1) as u32,
+                name: r.name.clone(),
+                exit_code: r.exit_code,
+                duration_ms: r.duration_ms,
+                stdout: r.stdout.clone(),
+                stderr: r.stderr.clone(),
+            },
+        ));
     }
     for (idx, r) in result.verification_results.iter().enumerate() {
-        let _ = app_state.events().send(
-            DjinnEvent::VerificationStep {
-                project_id: project_id.to_string(),
-                task_id: task_id.map(|t| t.to_string()),
-                phase: "verification".to_string(),
-                step: StepEvent::Finished {
-                    index: (idx + 1) as u32,
-                    name: r.name.clone(),
-                    exit_code: r.exit_code,
-                    duration_ms: r.duration_ms,
-                    stdout: r.stdout.clone(),
-                    stderr: r.stderr.clone(),
-                },
-            }
-            .into(),
-        );
+        let _ = app_state.events().send(DjinnEventEnvelope::verification_step(
+            project_id,
+            task_id,
+            "verification",
+            &StepEvent::Finished {
+                index: (idx + 1) as u32,
+                name: r.name.clone(),
+                exit_code: r.exit_code,
+                duration_ms: r.duration_ms,
+                stdout: r.stdout.clone(),
+                stderr: r.stderr.clone(),
+            },
+        ));
     }
 }
 

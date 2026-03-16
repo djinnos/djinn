@@ -77,7 +77,7 @@ impl NoteRepository {
             let _ = std::fs::remove_file(&file_path);
         })?;
 
-        let _ = self.events.send(DjinnEvent::NoteCreated(note.clone()).into());
+        let _ = self.events.send(DjinnEventEnvelope::note_created(&note));
         Ok(note)
     }
 
@@ -206,7 +206,7 @@ impl NoteRepository {
 
         tx.commit().await?;
 
-        let _ = self.events.send(DjinnEvent::NoteUpdated(note.clone()).into());
+        let _ = self.events.send(DjinnEventEnvelope::note_updated(&note));
         Ok(note)
     }
 
@@ -234,7 +234,7 @@ impl NoteRepository {
 
         let _ = self
             .events
-            .send(DjinnEvent::NoteDeleted { id: id_for_event }.into());
+            .send(DjinnEventEnvelope::note_deleted(&id_for_event));
         Ok(())
     }
 
@@ -330,7 +330,7 @@ impl NoteRepository {
 
         tx.commit().await?;
 
-        let _ = self.events.send(DjinnEvent::NoteUpdated(note.clone()).into());
+        let _ = self.events.send(DjinnEventEnvelope::note_updated(&note));
         Ok(note)
     }
 }

@@ -6,7 +6,7 @@ use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
 use crate::error::{Error, Result};
-use crate::events::{DjinnEvent, DjinnEventEnvelope};
+use crate::events::DjinnEventEnvelope;
 use crate::models::{
     BrokenLink, GraphEdge, GraphNode, GraphResponse, HealthReport, Note, NoteCompact,
     NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,

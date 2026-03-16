@@ -2,7 +2,7 @@ use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::{DjinnEvent, DjinnEventEnvelope};
+use crate::events::DjinnEventEnvelope;
 use crate::models::Project;
 
 #[derive(Clone, Debug, serde::Serialize, sqlx::FromRow)]
@@ -142,7 +142,7 @@ impl ProjectRepository {
 
         let _ = self
             .events
-            .send(DjinnEvent::ProjectCreated(project.clone()).into());
+            .send(DjinnEventEnvelope::project_created(&project));
         Ok(project)
     }
 
@@ -163,7 +163,7 @@ impl ProjectRepository {
 
         let _ = self
             .events
-            .send(DjinnEvent::ProjectUpdated(project.clone()).into());
+            .send(DjinnEventEnvelope::project_updated(&project));
         Ok(project)
     }
 
@@ -222,10 +222,7 @@ impl ProjectRepository {
         let Some(config) = self.get_config(id).await? else {
             return Ok(None);
         };
-        let _ = self.events.send(DjinnEvent::ProjectConfigUpdated {
-            project_id: id.to_owned(),
-            config: config.clone(),
-        }.into());
+        let _ = self.events.send(DjinnEventEnvelope::project_config_updated(id, &config));
         Ok(Some(config))
     }
 
@@ -295,7 +292,7 @@ impl ProjectRepository {
 
         let _ = self
             .events
-            .send(DjinnEvent::ProjectDeleted { id: id.to_owned() }.into());
+            .send(DjinnEventEnvelope::project_deleted(id));
         Ok(())
     }
 }

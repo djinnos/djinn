@@ -66,24 +66,18 @@ fn is_wsl() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::events::{DjinnEvent, DjinnEventEnvelope};
+    use crate::events::DjinnEventEnvelope;
 
     #[test]
     fn sse_event_name_uses_entity_type_and_action() {
-        let evt = DjinnEvent::TaskDeleted {
-            id: "t1".to_string(),
-        };
-        let envelope: DjinnEventEnvelope = evt.into();
+        let envelope = DjinnEventEnvelope::task_deleted("t1");
         let event_name = format!("{}.{}", envelope.entity_type, envelope.action);
         assert_eq!(event_name, "task.deleted");
     }
 
     #[test]
     fn sse_payload_serializes_djinn_event_shape() {
-        let evt = DjinnEvent::TaskDeleted {
-            id: "t1".to_string(),
-        };
-        let envelope: DjinnEventEnvelope = evt.into();
+        let envelope = DjinnEventEnvelope::task_deleted("t1");
         let json = serde_json::to_value(&envelope).expect("serialize envelope");
 
         assert_eq!(

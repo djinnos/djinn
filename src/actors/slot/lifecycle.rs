@@ -43,12 +43,7 @@ pub async fn run_task_lifecycle(
     let emit_step = |task_id: &str, step: &str, detail: serde_json::Value| {
         let _ = app_state
             .events()
-            .send(crate::events::DjinnEvent::TaskLifecycleStep {
-                task_id: task_id.to_string(),
-                step: step.to_string(),
-                detail,
-            }
-            .into());
+            .send(crate::events::DjinnEventEnvelope::task_lifecycle_step(task_id, step, &detail));
     };
 
     // Helper macros for emitting slot events on exit.
@@ -118,12 +113,12 @@ pub async fn run_task_lifecycle(
     // worktree/setup is still running.
     let dispatched_receivers = app_state
         .events()
-        .send(crate::events::DjinnEvent::SessionDispatched {
-            project_id: task.project_id.clone(),
-            task_id: task.id.clone(),
-            model_id: model_id.clone(),
-            agent_type: agent_type.as_str().to_string(),
-        }.into());
+        .send(crate::events::DjinnEventEnvelope::session_dispatched(
+            &task.project_id,
+            &task.id,
+            &model_id,
+            agent_type.as_str(),
+        ));
     tracing::info!(
         task_id = %task_id,
         sse_receivers = ?dispatched_receivers.ok(),
@@ -1044,12 +1039,12 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
 
     let cont_dispatched_receivers = app_state
         .events()
-        .send(crate::events::DjinnEvent::SessionDispatched {
-            project_id: project_id.clone(),
-            task_id: task_id.clone(),
-            model_id: model_id.clone(),
-            agent_type: agent_type.as_str().to_string(),
-        }.into());
+        .send(crate::events::DjinnEventEnvelope::session_dispatched(
+            &project_id,
+            &task_id,
+            &model_id,
+            agent_type.as_str(),
+        ));
     tracing::info!(
         task_id = %task_id,
         sse_receivers = ?cont_dispatched_receivers.ok(),

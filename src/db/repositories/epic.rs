@@ -3,7 +3,7 @@ use tokio::sync::broadcast;
 
 use crate::db::connection::Database;
 use crate::error::{Error, Result};
-use crate::events::{DjinnEvent, DjinnEventEnvelope};
+use crate::events::DjinnEventEnvelope;
 use crate::models::Epic;
 
 // ── Query / result types ─────────────────────────────────────────────────────
@@ -170,7 +170,7 @@ impl EpicRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEvent::EpicCreated(epic.clone()).into());
+        let _ = self.events.send(DjinnEventEnvelope::epic_created(&epic));
         Ok(epic)
     }
 
@@ -200,7 +200,7 @@ impl EpicRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEvent::EpicUpdated(epic.clone()).into());
+        let _ = self.events.send(DjinnEventEnvelope::epic_updated(&epic));
         Ok(epic)
     }
 
@@ -224,7 +224,7 @@ impl EpicRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEvent::EpicUpdated(epic.clone()).into());
+        let _ = self.events.send(DjinnEventEnvelope::epic_updated(&epic));
         Ok(epic)
     }
 
@@ -237,7 +237,7 @@ impl EpicRepository {
 
         let _ = self
             .events
-            .send(DjinnEvent::EpicDeleted { id: id.to_owned() }.into());
+            .send(DjinnEventEnvelope::epic_deleted(id));
         Ok(())
     }
 
@@ -306,7 +306,7 @@ impl EpicRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        let _ = self.events.send(DjinnEvent::EpicUpdated(epic.clone()).into());
+        let _ = self.events.send(DjinnEventEnvelope::epic_updated(&epic));
         Ok(epic)
     }
 
