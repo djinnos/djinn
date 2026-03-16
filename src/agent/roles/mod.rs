@@ -13,11 +13,11 @@ mod pm;
 mod reviewer;
 mod worker;
 
-pub(crate) use conflict::CONFLICT_RESOLVER_CONFIG;
-pub(crate) use groomer::GROOMER_CONFIG;
-pub(crate) use pm::PM_CONFIG;
-pub(crate) use reviewer::TASK_REVIEWER_CONFIG;
-pub(crate) use worker::WORKER_CONFIG;
+pub(crate) use conflict::{CONFLICT_RESOLVER_CONFIG, ConflictResolverRole};
+pub(crate) use groomer::{GROOMER_CONFIG, GroomerRole};
+pub(crate) use pm::{PM_CONFIG, PmRole};
+pub(crate) use reviewer::{TASK_REVIEWER_CONFIG, TaskReviewerRole};
+pub(crate) use worker::{WORKER_CONFIG, WorkerRole};
 
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -60,7 +60,7 @@ pub(crate) fn config_for(agent_type: AgentType) -> &'static RoleConfig {
 #[allow(dead_code)]
 pub(crate) trait AgentRole: Send + Sync + 'static {
     fn config(&self) -> &RoleConfig;
-    fn render_prompt(&self, ctx: &TaskContext) -> String;
+    fn render_prompt(&self, task: &Task, ctx: &TaskContext) -> String;
     fn on_complete<'a>(
         &'a self,
         task_id: &'a str,
@@ -89,6 +89,8 @@ pub(crate) struct DispatchRule {
 
 pub struct RoleRegistry {
     pub(crate) roles: HashMap<&'static str, AgentType>,
+    #[allow(dead_code)]
+    pub(crate) role_impls: HashMap<&'static str, Box<dyn AgentRole>>,
     pub(crate) dispatch_rules: Vec<DispatchRule>,
 }
 
@@ -102,6 +104,20 @@ impl RoleRegistry {
             ("groomer", AgentType::Groomer),
         ]);
 
+        let role_impls: HashMap<&'static str, Box<dyn AgentRole>> = HashMap::from([
+            ("worker", Box::new(WorkerRole) as Box<dyn AgentRole>),
+            (
+                "conflict_resolver",
+                Box::new(ConflictResolverRole) as Box<dyn AgentRole>,
+            ),
+            (
+                "task_reviewer",
+                Box::new(TaskReviewerRole) as Box<dyn AgentRole>,
+            ),
+            ("pm", Box::new(PmRole) as Box<dyn AgentRole>),
+            ("groomer", Box::new(GroomerRole) as Box<dyn AgentRole>),
+        ]);
+
         let dispatch_rules = vec![
             conflict_resolver_dispatch_rule(),
             worker_dispatch_rule(),
@@ -112,6 +128,7 @@ impl RoleRegistry {
 
         Self {
             roles,
+            role_impls,
             dispatch_rules,
         }
     }

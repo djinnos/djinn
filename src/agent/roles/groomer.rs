@@ -1,8 +1,38 @@
 use crate::agent::compaction::{GENERIC_PROMPT, SUMMARISER_SYSTEM_GENERIC};
 use crate::agent::extension;
-use crate::models::TransitionAction;
+use crate::agent::output_parser::ParsedAgentOutput;
+use crate::agent::prompts::TaskContext;
+use crate::models::{Task, TransitionAction};
+use crate::server::AppState;
+use futures::future::BoxFuture;
 
-use super::{CompactionPrompts, RoleConfig};
+use super::{AgentRole, CompactionPrompts, RoleConfig};
+
+pub(crate) struct GroomerRole;
+
+#[allow(dead_code)]
+impl AgentRole for GroomerRole {
+    fn config(&self) -> &RoleConfig {
+        &GROOMER_CONFIG
+    }
+
+    fn render_prompt(&self, _task: &Task, ctx: &TaskContext) -> String {
+        crate::agent::prompts::render_project_prompt(
+            crate::agent::AgentType::Groomer,
+            &ctx.project_path,
+            ctx.verification_commands.as_deref(),
+        )
+    }
+
+    fn on_complete<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _output: &'a ParsedAgentOutput,
+        _app_state: &'a AppState,
+    ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
+        Box::pin(async { None })
+    }
+}
 
 pub(crate) const GROOMER_CONFIG: RoleConfig = RoleConfig {
     name: "groomer",

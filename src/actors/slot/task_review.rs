@@ -5,7 +5,7 @@ use crate::db::repositories::task::transitions::merge_after_task_review;
 use crate::models::TransitionAction;
 use crate::server::AppState;
 
-const STALE_ESCALATION_THRESHOLD: i64 = 3;
+pub(crate) const STALE_ESCALATION_THRESHOLD: i64 = 3;
 
 // ─── Success transition ───────────────────────────────────────────────────────
 
@@ -120,7 +120,7 @@ pub(crate) async fn success_transition(
 }
 
 /// Check if all acceptance criteria are met.
-fn all_acceptance_criteria_met(ac_json: &str) -> bool {
+pub(crate) fn all_acceptance_criteria_met(ac_json: &str) -> bool {
     #[derive(serde::Deserialize)]
     struct Criterion {
         #[serde(default)]
@@ -135,7 +135,7 @@ fn all_acceptance_criteria_met(ac_json: &str) -> bool {
 
 /// Returns true if the AC met-state is identical to the snapshot from when
 /// the current review cycle started (i.e. the worker made no AC progress).
-async fn is_stale_review_cycle(task_id: &str, current_ac_json: &str, app_state: &AppState) -> bool {
+pub(crate) async fn is_stale_review_cycle(task_id: &str, current_ac_json: &str, app_state: &AppState) -> bool {
     let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     let snapshot_json = match repo.last_review_start_ac_snapshot(task_id).await {
         Ok(Some(s)) => s,
