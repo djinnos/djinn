@@ -32,7 +32,7 @@ pub(crate) fn spawn_verification(task_id: String, project_path: String, app_stat
                 error = %e,
                 "Verification pipeline crashed; releasing task"
             );
-            let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+            let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
             let _ = repo
                 .transition(
                     &task_id,
@@ -66,7 +66,7 @@ async fn run_verification_pipeline(
 ) -> anyhow::Result<()> {
     let task = load_task(task_id, app_state).await?;
     let project_dir = PathBuf::from(project_path);
-    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
 
     // Create a fresh worktree from the task branch.
     let worktree_path = prepare_worktree(&project_dir, &task, app_state).await?;

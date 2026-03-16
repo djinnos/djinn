@@ -5,7 +5,7 @@ use crate::test_helpers::{
     create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
     create_test_task, initialize_mcp_session, mcp_call_tool,
 };
-use tokio::sync::broadcast;
+use crate::events::EventBus;
 
 #[tokio::test]
 async fn task_create_success_shape() {
@@ -29,7 +29,7 @@ async fn task_create_success_shape() {
     assert_eq!(payload["title"], "Create task contract test");
     assert_eq!(payload["epic_id"], epic.id);
 
-    let repo = TaskRepository::new(db.clone(), broadcast::channel(16).0);
+    let repo = TaskRepository::new(db.clone(), EventBus::noop());
     let created = repo
         .get(payload["id"].as_str().unwrap())
         .await
@@ -93,7 +93,7 @@ async fn task_list_filters_and_pagination() {
     let project = create_test_project(&db).await;
     let epic1 = create_test_epic(&db, &project.id).await;
     let epic2 = create_test_epic(&db, &project.id).await;
-    let repo = TaskRepository::new(db.clone(), tokio::sync::broadcast::channel(16).0);
+    let repo = TaskRepository::new(db.clone(), EventBus::noop());
 
     let t1 = repo
         .create_in_project(
@@ -220,7 +220,7 @@ async fn task_update_partial_and_error_shape() {
     .await;
     assert_eq!(ok["title"], "updated");
 
-    let repo = TaskRepository::new(db.clone(), broadcast::channel(16).0);
+    let repo = TaskRepository::new(db.clone(), EventBus::noop());
     let updated = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(updated.title, "updated");
 
@@ -252,7 +252,7 @@ async fn task_transition_valid_and_invalid() {
     .await;
     assert_eq!(ok["status"], "open");
 
-    let repo = TaskRepository::new(db.clone(), broadcast::channel(16).0);
+    let repo = TaskRepository::new(db.clone(), EventBus::noop());
     let transitioned = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(transitioned.status, "open");
 
@@ -272,7 +272,7 @@ async fn task_count_plain_and_grouped() {
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
     let t1 = create_test_task(&db, &project.id, &epic.id).await;
-    let repo = TaskRepository::new(db.clone(), tokio::sync::broadcast::channel(16).0);
+    let repo = TaskRepository::new(db.clone(), EventBus::noop());
     repo.transition(
         &t1.id,
         crate::models::TransitionAction::Accept,

@@ -164,7 +164,7 @@ pub(crate) async fn prepare_worktree(
         .join("worktrees")
         .join(&task.short_id);
 
-    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
     let has_paused_session = session_repo
         .paused_for_task(&task.id)
         .await
@@ -422,7 +422,7 @@ pub(crate) async fn cleanup_worktree(task_id: &str, worktree_path: &Path, app_st
         return;
     }
 
-    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
     if let Ok(Some(paused)) = session_repo.paused_for_task(task_id).await
         && paused.worktree_path.as_deref() == Some(worktree_path.to_str().unwrap_or(""))
     {
@@ -471,7 +471,7 @@ pub(crate) async fn cleanup_worktree(task_id: &str, worktree_path: &Path, app_st
 /// each project's `.djinn/worktrees/`. Skips entries that start with `.` (sync
 /// worktrees are transient and handled separately).
 pub(crate) async fn purge_all_worktrees(app_state: &AppState) {
-    let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.events().clone());
+    let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.event_bus());
     let projects = match project_repo.list().await {
         Ok(p) => p,
         Err(e) => {

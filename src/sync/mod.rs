@@ -470,7 +470,7 @@ impl SyncManager {
 // ── Module-level helpers ──────────────────────────────────────────────────────
 
 fn project_repo(inner: &Inner) -> ProjectRepository {
-    ProjectRepository::new(inner.db.clone(), inner.events_tx.clone())
+    ProjectRepository::new(inner.db.clone(), crate::events::event_bus_for(&inner.events_tx))
 }
 
 /// Current UTC time as an ISO-8601 string (second precision).
@@ -539,6 +539,8 @@ fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::broadcast;
+    use crate::events::event_bus_for;
 
     #[test]
     fn registered_channels_has_tasks() {
@@ -563,7 +565,7 @@ mod tests {
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
         // Create a project.
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let project = project_repo
             .create("test-proj", "/tmp/test-project")
             .await
@@ -583,7 +585,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let project = project_repo
             .create("test-proj", "/tmp/test-project")
             .await
@@ -602,7 +604,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let project = project_repo
             .create("my-repo", "/tmp/my-repo")
             .await
@@ -621,7 +623,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let p1 = project_repo.create("alpha", "/tmp/alpha").await.unwrap();
         let p2 = project_repo.create("beta", "/tmp/beta").await.unwrap();
         let _p3 = project_repo.create("gamma", "/tmp/gamma").await.unwrap();
@@ -655,18 +657,18 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         // Create two projects with tasks.
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let p1 = project_repo.create("proj-a", "/tmp/a").await.unwrap();
         let p2 = project_repo.create("proj-b", "/tmp/b").await.unwrap();
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let e1 = epic_repo
             .create("Epic A", "", "", "", "", None)
             .await
             .unwrap();
         // Reassign e1's project to p1 (epic auto-creates a default project).
         // For simplicity, create tasks directly in each project.
-        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
         let _t1 = task_repo
             .create_in_project(
                 &p1.id,
@@ -747,7 +749,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(64);
 
         // Create an epic (auto-creates default project) so upsert_peer's FK check passes.
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo
             .create("Test Epic", "", "", "", "", None)
             .await
@@ -755,7 +757,7 @@ mod tests {
         // Drain setup events (ProjectCreated + EpicCreated).
         while rx.try_recv().is_ok() {}
 
-        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
         let peer_task = crate::models::Task {
             id: uuid::Uuid::now_v7().to_string(),
             project_id: epic.project_id.clone(),
@@ -962,7 +964,7 @@ mod tests {
         let user_id = "test-user".to_string();
 
         // Create a project and enable it for sync.
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let project = project_repo
             .create("interval-test", "/tmp/interval-test")
             .await

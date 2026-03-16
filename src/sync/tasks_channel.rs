@@ -147,7 +147,7 @@ pub async fn export(
     let wt = ensure_worktree(project).await?;
 
     // Fetch exportable tasks scoped to this project (SYNC-07 + SYNC-12).
-    let repo = TaskRepository::new(db.clone(), events.clone());
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(events));
     let tasks = repo
         .list_for_export(Some(project_id))
         .await
@@ -266,7 +266,7 @@ pub async fn import(
     events: &broadcast::Sender<DjinnEventEnvelope>,
 ) -> Result<usize> {
     // Two-phase pull (SYNC-08): cheap SHA check before expensive fetch.
-    let settings = crate::db::SettingsRepository::new(db.clone(), events.clone());
+    let settings = crate::db::SettingsRepository::new(db.clone(), crate::events::event_bus_for(events));
     let sha_key = sha_settings_key(project_id);
     let remote_sha = ls_remote_sha(project).await;
     if let Some(ref sha) = remote_sha {
@@ -399,7 +399,7 @@ pub async fn import(
     }
 
     // Emit events after successful commit.
-    let repo = TaskRepository::new(db.clone(), events.clone());
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(events));
     for id in &upserted_ids {
         if let Ok(Some(task)) = repo.get(id).await {
             let _ = events.send(DjinnEventEnvelope {
@@ -427,8 +427,10 @@ pub async fn delete_remote_branch(project: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::broadcast;
     use crate::db::EpicRepository;
     use crate::db::TaskRepository;
+    use crate::events::event_bus_for;
     use crate::models::TransitionAction;
 
     /// Create a temp dir with a git repo + bare "origin" remote.
@@ -514,10 +516,10 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         // Create a project and task via DB.
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
-        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
         let task = task_repo
             .create(&epic.id, "My Task", "", "", "task", 0, "", Some("open"))
             .await
@@ -544,14 +546,14 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         // Create two projects with tasks.
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), tx.clone());
+        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let p1 = project_repo.create("proj-a", "/tmp/a").await.unwrap();
         let p2 = project_repo.create("proj-b", "/tmp/b").await.unwrap();
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
-        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
         task_repo
             .create_in_project(
                 &p1.id,
@@ -602,7 +604,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         // Create an epic so FK checks pass.
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         // Manually write a JSONL file into the sync worktree (simulating a peer).
@@ -620,7 +622,7 @@ mod tests {
         assert_eq!(count, 1);
 
         // Verify it's in the DB.
-        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
         let fetched = task_repo.get("aaaa-bbbb-cccc-dddd").await.unwrap();
         assert!(fetched.is_some());
         assert_eq!(fetched.unwrap().title, "Peer Task");
@@ -635,9 +637,9 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(64);
 
         // Create task.
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
-        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
         let task = task_repo
             .create(&epic.id, "Round Trip", "", "", "task", 0, "", Some("open"))
             .await
@@ -669,11 +671,11 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         // Create an epic.
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         // Create 3 tasks locally, all owned by peer "alice".
-        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
         let task1 = task_repo
             .create(&epic.id, "Task 1", "", "", "task", 0, "alice", None)
             .await
@@ -721,11 +723,11 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(64);
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         // Create a task and close it.
-        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
         let task1 = task_repo
             .create(&epic.id, "Task 1", "", "", "task", 0, "alice", None)
             .await
@@ -764,10 +766,10 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(64);
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
-        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
         // Task owned by alice, but empty file means reconciliation skipped.
         let task_alice = task_repo
             .create(&epic.id, "Alice Task", "", "", "task", 0, "alice", None)
@@ -807,10 +809,10 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(64);
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
-        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
         let task1 = task_repo
             .create(&epic.id, "Task 1", "", "", "task", 0, "alice", None)
             .await
@@ -847,11 +849,11 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(64);
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         // Create local task owned by alice.
-        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
         let task_local = task_repo
             .create(&epic.id, "Local Task", "", "", "task", 0, "alice", None)
             .await
@@ -891,10 +893,10 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(64);
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
-        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
         // Create a closed task.
         let task_closed = task_repo
             .create(&epic.id, "Closed Task", "", "", "task", 0, "alice", None)
@@ -939,7 +941,7 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(64);
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         // Write a peer task directly into worktree.
@@ -971,7 +973,7 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(64);
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let wt = ensure_worktree(&repo).await.unwrap();
@@ -997,7 +999,7 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(64);
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let wt = ensure_worktree(&repo).await.unwrap();
@@ -1023,7 +1025,7 @@ mod tests {
         let count = import(&repo, &epic.project_id, &db, &tx).await.unwrap();
         assert_eq!(count, 1);
 
-        let task_repo = TaskRepository::new(db.clone(), tx.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
         let fetched = task_repo.get("same-id-00-00").await.unwrap().unwrap();
         assert_eq!(fetched.title, "New Title", "LWW should keep newer version");
     }
@@ -1038,7 +1040,7 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(64);
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let wt = ensure_worktree(&repo).await.unwrap();
@@ -1061,7 +1063,7 @@ mod tests {
         assert!(remote_sha.is_some(), "remote SHA should exist");
 
         // Store it manually in settings (simulating what import does).
-        let settings_repo = SettingsRepository::new(db.clone(), tx.clone());
+        let settings_repo = SettingsRepository::new(db.clone(), event_bus_for(&tx));
         let sha_key = sha_settings_key(&epic.project_id);
         let _ = settings_repo
             .set(&sha_key, remote_sha.as_ref().unwrap())
@@ -1080,7 +1082,7 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(64);
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let wt = ensure_worktree(&repo).await.unwrap();
@@ -1095,7 +1097,7 @@ mod tests {
         git(&wt, &["push", "origin", BRANCH]).await.unwrap();
 
         // Clear any stored SHA.
-        let settings_repo = SettingsRepository::new(db.clone(), tx.clone());
+        let settings_repo = SettingsRepository::new(db.clone(), event_bus_for(&tx));
         let sha_key = sha_settings_key(&epic.project_id);
         let _ = settings_repo.delete(&sha_key).await;
 
@@ -1129,7 +1131,7 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(64);
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let wt = ensure_worktree(&repo).await.unwrap();
@@ -1158,7 +1160,7 @@ mod tests {
             .unwrap();
 
         // Get the SHA before the failed import.
-        let settings_repo = SettingsRepository::new(db.clone(), tx.clone());
+        let settings_repo = SettingsRepository::new(db.clone(), event_bus_for(&tx));
         let sha_key = sha_settings_key(&epic.project_id);
         let sha_before = settings_repo.get(&sha_key).await.unwrap().unwrap().value;
 
@@ -1182,7 +1184,7 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(64);
 
-        let epic_repo = EpicRepository::new(db.clone(), tx.clone());
+        let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
         let epic = epic_repo.create("E1", "", "", "", "", None).await.unwrap();
 
         let wt = ensure_worktree(&repo).await.unwrap();

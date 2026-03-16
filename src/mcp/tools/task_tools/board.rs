@@ -8,7 +8,7 @@ pub(super) async fn board_health_impl(
         return Json(ErrorOr::Error(e));
     }
     let stale_hours = p.stale_threshold_hours.unwrap_or(24).max(1);
-    let repo = TaskRepository::new(server.state.db().clone(), server.state.events().clone());
+    let repo = TaskRepository::new(server.state.db().clone(), server.state.event_bus());
     match repo.board_health(stale_hours).await {
         Ok(report) => match serde_json::from_value::<BoardHealthResponse>(report) {
             Ok(mut parsed) => {
@@ -51,7 +51,7 @@ pub(super) async fn board_reconcile_impl(
         Err(e) => return Json(ErrorOr::Error(e)),
     };
     let stale_hours = p.stale_threshold_hours.unwrap_or(24).max(1);
-    let repo = TaskRepository::new(server.state.db().clone(), server.state.events().clone());
+    let repo = TaskRepository::new(server.state.db().clone(), server.state.event_bus());
     let Some(pool) = server.state.pool().await else {
         return Json(ErrorOr::Error(ErrorResponse::new(
             "slot pool actor not initialized",
@@ -63,7 +63,7 @@ pub(super) async fn board_reconcile_impl(
         )));
     };
     let session_repo =
-        SessionRepository::new(server.state.db().clone(), server.state.events().clone());
+        SessionRepository::new(server.state.db().clone(), server.state.event_bus());
 
     match repo.reconcile(stale_hours).await {
         Ok(result) => {
@@ -117,7 +117,7 @@ pub(super) async fn board_reconcile_impl(
             // ── batch-* worktree cleanup (ADR-016) ───────────────────
             let mut stale_batch_worktrees: Vec<String> = Vec::new();
             let project_repo =
-                ProjectRepository::new(server.state.db().clone(), server.state.events().clone());
+                ProjectRepository::new(server.state.db().clone(), server.state.event_bus());
             if let Ok(Some(project)) = project_repo.get(&project_id).await {
                 let project_path = std::path::PathBuf::from(&project.path);
                 let worktrees_dir = project_path.join(".djinn").join("worktrees");

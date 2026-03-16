@@ -304,7 +304,7 @@ impl TaskRepository {
         tx.commit().await?;
 
         if changed && let Ok(Some(updated)) = self.get(&task.id).await {
-            let _ = self.events.send(DjinnEventEnvelope::task_updated(&updated, true));
+            self.events.send(DjinnEventEnvelope::task_updated(&updated, true));
         }
         Ok(changed)
     }

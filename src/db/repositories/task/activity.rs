@@ -36,7 +36,7 @@ impl TaskRepository {
         tx.commit().await?;
         let payload_value: serde_json::Value = serde_json::from_str(payload)
             .unwrap_or(serde_json::Value::String(payload.to_owned()));
-        let _ = self.events.send(DjinnEventEnvelope::activity_logged(
+        self.events.send(DjinnEventEnvelope::activity_logged(
             task_id,
             event_type,
             actor_id,

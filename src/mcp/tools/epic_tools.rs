@@ -391,7 +391,7 @@ impl DjinnMcpServer {
             .as_ref()
             .map(|refs| serde_json::to_string(refs).unwrap_or_else(|_| "[]".to_string()));
 
-        let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
@@ -424,7 +424,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<EpicShowParams>,
     ) -> Json<EpicShowResponse> {
-        let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
@@ -506,7 +506,7 @@ impl DjinnMcpServer {
             limit,
             offset,
         };
-        let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo.list_filtered(query).await {
             Ok(result) => Json(EpicListResponse {
                 epics: Some(result.epics.iter().map(EpicModel::from).collect()),
@@ -535,7 +535,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<EpicUpdateParams>,
     ) -> Json<EpicSingleResponse> {
-        let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
@@ -632,7 +632,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<EpicCloseParams>,
     ) -> Json<EpicSingleResponse> {
-        let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
@@ -677,7 +677,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<EpicReopenParams>,
     ) -> Json<EpicSingleResponse> {
-        let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
@@ -718,7 +718,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<EpicDeleteParams>,
     ) -> Json<EpicDeleteResponse> {
-        let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
@@ -763,7 +763,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<EpicTasksParams>,
     ) -> Json<EpicTasksResponse> {
-        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
@@ -827,7 +827,7 @@ impl DjinnMcpServer {
             offset,
             ..Default::default()
         };
-        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         match task_repo.list_filtered(query).await {
             Ok(result) => Json(EpicTasksResponse {
                 tasks: Some(result.tasks.iter().map(EpicTaskModel::from).collect()),
@@ -878,7 +878,7 @@ impl DjinnMcpServer {
             status: p.status,
             group_by: p.group_by,
         };
-        let repo = EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo.count_grouped(query).await {
             Ok(v) => {
                 if let Some(total_count) = v.get("total_count").and_then(serde_json::Value::as_i64)
@@ -937,7 +937,7 @@ mod tests {
         create_test_app, create_test_app_with_db, create_test_db, create_test_epic,
         create_test_project, create_test_task, initialize_mcp_session, mcp_call_tool,
     };
-    use tokio::sync::broadcast;
+    use crate::events::EventBus;
 
     #[tokio::test]
     async fn epic_create_success_shape() {
@@ -960,7 +960,7 @@ mod tests {
         assert_eq!(result["status"], "open");
         assert_eq!(result["title"], "New Epic");
 
-        let repo = EpicRepository::new(db.clone(), broadcast::channel(16).0);
+        let repo = EpicRepository::new(db.clone(), EventBus::noop());
         let created = repo
             .get(result["id"].as_str().unwrap())
             .await
@@ -1116,7 +1116,7 @@ mod tests {
         assert_eq!(result["color"], "#800080");
         assert_eq!(result["emoji"], "🚀");
 
-        let repo = EpicRepository::new(db.clone(), broadcast::channel(16).0);
+        let repo = EpicRepository::new(db.clone(), EventBus::noop());
         let updated = repo.get(&epic.id).await.unwrap().unwrap();
         assert_eq!(updated.title, "Updated Epic");
         assert_eq!(updated.description, "Updated description");
@@ -1250,7 +1250,7 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert_eq!(result["deleted_task_count"], 2);
 
-        let epic_repo = EpicRepository::new(db.clone(), broadcast::channel(16).0);
+        let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
         let deleted_epic = epic_repo.get(&epic.id).await.expect("query epic");
         assert!(deleted_epic.is_none(), "epic should be deleted from DB");
 

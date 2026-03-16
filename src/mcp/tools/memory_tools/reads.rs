@@ -15,7 +15,7 @@ impl DjinnMcpServer {
             )));
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
 
         // Try permalink first, then title search.
         let note = match repo.get_by_permalink(&project_id, &p.identifier).await {
@@ -66,7 +66,7 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
         let depth = p.depth.unwrap_or(1);
 
         let notes = repo
@@ -98,7 +98,7 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
         let catalog = repo.catalog(&project_id).await.unwrap_or_default();
         Json(MemoryCatalogResponse {
             catalog,
@@ -138,7 +138,7 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
 
         match repo.health(&project_id).await {
             Ok(h) => Json(MemoryHealthResponse {
@@ -177,7 +177,7 @@ impl DjinnMcpServer {
         let hours = parse_timeframe(p.timeframe.as_deref().unwrap_or("7d"));
         let limit = p.limit.unwrap_or(10).clamp(1, 100);
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
         let notes = repo
             .recent(&project_id, hours, limit)
             .await
@@ -201,7 +201,7 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
 
         let Some(note) = repo
             .get_by_permalink(&project_id, &p.permalink)
@@ -236,7 +236,7 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
         let tasks: Vec<MemoryTaskRefItem> = repo
             .task_refs(&p.permalink)
             .await
@@ -262,7 +262,7 @@ impl DjinnMcpServer {
                 error: Some(format!("project not found: {}", params.project)),
             });
         };
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
         let broken_links = repo
             .broken_links(&project_id, params.folder.as_deref())
             .await
@@ -288,7 +288,7 @@ impl DjinnMcpServer {
                 error: Some(format!("project not found: {}", params.project)),
             });
         };
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
         let orphans = repo
             .orphans(&project_id, params.folder.as_deref())
             .await

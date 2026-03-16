@@ -87,7 +87,7 @@ impl DjinnMcpServer {
         // Resolve parent epic (optional).
         let epic_id = if let Some(epic_ref) = p.epic_id.as_deref() {
             let epic_repo =
-                EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+                EpicRepository::new(self.state.db().clone(), self.state.event_bus());
             let Some(epic) = epic_repo
                 .resolve_in_project(&project_id, epic_ref)
                 .await
@@ -103,7 +103,7 @@ impl DjinnMcpServer {
             None
         };
 
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
 
         let task = match repo
             .create_in_project(
@@ -241,7 +241,7 @@ impl DjinnMcpServer {
             return Json(ErrorOr::Error(ErrorResponse::new(e)));
         }
 
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = match self.require_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => return Json(ErrorOr::Error(e)),
@@ -259,7 +259,7 @@ impl DjinnMcpServer {
         // Resolve new parent epic if provided.
         let epic_id: Option<String> = if let Some(ref par) = p.epic_id {
             let epic_repo =
-                EpicRepository::new(self.state.db().clone(), self.state.events().clone());
+                EpicRepository::new(self.state.db().clone(), self.state.event_bus());
             let Some(epic) = epic_repo
                 .resolve_in_project(&project_id, par)
                 .await
@@ -400,9 +400,9 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskShowParams>,
     ) -> Json<ErrorOr<TaskShowResponse>> {
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let session_repo =
-            SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+            SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let task_result = if let Some(project) = &p.project {
             let project_id = match self.require_project_id(project).await {
                 Ok(id) => id,
@@ -521,9 +521,9 @@ impl DjinnMcpServer {
             offset,
         };
 
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let session_repo =
-            SessionRepository::new(self.state.db().clone(), self.state.events().clone());
+            SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo.list_filtered(query).await {
             Ok(result) => {
                 // Batch-fetch active sessions and session counts for the project
@@ -612,7 +612,7 @@ impl DjinnMcpServer {
             group_by: p.group_by,
         };
 
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo.count_grouped(query).await {
             Ok(v) => match serde_json::from_value::<TaskCountSuccess>(v) {
                 Ok(parsed) => Json(ErrorOr::Ok(parsed)),
@@ -634,7 +634,7 @@ impl DjinnMcpServer {
             Ok(id) => id,
             Err(e) => return Json(ErrorOr::Error(e)),
         };
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let Some(task) = repo
             .resolve_in_project(&project_id, &p.id)
             .await
@@ -669,7 +669,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskBlockedListParams>,
     ) -> Json<ErrorOr<TaskBlockedListResponse>> {
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let task_result = if let Some(project) = &p.project {
             let project_id = match self.require_project_id(project).await {
                 Ok(id) => id,
@@ -722,7 +722,7 @@ impl DjinnMcpServer {
             return Json(ErrorOr::Error(ErrorResponse::new(e)));
         }
 
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let query = ReadyQuery {
             project_id: Some(project_id),
             issue_type: None,
@@ -765,7 +765,7 @@ impl DjinnMcpServer {
             return Json(ErrorOr::Error(ErrorResponse::new(e)));
         }
 
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
 
         let Some(task) = repo
             .resolve_in_project(&project_id, &p.id)
@@ -853,7 +853,7 @@ impl DjinnMcpServer {
             return Json(ErrorOr::Error(ErrorResponse::new(e)));
         }
 
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let query = ReadyQuery {
             project_id: Some(project_id),
             issue_type: None,
@@ -894,7 +894,7 @@ impl DjinnMcpServer {
             return Json(ErrorOr::Error(ErrorResponse::new(e)));
         }
 
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
 
         let Some(task) = repo
             .resolve_in_project(&project_id, &p.id)
@@ -932,7 +932,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskActivityListParams>,
     ) -> Json<ErrorOr<TaskActivityListResponse>> {
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = match self.require_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => return Json(ErrorOr::Error(e)),
@@ -1017,7 +1017,7 @@ impl DjinnMcpServer {
             Ok(id) => id,
             Err(e) => return Json(ErrorOr::Error(e)),
         };
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let Some(task) = repo
             .resolve_in_project(&project_id, &p.id)
             .await
@@ -1052,13 +1052,13 @@ impl DjinnMcpServer {
         project_id: &str,
         id: &str,
     ) -> std::result::Result<String, ErrorResponse> {
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         if let Ok(Some(task)) = repo.resolve_in_project(project_id, id).await {
             return Ok(task.id);
         }
         // Not found in tasks — check if it's an epic to give a clearer error.
         if let Ok(Some(_)) =
-            EpicRepository::new(self.state.db().clone(), self.state.events().clone())
+            EpicRepository::new(self.state.db().clone(), self.state.event_bus())
                 .resolve_in_project(project_id, id)
                 .await
         {

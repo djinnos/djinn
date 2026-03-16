@@ -77,7 +77,7 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<SettingsGetParams>,
     ) -> Json<SettingsGetResponse> {
         let key = p.key.unwrap_or_else(|| SETTINGS_RAW_KEY.to_string());
-        let repo = SettingsRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = SettingsRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo.get(&key).await {
             Ok(Some(setting)) => {
                 if key == SETTINGS_RAW_KEY {
@@ -126,7 +126,7 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<SettingsSetParams>,
     ) -> Json<SettingsSetResponse> {
         // Load existing settings so we can patch rather than replace.
-        let repo = SettingsRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = SettingsRepository::new(self.state.db().clone(), self.state.event_bus());
         let mut settings = match repo.get(SETTINGS_RAW_KEY).await {
             Ok(Some(s)) => DjinnSettings::from_db_value(&s.value),
             _ => DjinnSettings::default(),
@@ -197,7 +197,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(_): Parameters<SettingsResetParams>,
     ) -> Json<SettingsResetResponse> {
-        let repo = SettingsRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = SettingsRepository::new(self.state.db().clone(), self.state.event_bus());
         let deleted = match repo.delete(SETTINGS_RAW_KEY).await {
             Ok(v) => v,
             Err(e) => {

@@ -4,20 +4,20 @@
 //!   - Per-project: `git:{project_id}:target_branch`
 //!   - Global default: `git:global:target_branch`  (falls back to "main")
 
-use tokio::sync::broadcast;
+
 
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::DjinnEventEnvelope;
+use crate::events::{DjinnEventEnvelope, EventBus};
 use crate::models::GitSettings;
 
 pub struct GitSettingsRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEventEnvelope>,
+    events: EventBus,
 }
 
 impl GitSettingsRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
+    pub fn new(db: Database, events: EventBus) -> Self {
         Self { db, events }
     }
 
@@ -72,7 +72,7 @@ impl GitSettingsRepository {
         .bind(branch)
         .execute(self.db.pool())
         .await?;
-        let _ = self.events.send(DjinnEventEnvelope::git_settings_updated(
+        self.events.send(DjinnEventEnvelope::git_settings_updated(
             project_id,
             &GitSettings { target_branch: branch.to_owned() },
         ));
@@ -92,7 +92,7 @@ impl GitSettingsRepository {
         .bind(branch)
         .execute(self.db.pool())
         .await?;
-        let _ = self.events.send(DjinnEventEnvelope::git_settings_updated(
+        self.events.send(DjinnEventEnvelope::git_settings_updated(
             "global",
             &GitSettings { target_branch: branch.to_owned() },
         ));
@@ -103,13 +103,15 @@ impl GitSettingsRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::broadcast;
+    use crate::events::event_bus_for;
     use crate::test_helpers;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn defaults_to_main_when_no_settings() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
-        let repo = GitSettingsRepository::new(db, tx);
+        let repo = GitSettingsRepository::new(db, event_bus_for(&tx));
 
         let settings = repo.get("some-project-id").await.unwrap();
         assert_eq!(settings.target_branch, "main");
@@ -119,7 +121,7 @@ mod tests {
     async fn project_override_takes_precedence() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
-        let repo = GitSettingsRepository::new(db, tx);
+        let repo = GitSettingsRepository::new(db, event_bus_for(&tx));
 
         repo.set_target_branch("proj-123", "develop").await.unwrap();
         let settings = repo.get("proj-123").await.unwrap();
@@ -130,7 +132,7 @@ mod tests {
     async fn global_default_applies_when_no_project_override() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
-        let repo = GitSettingsRepository::new(db, tx);
+        let repo = GitSettingsRepository::new(db, event_bus_for(&tx));
 
         repo.set_global_target_branch("develop").await.unwrap();
         let settings = repo.get("some-other-project").await.unwrap();
@@ -141,7 +143,7 @@ mod tests {
     async fn project_override_supersedes_global() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
-        let repo = GitSettingsRepository::new(db, tx);
+        let repo = GitSettingsRepository::new(db, event_bus_for(&tx));
 
         repo.set_global_target_branch("develop").await.unwrap();
         repo.set_target_branch("proj-123", "feature-base")
@@ -161,7 +163,7 @@ mod tests {
     async fn set_target_branch_upserts() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
-        let repo = GitSettingsRepository::new(db, tx);
+        let repo = GitSettingsRepository::new(db, event_bus_for(&tx));
 
         repo.set_target_branch("proj", "v1").await.unwrap();
         repo.set_target_branch("proj", "v2").await.unwrap();

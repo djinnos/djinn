@@ -221,7 +221,7 @@ pub(crate) async fn compact_conversation(
     context_window: i64,
 ) -> bool {
     // 1. Persist current messages before replacing them.
-    let repo = SessionMessageRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = SessionMessageRepository::new(app_state.db().clone(), app_state.event_bus());
     if let Err(e) = repo
         .insert_messages_batch(session_id, task_id, &conversation.messages)
         .await

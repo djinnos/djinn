@@ -77,7 +77,7 @@ impl NoteRepository {
             let _ = std::fs::remove_file(&file_path);
         })?;
 
-        let _ = self.events.send(DjinnEventEnvelope::note_created(&note));
+        self.events.send(DjinnEventEnvelope::note_created(&note));
         Ok(note)
     }
 
@@ -206,7 +206,7 @@ impl NoteRepository {
 
         tx.commit().await?;
 
-        let _ = self.events.send(DjinnEventEnvelope::note_updated(&note));
+        self.events.send(DjinnEventEnvelope::note_updated(&note));
         Ok(note)
     }
 
@@ -232,7 +232,7 @@ impl NoteRepository {
         // Best-effort file removal — don't fail if file is already gone.
         let _ = std::fs::remove_file(&current.file_path);
 
-        let _ = self
+        self
             .events
             .send(DjinnEventEnvelope::note_deleted(&id_for_event));
         Ok(())
@@ -330,7 +330,7 @@ impl NoteRepository {
 
         tx.commit().await?;
 
-        let _ = self.events.send(DjinnEventEnvelope::note_updated(&note));
+        self.events.send(DjinnEventEnvelope::note_updated(&note));
         Ok(note)
     }
 }

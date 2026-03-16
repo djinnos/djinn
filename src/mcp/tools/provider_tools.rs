@@ -398,7 +398,7 @@ impl DjinnMcpServer {
         let builtin_ids = builtin::builtin_provider_ids();
         let merged_ids = builtin::merged_provider_ids();
         let credential_repo =
-            CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
+            CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
         let (credential_provider_ids, credential_key_names) = match credential_repo.list().await {
             Ok(creds) => {
                 let provider_ids = creds.iter().map(|c| c.provider_id.clone()).collect();
@@ -454,7 +454,7 @@ impl DjinnMcpServer {
         let builtin_ids = builtin::builtin_provider_ids();
         let merged_ids = builtin::merged_provider_ids();
         let credential_repo =
-            CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
+            CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
         let (credential_provider_ids, credential_key_names) = match credential_repo.list().await {
             Ok(creds) => {
                 let provider_ids = creds.iter().map(|c| c.provider_id.clone()).collect();
@@ -556,7 +556,7 @@ impl DjinnMcpServer {
         let builtin_ids = builtin::builtin_provider_ids();
         let merged_ids = builtin::merged_provider_ids();
         let credential_repo =
-            CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
+            CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
         let credentials = credential_repo.list().await.unwrap_or_else(|e| {
             tracing::warn!(error = %e, "provider_models_connected: failed to load credentials");
             Vec::new()
@@ -675,7 +675,7 @@ impl DjinnMcpServer {
         };
 
         let credential_repo =
-            CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
+            CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
         let result = match flow_kind {
             OAuthFlowKind::Codex => codex::run_codex_flow(&credential_repo).await.map(|_| ()),
             OAuthFlowKind::Copilot => match copilot::start_copilot_flow().await {
@@ -831,7 +831,7 @@ impl DjinnMcpServer {
 
         // Persist to DB.
         let repo =
-            CustomProviderRepository::new(self.state.db().clone(), self.state.events().clone());
+            CustomProviderRepository::new(self.state.db().clone(), self.state.event_bus());
         if let Err(e) = repo.upsert(&provider).await {
             tracing::warn!(id = %input.id, error = %e, "provider_add_custom: DB upsert failed");
             return Json(ProviderAddCustomResponse {
@@ -893,7 +893,7 @@ impl DjinnMcpServer {
 
         // 1. Delete all credentials for this provider.
         let credential_repo =
-            CredentialRepository::new(self.state.db().clone(), self.state.events().clone());
+            CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
         let credentials_deleted = match credential_repo.delete_by_provider(provider_id).await {
             Ok(n) => i64::try_from(n).unwrap_or(i64::MAX),
             Err(e) => {
@@ -919,7 +919,7 @@ impl DjinnMcpServer {
 
         // 3. Delete custom provider entry (no-op for built-in providers).
         let custom_repo =
-            CustomProviderRepository::new(self.state.db().clone(), self.state.events().clone());
+            CustomProviderRepository::new(self.state.db().clone(), self.state.event_bus());
         let custom_provider_deleted = match custom_repo.delete(provider_id).await {
             Ok(deleted) => deleted,
             Err(e) => {

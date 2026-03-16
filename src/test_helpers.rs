@@ -4,7 +4,6 @@ use axum::body::Body;
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
 use http_body_util::BodyExt;
 use serde_json::Value;
-use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
@@ -15,7 +14,7 @@ use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
 use crate::db::TaskRepository;
 use crate::db::connection::Database;
-use crate::events::DjinnEventEnvelope;
+use crate::events::EventBus;
 use crate::models::Epic;
 use crate::models::Note;
 use crate::models::Project;
@@ -49,9 +48,8 @@ pub async fn test_app_state_in_memory() -> AppState {
     AppState::new(db, cancel)
 }
 
-pub fn test_events() -> broadcast::Sender<DjinnEventEnvelope> {
-    let (tx, _rx) = broadcast::channel(256);
-    tx
+pub fn test_events() -> EventBus {
+    EventBus::noop()
 }
 
 pub async fn create_test_project(db: &Database) -> Project {

@@ -253,7 +253,7 @@ impl CoordinatorActor {
         // Always start with execution paused for all projects.
         #[cfg(not(test))]
         {
-            let repo = crate::db::ProjectRepository::new(self.db.clone(), self.events_tx.clone());
+            let repo = crate::db::ProjectRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
             if let Ok(projects) = repo.list().await {
                 for p in projects {
                     self.paused_projects.insert(p.id);
@@ -338,7 +338,7 @@ impl CoordinatorActor {
             } => {
                 // Global pause = pause every known project individually.
                 let repo =
-                    crate::db::ProjectRepository::new(self.db.clone(), self.events_tx.clone());
+                    crate::db::ProjectRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
                 if let Ok(projects) = repo.list().await {
                     for p in projects {
                         self.paused_projects.insert(p.id);
@@ -556,7 +556,7 @@ impl CoordinatorActor {
         #[cfg(not(test))]
         {
             let cred_repo =
-                crate::db::CredentialRepository::new(self.db.clone(), self.events_tx.clone());
+                crate::db::CredentialRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
             let credentials = match cred_repo.list().await {
                 Ok(credentials) => credentials,
                 Err(_) => return Vec::new(),
@@ -619,11 +619,11 @@ impl CoordinatorActor {
     }
 
     fn task_repo(&self) -> TaskRepository {
-        TaskRepository::new(self.db.clone(), self.events_tx.clone())
+        TaskRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx))
     }
 
     async fn project_path_for_id(&self, project_id: &str) -> Option<String> {
-        let repo = ProjectRepository::new(self.db.clone(), self.events_tx.clone());
+        let repo = ProjectRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
         repo.get_path(project_id).await.ok().flatten()
     }
 }
@@ -905,7 +905,7 @@ mod tests {
     }
 
     async fn make_epic(db: &Database, tx: broadcast::Sender<DjinnEventEnvelope>) -> crate::models::Epic {
-        EpicRepository::new(db.clone(), tx)
+        EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
             .create("Epic", "", "", "", "", None)
             .await
             .unwrap()
@@ -958,7 +958,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let epic = make_epic(&db, tx.clone()).await;
-        let repo = TaskRepository::new(db.clone(), tx.clone());
+        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
         repo.create(&epic.id, "T1", "", "", "task", 0, "", Some("open"))
             .await
             .unwrap();
@@ -981,7 +981,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let epic = make_epic(&db, tx.clone()).await;
-        let repo = TaskRepository::new(db.clone(), tx.clone());
+        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
         // Create a ready task (open, no blockers).
         repo.create(&epic.id, "T1", "", "", "task", 0, "", Some("open"))
@@ -1004,7 +1004,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let epic = make_epic(&db, tx.clone()).await;
-        let repo = TaskRepository::new(db.clone(), tx.clone());
+        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
         let task = repo
             .create(&epic.id, "Review me", "", "", "task", 0, "", Some("open"))
@@ -1062,7 +1062,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let epic = make_epic(&db, tx.clone()).await;
-        let repo = TaskRepository::new(db.clone(), tx.clone());
+        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
         // Manually put a task in_progress (simulating an orphaned session).
         let task = repo

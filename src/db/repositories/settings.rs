@@ -1,17 +1,17 @@
-use tokio::sync::broadcast;
+
 
 use crate::db::connection::Database;
 use crate::error::Result;
-use crate::events::DjinnEventEnvelope;
+use crate::events::{DjinnEventEnvelope, EventBus};
 use crate::models::Setting;
 
 pub struct SettingsRepository {
     db: Database,
-    events: broadcast::Sender<DjinnEventEnvelope>,
+    events: EventBus,
 }
 
 impl SettingsRepository {
-    pub fn new(db: Database, events: broadcast::Sender<DjinnEventEnvelope>) -> Self {
+    pub fn new(db: Database, events: EventBus) -> Self {
         Self { db, events }
     }
 
@@ -56,7 +56,7 @@ impl SettingsRepository {
         .await?;
 
         // Emit event — ignore send error (no receivers is fine).
-        let _ = self.events.send(DjinnEventEnvelope {
+        self.events.send(DjinnEventEnvelope {
             entity_type: "setting",
             action: "updated",
             payload: serde_json::to_value(&setting).unwrap_or_default(),
@@ -76,7 +76,7 @@ impl SettingsRepository {
             .await?;
         let deleted = res.rows_affected() > 0;
         if deleted {
-            let _ = self.events.send(DjinnEventEnvelope {
+            self.events.send(DjinnEventEnvelope {
                 entity_type: "setting",
                 action: "updated",
                 payload: serde_json::to_value(Setting {
@@ -97,13 +97,15 @@ impl SettingsRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::broadcast;
+    use crate::events::event_bus_for;
     use crate::test_helpers;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_and_get_setting() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
-        let repo = SettingsRepository::new(db, tx);
+        let repo = SettingsRepository::new(db, event_bus_for(&tx));
 
         let setting = repo.set("theme", "dark").await.unwrap();
         assert_eq!(setting.key, "theme");
@@ -117,7 +119,7 @@ mod tests {
     async fn set_emits_event() {
         let db = test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(1024);
-        let repo = SettingsRepository::new(db, tx);
+        let repo = SettingsRepository::new(db, event_bus_for(&tx));
 
         repo.set("lang", "en").await.unwrap();
 
@@ -133,7 +135,7 @@ mod tests {
     async fn get_missing_returns_none() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
-        let repo = SettingsRepository::new(db, tx);
+        let repo = SettingsRepository::new(db, event_bus_for(&tx));
 
         assert!(repo.get("nonexistent").await.unwrap().is_none());
     }
@@ -142,7 +144,7 @@ mod tests {
     async fn set_upserts() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
-        let repo = SettingsRepository::new(db, tx);
+        let repo = SettingsRepository::new(db, event_bus_for(&tx));
 
         repo.set("k", "v1").await.unwrap();
         let updated = repo.set("k", "v2").await.unwrap();
@@ -156,7 +158,7 @@ mod tests {
     async fn list_returns_all_keys_sorted() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
-        let repo = SettingsRepository::new(db, tx);
+        let repo = SettingsRepository::new(db, event_bus_for(&tx));
 
         repo.set("b", "2").await.unwrap();
         repo.set("a", "1").await.unwrap();
@@ -171,7 +173,7 @@ mod tests {
     async fn delete_removes_key() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(1024);
-        let repo = SettingsRepository::new(db, tx);
+        let repo = SettingsRepository::new(db, event_bus_for(&tx));
 
         repo.set("x", "1").await.unwrap();
         assert!(repo.delete("x").await.unwrap());

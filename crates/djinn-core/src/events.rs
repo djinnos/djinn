@@ -150,11 +150,14 @@ impl DjinnEventEnvelope {
 
 /// A type-erased event sink. Wraps a callback so that djinn-db repositories
 /// can emit events without depending on tokio broadcast.
-pub struct EventBus(Box<dyn Fn(DjinnEventEnvelope) + Send + Sync>);
+///
+/// Cheap to clone — the inner callback is reference-counted.
+#[derive(Clone)]
+pub struct EventBus(std::sync::Arc<dyn Fn(DjinnEventEnvelope) + Send + Sync>);
 
 impl EventBus {
     pub fn new(f: impl Fn(DjinnEventEnvelope) + Send + Sync + 'static) -> Self {
-        EventBus(Box::new(f))
+        EventBus(std::sync::Arc::new(f))
     }
 
     pub fn send(&self, event: DjinnEventEnvelope) {
@@ -162,7 +165,7 @@ impl EventBus {
     }
 
     pub fn noop() -> Self {
-        EventBus(Box::new(|_| {}))
+        EventBus(std::sync::Arc::new(|_| {}))
     }
 }
 

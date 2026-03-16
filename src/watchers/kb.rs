@@ -41,7 +41,7 @@ pub fn spawn_kb_watchers(
     tokio::spawn(async move {
         // Initial setup: watch all existing projects.
         {
-            let project_repo = ProjectRepository::new(db.clone(), events_tx.clone());
+            let project_repo = ProjectRepository::new(db.clone(), crate::events::event_bus_for(&events_tx));
             match project_repo.list().await {
                 Ok(projects) => {
                     let mut guard = state_clone.lock().await;
@@ -79,7 +79,7 @@ pub fn spawn_kb_watchers(
                             let mut guard = state_clone.lock().await;
                             // Find and remove by scanning — we don't have path from the delete event.
                             // The watcher is dropped which stops watching.
-                            let project_repo = ProjectRepository::new(guard.db.clone(), guard.events_tx.clone());
+                            let project_repo = ProjectRepository::new(guard.db.clone(), crate::events::event_bus_for(&guard.events_tx));
                             // Project is already deleted, so we need to find which watcher to remove.
                             // We'll just try to remove any watcher whose path no longer has a project.
                             let current_projects: std::collections::HashSet<PathBuf> = match project_repo.list().await {
@@ -114,7 +114,7 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
     }
 
     let db = state.db.clone();
-    let events_tx = state.events_tx.clone();
+    let events_tx = crate::events::event_bus_for(&state.events_tx);
     let project_id = project_id.to_string();
     let project_path_owned = project_path.to_path_buf();
 

@@ -5,7 +5,7 @@ impl CoordinatorActor {
     /// Spawn background health-check tasks for all projects (or one) that have
     /// setup/verification commands configured (ADR-014, task bit0).
     pub(super) async fn validate_all_project_health(&mut self, project_id_filter: Option<String>) {
-        let repo = ProjectRepository::new(self.db.clone(), self.events_tx.clone());
+        let repo = ProjectRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
         let projects = match repo.list().await {
             Ok(p) => p,
             Err(e) => {
@@ -146,7 +146,7 @@ pub(super) async fn run_project_health_check(
     let project_path = std::path::PathBuf::from(&path);
 
     // Resolve target branch (falls back to "main").
-    let target_branch = GitSettingsRepository::new(app_state.db().clone(), events_tx.clone())
+    let target_branch = GitSettingsRepository::new(app_state.db().clone(), crate::events::event_bus_for(&events_tx))
         .get(&project_id)
         .await
         .map(|s| s.target_branch)

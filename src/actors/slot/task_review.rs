@@ -31,7 +31,7 @@ pub(crate) async fn success_transition(
             // its session (e.g. pm_intervention_complete, force_close).  If the
             // task is no longer in_pm_intervention, the PM acted — no fallback
             // transition needed.
-            let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+            let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
             if let Ok(Some(task)) = repo.get(task_id).await
                 && task.status != "in_pm_intervention"
             {
@@ -55,7 +55,7 @@ pub(crate) async fn success_transition(
         }
         AgentType::TaskReviewer => {
             // Derive verdict from acceptance criteria state on the task.
-            let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+            let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
             match repo.get(task_id).await {
                 Ok(Some(task)) => {
                     if all_acceptance_criteria_met(&task.acceptance_criteria) {
@@ -136,7 +136,7 @@ fn all_acceptance_criteria_met(ac_json: &str) -> bool {
 /// Returns true if the AC met-state is identical to the snapshot from when
 /// the current review cycle started (i.e. the worker made no AC progress).
 async fn is_stale_review_cycle(task_id: &str, current_ac_json: &str, app_state: &AppState) -> bool {
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     let snapshot_json = match repo.last_review_start_ac_snapshot(task_id).await {
         Ok(Some(s)) => s,
         _ => return false, // no snapshot → assume not stale

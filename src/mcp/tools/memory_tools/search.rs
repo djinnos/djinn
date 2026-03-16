@@ -18,7 +18,7 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
         let limit = p.limit.unwrap_or(10).clamp(1, 100) as usize;
 
         let results = match repo
@@ -74,7 +74,7 @@ impl DjinnMcpServer {
                 error: Some(format!("project not found: {}", params.project)),
             });
         };
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
         let graph = repo.graph(&project_id).await.unwrap_or_default();
         Json(MemoryGraphResponse {
             nodes: graph.nodes,
@@ -99,7 +99,7 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
 
         let Some(note) = repo
             .get_by_permalink(&project_id, &p.permalink)
@@ -135,7 +135,7 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
         let summary = repo
             .reindex_from_disk(&project_id, Path::new(&params.project))
             .await
@@ -167,7 +167,7 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.events().clone());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
         let depth = p.depth.unwrap_or(1).max(0);
         let max_related = p.max_related.unwrap_or(10).clamp(1, 50) as usize;
 

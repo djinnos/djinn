@@ -58,10 +58,7 @@ async fn provider_connected_returns_only_seeded_provider() {
     let app = create_test_app_with_db(db.clone());
     let session_id = initialize_mcp_session(&app).await;
 
-    let cred_repo = CredentialRepository::new(db, {
-        let (tx, _rx) = tokio::sync::broadcast::channel(256);
-        tx
-    });
+    let cred_repo = CredentialRepository::new(db, crate::events::EventBus::noop());
     cred_repo
         .set("openai", "OPENAI_API_KEY", "sk-test")
         .await
@@ -90,10 +87,7 @@ async fn provider_models_connected_filters_to_connected_provider_models() {
     let app = create_test_app_with_db(db.clone());
     let session_id = initialize_mcp_session(&app).await;
 
-    let cred_repo = CredentialRepository::new(db, {
-        let (tx, _rx) = tokio::sync::broadcast::channel(256);
-        tx
-    });
+    let cred_repo = CredentialRepository::new(db, crate::events::EventBus::noop());
     cred_repo
         .set("openai", "OPENAI_API_KEY", "sk-test")
         .await

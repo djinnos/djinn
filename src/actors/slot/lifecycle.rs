@@ -203,7 +203,7 @@ pub async fn run_task_lifecycle(
                 }
             } else if !paused_worktree_path.exists() || !paused_worktree_path.is_dir() {
                 let session_repo =
-                    SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+                    SessionRepository::new(app_state.db().clone(), app_state.event_bus());
                 let _ = session_repo
                     .update(
                         &paused.id,
@@ -375,7 +375,7 @@ pub async fn run_task_lifecycle(
                     let reason = format!("Setup commands error: {e}");
                     tracing::warn!(task_id = %task.short_id, error = %e, "Lifecycle: setup command error");
                     let task_repo =
-                        TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+                        TaskRepository::new(app_state.db().clone(), app_state.event_bus());
                     let _ = task_repo
                         .transition(
                             &task.id,
@@ -413,7 +413,7 @@ pub async fn run_task_lifecycle(
                             "Lifecycle: setup command failed; releasing task"
                         );
                         let task_repo =
-                            TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+                            TaskRepository::new(app_state.db().clone(), app_state.event_bus());
                         let _ = task_repo
                             .transition(
                                 &task.id,
@@ -448,7 +448,7 @@ pub async fn run_task_lifecycle(
 
     // Fetch activity log for the prompt: last 3 high-signal comments plus a
     // summary of total counts by role so the agent knows what to look up.
-    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     let activity_text = match task_repo.list_activity(&task.id).await {
         Ok(entries) if !entries.is_empty() => {
             // Last 3 high-signal comments (PM, reviewer, verification)
@@ -489,8 +489,8 @@ pub async fn run_task_lifecycle(
     // ── Build epic context for PM agents ────────────────────────────────────
     let epic_context = if agent_type == AgentType::PM {
         if let Some(ref epic_id) = task.epic_id {
-            let epic_repo = crate::db::EpicRepository::new(app_state.db().clone(), app_state.events().clone());
-            let task_repo_ctx = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+            let epic_repo = crate::db::EpicRepository::new(app_state.db().clone(), app_state.event_bus());
+            let task_repo_ctx = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
             match epic_repo.get(epic_id).await {
                 Ok(Some(epic)) => {
                     let mut ctx_lines = vec![
@@ -550,7 +550,7 @@ pub async fn run_task_lifecycle(
         .map(|m| m.context_window)
         .unwrap_or(0);
 
-    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
 
     // ── Build Djinn-native provider ───────────────────────────────────────────
     let telemetry_meta = build_telemetry_meta(agent_type, &task_id);
@@ -750,7 +750,7 @@ pub async fn run_task_lifecycle(
     if let Some(ref record_id) = current_record_id {
         let msg_repo = crate::db::SessionMessageRepository::new(
             app_state.db().clone(),
-            app_state.events().clone(),
+            app_state.event_bus(),
         );
         if let Err(e) = msg_repo
             .insert_messages_batch(record_id, &task.id, &conversation.messages)
@@ -858,7 +858,7 @@ pub async fn run_task_lifecycle(
     }
 
     // Log reviewer feedback.
-    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.events().clone());
+    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     if let Some(feedback) = final_output.reviewer_feedback.as_deref() {
         let payload = serde_json::json!({ "body": feedback }).to_string();
         if let Err(e) = task_repo
@@ -1108,7 +1108,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         .map(|m| m.context_window)
         .unwrap_or(0);
 
-    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.events().clone());
+    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
 
     // ── Build provider ────────────────────────────────────────────────────
     let telemetry_meta = build_telemetry_meta(agent_type, &task_id);
@@ -1197,7 +1197,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     if let Some(ref record_id) = current_record_id {
         let msg_repo = crate::db::SessionMessageRepository::new(
             app_state.db().clone(),
-            app_state.events().clone(),
+            app_state.event_bus(),
         );
         let _ = msg_repo
             .insert_messages_batch(record_id, &task_id, &conversation.messages)
