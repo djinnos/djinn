@@ -210,6 +210,8 @@ export function initSSEEventHandlers(): () => void {
     if (!payload.task_id) return;
     const existing = taskStore.getState().getTask(payload.task_id);
     if (!existing) return;
+    // Setup is complete — clear lifecycle steps so "setting up" badge disappears
+    verificationStore.getState().clearLifecycleSteps(payload.task_id);
     taskStore.getState().updateTask({
       ...existing,
       active_session: {
@@ -227,6 +229,7 @@ export function initSSEEventHandlers(): () => void {
     if (!payload.task_id) return;
     const existing = taskStore.getState().getTask(payload.task_id);
     if (!existing) return;
+    verificationStore.getState().clearLifecycleSteps(payload.task_id);
     taskStore.getState().updateTask({
       ...existing,
       active_session: undefined,

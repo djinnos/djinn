@@ -75,7 +75,7 @@ function formatCompactDuration(totalSeconds: number): string {
 
 // --- Status badge for in-flight cards ---
 
-function getStatusBadge(status: string, hasSession: boolean, allAcMet: boolean): { label: string; className: string } | null {
+function getStatusBadge(status: string, hasSession: boolean, allAcMet: boolean, hasSetupStep: boolean): { label: string; className: string } | null {
   if (status === "needs_pm_intervention" && !hasSession) {
     return { label: "agent stuck", className: "text-red-400" };
   }
@@ -85,17 +85,17 @@ function getStatusBadge(status: string, hasSession: boolean, allAcMet: boolean):
   if ((status === "needs_task_review" || status === "in_task_review") && !hasSession && allAcMet) {
     return { label: "merging", className: "text-green-400 animate-pulse" };
   }
-  if (status === "in_progress" && !hasSession) {
+  if (status === "in_progress" && (!hasSession || hasSetupStep)) {
     return { label: "setting up", className: "text-blue-400 animate-pulse" };
   }
   return null;
 }
 
-function StatusBadge({ status, hasSession, allAcMet }: { status: string; hasSession: boolean; allAcMet: boolean }) {
-  const badge = getStatusBadge(status, hasSession, allAcMet);
+function StatusBadge({ status, hasSession, allAcMet, hasSetupStep, tooltip }: { status: string; hasSession: boolean; allAcMet: boolean; hasSetupStep: boolean; tooltip?: string }) {
+  const badge = getStatusBadge(status, hasSession, allAcMet, hasSetupStep);
   if (!badge) return null;
   return (
-    <span className={cn("text-[10px] font-medium", badge.className)}>
+    <span className={cn("text-[10px] font-medium", badge.className)} title={tooltip || undefined}>
       {badge.label}
     </span>
   );
@@ -323,12 +323,21 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const cardTint = getCardTint(task);
   const backlogBadge = getBacklogBadge(task.status);
   const runningStep = useStoreWithEqualityFn(verificationStore, (state) => getTaskRunningStep(task.id, state));
+  const isSettingUp = task.status === "in_progress" && runningStep?.phase === "setup";
   const statusLabel =
-    task.status === "in_progress" && runningStep?.phase === "setup"
+    isSettingUp
       ? `setting up: ${runningStep.name}`
       : task.status === "verifying" && runningStep?.phase === "verification"
         ? `verifying: ${runningStep.name}`
         : null;
+  // Build tooltip for the "setting up" badge: shows step, duration, and model
+  const setupTooltip = isSettingUp
+    ? [
+        runningStep.name,
+        shouldShowDuration ? formatCompactDuration(totalTrackedSeconds) : null,
+        task.active_session?.model_id,
+      ].filter(Boolean).join(" · ")
+    : undefined;
 
   return (
     <Card
@@ -391,16 +400,16 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           {/* Status badge for in-flight */}
           {isInFlight && (
             <span className="inline-flex items-center gap-1" data-testid="taskcard-status-badge">
-              <StatusBadge status={task.status} hasSession={!!task.active_session} allAcMet={acTotal > 0 && acMet === acTotal} />
-              {statusLabel && <span className="text-[10px] font-medium text-muted-foreground">{statusLabel}</span>}
+              <StatusBadge status={task.status} hasSession={!!task.active_session} allAcMet={acTotal > 0 && acMet === acTotal} hasSetupStep={!!isSettingUp} tooltip={setupTooltip} />
+              {statusLabel && !isSettingUp && <span className="text-[10px] font-medium text-muted-foreground">{statusLabel}</span>}
             </span>
           )}
 
-          {/* Duration & model for in-flight / done */}
-          {shouldShowDuration && (
+          {/* Duration & model for in-flight / done (hidden during setup — shown in tooltip) */}
+          {shouldShowDuration && !isSettingUp && (
             <span className="text-[10px]">{formatCompactDuration(totalTrackedSeconds)}</span>
           )}
-          {task.active_session?.model_id && (
+          {task.active_session?.model_id && !isSettingUp && (
             <span className="max-w-[80px] truncate text-[10px]" title={task.active_session.model_id}>
               {task.active_session.model_id}
             </span>
@@ -433,8 +442,8 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           </div>
         )}
 
-        {/* Agent avatar – shown when task has an active session */}
-        {task.active_session && (
+        {/* Agent avatar – shown when task has an active session (hidden during setup) */}
+        {task.active_session && !isSettingUp && (
           <img
             src={agentAvatar(task.active_session.agent_type)}
             alt={task.active_session.agent_type ?? "agent"}

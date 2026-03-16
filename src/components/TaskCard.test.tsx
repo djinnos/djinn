@@ -81,7 +81,10 @@ describe("TaskCard", () => {
     });
 
     const { rerender } = render(<TaskCard task={setupTask} />);
-    expect(screen.getByText("setting up: cargo build")).toBeInTheDocument();
+    // During setup, only the "setting up" badge is shown; details are in the tooltip
+    const setupBadge = screen.getByText("setting up");
+    expect(setupBadge).toBeInTheDocument();
+    expect(setupBadge).toHaveAttribute("title", expect.stringContaining("cargo build"));
 
     rerender(<TaskCard task={verifyingTask} />);
     expect(screen.getByText("verifying: cargo test")).toBeInTheDocument();
