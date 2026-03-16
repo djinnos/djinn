@@ -7,6 +7,7 @@ pub mod provider;
 pub mod session;
 pub mod session_message;
 pub mod settings;
+pub mod task;
 
 pub use credential::Credential;
 pub use epic::Epic;
@@ -20,6 +21,9 @@ pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
 pub use session::{SessionRecord, SessionStatus};
 pub use session_message::SessionMessage;
 pub use settings::{DjinnSettings, Setting};
+pub use task::{
+    ActivityEntry, Task, TaskStatus, TransitionAction, TransitionApply, compute_transition,
+};
 
 /// Parse a JSON array string (e.g. '["a","b"]') into a `Vec<String>`.
 /// Returns an empty vec on any parse failure.
