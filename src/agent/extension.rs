@@ -86,6 +86,7 @@ where
         "epic_tasks" => call_epic_tasks(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments).await,
+        "memory_list" => call_memory_list(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
         "read" => call_read(state, &call.arguments, worktree_path).await,
         "write" => call_write(state, &call.arguments, worktree_path).await,
@@ -206,6 +207,15 @@ struct MemorySearchParams {
     #[serde(rename = "type")]
     note_type: Option<String>,
     limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct MemoryListParams {
+    project: Option<String>,
+    folder: Option<String>,
+    #[serde(rename = "type")]
+    note_type: Option<String>,
+    depth: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -835,6 +845,44 @@ async fn call_memory_search(
         .collect();
 
     Ok(serde_json::json!({ "results": items }))
+}
+
+async fn call_memory_list(
+    state: &AppState,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: MemoryListParams = parse_args(arguments)?;
+    let project_path = resolve_project_path(p.project);
+    let project_id = project_id_for_path(state, &project_path).await?;
+
+    let repo = NoteRepository::new(state.db().clone(), state.events().clone());
+    let depth = p.depth.unwrap_or(1);
+
+    let notes = repo
+        .list_compact(
+            &project_id,
+            p.folder.as_deref(),
+            p.note_type.as_deref(),
+            depth,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let items: Vec<serde_json::Value> = notes
+        .into_iter()
+        .map(|n| {
+            serde_json::json!({
+                "id": n.id,
+                "permalink": n.permalink,
+                "title": n.title,
+                "note_type": n.note_type,
+                "folder": n.folder,
+                "updated_at": n.updated_at,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({ "notes": items }))
 }
 
 async fn call_shell(
@@ -2205,6 +2253,22 @@ fn tool_memory_search() -> RmcpTool {
     )
 }
 
+fn tool_memory_list() -> RmcpTool {
+    RmcpTool::new(
+        "memory_list".to_string(),
+        "List notes in project memory. Returns compact summaries without full content.".to_string(),
+        object!({
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Absolute project path"},
+                "folder": {"type": "string", "description": "Filter by folder (e.g. \"decisions\")"},
+                "type": {"type": "string", "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\")"},
+                "depth": {"type": "integer", "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels"}
+            }
+        }),
+    )
+}
+
 fn tool_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
@@ -2452,6 +2516,7 @@ pub(crate) fn tool_schemas(agent_type: AgentType) -> Vec<serde_json::Value> {
         serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
         serde_json::to_value(tool_memory_read()).expect("serialize tool_memory_read"),
         serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
+        serde_json::to_value(tool_memory_list()).expect("serialize tool_memory_list"),
     ];
 
     tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
