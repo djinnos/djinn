@@ -93,6 +93,13 @@ pub(super) async fn run_reply_loop(
     // so they survive the borrow and can be used for telemetry/return values.
     let mut total_tokens_in: u32 = 0;
     let mut total_tokens_out: u32 = 0;
+    // Tracks the actual context-window fill for the most recent generation.
+    // Each generation sends the entire conversation, so `usage.input` IS the
+    // current context size — it overwrites the previous value rather than
+    // accumulating.  This is the correct metric for the compaction threshold
+    // and for the usage_pct SSE event.  `total_tokens_in` is kept as a
+    // billing / telemetry aggregate (sum across all turns).
+    let mut current_context_tokens: u32 = 0;
     let mut final_assistant_text = String::new();
 
     // Resumed sessions may respond text-only if the model determines the
@@ -255,6 +262,7 @@ pub(super) async fn run_reply_loop(
                     if compacted {
                         total_tokens_in = 0;
                         total_tokens_out = 0;
+                        current_context_tokens = 0;
                         compaction_attempts += 1;
                         conversation.push(crate::message::Message::user(
                             "Continue with the task.",
@@ -342,18 +350,21 @@ pub(super) async fn run_reply_loop(
                             StreamEvent::Usage(usage) => {
                                 turn_tokens_in = usage.input;
                                 turn_tokens_out = usage.output;
+                                // Overwrite (don't sum): each generation's input
+                                // tokens represent the full current context size.
+                                current_context_tokens = usage.input;
                                 total_tokens_in = total_tokens_in.saturating_add(usage.input);
                                 total_tokens_out = total_tokens_out.saturating_add(usage.output);
 
                                 let usage_pct = if context_window > 0 {
-                                    total_tokens_in as f64 / context_window as f64
+                                    current_context_tokens as f64 / context_window as f64
                                 } else {
                                     0.0
                                 };
                                 app_state.event_bus.send(DjinnEventEnvelope::session_token_update(
                                     session_id,
                                     task_id,
-                                    total_tokens_in as i64,
+                                    current_context_tokens as i64,
                                     total_tokens_out as i64,
                                     context_window,
                                     usage_pct,
@@ -412,6 +423,7 @@ pub(super) async fn run_reply_loop(
                 if compacted {
                     total_tokens_in = 0;
                     total_tokens_out = 0;
+                    current_context_tokens = 0;
                     compaction_attempts += 1;
                     conversation.push(crate::message::Message::user(
                         "Continue with the task.",
@@ -503,10 +515,12 @@ pub(super) async fn run_reply_loop(
             conversation.push(assistant_msg);
 
             // ── Compaction threshold check ────────────────────────────────────
-            if crate::compaction::needs_compaction(total_tokens_in, context_window) {
+            if crate::compaction::needs_compaction(current_context_tokens, context_window) {
                 tracing::info!(
                     task_id = %task_id,
-                    usage_pct = total_tokens_in as f64 / context_window as f64,
+                    current_context_tokens,
+                    context_window,
+                    usage_pct = current_context_tokens as f64 / context_window as f64,
                     "ReplyLoop: compaction threshold reached, compacting"
                 );
                 let compacted = crate::compaction::compact_conversation(
@@ -525,6 +539,7 @@ pub(super) async fn run_reply_loop(
                     // values for the new context size.
                     total_tokens_in = 0;
                     total_tokens_out = 0;
+                    current_context_tokens = 0;
 
                     // After compaction the conversation was replaced — the
                     // assistant message containing this turn's ToolUse blocks
@@ -792,4 +807,411 @@ pub(super) async fn run_reply_loop(
         total_tokens_in as i64,
         total_tokens_out as i64,
     )
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::{ContentBlock, Conversation, Message};
+    use crate::provider::{LlmProvider, StreamEvent, TokenUsage};
+    use crate::test_helpers;
+    use djinn_db::{SessionMessageRepository, SessionRepository};
+    use futures::stream;
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use tokio_util::sync::CancellationToken;
+
+    // ── MockLlmProvider ───────────────────────────────────────────────────────
+
+    /// Pre-scripted response: text (optional) + tool calls + token counts.
+    struct MockResponse {
+        text: Option<String>,
+        tool_calls: Vec<ContentBlock>,
+        input_tokens: u32,
+        output_tokens: u32,
+    }
+
+    impl MockResponse {
+        fn text_only(text: &str, input_tokens: u32) -> Self {
+            Self {
+                text: Some(text.to_string()),
+                tool_calls: vec![],
+                input_tokens,
+                output_tokens: 10,
+            }
+        }
+
+        fn tool_call(id: &str, name: &str, input_tokens: u32) -> Self {
+            Self {
+                text: None,
+                tool_calls: vec![ContentBlock::ToolUse {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    input: serde_json::json!({}),
+                }],
+                input_tokens,
+                output_tokens: 10,
+            }
+        }
+    }
+
+    /// An `LlmProvider` that pops from a fixed queue of `MockResponse`s.
+    /// When the queue is empty it returns a text-only "fallback done" response
+    /// so that the loop always terminates.
+    struct MockProvider {
+        responses: Arc<Mutex<VecDeque<MockResponse>>>,
+    }
+
+    impl MockProvider {
+        fn new(responses: Vec<MockResponse>) -> Self {
+            Self {
+                responses: Arc::new(Mutex::new(responses.into())),
+            }
+        }
+
+        fn remaining(&self) -> usize {
+            self.responses.lock().unwrap().len()
+        }
+    }
+
+    impl LlmProvider for MockProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _conversation: &'a Conversation,
+            _tools: &'a [serde_json::Value],
+        ) -> Pin<
+            Box<
+                dyn futures::Future<
+                        Output = anyhow::Result<
+                            Pin<
+                                Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                            >,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let responses = Arc::clone(&self.responses);
+            Box::pin(async move {
+                let resp = responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| MockResponse::text_only("fallback done", 50));
+
+                let mut events: Vec<anyhow::Result<StreamEvent>> = vec![];
+                if let Some(text) = resp.text {
+                    events.push(Ok(StreamEvent::Delta(ContentBlock::Text { text })));
+                }
+                for tc in resp.tool_calls {
+                    events.push(Ok(StreamEvent::Delta(tc)));
+                }
+                events.push(Ok(StreamEvent::Usage(TokenUsage {
+                    input: resp.input_tokens,
+                    output: resp.output_tokens,
+                })));
+                events.push(Ok(StreamEvent::Done));
+
+                Ok(Box::pin(stream::iter(events))
+                    as Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>)
+            })
+        }
+    }
+
+    // ── Test helpers ──────────────────────────────────────────────────────────
+
+    /// Returns (context, project_path, task_id, session_id, cancel).
+    async fn make_context() -> (
+        crate::context::AgentContext,
+        String,
+        String,
+        String,
+        CancellationToken,
+    ) {
+        let cancel = CancellationToken::new();
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        // Create a real session row so session_messages FK constraint is satisfied.
+        let session_repo = SessionRepository::new(db.clone(), ctx.event_bus.clone());
+        let session = session_repo
+            .create(
+                &project.id,
+                Some(&task.id),
+                "test/mock-model",
+                "worker",
+                None,
+                None,
+            )
+            .await
+            .expect("create session");
+        (ctx, project.path, task.id, session.id, cancel)
+    }
+
+    async fn count_persisted_messages(
+        app_state: &crate::context::AgentContext,
+        session_id: &str,
+    ) -> usize {
+        let repo = SessionMessageRepository::new(
+            app_state.db.clone(),
+            app_state.event_bus.clone(),
+        );
+        repo.load_conversation(session_id)
+            .await
+            .map(|c| c.messages.len())
+            .unwrap_or(0)
+    }
+
+    // ── Tests ─────────────────────────────────────────────────────────────────
+
+    /// A single ToolUse turn above the compaction threshold triggers compaction,
+    /// persists messages to DB, and replaces the conversation. The session then
+    /// continues with the compacted context and ends normally.
+    #[tokio::test]
+    async fn proactive_compaction_fires_when_current_context_exceeds_threshold() {
+        // context_window = 10,000 → threshold = 8,000 tokens
+        let context_window = 10_000_i64;
+
+        // Turn 1: ToolUse + 8,500 input tokens → above threshold → compaction fires.
+        //         Tool dispatch is skipped when compaction fires (conversation replaced).
+        // Turn 2: compaction LLM call → summary text returned.
+        // Turn 3: "Continue with the task." → text-only → ends session.
+        let provider = MockProvider::new(vec![
+            MockResponse::tool_call("t1", "nonexistent_tool", 8_500),
+            MockResponse::text_only("Summary: worked on the task using shell tools.", 200),
+            MockResponse::text_only("Completed the task.", 300),
+        ]);
+
+        let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let worktree_path = std::path::PathBuf::from("/tmp");
+        let mut conv = Conversation::new();
+        conv.push(Message::system("You are a worker."));
+        conv.push(Message::user("Do the task."));
+
+        let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
+            &provider,
+            &mut conv,
+            &[],
+            &task_id,
+            "t1",
+            &session_id,
+            &project_path,
+            &worktree_path,
+            "worker",
+            &cancel,
+            &cancel,
+            &app_state,
+            context_window,
+            "test/mock-model",
+            false,
+        )
+        .await;
+
+        // Session should end successfully (compacted + continued).
+        assert!(result.is_ok(), "expected ok, got: {:?}", result);
+
+        // All 3 mock responses were consumed.
+        assert_eq!(provider.remaining(), 0, "all mock responses should be consumed");
+
+        // Messages were persisted to DB before compaction.
+        let persisted = count_persisted_messages(&app_state, &session_id).await;
+        assert!(
+            persisted > 0,
+            "expected session messages persisted before compaction, got 0"
+        );
+
+        // Conversation was replaced by compaction then continued.
+        // Expected: [system, summary_user, ack_assistant, last_user_task,
+        //            continue_user, final_assistant] = 6 messages.
+        // The key check is that it's much smaller than an uncompacted session
+        // and that the system prompt is first.
+        assert!(
+            conv.messages.len() <= 7,
+            "conversation should be compact after compaction, got {} messages",
+            conv.messages.len()
+        );
+        assert_eq!(
+            conv.messages[0].role,
+            crate::message::Role::System,
+            "first message should still be the system prompt"
+        );
+    }
+
+    /// Compaction must NOT fire based on the cumulative sum of input tokens across
+    /// turns.  Even if the running sum exceeds the threshold, only the current
+    /// turn's input token count (the actual context window fill) matters.
+    ///
+    /// Pattern: each turn adds tokens at a rate that would push the SUM above the
+    /// threshold quickly, but the actual context (latest generation input) stays
+    /// well below 80%.
+    #[tokio::test]
+    async fn no_compaction_when_sum_large_but_current_context_small() {
+        // context_window = 10,000 → threshold = 8,000 tokens
+        let context_window = 10_000_i64;
+
+        // Turn 1: ToolUse + 7,500 input  (sum=7_500, current=7_500 → below threshold)
+        // Turn 2: ToolUse + 7,800 input  (sum=15_300, current=7_800 → below threshold)
+        //   With the OLD sum-based check: sum 15,300 > 8,000 → compaction would wrongly fire.
+        //   With the NEW current-context check: 7,800 < 8,000 → no compaction. ✓
+        // Turn 3: text-only "done" + 100 input  (ends session normally)
+        let provider = MockProvider::new(vec![
+            MockResponse::tool_call("t1", "nonexistent_tool", 7_500),
+            MockResponse::tool_call("t2", "nonexistent_tool", 7_800),
+            MockResponse::text_only("Completed.", 100),
+        ]);
+
+        let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let worktree_path = std::path::PathBuf::from("/tmp");
+        let mut conv = Conversation::new();
+        conv.push(Message::system("You are a worker."));
+        conv.push(Message::user("Do the task."));
+
+        let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
+            &provider,
+            &mut conv,
+            &[],
+            &task_id,
+            "t1",
+            &session_id,
+            &project_path,
+            &worktree_path,
+            "worker",
+            &cancel,
+            &cancel,
+            &app_state,
+            context_window,
+            "test/mock-model",
+            false,
+        )
+        .await;
+
+        assert!(result.is_ok(), "expected ok, got: {:?}", result);
+        assert_eq!(provider.remaining(), 0, "all 3 mock responses should be consumed");
+
+        // No compaction should have fired: DB has NO persisted session messages.
+        let persisted = count_persisted_messages(&app_state, &session_id).await;
+        assert_eq!(
+            persisted, 0,
+            "compaction should not have fired (no messages persisted), but found {persisted}"
+        );
+    }
+
+    /// Reactive compaction fires when the provider itself signals a
+    /// context-length error.  The session compacts and retries successfully.
+    #[tokio::test]
+    async fn reactive_compaction_on_context_length_error() {
+        let context_window = 10_000_i64;
+
+        // Provider behaviour:
+        //   • Turn 1: ToolUse + small tokens (below threshold).
+        //   • Turn 2 attempt: context_length error mid-stream → reactive compaction triggered.
+        //   • Compaction call: summary returned.
+        //   • Turn 2 retry: text-only → session ends.
+        //
+        // We simulate the context-length error by injecting an error event
+        // BEFORE the ToolUse delta, so the stream init itself fails.
+        struct ErrorOnSecondCallProvider {
+            call_count: Arc<Mutex<u32>>,
+            inner: MockProvider,
+        }
+
+        impl LlmProvider for ErrorOnSecondCallProvider {
+            fn name(&self) -> &str {
+                "mock-error"
+            }
+
+            fn stream<'a>(
+                &'a self,
+                conversation: &'a Conversation,
+                tools: &'a [serde_json::Value],
+            ) -> Pin<
+                Box<
+                    dyn futures::Future<
+                            Output = anyhow::Result<
+                                Pin<
+                                    Box<
+                                        dyn futures::Stream<Item = anyhow::Result<StreamEvent>>
+                                            + Send,
+                                    >,
+                                >,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                let count = Arc::clone(&self.call_count);
+                let inner = &self.inner;
+                let turn = {
+                    let mut n = count.lock().unwrap();
+                    *n += 1;
+                    *n
+                };
+                if turn == 2 {
+                    // Simulate a context-length-exceeded error on stream init.
+                    Box::pin(async move {
+                        Err(anyhow::anyhow!("context_length exceeded"))
+                    })
+                } else {
+                    inner.stream(conversation, tools)
+                }
+            }
+        }
+
+        let inner = MockProvider::new(vec![
+            // Call 1: normal ToolUse turn.
+            MockResponse::tool_call("t1", "nonexistent_tool", 500),
+            // Call 2 would error (handled above).
+            // Call 3: compaction LLM summary.
+            MockResponse::text_only("Summary: used nonexistent_tool.", 100),
+            // Call 4: continuation after compaction.
+            MockResponse::text_only("Done.", 120),
+        ]);
+        let provider = ErrorOnSecondCallProvider {
+            call_count: Arc::new(Mutex::new(0)),
+            inner,
+        };
+
+        let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let worktree_path = std::path::PathBuf::from("/tmp");
+        let mut conv = Conversation::new();
+        conv.push(Message::system("You are a worker."));
+        conv.push(Message::user("Do the task."));
+
+        let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
+            &provider,
+            &mut conv,
+            &[],
+            &task_id,
+            "t1",
+            &session_id,
+            &project_path,
+            &worktree_path,
+            "worker",
+            &cancel,
+            &cancel,
+            &app_state,
+            context_window,
+            "test/mock-model",
+            false,
+        )
+        .await;
+
+        assert!(result.is_ok(), "expected ok after reactive compaction, got: {:?}", result);
+
+        // Compaction fired → messages persisted.
+        let persisted = count_persisted_messages(&app_state, &session_id).await;
+        assert!(
+            persisted > 0,
+            "expected session messages persisted by reactive compaction"
+        );
+    }
 }
