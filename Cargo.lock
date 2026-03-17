@@ -622,19 +622,28 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "axum",
  "base64",
  "bytes",
+ "dirs",
  "djinn-core",
+ "djinn-db",
  "futures",
+ "libc",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "reqwest 0.13.2",
+ "ring",
  "serde",
  "serde_json",
+ "serde_urlencoded",
+ "sha2",
+ "sqlx",
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

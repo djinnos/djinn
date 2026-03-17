@@ -24,6 +24,16 @@ impl From<sqlx::Error> for Error {
     }
 }
 
+impl From<djinn_db::Error> for Error {
+    fn from(value: djinn_db::Error) -> Self {
+        match value {
+            djinn_db::Error::Sqlx(err) => Self::from(err),
+            djinn_db::Error::Json(err) => Self::Internal(err.to_string()),
+            djinn_db::Error::InvalidData(msg) => Self::Internal(msg),
+        }
+    }
+}
+
 impl From<djinn_core::error::Error> for Error {
     fn from(value: djinn_core::error::Error) -> Self {
         match value {
