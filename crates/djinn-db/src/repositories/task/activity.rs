@@ -1,5 +1,4 @@
 use super::*;
-use crate::events::DjinnEventEnvelope;
 
 impl TaskRepository {
     pub async fn log_activity(

@@ -52,6 +52,12 @@ impl From<crate::error::Error> for TaskSyncError {
     }
 }
 
+impl From<djinn_db::Error> for TaskSyncError {
+    fn from(e: djinn_db::Error) -> Self {
+        Self::Database(e.to_string())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, TaskSyncError>;
 
 // ── Git helpers ───────────────────────────────────────────────────────────────

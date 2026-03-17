@@ -18,4 +18,6 @@ pub use repositories::{
     session::SessionRepository,
     session_message::SessionMessageRepository,
     settings::SettingsRepository,
+    task::TaskRepository,
+    task::{ActivityQuery, BlockerRef, CountQuery, ListQuery, ListResult, ReadyQuery},
 };
