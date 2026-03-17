@@ -51,6 +51,9 @@ pub struct RunningTaskInfo {
     pub model_id: String,
     pub slot_id: usize,
     pub duration_seconds: u64,
+    /// Seconds since the session last produced a stream event or completed a
+    /// tool call.  Used by stall detection to kill idle sessions.
+    pub idle_seconds: u64,
 }
 
 #[derive(Debug, Clone)]

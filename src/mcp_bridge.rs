@@ -137,6 +137,7 @@ impl SlotPoolOps for SlotPoolBridge {
                     model_id: t.model_id,
                     slot_id: t.slot_id,
                     duration_seconds: t.duration_seconds,
+                    idle_seconds: t.idle_seconds,
                 })
                 .collect(),
         })
@@ -160,6 +161,7 @@ impl SlotPoolOps for SlotPoolBridge {
             model_id: t.model_id,
             slot_id: t.slot_id,
             duration_seconds: t.duration_seconds,
+            idle_seconds: t.idle_seconds,
         }))
     }
 

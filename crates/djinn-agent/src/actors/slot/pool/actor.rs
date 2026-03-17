@@ -396,11 +396,16 @@ impl SlotPool {
             .filter_map(|(task_id, slot_id)| {
                 let model_id = self.slot_models.get(slot_id)?.clone();
                 let started = self.task_started.get(task_id)?;
+                let idle_seconds = self
+                    .app_state
+                    .idle_seconds(task_id)
+                    .unwrap_or(0);
                 Some(super::types::RunningTaskInfo {
                     task_id: task_id.clone(),
                     model_id,
                     slot_id: *slot_id,
                     duration_seconds: started.elapsed().as_secs(),
+                    idle_seconds,
                 })
             })
             .collect();
@@ -424,11 +429,16 @@ impl SlotPool {
             .get(task_id)
             .map(|ts| ts.elapsed().as_secs())
             .unwrap_or(0);
+        let idle_seconds = self
+            .app_state
+            .idle_seconds(task_id)
+            .unwrap_or(0);
         Some(super::types::RunningTaskInfo {
             task_id: task_id.to_string(),
             model_id,
             slot_id: *slot_id,
             duration_seconds,
+            idle_seconds,
         })
     }
 

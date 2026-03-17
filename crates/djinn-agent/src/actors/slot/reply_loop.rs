@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -105,6 +106,10 @@ pub(super) async fn run_reply_loop(
         global_cancel,
         app_state,
     } = ctx;
+
+    // Register activity tracker — stall detection uses this to kill idle sessions.
+    let activity_ts = app_state.register_activity(task_id);
+
     let mut output = ParsedAgentOutput::new(role_name == "task_reviewer");
 
     // Token counts and last assistant text are declared outside the async block
@@ -343,6 +348,15 @@ pub(super) async fn run_reply_loop(
 
                         saw_any_event = true;
                         saw_round_event = true;
+
+                        // Touch activity on every stream event — proves the session is alive.
+                        {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            activity_ts.store(now, Ordering::Relaxed);
+                        }
 
                         match evt {
                             StreamEvent::Delta(ContentBlock::Text { text }) => {
@@ -726,6 +740,16 @@ pub(super) async fn run_reply_loop(
                 .collect();
             let tool_result_blocks = futures::future::join_all(tool_futures).await;
 
+            // Touch activity after tool execution — tool calls are legitimate
+            // work and can take a while (e.g. cargo build).
+            {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                activity_ts.store(now, Ordering::Relaxed);
+            }
+
             // Push a user message containing all tool results.
             let tool_result_msg = Message {
                 role: Role::User,
@@ -818,6 +842,9 @@ pub(super) async fn run_reply_loop(
             Err(e) => session.end_error(&e.to_string()),
         }
     }
+
+    // Deregister activity tracker — session is done.
+    app_state.deregister_activity(task_id);
 
     (
         run_result,

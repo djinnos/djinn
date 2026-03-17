@@ -34,6 +34,7 @@ pub struct RunningTaskInfo {
     pub model_id: String,
     pub slot_id: usize,
     pub duration_seconds: u64,
+    pub idle_seconds: u64,
 }
 
 #[derive(Debug, Clone)]
