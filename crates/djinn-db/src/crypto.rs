@@ -7,7 +7,7 @@
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 
-use djinn_db::{Error, Result};
+use crate::{Error, Result};
 
 fn system_hostname() -> String {
     let mut buf = [0u8; 256];

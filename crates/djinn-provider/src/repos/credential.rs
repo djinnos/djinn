@@ -1,6 +1,6 @@
 use uuid::Uuid;
 
-use crate::crypto;
+use djinn_db::crypto;
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Credential;
 use djinn_db::{Database, Result};
