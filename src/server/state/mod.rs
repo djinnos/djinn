@@ -394,7 +394,22 @@ impl AppState {
             return;
         };
         match serde_json::from_str::<Vec<djinn_provider::catalog::health::ModelHealth>>(&raw) {
-            Ok(snapshot) => self.health_tracker().restore_all(snapshot),
+            Ok(snapshot) => {
+                // Filter out health entries whose provider prefix is a merged
+                // child (e.g. "chatgpt_codex/…").  Merged children share
+                // credentials with their parent and should never appear as
+                // standalone model IDs — any such entries are stale artifacts.
+                let merged = djinn_provider::catalog::builtin::merged_provider_ids();
+                let snapshot: Vec<_> = snapshot
+                    .into_iter()
+                    .filter(|h| {
+                        h.model_id
+                            .split_once('/')
+                            .is_none_or(|(prefix, _)| !merged.contains(prefix))
+                    })
+                    .collect();
+                self.health_tracker().restore_all(snapshot);
+            }
             Err(e) => tracing::warn!(error = %e, "failed to parse model health state"),
         }
     }
