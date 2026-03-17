@@ -439,6 +439,7 @@ pub(crate) async fn transition_start(
                 None,
             )
             .await
+            .map_err(crate::error::Error::from)
         })
         .await
         .map_err(|e| anyhow::anyhow!("task transition failed for {}: {e}", task.id))?;
@@ -466,6 +467,7 @@ pub(crate) async fn transition_interrupted(
             None,
         )
         .await
+        .map_err(crate::error::Error::from)
     })
     .await
     {
