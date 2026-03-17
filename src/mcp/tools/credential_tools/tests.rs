@@ -2,7 +2,7 @@
 mod tests {
     use serde_json::json;
 
-    use crate::db::repositories::credential::CredentialRepository;
+    use crate::db::CredentialRepository;
     use crate::test_helpers::{create_test_app_with_db, create_test_db, initialize_mcp_session, mcp_call_tool};
     use tokio::sync::broadcast;
 
