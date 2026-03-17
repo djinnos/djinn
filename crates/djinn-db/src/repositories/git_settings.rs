@@ -4,12 +4,11 @@
 //!   - Per-project: `git:{project_id}:target_branch`
 //!   - Global default: `git:global:target_branch`  (falls back to "main")
 
+use djinn_core::events::{DjinnEventEnvelope, EventBus};
+use djinn_core::models::GitSettings;
 
-
-use crate::db::connection::Database;
-use crate::error::Result;
-use crate::events::{DjinnEventEnvelope, EventBus};
-use crate::models::GitSettings;
+use crate::database::Database;
+use crate::Result;
 
 pub struct GitSettingsRepository {
     db: Database,
@@ -102,27 +101,24 @@ impl GitSettingsRepository {
 
 #[cfg(test)]
 mod tests {
+    use djinn_core::events::EventBus;
+
     use super::*;
-    use tokio::sync::broadcast;
-    use crate::events::event_bus_for;
-    use crate::test_helpers;
+
+    fn test_db() -> Database {
+        Database::open_in_memory().unwrap()
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn defaults_to_main_when_no_settings() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(1024);
-        let repo = GitSettingsRepository::new(db, event_bus_for(&tx));
-
+        let repo = GitSettingsRepository::new(test_db(), EventBus::noop());
         let settings = repo.get("some-project-id").await.unwrap();
         assert_eq!(settings.target_branch, "main");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn project_override_takes_precedence() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(1024);
-        let repo = GitSettingsRepository::new(db, event_bus_for(&tx));
-
+        let repo = GitSettingsRepository::new(test_db(), EventBus::noop());
         repo.set_target_branch("proj-123", "develop").await.unwrap();
         let settings = repo.get("proj-123").await.unwrap();
         assert_eq!(settings.target_branch, "develop");
@@ -130,10 +126,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn global_default_applies_when_no_project_override() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(1024);
-        let repo = GitSettingsRepository::new(db, event_bus_for(&tx));
-
+        let repo = GitSettingsRepository::new(test_db(), EventBus::noop());
         repo.set_global_target_branch("develop").await.unwrap();
         let settings = repo.get("some-other-project").await.unwrap();
         assert_eq!(settings.target_branch, "develop");
@@ -141,9 +134,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn project_override_supersedes_global() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(1024);
-        let repo = GitSettingsRepository::new(db, event_bus_for(&tx));
+        let repo = GitSettingsRepository::new(test_db(), EventBus::noop());
 
         repo.set_global_target_branch("develop").await.unwrap();
         repo.set_target_branch("proj-123", "feature-base")
@@ -161,9 +152,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_target_branch_upserts() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(1024);
-        let repo = GitSettingsRepository::new(db, event_bus_for(&tx));
+        let repo = GitSettingsRepository::new(test_db(), EventBus::noop());
 
         repo.set_target_branch("proj", "v1").await.unwrap();
         repo.set_target_branch("proj", "v2").await.unwrap();
