@@ -8,12 +8,12 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::actors::slot::{
+use djinn_agent::actors::slot::{
     ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,
     format_family_for_provider, load_provider_credential, parse_model_id,
 };
-use crate::agent::message::{ContentBlock, Conversation, Message, Role};
-use crate::agent::provider::{StreamEvent, create_provider};
+use djinn_agent::message::{ContentBlock, Conversation, Message, Role};
+use djinn_agent::provider::{StreamEvent, create_provider};
 use crate::db::{
     EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, TaskRepository,
 };
@@ -248,7 +248,7 @@ pub(super) async fn completions_handler(
                 .map(|p| p.base_url.clone())
                 .filter(|u| !u.is_empty())
                 .unwrap_or_else(|| default_base_url(&provider_id));
-            crate::agent::provider::ProviderConfig {
+            djinn_agent::provider::ProviderConfig {
                 base_url,
                 auth: auth_method_for_provider(&provider_id, &api_key),
                 format_family: format_family_for_provider(&provider_id, &resolved_model),

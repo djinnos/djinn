@@ -110,7 +110,7 @@ async fn async_main() {
     server::run(router, cli.port, cancel).await;
 
     // Flush any pending OTel spans before exit.
-    djinn_server::agent::provider::telemetry::shutdown();
+    djinn_agent::provider::telemetry::shutdown();
 }
 
 #[derive(Clone)]
