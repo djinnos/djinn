@@ -249,6 +249,25 @@ async fn ensure_daemon_running(port: u16, db_path: Option<&std::path::Path>) -> 
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
+    // Place the daemon in its own session so it is immune to SIGHUP/SIGINT
+    // from the parent's terminal or process group (e.g. when a Claude Code
+    // stdio bridge exits or the user closes a terminal tab).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid() is async-signal-safe (POSIX) and has no
+        // preconditions beyond "caller is not already a session leader",
+        // which holds for a freshly forked child.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("spawn daemon process: {e}"))?;
