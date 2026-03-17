@@ -108,7 +108,7 @@ pub mod worktree;
 pub use actor::*;
 pub(crate) use commands::*;
 pub use helpers::*;
-pub use lifecycle::{ProjectLifecycleParams, run_project_lifecycle};
+pub(crate) use lifecycle::{ProjectLifecycleParams, run_project_lifecycle};
 pub(crate) use lifecycle::run_task_lifecycle;
 pub use pool::*;
 pub use worktree::*;
