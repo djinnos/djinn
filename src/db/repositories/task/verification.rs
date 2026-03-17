@@ -1,12 +1,20 @@
-use crate::commands::{CommandResult, CommandSpec, run_commands};
+// These helpers are defined as infrastructure for callers that provide a
+// VerificationRunner implementation.  They are not yet wired into the main
+// execution path, so suppress dead_code until they are consumed.
+#![allow(dead_code)]
+
+use std::path::Path;
+
+use djinn_core::commands::{CommandResult, CommandSpec, VerificationRunner};
+
 use crate::db::TaskRepository;
-use crate::server::AppState;
 
 pub(crate) async fn run_setup_commands_checked(
-    cwd: &std::path::Path,
+    cwd: &Path,
     setup_commands: &[String],
     task_id: Option<&str>,
-    app_state: &AppState,
+    task_repo: &TaskRepository,
+    runner: &dyn VerificationRunner,
 ) -> Result<(), String> {
     if setup_commands.is_empty() {
         return Ok(());
@@ -22,11 +30,9 @@ pub(crate) async fn run_setup_commands_checked(
         })
         .collect();
 
-    let setup_results = run_commands(&setup_specs, cwd)
-        .await
-        .map_err(|e| e.to_string())?;
+    let setup_results = runner.run_commands(&setup_specs, cwd).await?;
     if let Some(task_id) = task_id {
-        log_commands_run_event(task_id, "setup", &setup_results, app_state).await;
+        log_commands_run_event(task_id, "setup", &setup_results, task_repo).await;
     }
 
     let failed: Vec<&CommandResult> = setup_results.iter().filter(|r| r.exit_code != 0).collect();
@@ -48,9 +54,8 @@ pub(crate) async fn run_setup_commands_checked(
     let body = format!("Setup commands failed before verification:\n{}", summary);
 
     if let Some(task_id) = task_id {
-        let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
         let payload = serde_json::json!({ "body": body }).to_string();
-        let _ = repo
+        let _ = task_repo
             .log_activity(
                 Some(task_id),
                 "agent-supervisor",
@@ -69,17 +74,16 @@ pub(crate) async fn run_verification_commands(
     actor_id: Option<&str>,
     actor_role: Option<&str>,
     verify_specs: &[CommandSpec],
-    app_state: &AppState,
-    working_dir: &std::path::Path,
+    task_repo: &TaskRepository,
+    runner: &dyn VerificationRunner,
+    working_dir: &Path,
 ) -> Result<(), String> {
     if verify_specs.is_empty() {
         return Ok(());
     }
 
-    let verify_results = run_commands(verify_specs, working_dir)
-        .await
-        .map_err(|e| e.to_string())?;
-    log_commands_run_event(task_id, "verification", &verify_results, app_state).await;
+    let verify_results = runner.run_commands(verify_specs, working_dir).await?;
+    log_commands_run_event(task_id, "verification", &verify_results, task_repo).await;
 
     let failed: Vec<&CommandResult> = verify_results.iter().filter(|r| r.exit_code != 0).collect();
     if failed.is_empty() {
@@ -102,9 +106,8 @@ pub(crate) async fn run_verification_commands(
         summary
     );
 
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     let payload = serde_json::json!({ "body": body }).to_string();
-    let _ = repo
+    let _ = task_repo
         .log_activity(
             Some(task_id),
             actor_id.unwrap_or("agent-supervisor"),
@@ -121,9 +124,8 @@ pub(crate) async fn log_commands_run_event(
     task_id: &str,
     phase: &str,
     results: &[CommandResult],
-    app_state: &AppState,
+    task_repo: &TaskRepository,
 ) {
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
     for r in results {
         let payload = serde_json::json!({
             "phase": phase,
@@ -134,7 +136,7 @@ pub(crate) async fn log_commands_run_event(
             "duration_ms": r.duration_ms,
         })
         .to_string();
-        let _ = repo
+        let _ = task_repo
             .log_activity(
                 Some(task_id),
                 "agent-supervisor",
