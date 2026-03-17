@@ -386,9 +386,9 @@ impl DjinnMcpServer {
             .into_iter()
             .map(|msg| {
                 let role = match msg.role {
-                    crate::agent::message::Role::System => "system",
-                    crate::agent::message::Role::User => "user",
-                    crate::agent::message::Role::Assistant => "assistant",
+                    djinn_agent::message::Role::System => "system",
+                    djinn_agent::message::Role::User => "user",
+                    djinn_agent::message::Role::Assistant => "assistant",
                 }
                 .to_owned();
                 let content = msg

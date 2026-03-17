@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig};
+use djinn_agent::actors::slot::{ModelSlotConfig, SlotPoolConfig};
 use crate::db::CredentialRepository;
 use crate::db::SettingsRepository;
 use crate::models::DjinnSettings;
@@ -173,12 +173,12 @@ impl AppState {
                 .langfuse_endpoint
                 .as_deref()
                 .unwrap_or("http://localhost:3000/api/public/otel");
-            let config = crate::agent::provider::telemetry::LangfuseConfig {
+            let config = djinn_agent::provider::telemetry::LangfuseConfig {
                 endpoint: endpoint.to_string(),
                 public_key: pk.clone(),
                 secret_key: sk.clone(),
             };
-            if let Err(e) = crate::agent::provider::telemetry::init(&config) {
+            if let Err(e) = djinn_agent::provider::telemetry::init(&config) {
                 tracing::warn!(error = %e, "failed to initialize Langfuse telemetry");
             }
         }

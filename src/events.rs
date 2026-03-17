@@ -12,7 +12,7 @@ pub fn event_bus_for(tx: &tokio::sync::broadcast::Sender<DjinnEventEnvelope>) ->
 #[cfg(test)]
 mod tests {
     use super::DjinnEventEnvelope;
-    use crate::verification::StepEvent;
+    use djinn_agent::verification::StepEvent;
     use serde_json::json;
 
     #[test]

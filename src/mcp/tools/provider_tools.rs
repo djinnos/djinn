@@ -623,7 +623,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(input): Parameters<ProviderOauthStartInput>,
     ) -> Json<ProviderOauthStartResponse> {
-        use crate::agent::oauth::{OAuthFlowKind, codex, copilot};
+        use djinn_agent::oauth::{OAuthFlowKind, codex, copilot};
 
         let resolved_name = builtin::resolve_builtin_name(&input.provider_id);
         let Some(builtin_id) = resolved_name else {

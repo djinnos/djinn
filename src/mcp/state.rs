@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use crate::actors::coordinator::CoordinatorHandle;
-use crate::actors::slot::SlotPoolHandle;
-use crate::agent::lsp::LspManager;
+use djinn_agent::actors::coordinator::CoordinatorHandle;
+use djinn_agent::actors::slot::SlotPoolHandle;
+use djinn_agent::lsp::LspManager;
 use crate::db::connection::Database;
 use crate::events::EventBus;
 use crate::models::DjinnSettings;

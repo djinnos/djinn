@@ -5,12 +5,12 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
-use crate::actors::coordinator::CoordinatorHandle;
+use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_git::{GitActorHandle, GitError};
-use crate::actors::slot::{SlotPoolConfig, SlotPoolHandle};
-use crate::agent::file_time::FileTime;
-use crate::agent::lsp::LspManager;
-use crate::agent::roles::RoleRegistry;
+use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
+use djinn_agent::file_time::FileTime;
+use djinn_agent::lsp::LspManager;
+use djinn_agent::roles::RoleRegistry;
 use crate::db::NoteRepository;
 use crate::db::ProjectRepository;
 use crate::db::SettingsRepository;
@@ -56,7 +56,7 @@ struct Inner {
     /// Task IDs with an in-flight verification pipeline (background tokio task).
     /// Used by the coordinator to distinguish genuinely stuck `verifying` tasks
     /// (orphaned after server restart) from ones with a live pipeline.
-    pub verifying_tasks: crate::actors::coordinator::VerificationTracker,
+    pub verifying_tasks: djinn_agent::actors::coordinator::VerificationTracker,
     /// Per-session file read timestamps used to enforce read-before-edit/write.
     pub file_time: Arc<FileTime>,
     pub lsp: LspManager,
@@ -161,8 +161,8 @@ impl AppState {
         &self.inner.file_time
     }
 
-    pub fn agent_context(&self) -> crate::agent::context::AgentContext {
-        crate::agent::context::AgentContext {
+    pub fn agent_context(&self) -> djinn_agent::context::AgentContext {
+        djinn_agent::context::AgentContext {
             db: self.inner.db.clone(),
             event_bus: self.event_bus(),
             git_actors: self.inner.git_actors.clone(),

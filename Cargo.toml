@@ -12,6 +12,7 @@ djinn-agent = { path = "crates/djinn-agent" }
 djinn-core = { path = "crates/djinn-core", features = ["sqlx"] }
 djinn-db = { path = "crates/djinn-db" }
 djinn-git = { path = "crates/djinn-git" }
+djinn-mcp = { path = "crates/djinn-mcp" }
 djinn-provider = { path = "crates/djinn-provider" }
 anyhow = "1"
 axum = "0.8"

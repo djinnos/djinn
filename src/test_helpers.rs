@@ -54,7 +54,7 @@ pub async fn test_app_state_in_memory() -> AppState {
 pub fn agent_context_from_db(
     db: Database,
     cancel: CancellationToken,
-) -> crate::agent::context::AgentContext {
+) -> djinn_agent::context::AgentContext {
     AppState::new(db, cancel).agent_context()
 }
 

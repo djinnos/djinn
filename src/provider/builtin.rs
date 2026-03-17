@@ -12,7 +12,7 @@ pub use djinn_provider::catalog::builtin::{
 
 /// Remove OAuth tokens from the DB (and any lingering filesystem cache).
 pub async fn clear_oauth_tokens(oauth_keys: &[String], repo: &crate::db::CredentialRepository) {
-    use crate::agent::oauth::{codex::CodexTokens, copilot::CopilotTokens};
+    use djinn_agent::oauth::{codex::CodexTokens, copilot::CopilotTokens};
 
     for key in oauth_keys {
         match key.as_str() {
@@ -32,7 +32,7 @@ pub fn is_oauth_key_present(
     oauth_keys: &[String],
     credential_key_names: &std::collections::HashSet<String>,
 ) -> bool {
-    use crate::agent::oauth::{
+    use djinn_agent::oauth::{
         codex::{CODEX_OAUTH_DB_KEY, CodexTokens},
         copilot::{COPILOT_OAUTH_DB_KEY, CopilotTokens},
     };

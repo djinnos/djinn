@@ -24,10 +24,9 @@ pub fn latest_log_file_path() -> Option<PathBuf> {
         }
         if let Ok(meta) = entry.metadata()
             && let Ok(modified) = meta.modified()
+            && best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true)
         {
-            if best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
-                best = Some((modified, entry.path()));
-            }
+            best = Some((modified, entry.path()));
         }
     }
     best.map(|(_, p)| p)

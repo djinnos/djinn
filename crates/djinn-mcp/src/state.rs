@@ -6,10 +6,7 @@ use djinn_core::models::DjinnSettings;
 use djinn_db::Database;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
-use crate::bridge::{
-    ChannelStatus, CoordinatorOps, GitOps, LspOps, LspWarning, PoolStatus, RunningTaskInfo,
-    RuntimeOps, SlotPoolOps, SyncOps, SyncResult,
-};
+use crate::bridge::{CoordinatorOps, GitOps, LspOps, RuntimeOps, SlotPoolOps, SyncOps};
 
 /// Subset of application state consumed by the MCP layer.
 ///
@@ -33,6 +30,7 @@ pub struct McpState {
 }
 
 impl McpState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Database,
         event_bus: EventBus,
@@ -127,7 +125,9 @@ impl McpState {
 
 #[cfg(test)]
 pub(crate) mod stubs {
+    #![allow(dead_code, unused_imports)]
     use super::*;
+    use crate::bridge::{ChannelStatus, LspWarning, PoolStatus, RunningTaskInfo, SyncResult};
     use async_trait::async_trait;
     use djinn_git::{GitActorHandle, GitError};
 
@@ -239,7 +239,7 @@ pub(crate) mod stubs {
     #[async_trait]
     impl GitOps for StubGitOps {
         async fn git_actor(&self, _: &Path) -> Result<GitActorHandle, GitError> {
-            Err(GitError::NoRepo)
+            Err(GitError::CommandFailed { code: 1, command: "rev-parse".into(), cwd: ".".into(), stdout: String::new(), stderr: "no repository found".into() })
         }
     }
 
