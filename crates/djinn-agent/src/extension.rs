@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use std::process::Stdio;
 
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 
 use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
@@ -920,13 +920,9 @@ async fn call_shell(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::process::isolate_process_group(&mut cmd);
-    let output = timeout(
-        Duration::from_millis(timeout_ms),
-        crate::process::output(cmd),
-    )
-    .await
-    .map_err(|_| format!("shell timed out after {} ms", timeout_ms))?
-    .map_err(|e| format!("failed to run shell command: {e}"))?;
+    let output = crate::process::output_with_kill(cmd, Duration::from_millis(timeout_ms))
+        .await
+        .map_err(|e| format!("failed to run shell command: {e}"))?;
 
     let stdout = truncate_shell_output(&String::from_utf8_lossy(&output.stdout));
     let stderr = truncate_shell_output(&String::from_utf8_lossy(&output.stderr));

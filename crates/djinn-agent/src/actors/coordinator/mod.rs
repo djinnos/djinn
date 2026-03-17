@@ -178,7 +178,7 @@ struct CoordinatorActor {
     db: Database,
     events_tx: broadcast::Sender<DjinnEventEnvelope>,
     pool: SlotPoolHandle,
-    #[allow(dead_code)]
+    #[cfg_attr(test, allow(dead_code))]
     catalog: CatalogService,
     health: HealthTracker,
     role_registry: Arc<RoleRegistry>,
