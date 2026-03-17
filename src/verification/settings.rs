@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::commands::CommandSpec;
+use djinn_core::commands::CommandSpec;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct DjinnSettings {

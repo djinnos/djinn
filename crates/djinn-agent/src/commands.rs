@@ -1,18 +1,28 @@
+use std::io;
 use std::path::Path;
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
+
 use tokio::time::timeout;
 
-use crate::error::{Error, Result};
-
-// Re-export shared types from djinn-core so all existing callers continue to work.
-pub use djinn_core::commands::{CommandResult, CommandSpec, VerificationRunner};
+use djinn_core::commands::{CommandResult, CommandSpec};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
+
+/// Run a pre-configured `std::process::Command` on a blocking thread.
+///
+/// Uses `spawn_blocking` rather than `tokio::process::Command` to avoid
+/// reactor fd issues when the server runs as a daemon with null stdio.
+async fn spawn_command(mut cmd: Command) -> io::Result<Output> {
+    tokio::task::spawn_blocking(move || cmd.output())
+        .await
+        .map_err(io::Error::other)?
+}
 
 pub async fn run_commands(
     commands: &[CommandSpec],
     working_dir: &Path,
-) -> Result<Vec<CommandResult>> {
+) -> anyhow::Result<Vec<CommandResult>> {
     let mut results = Vec::with_capacity(commands.len());
 
     for spec in commands {
@@ -20,17 +30,18 @@ pub async fn run_commands(
         let duration = Duration::from_secs(timeout_secs);
         let start = Instant::now();
 
-        let mut cmd = std::process::Command::new("sh");
+        let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(&spec.command).current_dir(working_dir);
-        let output = timeout(duration, crate::process::output(cmd))
+        let output = timeout(duration, spawn_command(cmd))
             .await
             .map_err(|_| {
-                Error::Internal(format!(
+                anyhow::anyhow!(
                     "command '{}' timed out after {}s",
-                    spec.name, timeout_secs
-                ))
+                    spec.name,
+                    timeout_secs
+                )
             })?
-            .map_err(|e| Error::Internal(format!("failed to run '{}': {}", spec.name, e)))?;
+            .map_err(|e| anyhow::anyhow!("failed to run '{}': {}", spec.name, e))?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         let exit_code = output.status.code().unwrap_or(-1);
