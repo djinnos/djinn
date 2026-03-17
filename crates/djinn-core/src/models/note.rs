@@ -90,6 +90,17 @@ pub struct NoteOverview {
     pub score: Option<f32>,
 }
 
+/// L0 note abstract payload used in tiered context responses.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct NoteAbstract {
+    pub id: String,
+    pub permalink: String,
+    pub title: String,
+    pub note_type: String,
+    pub abstract_text: String,
+    pub score: Option<f32>,
+}
+
 /// A single git commit entry for note history.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GitLogEntry {
@@ -183,7 +194,7 @@ pub struct OrphanNote {
 
 #[cfg(test)]
 mod tests {
-    use super::NoteOverview;
+    use super::{NoteAbstract, NoteOverview};
 
     #[test]
     fn note_overview_serializes_with_stable_field_names() {
@@ -203,5 +214,26 @@ mod tests {
         assert_eq!(value["note_type"], "reference");
         assert_eq!(value["overview_text"], "Short summary");
         assert_eq!(value["score"].as_f64(), Some(0.8700000047683716));
+    }
+
+    #[test]
+    fn note_abstract_serializes_with_stable_field_names() {
+        let payload = NoteAbstract {
+            id: "note_456".to_string(),
+            permalink: "reference/another".to_string(),
+            title: "Another Note".to_string(),
+            note_type: "reference".to_string(),
+            abstract_text: "L0 abstract".to_string(),
+            score: None,
+        };
+
+        let value = serde_json::to_value(payload).expect("serializes to JSON value");
+        assert_eq!(value["id"], "note_456");
+        assert_eq!(value["permalink"], "reference/another");
+        assert_eq!(value["title"], "Another Note");
+        assert_eq!(value["note_type"], "reference");
+        assert_eq!(value["abstract_text"], "L0 abstract");
+        assert!(value.get("score").is_some());
+        assert!(value["score"].is_null());
     }
 }
