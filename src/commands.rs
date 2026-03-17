@@ -2,27 +2,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
-use serde::{Deserialize, Serialize};
-
 use crate::error::{Error, Result};
 
+// Re-export shared types from djinn-core so all existing callers continue to work.
+pub use djinn_core::commands::{CommandResult, CommandSpec, VerificationRunner};
+
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandSpec {
-    pub name: String,
-    pub command: String,
-    pub timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandResult {
-    pub name: String,
-    pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
-    pub duration_ms: u64,
-}
 
 pub async fn run_commands(
     commands: &[CommandSpec],
