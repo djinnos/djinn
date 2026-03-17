@@ -858,12 +858,11 @@ mod tests {
     use crate::db::TaskRepository;
     use crate::models::TransitionAction;
     use crate::provider::health::HealthTracker;
-    use crate::server::AppState;
     use crate::test_helpers;
 
     fn spawn_coordinator(db: &Database, tx: &broadcast::Sender<DjinnEventEnvelope>) -> CoordinatorHandle {
         let cancel = CancellationToken::new();
-        let ctx = AppState::new(db.clone(), cancel.clone()).agent_context();
+        let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
         let sessions_dir = std::env::temp_dir().join(format!(
             "djinn-test-sessions-{}",
             std::time::SystemTime::now()

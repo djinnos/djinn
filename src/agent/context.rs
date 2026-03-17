@@ -17,7 +17,8 @@ use crate::provider::{CatalogService, HealthTracker};
 /// slot code.  Cheaply cloneable — all fields are either `Clone` or wrapped in
 /// `Arc`.
 ///
-/// Construct via [`AppState::agent_context()`].
+/// Construct via [`crate::server::AppState::agent_context()`] at the server
+/// boundary, or via [`crate::test_helpers::agent_context_from_db()`] in tests.
 #[derive(Clone)]
 pub struct AgentContext {
     pub db: Database,

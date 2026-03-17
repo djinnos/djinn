@@ -25,7 +25,7 @@ fn test_app_state() -> (
 ) {
     let db = test_helpers::create_test_db();
     let cancel = tokio_util::sync::CancellationToken::new();
-    let app_state = crate::server::AppState::new(db, cancel.clone()).agent_context();
+    let app_state = test_helpers::agent_context_from_db(db, cancel.clone());
     let temp = tempfile::tempdir().expect("tempdir");
     (app_state, cancel, temp)
 }

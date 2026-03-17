@@ -48,6 +48,16 @@ pub async fn test_app_state_in_memory() -> AppState {
     AppState::new(db, cancel)
 }
 
+/// Create an `AgentContext` from a database and cancellation token.
+///
+/// Use this in actor/agent tests instead of constructing `AppState` directly.
+pub fn agent_context_from_db(
+    db: Database,
+    cancel: CancellationToken,
+) -> crate::agent::context::AgentContext {
+    AppState::new(db, cancel).agent_context()
+}
+
 pub fn test_events() -> EventBus {
     EventBus::noop()
 }

@@ -127,11 +127,10 @@ mod transition_tests {
     #[tokio::test]
     async fn is_stale_review_cycle_cases() {
         let db = test_helpers::create_test_db();
-        let app = crate::server::AppState::new(db, tokio_util::sync::CancellationToken::new());
-        let ctx = app.agent_context();
-        let project = test_helpers::create_test_project(app.db()).await;
-        let epic = test_helpers::create_test_epic(app.db(), &project.id).await;
-        let task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
+        let ctx = test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
 
         let same = ac(&[true, false]);
         insert_review_snapshot(&ctx.db, &task.id, &same).await;
@@ -140,14 +139,14 @@ mod transition_tests {
         let progressed = ac(&[true, true]);
         assert!(!is_stale_review_cycle(&task.id, &progressed, &ctx).await);
 
-        let task2 = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
+        let task2 = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
         assert!(!is_stale_review_cycle(&task2.id, &same, &ctx).await);
 
         let empty = "[]".to_string();
         insert_review_snapshot(&ctx.db, &task2.id, &empty).await;
         assert!(is_stale_review_cycle(&task2.id, &empty, &ctx).await);
 
-        let task3 = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
+        let task3 = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
         let three = ac(&[true, false, true]);
         let five = ac(&[true, false, true, false, true]);
         insert_review_snapshot(&ctx.db, &task3.id, &three).await;
