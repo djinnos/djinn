@@ -1,6 +1,6 @@
 
 
-use crate::agent::message::{Conversation, Message, Role};
+use djinn_core::message::{Conversation, Message, Role};
 use crate::db::connection::Database;
 use crate::error::Result;
 use crate::events::{DjinnEventEnvelope, EventBus};
@@ -185,7 +185,7 @@ impl SessionMessageRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::message::{Message, Role};
+    use djinn_core::message::{Message, Role};
     use crate::db::EpicRepository;
     use crate::db::SessionRepository;
     use crate::db::TaskRepository;
