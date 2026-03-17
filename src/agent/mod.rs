@@ -3,6 +3,7 @@ pub mod context;
 pub mod config;
 pub(crate) mod extension;
 pub mod file_time;
+pub(crate) mod task_merge;
 pub mod lsp;
 pub use djinn_provider::message;
 pub mod oauth;

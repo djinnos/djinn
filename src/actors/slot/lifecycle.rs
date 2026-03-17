@@ -19,7 +19,7 @@ use crate::agent::context::AgentContext;
 
 use super::reply_loop::run_reply_loop;
 use super::*;
-use crate::db::repositories::task::transitions::interrupt_paused_worker_session;
+use crate::agent::task_merge::interrupt_paused_worker_session;
 
 /// Standalone async function that runs the full per-task lifecycle:
 /// load -> worktree -> session -> reply loop -> post-session work -> cleanup.
