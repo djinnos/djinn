@@ -14,9 +14,7 @@ use djinn_agent::actors::slot::{
 };
 use djinn_agent::message::{ContentBlock, Conversation, Message, Role};
 use djinn_agent::provider::{StreamEvent, create_provider};
-use crate::db::{
-    EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, TaskRepository,
-};
+use djinn_db::{EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, TaskRepository};
 use djinn_mcp::server::DjinnMcpServer;
 use crate::server::AppState;
 
@@ -124,7 +122,7 @@ async fn build_project_context_block(state: &AppState, project_ref: &str) -> Opt
         .unwrap_or_else(|| "unknown".to_string());
 
     let open_tasks = task_repo
-        .count_grouped(crate::db::CountQuery {
+        .count_grouped(djinn_db::CountQuery {
             project_id: Some(project_id.clone()),
             status: Some("open".to_string()),
             issue_type: None,

@@ -7,13 +7,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
-use crate::db::EpicRepository;
-use djinn_db::EpicCreateInput;
-use crate::db::NoteRepository;
-use crate::db::ProjectRepository;
-use crate::db::SessionRepository;
-use crate::db::TaskRepository;
-use crate::db::connection::Database;
+use djinn_db::{Database, EpicCreateInput, EpicRepository, NoteRepository, ProjectRepository, SessionRepository, TaskRepository};
 use crate::events::EventBus;
 use crate::models::Epic;
 use crate::models::Note;

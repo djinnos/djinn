@@ -25,7 +25,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use djinn_server::daemon;
 use djinn_server::db::checkpoint;
-use djinn_server::db::connection::{self, Database};
+use djinn_db::Database;
+use djinn_server::db::connection::{self};
 use djinn_server::logging;
 use djinn_server::server::{self, AppState};
 

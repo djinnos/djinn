@@ -1,12 +1,11 @@
-use super::*;
+use djinn_db::{TaskRepository, ActivityQuery, ReadyQuery};
 use tokio::sync::broadcast;
 use crate::events::{EventBus, event_bus_for};
 use djinn_db::Database;
-use crate::db::EpicRepository;
+use djinn_db::EpicRepository;
 use crate::models::{Task, TaskStatus, TransitionAction};
 use crate::test_helpers;
 use djinn_db::Error;
-
 async fn make_epic(db: &Database, events: EventBus) -> crate::models::Epic {
     EpicRepository::new(db.clone(), events)
         .create("Test Epic", "", "", "", "", None)

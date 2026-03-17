@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::db::connection::Database;
+use djinn_db::Database;
 
 const INTERVAL: Duration = Duration::from_secs(30);
 
