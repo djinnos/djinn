@@ -36,6 +36,7 @@ impl NoteRepository {
         &self,
         project_id: &str,
         query: &str,
+        task_id: Option<&str>,
         folder: Option<&str>,
         note_type: Option<&str>,
         limit: usize,
@@ -81,7 +82,7 @@ impl NoteRepository {
 
         let temporal_scores = self.temporal_scores(project_id, &candidate_ids).await?;
         let graph_scores = self.graph_proximity_scores(&candidate_ids, 2).await?;
-        let task_scores = self.task_affinity_scores(project_id, None).await?;
+        let task_scores = self.task_affinity_scores(project_id, task_id).await?;
 
         let signals = vec![
             (lexical_scores, 60.0),

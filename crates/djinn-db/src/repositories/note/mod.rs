@@ -272,7 +272,7 @@ mod tests {
 
         // Search for "rusqlite" — should hit only the first note.
         let results = repo
-            .search(&project.id, "rusqlite", None, None, 10)
+            .search(&project.id, "rusqlite", None, None, None, 10)
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -310,7 +310,7 @@ mod tests {
         .unwrap();
 
         let results = repo
-            .search(&project.id, "common", Some("design"), None, 10)
+            .search(&project.id, "common", None, Some("design"), None, 10)
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -347,7 +347,7 @@ mod tests {
         .unwrap();
 
         let results = repo
-            .search(&project.id, "rankneedle", None, None, 10)
+            .search(&project.id, "rankneedle", None, None, None, 10)
             .await
             .unwrap();
 
@@ -385,7 +385,7 @@ mod tests {
         .unwrap();
 
         let results = repo
-            .search(&project.id, "ranktag", None, None, 10)
+            .search(&project.id, "ranktag", None, None, None, 10)
             .await
             .unwrap();
 
@@ -436,7 +436,7 @@ mod tests {
             .unwrap();
 
         let results = repo
-            .search(&project.id, "sharedterm", None, None, 10)
+            .search(&project.id, "sharedterm", None, None, None, 10)
             .await
             .unwrap();
 

@@ -832,6 +832,7 @@ async fn call_memory_search(
         .search(
             &project_id,
             &p.query,
+            None,
             p.folder.as_deref(),
             p.note_type.as_deref(),
             limit,
