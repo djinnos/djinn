@@ -4,8 +4,9 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use djinn_core::models::{Credential, Model, Pricing, Provider};
+
 use super::builtin::BuiltinProvider;
-use crate::models::{Model, Pricing, Provider};
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -261,7 +262,7 @@ impl CatalogService {
     /// This is the single source of truth for "is provider X connected?".
     pub fn connected_provider_ids(
         &self,
-        vault_credentials: &[crate::models::Credential],
+        vault_credentials: &[Credential],
     ) -> HashSet<String> {
         use super::builtin;
 
@@ -504,6 +505,8 @@ mod tests {
 
     #[test]
     fn inject_builtin_providers_adds_missing_entries() {
+        use super::builtin::BuiltinProvider;
+
         let catalog = CatalogService::new();
         let initial_count = catalog.list_providers().len();
 
@@ -530,6 +533,8 @@ mod tests {
 
     #[test]
     fn inject_builtin_providers_skips_existing() {
+        use super::builtin::BuiltinProvider;
+
         let catalog = CatalogService::new();
         let initial_count = catalog.list_providers().len();
 

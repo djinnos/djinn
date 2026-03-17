@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+djinn-core = { path = "../djinn-core" }
 anyhow = "1"
 async-stream = "0.3"
 base64 = "0.22"
