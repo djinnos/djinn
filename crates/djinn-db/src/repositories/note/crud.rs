@@ -118,7 +118,7 @@ impl NoteRepository {
             return Ok(Some(n));
         }
         // Fallback: title search, take best match.
-        let results = self.search(project_id, identifier, None, None, 1).await?;
+        let results = self.search(project_id, identifier, None, None, None, 1).await?;
         if let Some(r) = results.into_iter().next() {
             return self.get(&r.id).await;
         }

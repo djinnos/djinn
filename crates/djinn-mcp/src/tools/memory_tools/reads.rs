@@ -22,7 +22,7 @@ impl DjinnMcpServer {
             Ok(Some(n)) => n,
             _ => {
                 // Fallback: search by title
-                match repo.search(&project_id, &p.identifier, None, None, 1).await {
+                match repo.search(&project_id, &p.identifier, None, None, None, 1).await {
                     Ok(results) if !results.is_empty() => {
                         match repo.get(&results[0].id).await.ok().flatten() {
                             Some(n) => n,
