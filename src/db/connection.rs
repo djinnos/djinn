@@ -1,5 +1,3 @@
-pub use djinn_db::Database;
-
 /// Default database path: `~/.djinn/djinn.db`.
 pub fn default_db_path() -> std::path::PathBuf {
     dirs::home_dir()
@@ -10,7 +8,7 @@ pub fn default_db_path() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use djinn_db::Database;
     use sqlx::Row;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

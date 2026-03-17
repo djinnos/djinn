@@ -81,7 +81,7 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
 
-    use crate::db::CredentialRepository;
+    use djinn_provider::repos::CredentialRepository;
     use crate::models::DjinnSettings;
     use crate::server::{self, AppState};
     use crate::test_helpers;
@@ -752,7 +752,7 @@ mod tests {
         let epic = test_helpers::create_test_epic(&db, &project.id).await;
         let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
 
-        let repo = crate::db::TaskRepository::new(db.clone(), crate::events::EventBus::noop());
+        let repo = djinn_db::TaskRepository::new(db.clone(), crate::events::EventBus::noop());
         repo.set_status(&task.id, "in_progress").await.unwrap();
         sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1")
             .bind(&task.id)

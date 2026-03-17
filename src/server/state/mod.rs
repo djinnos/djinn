@@ -11,10 +11,7 @@ use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
-use crate::db::NoteRepository;
-use crate::db::ProjectRepository;
-use crate::db::SettingsRepository;
-use crate::db::connection::Database;
+use djinn_db::{Database, NoteRepository, ProjectRepository, SettingsRepository};
 use crate::events::DjinnEventEnvelope;
 use crate::provider::{CatalogService, HealthTracker};
 use crate::sync::SyncManager;
@@ -246,7 +243,7 @@ impl AppState {
     /// Load custom providers from DB into the catalog and trigger a background
     /// catalog refresh from models.dev.  Call once after server startup.
     pub async fn initialize(&self) {
-        use crate::db::CustomProviderRepository;
+        use djinn_provider::repos::CustomProviderRepository;
         use crate::models::{Model, Provider};
 
         // Load custom providers from DB → merge into in-memory catalog.
@@ -321,7 +318,7 @@ impl AppState {
     }
 
     async fn interrupt_stale_sessions_on_startup(&self) {
-        use crate::db::SessionRepository;
+        use djinn_db::SessionRepository;
         let repo = SessionRepository::new(self.db().clone(), self.event_bus());
         match repo.interrupt_all_running().await {
             Ok(0) => {}
@@ -331,7 +328,7 @@ impl AppState {
     }
 
     async fn prune_verification_cache_on_startup(&self) {
-        use crate::db::VerificationCacheRepository;
+        use djinn_db::VerificationCacheRepository;
         let repo = VerificationCacheRepository::new(self.db().clone());
         match repo.prune_older_than(7).await {
             Ok(()) => tracing::debug!("pruned stale verification cache entries"),

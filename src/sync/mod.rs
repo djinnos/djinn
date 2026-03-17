@@ -31,8 +31,7 @@ use serde::Serialize;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
-use crate::db::ProjectRepository;
-use crate::db::connection::Database;
+use djinn_db::{Database, ProjectRepository};
 use crate::events::DjinnEventEnvelope;
 use backoff::BackoffState;
 pub use tasks_channel::TaskSyncError;
@@ -565,7 +564,7 @@ mod tests {
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
         // Create a project.
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
+        let project_repo = djinn_db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let project = project_repo
             .create("test-proj", "/tmp/test-project")
             .await
@@ -585,7 +584,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
+        let project_repo = djinn_db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let project = project_repo
             .create("test-proj", "/tmp/test-project")
             .await
@@ -604,7 +603,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
+        let project_repo = djinn_db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let project = project_repo
             .create("my-repo", "/tmp/my-repo")
             .await
@@ -623,7 +622,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let mgr = SyncManager::new(db.clone(), tx.clone());
 
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
+        let project_repo = djinn_db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let p1 = project_repo.create("alpha", "/tmp/alpha").await.unwrap();
         let p2 = project_repo.create("beta", "/tmp/beta").await.unwrap();
         let _p3 = project_repo.create("gamma", "/tmp/gamma").await.unwrap();
@@ -650,14 +649,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_for_export_filters_by_project_id() {
-        use crate::db::EpicRepository;
-        use crate::db::TaskRepository;
+        use djinn_db::EpicRepository;
+        use djinn_db::TaskRepository;
 
         let db = crate::test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(64);
 
         // Create two projects with tasks.
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
+        let project_repo = djinn_db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let p1 = project_repo.create("proj-a", "/tmp/a").await.unwrap();
         let p2 = project_repo.create("proj-b", "/tmp/b").await.unwrap();
 
@@ -742,8 +741,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upsert_peer_emits_from_sync_true() {
-        use crate::db::EpicRepository;
-        use crate::db::TaskRepository;
+        use djinn_db::EpicRepository;
+        use djinn_db::TaskRepository;
 
         let db = crate::test_helpers::create_test_db();
         let (tx, mut rx) = broadcast::channel(64);
@@ -964,7 +963,7 @@ mod tests {
         let user_id = "test-user".to_string();
 
         // Create a project and enable it for sync.
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
+        let project_repo = djinn_db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let project = project_repo
             .create("interval-test", "/tmp/interval-test")
             .await

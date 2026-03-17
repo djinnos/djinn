@@ -17,7 +17,7 @@ fn test_mcp_server() -> DjinnMcpServer {
 mod credential_tools {
     use serde_json::json;
 
-    use crate::db::CredentialRepository;
+    use djinn_provider::repos::CredentialRepository;
     use crate::events::EventBus;
     use crate::test_helpers::{
         create_test_app_with_db, create_test_db, initialize_mcp_session, mcp_call_tool,
@@ -114,7 +114,7 @@ mod memory_tools {
     use djinn_mcp::tools::memory_tools::*;
     use serde_json::json;
 
-    use crate::db::NoteRepository;
+    use djinn_db::NoteRepository;
     use crate::events::EventBus;
     use crate::test_helpers::{
         create_test_app, create_test_app_with_db, create_test_db, create_test_epic,
@@ -825,7 +825,7 @@ mod system_tools {
 mod task_tools {
     use serde_json::json;
 
-    use crate::db::repositories::task::TaskRepository;
+    use djinn_db::TaskRepository;
     use crate::events::EventBus;
     use crate::test_helpers::{
         create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
@@ -1040,7 +1040,7 @@ mod task_tools {
 mod session_tools {
     use serde_json::json;
 
-    use crate::db::SessionMessageRepository;
+    use djinn_db::SessionMessageRepository;
     use crate::test_helpers::{
         create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
         create_test_session, create_test_task, initialize_mcp_session, mcp_call_tool,
@@ -1204,7 +1204,7 @@ mod session_tools {
 // ── provider_tools ────────────────────────────────────────────────────────────
 
 mod provider_tools {
-    use crate::db::CredentialRepository;
+    use djinn_provider::repos::CredentialRepository;
     use crate::test_helpers::{
         create_test_app_with_db, create_test_db, initialize_mcp_session, mcp_call_tool,
     };

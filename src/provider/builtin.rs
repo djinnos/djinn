@@ -11,7 +11,7 @@ pub use djinn_provider::catalog::builtin::{
 // rather than in the crate.
 
 /// Remove OAuth tokens from the DB (and any lingering filesystem cache).
-pub async fn clear_oauth_tokens(oauth_keys: &[String], repo: &crate::db::CredentialRepository) {
+pub async fn clear_oauth_tokens(oauth_keys: &[String], repo: &djinn_provider::repos::CredentialRepository) {
     use djinn_agent::oauth::{codex::CodexTokens, copilot::CopilotTokens};
 
     for key in oauth_keys {

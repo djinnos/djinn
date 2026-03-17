@@ -7,9 +7,7 @@ use notify_debouncer_mini::{DebouncedEventKind, Debouncer, new_debouncer};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::NoteRepository;
-use crate::db::ProjectRepository;
-use crate::db::connection::Database;
+use djinn_db::{Database, NoteRepository, ProjectRepository};
 use crate::events::DjinnEventEnvelope;
 
 /// Debounce window — reindex fires this long after the last file change.

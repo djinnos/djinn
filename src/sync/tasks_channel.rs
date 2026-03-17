@@ -16,8 +16,7 @@ use tokio::sync::broadcast;
 
 use crate::events::DjinnEventEnvelope;
 
-use crate::db::TaskRepository;
-use crate::db::connection::Database;
+use djinn_db::{Database, TaskRepository};
 use crate::models::Task;
 
 /// The sync branch name.
@@ -272,7 +271,7 @@ pub async fn import(
     events: &broadcast::Sender<DjinnEventEnvelope>,
 ) -> Result<usize> {
     // Two-phase pull (SYNC-08): cheap SHA check before expensive fetch.
-    let settings = crate::db::SettingsRepository::new(db.clone(), crate::events::event_bus_for(events));
+    let settings = djinn_db::SettingsRepository::new(db.clone(), crate::events::event_bus_for(events));
     let sha_key = sha_settings_key(project_id);
     let remote_sha = ls_remote_sha(project).await;
     if let Some(ref sha) = remote_sha {
@@ -434,8 +433,8 @@ pub async fn delete_remote_branch(project: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use tokio::sync::broadcast;
-    use crate::db::EpicRepository;
-    use crate::db::TaskRepository;
+    use djinn_db::EpicRepository;
+    use djinn_db::TaskRepository;
     use crate::events::event_bus_for;
     use crate::models::TransitionAction;
 
@@ -552,7 +551,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
 
         // Create two projects with tasks.
-        let project_repo = crate::db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
+        let project_repo = djinn_db::ProjectRepository::new(db.clone(), event_bus_for(&tx));
         let p1 = project_repo.create("proj-a", "/tmp/a").await.unwrap();
         let p2 = project_repo.create("proj-b", "/tmp/b").await.unwrap();
 
@@ -1040,7 +1039,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn import_skips_when_remote_sha_unchanged() {
-        use crate::db::SettingsRepository;
+        use djinn_db::SettingsRepository;
 
         let (repo, _tmp) = setup_git_repo().await;
         let db = crate::test_helpers::create_test_db();
@@ -1082,7 +1081,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sha_persisted_only_after_tx_commit() {
-        use crate::db::SettingsRepository;
+        use djinn_db::SettingsRepository;
 
         let (repo, _tmp) = setup_git_repo().await;
         let db = crate::test_helpers::create_test_db();
@@ -1131,7 +1130,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sha_not_updated_on_rollback() {
-        use crate::db::SettingsRepository;
+        use djinn_db::SettingsRepository;
 
         let (repo, _tmp) = setup_git_repo().await;
         let db = crate::test_helpers::create_test_db();
