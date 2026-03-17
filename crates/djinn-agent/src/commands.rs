@@ -14,6 +14,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 /// Uses `spawn_blocking` rather than `tokio::process::Command` to avoid
 /// reactor fd issues when the server runs as a daemon with null stdio.
 async fn spawn_command(mut cmd: Command) -> io::Result<Output> {
+    crate::process::isolate_process_group(&mut cmd);
     tokio::task::spawn_blocking(move || cmd.output())
         .await
         .map_err(io::Error::other)?
