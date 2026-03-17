@@ -1053,6 +1053,7 @@ mod tests {
         );
     }
 
+
     // ── Stuck detection ───────────────────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1087,4 +1088,5 @@ mod tests {
             "released task should be back to open"
         );
     }
+
 }
