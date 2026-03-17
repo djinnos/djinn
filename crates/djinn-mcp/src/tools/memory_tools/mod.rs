@@ -35,12 +35,13 @@ impl DjinnMcpServer {
         repo.resolve(project_ref).await.ok().flatten()
     }
 
-    /// Resolve a project path to ID, creating a project entry when missing.
+    /// Resolve a project path/name to ID, erroring if not found.
     pub(crate) async fn resolve_project_id(&self, project_path: &str) -> Result<String, String> {
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        repo.resolve_or_create(project_path)
+        repo.resolve(project_path)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("project not found: {project_path}"))
     }
 }
 

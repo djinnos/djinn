@@ -4,49 +4,58 @@ type: adr
 tags: ["adr","architecture","workspace","cargo","agent","trait","vertical-slice","compilation"]
 ---
 
+
 # ADR-029: Vertical Workspace Splitting and Agent Role Trait
 
 ## Status: In Progress
 
 Date: 2026-03-13
 
-## Implementation Status (updated 2026-03-16)
+## Implementation Status (updated 2026-03-17)
 
-### Part 1: Vertical Workspace Split — Partially Complete
+### Part 1: Vertical Workspace Split — Complete
 
-**Completed crates:**
+**All planned crates extracted:**
 - `djinn-db` — Database, migrations, error types. Done.
-- `djinn-git` — Git operations (worktree, merge, branch, rebase). Done. Git actor/handle still in server (task `3sjw`).
 - `djinn-core` — All models (11), state machine, DjinnEventEnvelope + EventBus. Done.
+- `djinn-git` — Git operations + Git actor/handle (moved in task `3sjw`, closed 2026-03-16). Done.
+- `djinn-provider` — Catalog, OAuth, provider client, credential/custom-provider repos, format adapters, telemetry. Done.
+- `djinn-agent` — Roles (Worker, TaskReviewer, PM, Groomer, ConflictResolver), actors (CoordinatorActor, SlotPool), lifecycle, reply loop, compaction, extension, verification, sandbox, output parser, conversation store. Done.
+- `djinn-mcp` — MCP tool handlers crate scaffold created; full extraction in progress.
 
 **Decoupling work (ADR-033) — Complete:**
 - Phase 1: DjinnEvent enum deleted, envelope constructors everywhere (commit `b47d121`)
-- Phase 2: Model re-exports consolidated — src/models/ is pure re-exports from djinn-core (commit `8a63839`)
+- Phase 2: Model re-exports consolidated — src/models/ deleted (task `1j8g`, closed 2026-03-16)
 - Phase 3: EventBus newtype in djinn-core, all 10 repos migrated from broadcast::Sender (commits `3a8afb4`, `e617ba5`)
 - Phase 4: Intentionally skipped — repos stay in server; moving to djinn-db would conflict with future verticalization
 
-**Not started (deferred):**
-- `djinn-provider` — LLM provider vertical (reqwest, OAuth, telemetry cluster)
-- `djinn-agent` — Agent execution engine (depends on AgentRole trait completing first)
-- `djinn-mcp` — MCP tool handlers
+**Remaining server-side shims (intentional):**
+- `src/provider/mod.rs` — re-exports from djinn_provider for server consumers (health, catalog, validate, CatalogService, HealthTracker)
+- `src/provider/builtin.rs` — re-exports djinn_provider::catalog::builtin, plus two server-specific functions (`clear_oauth_tokens`, `is_oauth_key_present`) that depend on djinn_agent OAuth types and the credential DB; these legitimately live in the server, not in a crate.
+- `src/db/` and `src/provider/` shim directories were stripped (commit `38af74a`)
 
 **Decision: sync/ and watchers/ stay in server** — they depend on repositories which remain in the server crate.
 
-### Part 2: Agent Role Trait — Foundation Only
+### Part 2: Agent Role Trait — Foundation in djinn-agent, dispatch sites not yet migrated
 
-**Completed:**
+**Completed (in djinn-agent crate):**
+- `AgentRole` trait defined in `crates/djinn-agent/src/roles/mod.rs` (config, render_prompt, on_complete, prepare_worktree)
 - RoleConfig struct with all fields
-- 5 role configs (Worker, TaskReviewer, PM, Groomer, ConflictResolver)
+- 5 role implementations: Worker, TaskReviewer, PM, Groomer, ConflictResolver (in `roles/`)
 - CompactionPrompts struct
 - RoleRegistry with dispatch rules, wired into CoordinatorActor
 - AgentType delegates to role_config() for dispatch_role, tool_schemas, etc.
 - Equivalence tests proving role configs match AgentType behavior
 
 **Remaining (epic `53sw`, 4 tasks):**
-1. Define AgentRole trait (config, render_prompt, on_complete, prepare_worktree) — task `qw07`
+1. Define AgentRole trait (config, render_prompt, on_complete, prepare_worktree) — task `qw07` *(trait is defined in roles/mod.rs; this task may need re-scoping)*
 2. Implement trait for all 5 roles — task `1wfy`
 3. Make lifecycle/slot pool role-generic via `&dyn AgentRole` — task `lyku`
 4. Strip remaining AgentType behavioral dispatch sites — task `w8fo`
+
+**Still dispatch via AgentType (not yet migrated):**
+- `crates/djinn-agent/src/prompts.rs` — render_prompt dispatches via AgentType match
+- `crates/djinn-agent/src/extension.rs` — tool_schemas dispatches via AgentType match
 
 ## Context
 
