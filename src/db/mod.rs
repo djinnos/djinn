@@ -15,4 +15,4 @@ pub use djinn_db::SettingsRepository;
 pub use djinn_db::{
     ActivityQuery, CountQuery, ListQuery, ListResult, ReadyQuery, TaskRepository,
 };
-pub use repositories::verification_cache::{CachedVerification, VerificationCacheRepository};
+pub use djinn_db::{CachedVerification, VerificationCacheRepository};

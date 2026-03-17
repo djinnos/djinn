@@ -20,4 +20,5 @@ pub use repositories::{
     settings::SettingsRepository,
     task::TaskRepository,
     task::{ActivityQuery, BlockerRef, CountQuery, ListQuery, ListResult, ReadyQuery},
+    verification_cache::{CachedVerification, VerificationCacheRepository},
 };

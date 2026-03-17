@@ -582,6 +582,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "djinn-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "djinn-core"
 version = "0.1.0"
 dependencies = [
@@ -620,6 +630,26 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "djinn-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "djinn-core",
+ "djinn-db",
+ "djinn-git",
+ "djinn-provider",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

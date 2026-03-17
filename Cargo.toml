@@ -8,6 +8,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+djinn-agent = { path = "crates/djinn-agent" }
 djinn-core = { path = "crates/djinn-core", features = ["sqlx"] }
 djinn-db = { path = "crates/djinn-db" }
 djinn-git = { path = "crates/djinn-git" }

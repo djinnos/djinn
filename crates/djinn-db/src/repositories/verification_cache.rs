@@ -1,5 +1,5 @@
-use crate::db::connection::Database;
-use crate::error::Result;
+use crate::database::Database;
+use crate::Result;
 
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct CachedVerification {
@@ -76,7 +76,7 @@ impl VerificationCacheRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::connection::Database;
+    use crate::database::Database;
 
     async fn test_repo() -> VerificationCacheRepository {
         let db = Database::open_in_memory().expect("in-memory db");
