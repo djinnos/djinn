@@ -15,7 +15,7 @@ Phased delivery plan for v1 requirements. Each phase builds on the previous and 
 
 ## Progress Overview
 
-_Updated: 2026-03-13_
+_Updated: 2026-03-17_
 
 | Phase | Status | Remaining |
 |-------|--------|-----------|
@@ -30,18 +30,19 @@ _Updated: 2026-03-13_
 | Phase 9: V1 Completion | Complete | -- |
 | Phase 10: Architecture & Agent Roles | Complete | -- |
 | Phase 11: Own the Agent Loop | Complete | -- |
-| Phase 12: Backlog Grooming | Nearly complete | 1 task (`78gy` SSE event) |
-| Phase 13: Chat Experience | In progress | 3 tasks remaining |
-| Phase 14: Desktop SSE Completeness | In progress | 5 tasks remaining |
-| Phase 15: Deep Module Architecture | In progress | 2 tasks remaining |
+| Phase 12: Backlog Grooming | Complete | -- |
+| Phase 13: Chat Experience | Complete | -- |
+| Phase 14: Desktop SSE Completeness | Complete | -- |
+| Phase 15: Deep Module Architecture | Complete | -- |
 | Phase 16: Operational Reliability | Not started | ADR-022 remaining items |
-| Phase 17: Cognitive Memory | Not started | ADR-023: full scope |
+| Phase 17: Cognitive Memory | In progress | 17a (`9x3j`, 8 tasks) + 17b (`iuni`, 6 tasks) active; 17c/17d planned |
 | Phase 18: Test Coverage & CI | Not started | ADR-026 Phases 2-3 |
+| Phase 19: Agent Role Hierarchy | Not started | ADR-034: Architect patrol, task types, escalation |
 
 **V1 server phases 1-9 complete (55/55 items, 100%).**
-**Post-V1 phases 10-11 complete: slot architecture, PM intervention, agent loop ownership.**
-**Phases 12-15 in progress: grooming, chat, SSE completeness, deep modules.**
-**Phases 16-18 planned: operational reliability, cognitive memory, test/CI pipeline.**
+**Post-V1 phases 10-15 complete: slot architecture, agent loop, grooming, chat, SSE, deep modules.**
+**Phase 17 (Cognitive Memory) active: 17a retrieval pipeline + 17b association learning on the board.**
+**Phases 16, 18-19 planned: operational reliability, test/CI pipeline, agent role hierarchy (ADR-034).**
 
 **ADR-008:** Goose library replaced summon — then itself replaced by own agent loop (ADR-027). MCP-connect bridge (`1tst`) and scaffold system (`1nby`) dropped. See [[ADR-008: Agent Harness -- Goose Library over Summon Subprocess Spawning]].
 
@@ -623,6 +624,38 @@ _Updated: 2026-03-13_
 
 **Depends on**: Phase 15 (deep module architecture — clean boundaries make testing easier)
 
+## Phase 19: Agent Role Hierarchy — ADR-034
+
+**Goal**: Replace the flat agent hierarchy with a structured role model: rename existing roles (Groomer→Planner, PM→Lead), add Architect role with 5-minute patrol, introduce task types (spike, research, decomposition, review), implement Scrum Master deterministic coordinator rules, and enable wave-based epic decomposition. **See [[ADR-034: Agent Role Hierarchy — Architect Patrol, Scrum Master Rules, and Task Types]].**
+
+**Progress**: Not started. ADR-034 written and accepted. Depends on Phase 17 (cognitive memory) for full Planner wave integration with session reflection and confidence signals.
+
+**Sub-phases**:
+- **19a**: Role renames + task type expansion (Groomer→Planner, PM→Lead; add spike/research/decomposition/review issue_types; simple lifecycle)
+- **19b**: Scrum Master coordinator rules (deterministic: session timeouts, 2nd-escalation routing, batch-completion trigger)
+- **19c**: Architect role (RoleConfig, prompt, patrol dispatch, request_architect tool, self-task creation)
+- **19d**: Planner wave decomposition (epic_created trigger, roadmap note, max-5-tasks batches, re-dispatch on batch complete)
+
+**Features** (to be broken down after Phase 17a/17b complete):
+- Role renames: `AgentType::Groomer → Planner`, `Pm → Lead`
+- Remove `backlog` TaskStatus; migrate existing backlog tasks to `open`
+- Add `spike`, `research`, `decomposition`, `review` to `issue_type`
+- Simple lifecycle (`open → in_progress → closed`) for non-worker task types
+- Scrum Master rules in coordinator tick
+- Architect: RoleConfig, prompt, 5-min patrol, on-demand escalation via `request_architect`
+- Epic-created trigger → Planner dispatch with decomposition task
+- Planner roadmap note pattern + wave-based max-5-task batches
+
+**Success criteria**:
+1. Role renames compile cleanly; all existing tests pass with new names
+2. Architect dispatched every 5 minutes when open epics exist; skips when board is idle
+3. Lead calls `request_architect`; Architect dispatched within next patrol cycle
+4. 2nd `request_lead` on same task routes directly to Architect (Scrum Master rule)
+5. New epic triggers Planner dispatch; Planner creates decomposition task with roadmap note
+6. Planner creates ≤5 tasks per batch; re-dispatched when batch closes
+
+**Depends on**: Phase 17 (cognitive memory — Planner wave integration uses session reflection + confidence)
+
 ## Phase Dependency Graph
 
 ```
@@ -632,26 +665,22 @@ Phase 1-9: V1 Complete
     │       |
     │   Phase 11: Own the Agent Loop ✅ (parallel with 10)
     │       |
-    │   Phase 12: Backlog Grooming (nearly complete)
-    │
-    ├── Phase 13: Chat Experience (in progress)
-    │
-    ├── Phase 14: Desktop SSE Completeness (in progress)
-    │
-    ├── Phase 15: Deep Module Architecture (in progress)
-    │       |
-    │   Phase 18: Test Coverage & CI
+    │   Phase 12-15: Grooming, Chat, SSE, Deep Modules ✅
     │
     ├── Phase 16: Operational Reliability
     │
-    └── Phase 17: Cognitive Memory
+    ├── Phase 17: Cognitive Memory (in progress)
+    │       |
+    │   Phase 19: Agent Role Hierarchy (planned — depends on 17 for wave integration)
+    │
+    └── Phase 18: Test Coverage & CI
 ```
 
-Phases 13-15 can proceed in parallel. Phase 16 and 17 are independent of each other. Phase 18 benefits from Phase 15 clean boundaries.
+Phase 16 and 17 are independent. Phase 19 can start partially (19a/19b renames + rules) before Phase 17 completes, but full Planner wave integration requires 17a/17b. Phase 18 is independent.
 
 ## Coverage Check
 
-Updated 2026-03-13. V1 phases 1-9 complete. Post-V1 phases 10-11 complete.
+Updated 2026-03-17. V1 phases 1-9 complete. Post-V1 phases 10-15 complete.
 
 - Phase 1: DB-01..07, MCP-01/02/05, CFG-01/02 (13 reqs) ✅
 - Phase 2: TASK-01..14 (14 reqs) ✅
@@ -664,10 +693,12 @@ Updated 2026-03-13. V1 phases 1-9 complete. Post-V1 phases 10-11 complete.
 - Phase 9: GIT-09, OBS-02, CFG-02 MCP tools, REVIEW-01..03 completion (5 reqs) ✅
 - Phase 10: ADR-014/015/024(PM)/slot architecture (cross-cutting) ✅
 - Phase 11: AGENT-03/17/18/19 revised, OBS-03 (5 reqs) ✅
-- Cross-cutting: TEST-01..03 (3 reqs) — Phase 1 complete (ADR-026, epic `b11g` closed 2026-03-12; 456 tests, all passing)
+- Phase 12-15: ADR-025/027/028/grooming/chat/SSE/deep-modules (cross-cutting) ✅
+- Cross-cutting: TEST-01..03 (3 reqs) — Phase 1 complete (ADR-026, epic `b11g` closed 2026-03-12; 495 tests, all passing)
 
 - Phase 16: AGENT-20..22, REVIEW-04 (4 reqs) — not started
-- Phase 17: CMEM-01..14 (14 reqs) — not started
+- Phase 17: CMEM-01..14 (14 reqs) — in progress (17a + 17b on board)
+- Phase 19: ADR-034 role hierarchy (cross-cutting) — not started
 
 Total: 112+ (94 V1 + 5 Phase 11 + 4 Phase 16 + 14 Phase 17) ✓
 
