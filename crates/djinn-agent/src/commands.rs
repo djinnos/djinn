@@ -3,21 +3,17 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-use tokio::time::timeout;
-
 use djinn_core::commands::{CommandResult, CommandSpec};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
-/// Run a pre-configured `std::process::Command` on a blocking thread.
-///
-/// Uses `spawn_blocking` rather than `tokio::process::Command` to avoid
-/// reactor fd issues when the server runs as a daemon with null stdio.
-async fn spawn_command(mut cmd: Command) -> io::Result<Output> {
+/// Run a pre-configured `std::process::Command` with process-group isolation
+/// and timeout kill-tree behavior.
+async fn spawn_command(mut cmd: Command, timeout: Duration) -> io::Result<Output> {
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     crate::process::isolate_process_group(&mut cmd);
-    tokio::task::spawn_blocking(move || cmd.output())
-        .await
-        .map_err(io::Error::other)?
+    crate::process::output_with_kill(cmd, timeout).await
 }
 
 pub async fn run_commands(
@@ -33,11 +29,8 @@ pub async fn run_commands(
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(&spec.command).current_dir(working_dir);
-        let output = timeout(duration, spawn_command(cmd))
+        let output = spawn_command(cmd, duration)
             .await
-            .map_err(|_| {
-                anyhow::anyhow!("command '{}' timed out after {}s", spec.name, timeout_secs)
-            })?
             .map_err(|e| anyhow::anyhow!("failed to run '{}': {}", spec.name, e))?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -109,8 +102,9 @@ mod tests {
             command: "sleep 10".into(),
             timeout_secs: Some(1),
         }];
-        let err = run_commands(&commands, &tmp_dir()).await.unwrap_err();
-        assert!(err.to_string().contains("timed out"));
+        let results = run_commands(&commands, &tmp_dir()).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_ne!(results[0].exit_code, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
