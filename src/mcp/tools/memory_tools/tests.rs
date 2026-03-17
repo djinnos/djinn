@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::db::repositories::note::NoteRepository;
+use crate::db::NoteRepository;
 use crate::db::repositories::project::ProjectRepository;
 use crate::mcp::tools::memory_tools::types::*;
 use crate::test_helpers::{
