@@ -739,6 +739,115 @@ mod tests {
             .unwrap();
         assert_eq!(third.deleted, 1);
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_affinity_scores_task_epic_blocker_and_max() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let task_note = repo
+            .create(&project.id, tmp.path(), "Task Note", "body", "reference", "[]")
+            .await
+            .unwrap();
+        let epic_note = repo
+            .create(&project.id, tmp.path(), "Epic Note", "body", "reference", "[]")
+            .await
+            .unwrap();
+        let blocker_note = repo
+            .create(&project.id, tmp.path(), "Blocker Note", "body", "reference", "[]")
+            .await
+            .unwrap();
+        let overlap_note = repo
+            .create(&project.id, tmp.path(), "Overlap Note", "body", "reference", "[]")
+            .await
+            .unwrap();
+
+        let epic_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(&epic_id)
+        .bind(&project.id)
+        .bind("EP-1")
+        .bind("Epic")
+        .bind("")
+        .bind("")
+        .bind("")
+        .bind("")
+        .bind(serde_json::json!([epic_note.id.clone(), task_note.id.clone(), overlap_note.id.clone()]).to_string())
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let task_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                issue_type, priority, owner, status, continuation_count, memory_refs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        )
+        .bind(&task_id)
+        .bind(&project.id)
+        .bind("T-1")
+        .bind(&epic_id)
+        .bind("Task")
+        .bind("")
+        .bind("")
+        .bind("task")
+        .bind(0_i64)
+        .bind("")
+        .bind("open")
+        .bind(0_i64)
+        .bind(serde_json::json!([task_note.id.clone(), overlap_note.id.clone()]).to_string())
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let blocker_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                issue_type, priority, owner, status, continuation_count, memory_refs)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        )
+        .bind(&blocker_id)
+        .bind(&project.id)
+        .bind("T-2")
+        .bind("Blocker")
+        .bind("")
+        .bind("")
+        .bind("task")
+        .bind(0_i64)
+        .bind("")
+        .bind("open")
+        .bind(0_i64)
+        .bind(serde_json::json!([blocker_note.id.clone(), epic_note.id.clone(), overlap_note.id.clone()]).to_string())
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        sqlx::query("INSERT INTO blockers (task_id, blocking_task_id) VALUES (?1, ?2)")
+            .bind(&task_id)
+            .bind(&blocker_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let none_scores = repo.task_affinity_scores(&project.id, None).await.unwrap();
+        assert!(none_scores.is_empty());
+
+        let scores = repo
+            .task_affinity_scores(&project.id, Some(&task_id))
+            .await
+            .unwrap();
+
+        let score_map: std::collections::HashMap<String, f64> = scores.into_iter().collect();
+        assert_eq!(score_map.get(&task_note.id), Some(&1.0));
+        assert_eq!(score_map.get(&epic_note.id), Some(&0.7));
+        assert_eq!(score_map.get(&blocker_note.id), Some(&0.5));
+        assert_eq!(score_map.get(&overlap_note.id), Some(&1.0));
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn graph_proximity_empty_for_seed_without_links() {
@@ -1014,6 +1123,5 @@ mod tests {
         assert!(m[&old.id].is_finite());
         assert!(m[&zero_age.id] > m[&old.id]);
     }
-
 
 }

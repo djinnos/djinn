@@ -182,4 +182,92 @@ impl NoteRepository {
             stale_notes_by_folder,
         })
     }
+    pub async fn task_affinity_scores(
+        &self,
+        project_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<Vec<(String, f64)>> {
+        self.db.ensure_initialized().await?;
+
+        let Some(task_id) = task_id else {
+            return Ok(vec![]);
+        };
+
+        use std::collections::HashMap;
+
+        let mut scores: HashMap<String, f64> = HashMap::new();
+
+        let task_refs: Option<String> = sqlx::query_scalar(
+            "SELECT memory_refs FROM tasks WHERE id = ?1 AND project_id = ?2",
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        if let Some(refs_json) = task_refs
+            && let Ok(note_ids) = serde_json::from_str::<Vec<String>>(&refs_json)
+        {
+            for note_id in note_ids {
+                scores
+                    .entry(note_id)
+                    .and_modify(|score| *score = score.max(1.0_f64))
+                    .or_insert(1.0);
+            }
+        }
+
+        let epic_refs: Option<String> = sqlx::query_scalar(
+            "SELECT e.memory_refs
+             FROM tasks t
+             JOIN epics e ON e.id = t.epic_id
+             WHERE t.id = ?1 AND t.project_id = ?2",
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        if let Some(refs_json) = epic_refs
+            && let Ok(note_ids) = serde_json::from_str::<Vec<String>>(&refs_json)
+        {
+            for note_id in note_ids {
+                scores
+                    .entry(note_id)
+                    .and_modify(|score| *score = score.max(0.7_f64))
+                    .or_insert(0.7);
+            }
+        }
+
+        let blocker_refs = sqlx::query_as::<_, (String,)>(
+            "SELECT bt.memory_refs
+             FROM blockers b
+             JOIN tasks bt ON bt.id = b.blocking_task_id
+             WHERE b.task_id = ?1 AND bt.project_id = ?2",
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        for (refs_json,) in blocker_refs {
+            if let Ok(note_ids) = serde_json::from_str::<Vec<String>>(&refs_json) {
+                for note_id in note_ids {
+                    scores
+                        .entry(note_id)
+                        .and_modify(|score| *score = score.max(0.5_f64))
+                        .or_insert(0.5);
+                }
+            }
+        }
+
+        let mut ranked: Vec<(String, f64)> = scores.into_iter().collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        Ok(ranked)
+    }
+
 }
