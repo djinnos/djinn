@@ -263,7 +263,7 @@ impl TaskRepository {
                                 retry_count,
                                 "Short ID collision retry limit exceeded after {MAX_RETRIES} attempts"
                             );
-                            return Err(Error::Database(sqlx::Error::Database(db_err)));
+                            return Err(Error::Sqlx(sqlx::Error::Database(db_err)));
                         }
 
                         // Get the next character from the UUID hex string
@@ -284,7 +284,7 @@ impl TaskRepository {
                                 retry_count,
                                 "Short ID collision but UUID exhausted, cannot extend further"
                             );
-                            return Err(Error::Database(sqlx::Error::Database(db_err)));
+                            return Err(Error::Sqlx(sqlx::Error::Database(db_err)));
                         }
                         // Continue to next loop iteration with extended short_id
                     } else {
@@ -294,10 +294,10 @@ impl TaskRepository {
                             task_id = %task.id,
                             "Non-retriable constraint violation during peer upsert"
                         );
-                        return Err(Error::Database(sqlx::Error::Database(db_err)));
+                        return Err(Error::Sqlx(sqlx::Error::Database(db_err)));
                     }
                 }
-                Err(e) => return Err(Error::Database(e)),
+                Err(e) => return Err(Error::Sqlx(e)),
             }
         };
 
@@ -414,7 +414,7 @@ impl TaskRepository {
                                 retry_count,
                                 "Short ID collision retry limit exceeded after {MAX_RETRIES} attempts"
                             );
-                            return Err(Error::Database(sqlx::Error::Database(db_err)));
+                            return Err(Error::Sqlx(sqlx::Error::Database(db_err)));
                         }
 
                         // Get the next character from the UUID hex string
@@ -435,7 +435,7 @@ impl TaskRepository {
                                 retry_count,
                                 "Short ID collision but UUID exhausted, cannot extend further"
                             );
-                            return Err(Error::Database(sqlx::Error::Database(db_err)));
+                            return Err(Error::Sqlx(sqlx::Error::Database(db_err)));
                         }
                         // Continue to next loop iteration with extended short_id
                     } else {
@@ -445,10 +445,10 @@ impl TaskRepository {
                             task_id = %task.id,
                             "Non-retriable constraint violation during peer upsert"
                         );
-                        return Err(Error::Database(sqlx::Error::Database(db_err)));
+                        return Err(Error::Sqlx(sqlx::Error::Database(db_err)));
                     }
                 }
-                Err(e) => return Err(Error::Database(e)),
+                Err(e) => return Err(Error::Sqlx(e)),
             }
         }
     }
@@ -495,8 +495,7 @@ impl TaskRepository {
             return Ok(0);
         }
 
-        // Close the tasks with peer_reconciled reason
-        let now = crate::sync::now_utc();
+        // Close the tasks with peer_reconciled reason using SQLite's built-in timestamp.
         let placeholders: String = tasks_to_close
             .iter()
             .map(|_| "?")
@@ -504,11 +503,12 @@ impl TaskRepository {
             .join(",");
 
         let sql_update = format!(
-            "UPDATE tasks SET status = 'closed', close_reason = 'peer_reconciled', closed_at = ? WHERE id IN ({})",
+            "UPDATE tasks SET status = 'closed', close_reason = 'peer_reconciled',
+             closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id IN ({})",
             placeholders
         );
 
-        let mut update_query = sqlx::query(&sql_update).bind(&now);
+        let mut update_query = sqlx::query(&sql_update);
         for id in &tasks_to_close {
             update_query = update_query.bind(id);
         }

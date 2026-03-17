@@ -12,7 +12,7 @@ pub use repositories::project::{ProjectConfig, ProjectRepository};
 pub use repositories::session::SessionRepository;
 pub use repositories::session_message::SessionMessageRepository;
 pub use djinn_db::SettingsRepository;
-pub use repositories::task::{
+pub use djinn_db::{
     ActivityQuery, CountQuery, ListQuery, ListResult, ReadyQuery, TaskRepository,
 };
 pub use repositories::verification_cache::{CachedVerification, VerificationCacheRepository};
