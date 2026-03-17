@@ -909,6 +909,7 @@ async fn call_shell(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::process::isolate_process_group(&mut cmd);
     let output = timeout(
         Duration::from_millis(timeout_ms),
         crate::process::output(cmd),
