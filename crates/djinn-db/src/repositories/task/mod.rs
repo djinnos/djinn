@@ -31,6 +31,40 @@ pub struct ListQuery {
     pub offset: i64,
 }
 
+pub struct CreateTaskParams<'a> {
+    pub epic_id: &'a str,
+    pub title: &'a str,
+    pub description: &'a str,
+    pub design: &'a str,
+    pub issue_type: &'a str,
+    pub priority: i64,
+    pub owner: &'a str,
+    pub status: Option<&'a str>,
+}
+
+pub struct CreateTaskInProjectParams<'a> {
+    pub project_id: &'a str,
+    pub epic_id: Option<&'a str>,
+    pub title: &'a str,
+    pub description: &'a str,
+    pub design: &'a str,
+    pub issue_type: &'a str,
+    pub priority: i64,
+    pub owner: &'a str,
+    pub status: Option<&'a str>,
+}
+
+pub struct UpdateTaskParams<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub description: &'a str,
+    pub design: &'a str,
+    pub priority: i64,
+    pub owner: &'a str,
+    pub labels: &'a str,
+    pub acceptance_criteria: &'a str,
+}
+
 impl Default for ListQuery {
     fn default() -> Self {
         Self {

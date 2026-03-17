@@ -14,12 +14,18 @@ pub use repositories::{
     events::EventsRepository,
     git_settings::GitSettingsRepository,
     models::ModelsRepository,
-    note::{NoteRepository, file_path_for, folder_for_type, is_singleton, permalink_for, slugify},
+    note::{
+        NoteRepository, UpdateNoteIndexParams, file_path_for, folder_for_type, is_singleton,
+        permalink_for, slugify,
+    },
     project::{ProjectConfig, ProjectRepository},
-    session::SessionRepository,
+    session::{CreateSessionParams, SessionRepository},
     session_message::SessionMessageRepository,
     settings::SettingsRepository,
     task::TaskRepository,
-    task::{ActivityQuery, BlockerRef, CountQuery, ListQuery, ListResult, ReadyQuery},
+    task::{
+        ActivityQuery, BlockerRef, CountQuery, CreateTaskInProjectParams, CreateTaskParams,
+        ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
+    },
     verification_cache::{CachedVerification, VerificationCacheRepository},
 };
