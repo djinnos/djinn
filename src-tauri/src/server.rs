@@ -99,10 +99,29 @@ pub async fn spawn_server<R: Runtime>(
         .sidecar("djinn-server")
         .map_err(|e| format!("Failed to create sidecar command: {}", e))?;
 
-    // Spawn the sidecar - it runs independently
-    let (mut rx, _child) = sidecar_command
-        .spawn()
-        .map_err(|e| format!("Failed to spawn server sidecar: {}", e))?;
+    // Spawn the sidecar - it runs independently.
+    // If spawn fails (e.g. placeholder binary, permission denied), fall back to
+    // discovering an already-running server before giving up.
+    let (mut rx, _child) = match sidecar_command.spawn() {
+        Ok(result) => result,
+        Err(e) => {
+            log::warn!("Sidecar spawn failed ({}); checking for existing server", e);
+            if let Some(port) = discover_server_for_app(app) {
+                if health_check(port).await {
+                    log::info!(
+                        "Found existing healthy server on port {} after sidecar spawn failure",
+                        port
+                    );
+                    let state = app.state::<Mutex<ServerState>>();
+                    if let Ok(mut state) = state.lock() {
+                        state.port = Some(port);
+                    }
+                    return Ok(port);
+                }
+            }
+            return Err(format!("Failed to spawn server sidecar: {}", e));
+        }
+    };
 
     // Log any output from the server for debugging
     tauri::async_runtime::spawn(async move {
