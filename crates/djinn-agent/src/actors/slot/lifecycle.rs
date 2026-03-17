@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::message::{Conversation, Message};
 use crate::prompts::TaskContext;
 use crate::provider::create_provider;
-use crate::roles::{AgentRole, role_impl_for};
+use crate::roles::AgentRole;
 use crate::commands::run_commands;
 use crate::verification::settings::load_commands;
 use djinn_db::SessionRepository;
@@ -940,10 +940,10 @@ pub(crate) async fn run_task_lifecycle(
     return_free!();
 }
 
-pub struct ProjectLifecycleParams {
+pub(crate) struct ProjectLifecycleParams {
     pub project_id: String,
     pub project_path: String,
-    pub agent_type: String,
+    pub role: Arc<dyn AgentRole>,
     pub model_id: String,
     pub app_state: AgentContext,
     pub cancel: CancellationToken,
@@ -952,7 +952,7 @@ pub struct ProjectLifecycleParams {
 }
 
 pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Result<()> {
-    let task_id = format!("project:{}:{}", params.project_id, params.agent_type);
+    let task_id = format!("project:{}:{}", params.project_id, params.role.config().name);
     let model_id = params.model_id;
     let app_state = params.app_state;
     let cancel = params.cancel;
@@ -961,10 +961,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     let project_path = params.project_path;
     let project_id = params.project_id;
 
-    let role = {
-        let agent_type: crate::AgentType = params.agent_type.parse().unwrap_or(crate::AgentType::Groomer);
-        role_impl_for(agent_type)
-    };
+    let role = params.role;
 
     macro_rules! return_free {
         () => {{

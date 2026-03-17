@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::context::AgentContext;
-use crate::roles::role_for_task_dispatch;
+use crate::roles::{role_for_task_dispatch, role_impl_for};
 
 use super::helpers::conflict_context_for_dispatch;
 use super::{
@@ -143,13 +143,14 @@ impl SlotActor {
                                 let event_tx = self.event_tx.clone();
                                 let app_state = self.app_state.clone();
                                 let project_task_id = format!("project:{project_id}:{agent_type}");
+                                let role = role_impl_for(agent_type.parse().unwrap_or(crate::AgentType::Groomer));
                                 let kill_for_task = kill.clone();
                                 let pause_for_task = pause.clone();
                                 let join = tokio::spawn(async move {
                                     run_project_lifecycle(ProjectLifecycleParams {
                                         project_id,
                                         project_path,
-                                        agent_type,
+                                        role,
                                         model_id,
                                         app_state,
                                         cancel: kill_for_task,
