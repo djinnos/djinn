@@ -6,11 +6,7 @@ pub mod error;
 pub mod events;
 pub mod logging;
 pub mod mcp_bridge;
-pub mod models {
-    pub use djinn_core::models::*;
-}
 pub mod process;
-pub mod provider;
 pub mod server;
 pub mod sse;
 pub mod sync;

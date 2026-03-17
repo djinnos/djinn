@@ -6,7 +6,7 @@ use serde::Serialize;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::db::connection::default_db_path;
+use djinn_db::default_db_path;
 use crate::server::AppState;
 
 pub async fn events_handler(

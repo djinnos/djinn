@@ -67,7 +67,7 @@ pub fn spawn_kb_watchers(
                     match recv {
                         Ok(envelope) => {
                             if envelope.entity_type == "project" && envelope.action == "created" {
-                                let Some(project) = envelope.parse_payload::<crate::models::Project>() else { continue; };
+                                let Some(project) = envelope.parse_payload::<djinn_core::models::Project>() else { continue; };
                                 let mut guard = state_clone.lock().await;
                                 let path = PathBuf::from(&project.path);
                                 add_watch(&mut guard, &project.id, &path);

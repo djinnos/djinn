@@ -126,6 +126,7 @@ mod memory_tools {
         let db = create_test_db();
         let app = create_test_app_with_db(db.clone());
         let session_id = initialize_mcp_session(&app).await;
+        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-write", "path": "/tmp/mcp-memory-write"})).await;
 
         let created = mcp_call_tool(
             &app,
@@ -178,6 +179,7 @@ mod memory_tools {
     async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
+        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-read", "path": "/tmp/mcp-memory-read"})).await;
 
         let created = mcp_call_tool(
             &app,
@@ -225,6 +227,7 @@ mod memory_tools {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let project = "/tmp/mcp-memory-search";
+        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-search", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Rust Alpha", "content": "rust rust rust memory", "type": "reference"})).await;
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Rust Beta", "content": "rust memory", "type": "reference"})).await;
@@ -269,6 +272,7 @@ mod memory_tools {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let project = "/tmp/mcp-memory-edit";
+        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-edit", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Edit Note", "content": "middle", "type": "reference"})).await;
 
@@ -290,6 +294,7 @@ mod memory_tools {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let project = "/tmp/mcp-memory-move";
+        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-move", "path": project})).await;
 
         let created = mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Move Me", "content": "content", "type": "reference"})).await;
 
@@ -310,6 +315,7 @@ mod memory_tools {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let project = "/tmp/mcp-memory-delete";
+        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-delete", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Delete Me", "content": "bye", "type": "reference"})).await;
 
@@ -326,6 +332,7 @@ mod memory_tools {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let project = "/tmp/mcp-memory-list";
+        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-list", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "A", "content": "x", "type": "adr"})).await;
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "B", "content": "x", "type": "reference"})).await;
@@ -349,6 +356,7 @@ mod memory_tools {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let project = "/tmp/mcp-memory-graph";
+        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-graph", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Node B", "content": "b", "type": "reference"})).await;
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Node A", "content": "links [[Node B]]", "type": "reference"})).await;
@@ -362,6 +370,7 @@ mod memory_tools {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let project = "/tmp/mcp-memory-recent";
+        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-recent", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Older", "content": "o", "type": "reference"})).await;
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Newer", "content": "n", "type": "reference"})).await;
@@ -377,6 +386,7 @@ mod memory_tools {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let project = "/tmp/mcp-memory-catalog";
+        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-catalog", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Catalog Item", "content": "c", "type": "reference"})).await;
         let catalog = mcp_call_tool(&app, &session_id, "memory_catalog", json!({"project": project})).await;
@@ -407,6 +417,7 @@ mod memory_tools {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let project = "/tmp/mcp-memory-history-diff";
+        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-history-diff", "path": project})).await;
 
         let created = mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "History Diff", "content": "line one", "type": "reference"})).await;
         let permalink = created["permalink"].as_str().unwrap().to_string();
@@ -442,6 +453,7 @@ mod memory_tools {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let project = "/tmp/mcp-memory-reindex";
+        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-reindex", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Reindex Seed", "content": "seed", "type": "reference"})).await;
 
@@ -458,6 +470,7 @@ mod memory_tools {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let project = "/tmp/mcp-memory-build-context";
+        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-build-context", "path": project})).await;
 
         let target = mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Context Target", "content": "target body", "type": "reference"})).await;
         let seed = mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Context Seed", "content": "see [[Context Target]]", "type": "reference"})).await;
@@ -892,9 +905,9 @@ mod task_tools {
         let t1 = repo.create_in_project(&project.id, Some(&epic1.id), "alpha ready", "desc", "design", "task", 1, "owner", None).await.unwrap();
         let _t2 = repo.create_in_project(&project.id, Some(&epic1.id), "beta progress", "desc", "design", "task", 2, "owner", None).await.unwrap();
         let _t3 = repo.create_in_project(&project.id, Some(&epic2.id), "gamma text", "desc", "design", "task", 3, "owner", None).await.unwrap();
-        repo.transition(&t1.id, crate::models::TransitionAction::Accept, "a", "user", None, None).await.unwrap();
+        repo.transition(&t1.id, djinn_core::models::TransitionAction::Accept, "a", "user", None, None).await.unwrap();
         repo.update(&t1.id, "alpha ready", "desc", "design", 1, "owner", "", r#"[{"description":"default","met":false}]"#).await.unwrap();
-        repo.transition(&t1.id, crate::models::TransitionAction::Start, "a", "user", None, None).await.unwrap();
+        repo.transition(&t1.id, djinn_core::models::TransitionAction::Start, "a", "user", None, None).await.unwrap();
 
         let app = create_test_app_with_db(db.clone());
         let sid = initialize_mcp_session(&app).await;
@@ -955,8 +968,8 @@ mod task_tools {
         let epic = create_test_epic(&db, &project.id).await;
         let t1 = create_test_task(&db, &project.id, &epic.id).await;
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
-        repo.transition(&t1.id, crate::models::TransitionAction::Accept, "u1", "user", None, None).await.unwrap();
-        repo.transition(&t1.id, crate::models::TransitionAction::Start, "u1", "user", None, None).await.unwrap();
+        repo.transition(&t1.id, djinn_core::models::TransitionAction::Accept, "u1", "user", None, None).await.unwrap();
+        repo.transition(&t1.id, djinn_core::models::TransitionAction::Start, "u1", "user", None, None).await.unwrap();
         let _t2 = create_test_task(&db, &project.id, &epic.id).await;
 
         let app = create_test_app_with_db(db.clone());

@@ -25,8 +25,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use djinn_server::daemon;
 use djinn_server::db::checkpoint;
-use djinn_db::Database;
-use djinn_server::db::connection::{self};
+use djinn_db::{Database, default_db_path};
 use djinn_server::logging;
 use djinn_server::server::{self, AppState};
 
@@ -98,7 +97,7 @@ async fn async_main() {
         shutdown_cancel.cancel();
     });
 
-    let db_path = cli.db_path.unwrap_or_else(connection::default_db_path);
+    let db_path = cli.db_path.unwrap_or_else(default_db_path);
     tracing::info!(path = %db_path.display(), "opening database");
     let db = Database::open(&db_path).expect("failed to open database");
     checkpoint::spawn(db.clone(), cancel.clone());

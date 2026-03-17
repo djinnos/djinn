@@ -458,7 +458,7 @@ impl SyncManager {
     // ── Internal helpers ──────────────────────────────────────────────────────
 
     /// Query sync-enabled projects from the DB (SYNC-07).
-    async fn list_sync_enabled_projects(&self) -> Vec<crate::models::Project> {
+    async fn list_sync_enabled_projects(&self) -> Vec<djinn_core::models::Project> {
         project_repo(&self.inner)
             .list_sync_enabled()
             .await
@@ -757,7 +757,7 @@ mod tests {
         while rx.try_recv().is_ok() {}
 
         let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
-        let peer_task = crate::models::Task {
+        let peer_task = djinn_core::models::Task {
             id: uuid::Uuid::now_v7().to_string(),
             project_id: epic.project_id.clone(),
             short_id: "abc".to_string(),
@@ -798,7 +798,7 @@ mod tests {
         // Verify that DjinnEventEnvelope serialization skips the top-level from_sync
         // field (it is #[serde(skip)]). The from_sync value is accessible via
         // envelope.from_sync() for sync-loop detection but must not leak to the wire.
-        let task = crate::models::Task {
+        let task = djinn_core::models::Task {
             id: "test-id".to_string(),
             project_id: "proj".to_string(),
             short_id: "xyz".to_string(),
@@ -843,7 +843,7 @@ mod tests {
             env.entity_type == "task" && !env.from_sync
         };
 
-        let task = crate::models::Task {
+        let task = djinn_core::models::Task {
             id: "t".to_string(),
             project_id: "p".to_string(),
             short_id: "s".to_string(),

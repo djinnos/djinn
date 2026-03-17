@@ -9,11 +9,7 @@ use tower::ServiceExt;
 
 use djinn_db::{Database, EpicCreateInput, EpicRepository, NoteRepository, ProjectRepository, SessionRepository, TaskRepository};
 use crate::events::EventBus;
-use crate::models::Epic;
-use crate::models::Note;
-use crate::models::Project;
-use crate::models::SessionRecord;
-use crate::models::Task;
+use djinn_core::models::{Epic, Note, Project, SessionRecord, Task};
 use crate::server::{self, AppState};
 
 /// Create an in-memory database with all migrations applied.
