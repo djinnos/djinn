@@ -346,9 +346,8 @@ mod tests {
     fn test_app_state() -> (AgentContext, CancellationToken, TempDir) {
         let db = test_helpers::create_test_db();
         let cancel = CancellationToken::new();
-        let app_state = crate::server::AppState::new(db, cancel.clone());
         let temp = tempfile::tempdir().expect("tempdir");
-        (app_state.agent_context(), cancel, temp)
+        (test_helpers::agent_context_from_db(db, cancel.clone()), cancel, temp)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
