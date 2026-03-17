@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 
 /// A knowledge base note. Source of truth is the markdown file on disk;
 /// this struct represents the SQLite index row.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, sqlx::FromRow)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Note {
     pub id: String,
     pub project_id: String,
@@ -67,7 +68,8 @@ pub struct NoteSearchResult {
 }
 
 /// Compact note summary (no full content) for list and recent queries.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, sqlx::FromRow)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct NoteCompact {
     pub id: String,
     pub permalink: String,
@@ -75,6 +77,17 @@ pub struct NoteCompact {
     pub note_type: String,
     pub folder: String,
     pub updated_at: String,
+}
+
+/// L1 note overview payload used in tiered context responses.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct NoteOverview {
+    pub id: String,
+    pub permalink: String,
+    pub title: String,
+    pub note_type: String,
+    pub overview_text: String,
+    pub score: Option<f32>,
 }
 
 /// A single git commit entry for note history.
@@ -166,4 +179,29 @@ pub struct OrphanNote {
     pub title: String,
     pub note_type: String,
     pub folder: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NoteOverview;
+
+    #[test]
+    fn note_overview_serializes_with_stable_field_names() {
+        let payload = NoteOverview {
+            id: "note_123".to_string(),
+            permalink: "reference/example".to_string(),
+            title: "Example Note".to_string(),
+            note_type: "reference".to_string(),
+            overview_text: "Short summary".to_string(),
+            score: Some(0.87),
+        };
+
+        let value = serde_json::to_value(payload).expect("serializes to JSON value");
+        assert_eq!(value["id"], "note_123");
+        assert_eq!(value["permalink"], "reference/example");
+        assert_eq!(value["title"], "Example Note");
+        assert_eq!(value["note_type"], "reference");
+        assert_eq!(value["overview_text"], "Short summary");
+        assert_eq!(value["score"].as_f64(), Some(0.8700000047683716));
+    }
 }
