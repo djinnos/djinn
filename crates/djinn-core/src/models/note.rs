@@ -19,6 +19,10 @@ pub struct Note {
     pub created_at: String,
     pub updated_at: String,
     pub last_accessed: String,
+    pub access_count: i64,
+    pub confidence: f64,
+    pub abstract_: Option<String>,
+    pub overview: Option<String>,
 }
 
 impl Note {
@@ -42,6 +46,10 @@ impl Note {
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "last_accessed": self.last_accessed,
+            "access_count": self.access_count,
+            "confidence": self.confidence,
+            "abstract": self.abstract_,
+            "overview": self.overview,
         })
     }
 }

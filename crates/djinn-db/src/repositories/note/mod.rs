@@ -27,7 +27,8 @@ use indexing::{index_links_for_note, resolve_links_for_note};
 
 const NOTE_SELECT_WHERE_ID: &str = "SELECT id, project_id, permalink, title, file_path,
             note_type, folder, tags, content,
-            created_at, updated_at, last_accessed
+            created_at, updated_at, last_accessed,
+            access_count, confidence, abstract as abstract_, overview
      FROM notes WHERE id = ?1";
 
 // ── Repository ────────────────────────────────────────────────────────────────
@@ -478,6 +479,34 @@ mod tests {
 
         // No event should be in the channel.
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn touch_accessed_increments_access_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let note = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Touch Count",
+                "body",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        for _ in 0..3 {
+            repo.touch_accessed(&note.id).await.unwrap();
+        }
+
+        let updated = repo.get(&note.id).await.unwrap().unwrap();
+        assert_eq!(updated.access_count, 3);
     }
 
     // ── Wikilink graph tests ──────────────────────────────────────────────────
