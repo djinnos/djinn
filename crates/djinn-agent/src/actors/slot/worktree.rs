@@ -469,6 +469,67 @@ pub(crate) async fn cleanup_worktree(
     }
 }
 
+/// Tear down a task worktree in the correct order to avoid git errors:
+/// 1. LSP clients shut down (must happen before directory removal)
+/// 2. Git worktree metadata removed (`git worktree remove`)
+/// 3. Worktree directory removed (filesystem fallback if git remove failed)
+/// 4. Task branch deleted — safe only AFTER the worktree is gone (set `delete_branch` true
+///    for merge/close paths; false when releasing a task back for retry)
+/// 5. Git worktree prune (clean stale metadata)
+pub async fn teardown_worktree(
+    task_short_id: &str,
+    worktree_path: &Path,
+    project_path: &Path,
+    app_state: &AgentContext,
+    delete_branch: bool,
+) {
+    // Safety: never operate on the main worktree (project root).  Linked
+    // worktrees have `.git` as a *file*; the main worktree has it as a dir.
+    if worktree_path.join(".git").is_dir() {
+        tracing::debug!(
+            task_id = %task_short_id,
+            worktree = %worktree_path.display(),
+            "teardown_worktree: skipping — path is the main worktree"
+        );
+        return;
+    }
+
+    // 1. Shut down any LSP clients whose root is inside this worktree.
+    app_state.lsp.shutdown_for_worktree(worktree_path).await;
+
+    // 2. Remove git worktree metadata.
+    if let Ok(git) = app_state.git_actor(project_path).await {
+        let _ = git.remove_worktree(worktree_path).await;
+    }
+
+    // 3. Remove the directory (fallback if git remove left it behind).
+    if worktree_path.exists() {
+        let _ = tokio::fs::remove_dir_all(worktree_path).await;
+    }
+
+    // 4. Delete the task branch (now safe — worktree is gone).
+    if delete_branch {
+        let branch = format!("task/{task_short_id}");
+        if let Ok(git) = app_state.git_actor(project_path).await
+            && let Err(e) = git.delete_branch(&branch).await
+        {
+            tracing::warn!(
+                task_id = %task_short_id,
+                branch = %branch,
+                error = %e,
+                "teardown_worktree: failed to delete task branch"
+            );
+        }
+    }
+
+    // 5. Prune stale worktree metadata.
+    if let Ok(git) = app_state.git_actor(project_path).await {
+        let _ = git
+            .run_command(vec!["worktree".into(), "prune".into()])
+            .await;
+    }
+}
+
 /// Remove all worktrees for all projects on execution start.
 ///
 /// Cleans both git worktree metadata and leftover filesystem directories under
