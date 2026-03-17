@@ -1807,7 +1807,7 @@ async fn call_task_transition(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    use crate::db::repositories::task::transitions::{PM_MERGE_ACTIONS, merge_and_transition};
+    use crate::db::repositories::task::transitions::{PM_MERGE_ACTIONS, VerificationGateFn, merge_and_transition};
     use crate::models::{TaskStatus, TransitionAction};
     let p: TaskTransitionParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
@@ -1824,7 +1824,14 @@ async fn call_task_transition(
             );
         }
 
-        let (merge_action, reason) = merge_and_transition(&task.id, state, &PM_MERGE_ACTIONS)
+        let gate_state = state.clone();
+        let gate: VerificationGateFn = Box::new(move |task_id: String, project_path: String| {
+            let s = gate_state.clone();
+            Box::pin(async move {
+                crate::actors::slot::verification::run_verification_gate(&task_id, &project_path, &s).await
+            })
+        });
+        let (merge_action, reason) = merge_and_transition(&task.id, state, &PM_MERGE_ACTIONS, Some(gate))
             .await
             .unwrap_or((
                 TransitionAction::PmInterventionComplete,
