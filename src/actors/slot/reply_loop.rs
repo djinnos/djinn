@@ -9,7 +9,7 @@ use crate::agent::output_parser::ParsedAgentOutput;
 use crate::agent::provider::telemetry;
 use crate::agent::provider::{LlmProvider, StreamEvent};
 use crate::events::DjinnEventEnvelope;
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 
 use super::*;
 
@@ -82,7 +82,7 @@ pub(super) async fn run_reply_loop(
     role_name: &str,
     cancel: &CancellationToken,
     global_cancel: &CancellationToken,
-    app_state: &AppState,
+    app_state: &AgentContext,
     context_window: i64,
     model_id: &str,
     is_resumed_session: bool,
@@ -321,7 +321,7 @@ pub(super) async fn run_reply_loop(
                         match evt {
                             StreamEvent::Delta(ContentBlock::Text { text }) => {
                                 // Emit streaming delta SSE event.
-                                let _ = app_state.events().send(DjinnEventEnvelope::session_message(
+                                app_state.event_bus.send(DjinnEventEnvelope::session_message(
                                     session_id,
                                     task_id,
                                     role_name,
@@ -350,7 +350,7 @@ pub(super) async fn run_reply_loop(
                                 } else {
                                     0.0
                                 };
-                                let _ = app_state.events().send(DjinnEventEnvelope::session_token_update(
+                                app_state.event_bus.send(DjinnEventEnvelope::session_token_update(
                                     session_id,
                                     task_id,
                                     total_tokens_in as i64,
@@ -493,7 +493,7 @@ pub(super) async fn run_reply_loop(
             assistant_message_count += 1;
 
             // Emit the complete assistant message as an SSE event.
-            let _ = app_state.events().send(DjinnEventEnvelope::session_message(
+            app_state.event_bus.send(DjinnEventEnvelope::session_message(
                 session_id,
                 task_id,
                 role_name,

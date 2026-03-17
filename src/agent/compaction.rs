@@ -11,7 +11,7 @@ use futures::StreamExt;
 use crate::agent::message::{Conversation, Message, Role};
 use crate::agent::provider::{LlmProvider, StreamEvent};
 use crate::db::SessionMessageRepository;
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 
 // ─── Threshold ────────────────────────────────────────────────────────────────
 
@@ -216,12 +216,12 @@ pub(crate) async fn compact_conversation(
     conversation: &mut Conversation,
     session_id: &str,
     task_id: &str,
-    app_state: &AppState,
+    app_state: &AgentContext,
     ctx: CompactionContext,
     context_window: i64,
 ) -> bool {
     // 1. Persist current messages before replacing them.
-    let repo = SessionMessageRepository::new(app_state.db().clone(), app_state.event_bus());
+    let repo = SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if let Err(e) = repo
         .insert_messages_batch(session_id, task_id, &conversation.messages)
         .await

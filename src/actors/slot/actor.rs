@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 
 use super::{
     ProjectLifecycleParams, SlotCommand, SlotError, SlotEvent, run_project_lifecycle,
@@ -18,7 +18,7 @@ type LifecycleRunner = Arc<
             String,
             String,
             String,
-            AppState,
+            AgentContext,
             CancellationToken,
             CancellationToken,
         ) -> LifecycleFuture
@@ -42,7 +42,7 @@ pub struct SlotActor {
     model_id: String,
     receiver: mpsc::Receiver<SlotCommand>,
     event_tx: mpsc::Sender<SlotEvent>,
-    app_state: AppState,
+    app_state: AgentContext,
     cancel: CancellationToken,
     runner: LifecycleRunner,
 }
@@ -208,7 +208,7 @@ impl SlotHandle {
         id: usize,
         model_id: String,
         event_tx: mpsc::Sender<SlotEvent>,
-        app_state: AppState,
+        app_state: AgentContext,
         cancel: CancellationToken,
     ) -> Self {
         let runner: LifecycleRunner =
@@ -234,7 +234,7 @@ impl SlotHandle {
         id: usize,
         model_id: String,
         event_tx: mpsc::Sender<SlotEvent>,
-        app_state: AppState,
+        app_state: AgentContext,
         cancel: CancellationToken,
         runner: LifecycleRunner,
     ) -> Self {
@@ -261,7 +261,7 @@ impl SlotHandle {
         id: usize,
         model_id: String,
         event_tx: mpsc::Sender<SlotEvent>,
-        app_state: AppState,
+        app_state: AgentContext,
         cancel: CancellationToken,
         runner: TestLifecycleRunner,
     ) -> Self {
@@ -343,12 +343,12 @@ mod tests {
     use super::*;
     use crate::test_helpers;
 
-    fn test_app_state() -> (AppState, CancellationToken, TempDir) {
+    fn test_app_state() -> (AgentContext, CancellationToken, TempDir) {
         let db = test_helpers::create_test_db();
         let cancel = CancellationToken::new();
-        let app_state = AppState::new(db, cancel.clone());
+        let app_state = crate::server::AppState::new(db, cancel.clone());
         let temp = tempfile::tempdir().expect("tempdir");
-        (app_state, cancel, temp)
+        (app_state.agent_context(), cancel, temp)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

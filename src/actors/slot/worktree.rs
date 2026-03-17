@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use djinn_git::GitError;
 use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 
 use super::*;
 
@@ -150,7 +150,7 @@ async fn ensure_target_branch_ready(
 pub(crate) async fn prepare_worktree(
     project_dir: &Path,
     task: &crate::models::Task,
-    app_state: &AppState,
+    app_state: &AgentContext,
 ) -> anyhow::Result<PathBuf> {
     let branch = format!("task/{}", task.short_id);
     let target_branch = default_target_branch(&task.project_id, app_state).await;
@@ -164,7 +164,7 @@ pub(crate) async fn prepare_worktree(
         .join("worktrees")
         .join(&task.short_id);
 
-    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
+    let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let has_paused_session = session_repo
         .paused_for_task(&task.id)
         .await
@@ -225,7 +225,7 @@ pub(crate) async fn try_rebase_existing_task_branch(
     project_dir: &Path,
     branch: &str,
     target_branch: &str,
-    app_state: &AppState,
+    app_state: &AgentContext,
 ) {
     let git = match app_state.git_actor(project_dir).await {
         Ok(git) => git,
@@ -329,7 +329,7 @@ pub(crate) async fn try_rebase_existing_task_branch(
 pub(crate) async fn commit_wip_if_needed(
     task_id: &str,
     worktree_path: &Path,
-    app_state: &AppState,
+    app_state: &AgentContext,
 ) {
     let git = match app_state.git_actor(worktree_path).await {
         Ok(g) => g,
@@ -376,7 +376,7 @@ pub(crate) async fn commit_wip_if_needed(
 pub(crate) async fn commit_final_work_if_needed(
     task_id: &str,
     worktree_path: &Path,
-    app_state: &AppState,
+    app_state: &AgentContext,
 ) -> Result<(), String> {
     let git = app_state
         .git_actor(worktree_path)
@@ -409,7 +409,7 @@ pub(crate) async fn commit_final_work_if_needed(
     Ok(())
 }
 
-pub(crate) async fn cleanup_worktree(task_id: &str, worktree_path: &Path, app_state: &AppState) {
+pub(crate) async fn cleanup_worktree(task_id: &str, worktree_path: &Path, app_state: &AgentContext) {
     // Never remove the main worktree (project root). Linked worktrees have `.git`
     // as a file; the main worktree has `.git` as a directory.
     let git_entry = worktree_path.join(".git");
@@ -422,7 +422,7 @@ pub(crate) async fn cleanup_worktree(task_id: &str, worktree_path: &Path, app_st
         return;
     }
 
-    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
+    let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if let Ok(Some(paused)) = session_repo.paused_for_task(task_id).await
         && paused.worktree_path.as_deref() == Some(worktree_path.to_str().unwrap_or(""))
     {
@@ -470,8 +470,8 @@ pub(crate) async fn cleanup_worktree(task_id: &str, worktree_path: &Path, app_st
 /// Cleans both git worktree metadata and leftover filesystem directories under
 /// each project's `.djinn/worktrees/`. Skips entries that start with `.` (sync
 /// worktrees are transient and handled separately).
-pub(crate) async fn purge_all_worktrees(app_state: &AppState) {
-    let project_repo = ProjectRepository::new(app_state.db().clone(), app_state.event_bus());
+pub(crate) async fn purge_all_worktrees(app_state: &AgentContext) {
+    let project_repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let projects = match project_repo.list().await {
         Ok(p) => p,
         Err(e) => {
@@ -485,7 +485,7 @@ pub(crate) async fn purge_all_worktrees(app_state: &AppState) {
     }
 }
 
-async fn purge_project_worktrees(project_path: &str, app_state: &AppState) {
+async fn purge_project_worktrees(project_path: &str, app_state: &AgentContext) {
     let project_dir = Path::new(project_path);
     let worktrees_dir = project_dir.join(".djinn").join("worktrees");
     if !worktrees_dir.exists() {

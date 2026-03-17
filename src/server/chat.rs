@@ -225,7 +225,7 @@ pub(super) async fn completions_handler(
         .map(|m| m.context_window)
         .unwrap_or(0);
 
-    let provider_credential = load_provider_credential(&provider_id, &state)
+    let provider_credential = load_provider_credential(&provider_id, &state.agent_context())
         .await
         .map_err(|e| {
             tracing::warn!(provider=%provider_id, error=%e, "provider credential resolution failed");

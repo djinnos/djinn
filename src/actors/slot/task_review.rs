@@ -1,5 +1,5 @@
 use crate::db::TaskRepository;
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 
 pub(crate) const STALE_ESCALATION_THRESHOLD: i64 = 3;
 
@@ -19,8 +19,8 @@ pub(crate) fn all_acceptance_criteria_met(ac_json: &str) -> bool {
 
 /// Returns true if the AC met-state is identical to the snapshot from when
 /// the current review cycle started (i.e. the worker made no AC progress).
-pub(crate) async fn is_stale_review_cycle(task_id: &str, current_ac_json: &str, app_state: &AppState) -> bool {
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
+pub(crate) async fn is_stale_review_cycle(task_id: &str, current_ac_json: &str, app_state: &AgentContext) -> bool {
+    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let snapshot_json = match repo.last_review_start_ac_snapshot(task_id).await {
         Ok(Some(s)) => s,
         _ => return false, // no snapshot → assume not stale
@@ -74,42 +74,42 @@ mod transition_tests {
     use crate::test_helpers;
 
     #[allow(dead_code)]
-    async fn set_task_status(app: &AppState, task_id: &str, status: &str) {
+    async fn set_task_status(db: &crate::db::connection::Database, task_id: &str, status: &str) {
         sqlx::query("UPDATE tasks SET status = ?1 WHERE id = ?2")
             .bind(status)
             .bind(task_id)
-            .execute(app.db().pool())
+            .execute(db.pool())
             .await
             .expect("update task status");
     }
 
     #[allow(dead_code)]
-    async fn set_task_ac(app: &AppState, task_id: &str, ac_json: &str) {
+    async fn set_task_ac(db: &crate::db::connection::Database, task_id: &str, ac_json: &str) {
         sqlx::query("UPDATE tasks SET acceptance_criteria = ?1 WHERE id = ?2")
             .bind(ac_json)
             .bind(task_id)
-            .execute(app.db().pool())
+            .execute(db.pool())
             .await
             .expect("update AC");
     }
 
     #[allow(dead_code)]
-    async fn set_continuation_count(app: &AppState, task_id: &str, count: i64) {
+    async fn set_continuation_count(db: &crate::db::connection::Database, task_id: &str, count: i64) {
         sqlx::query("UPDATE tasks SET continuation_count = ?1 WHERE id = ?2")
             .bind(count)
             .bind(task_id)
-            .execute(app.db().pool())
+            .execute(db.pool())
             .await
             .expect("update continuation_count");
     }
 
-    async fn insert_review_snapshot(app: &AppState, task_id: &str, ac_json: &str) {
+    async fn insert_review_snapshot(db: &crate::db::connection::Database, task_id: &str, ac_json: &str) {
         let payload = serde_json::json!({"to_status":"in_task_review","ac_snapshot":serde_json::from_str::<serde_json::Value>(ac_json).expect("valid ac json")}).to_string();
         sqlx::query("INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) VALUES (?1, ?2, 'test', 'system', 'status_changed', ?3)")
             .bind(uuid::Uuid::now_v7().to_string())
             .bind(task_id)
             .bind(payload)
-            .execute(app.db().pool())
+            .execute(db.pool())
             .await
             .expect("insert snapshot");
     }
@@ -128,29 +128,30 @@ mod transition_tests {
     async fn is_stale_review_cycle_cases() {
         let db = test_helpers::create_test_db();
         let app = crate::server::AppState::new(db, tokio_util::sync::CancellationToken::new());
+        let ctx = app.agent_context();
         let project = test_helpers::create_test_project(app.db()).await;
         let epic = test_helpers::create_test_epic(app.db(), &project.id).await;
         let task = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
 
         let same = ac(&[true, false]);
-        insert_review_snapshot(&app, &task.id, &same).await;
-        assert!(is_stale_review_cycle(&task.id, &same, &app).await);
+        insert_review_snapshot(&ctx.db, &task.id, &same).await;
+        assert!(is_stale_review_cycle(&task.id, &same, &ctx).await);
 
         let progressed = ac(&[true, true]);
-        assert!(!is_stale_review_cycle(&task.id, &progressed, &app).await);
+        assert!(!is_stale_review_cycle(&task.id, &progressed, &ctx).await);
 
         let task2 = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
-        assert!(!is_stale_review_cycle(&task2.id, &same, &app).await);
+        assert!(!is_stale_review_cycle(&task2.id, &same, &ctx).await);
 
         let empty = "[]".to_string();
-        insert_review_snapshot(&app, &task2.id, &empty).await;
-        assert!(is_stale_review_cycle(&task2.id, &empty, &app).await);
+        insert_review_snapshot(&ctx.db, &task2.id, &empty).await;
+        assert!(is_stale_review_cycle(&task2.id, &empty, &ctx).await);
 
         let task3 = test_helpers::create_test_task(app.db(), &project.id, &epic.id).await;
         let three = ac(&[true, false, true]);
         let five = ac(&[true, false, true, false, true]);
-        insert_review_snapshot(&app, &task3.id, &three).await;
-        assert!(!is_stale_review_cycle(&task3.id, &five, &app).await);
+        insert_review_snapshot(&ctx.db, &task3.id, &three).await;
+        assert!(!is_stale_review_cycle(&task3.id, &five, &ctx).await);
     }
 
 }

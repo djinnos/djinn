@@ -4,7 +4,7 @@ use crate::db::TaskRepository;
 use crate::db::VerificationCacheRepository;
 use crate::events::DjinnEventEnvelope;
 use crate::models::TransitionAction;
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 use crate::verification::service::verify_commit;
 use crate::verification::StepEvent;
 
@@ -23,7 +23,7 @@ const VERIFICATION_ESCALATION_THRESHOLD: i64 = 3;
 /// 5. On fail: logs the failure as an activity comment, transitions to `open` (VerificationFail)
 /// 6. Cleans up the worktree
 /// 7. Triggers redispatch for the project
-pub(crate) fn spawn_verification(task_id: String, project_path: String, app_state: AppState) {
+pub(crate) fn spawn_verification(task_id: String, project_path: String, app_state: AgentContext) {
     app_state.register_verification(&task_id);
     tokio::spawn(async move {
         if let Err(e) = run_verification_pipeline(&task_id, &project_path, &app_state).await {
@@ -32,7 +32,7 @@ pub(crate) fn spawn_verification(task_id: String, project_path: String, app_stat
                 error = %e,
                 "Verification pipeline crashed; releasing task"
             );
-            let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
+            let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
             let _ = repo
                 .transition(
                     &task_id,
@@ -62,17 +62,17 @@ pub(crate) fn spawn_verification(task_id: String, project_path: String, app_stat
 async fn run_verification_pipeline(
     task_id: &str,
     project_path: &str,
-    app_state: &AppState,
+    app_state: &AgentContext,
 ) -> anyhow::Result<()> {
     let task = load_task(task_id, app_state).await?;
     let project_dir = PathBuf::from(project_path);
-    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
     // Create a fresh worktree from the task branch.
     let worktree_path = prepare_worktree(&project_dir, &task, app_state).await?;
     let commit_sha = resolve_head_commit(&worktree_path)?;
 
-    let result = verify_commit(&task.project_id, &commit_sha, &worktree_path, app_state).await?;
+    let result = verify_commit(&task.project_id, &commit_sha, &worktree_path, &app_state.db).await?;
     emit_verification_steps(&task.project_id, Some(task_id), &result, app_state).await;
 
     if !result.passed {
@@ -108,7 +108,7 @@ async fn run_verification_pipeline(
 pub(crate) async fn run_verification_gate(
     task_id: &str,
     project_path: &str,
-    app_state: &AppState,
+    app_state: &AgentContext,
 ) -> Result<(), String> {
     let task = load_task(task_id, app_state)
         .await
@@ -119,14 +119,14 @@ pub(crate) async fn run_verification_gate(
     let commit_sha = resolve_head_commit_for_branch(&project_dir, &branch)
         .map_err(|e| format!("failed to resolve branch HEAD: {e}"))?;
 
-    let cache_repo = VerificationCacheRepository::new(app_state.db().clone());
+    let cache_repo = VerificationCacheRepository::new(app_state.db.clone());
     if cache_repo
         .get(&task.project_id, &commit_sha)
         .await
         .map_err(|e| format!("failed to query verification cache: {e}"))?
         .is_some()
     {
-        let _ = app_state.events().send(DjinnEventEnvelope::verification_step(
+        app_state.event_bus.send(DjinnEventEnvelope::verification_step(
             &task.project_id,
             Some(task_id),
             "verification",
@@ -143,7 +143,7 @@ pub(crate) async fn run_verification_gate(
         .await
         .map_err(|e| format!("failed to create verification worktree: {e}"))?;
 
-    let result = verify_commit(&task.project_id, &commit_sha, &worktree_path, app_state)
+    let result = verify_commit(&task.project_id, &commit_sha, &worktree_path, &app_state.db)
         .await
         .map_err(|e| format!("verification execution failed: {e}"))?;
     emit_verification_steps(&task.project_id, Some(task_id), &result, app_state).await;
@@ -162,7 +162,7 @@ async fn handle_verification_failure(
     task_id: &str,
     feedback: &str,
     task_repo: &TaskRepository,
-    _app_state: &AppState,
+    _app_state: &AgentContext,
 ) {
     let payload = serde_json::json!({ "body": feedback }).to_string();
     let _ = task_repo
@@ -256,10 +256,10 @@ async fn emit_verification_steps(
     project_id: &str,
     task_id: Option<&str>,
     result: &crate::verification::service::VerificationResult,
-    app_state: &AppState,
+    app_state: &AgentContext,
 ) {
     for (idx, r) in result.setup_results.iter().enumerate() {
-        let _ = app_state.events().send(DjinnEventEnvelope::verification_step(
+        app_state.event_bus.send(DjinnEventEnvelope::verification_step(
             project_id,
             task_id,
             "setup",
@@ -274,7 +274,7 @@ async fn emit_verification_steps(
         ));
     }
     for (idx, r) in result.verification_results.iter().enumerate() {
-        let _ = app_state.events().send(DjinnEventEnvelope::verification_step(
+        app_state.event_bus.send(DjinnEventEnvelope::verification_step(
             project_id,
             task_id,
             "verification",

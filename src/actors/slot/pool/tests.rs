@@ -19,13 +19,13 @@ enum RunnerSignal {
 }
 
 fn test_app_state() -> (
-    crate::server::AppState,
+    crate::agent::context::AgentContext,
     tokio_util::sync::CancellationToken,
     TempDir,
 ) {
     let db = test_helpers::create_test_db();
     let cancel = tokio_util::sync::CancellationToken::new();
-    let app_state = crate::server::AppState::new(db, cancel.clone());
+    let app_state = crate::server::AppState::new(db, cancel.clone()).agent_context();
     let temp = tempfile::tempdir().expect("tempdir");
     (app_state, cancel, temp)
 }

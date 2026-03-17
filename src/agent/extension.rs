@@ -17,7 +17,7 @@ use crate::db::SessionRepository;
 use crate::db::TaskRepository;
 use crate::agent::lsp::format_diagnostics_xml;
 use crate::models::Task;
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 
 #[derive(Deserialize)]
 struct IncomingToolCall {
@@ -38,7 +38,7 @@ fn floor_char_boundary(s: &str, idx: usize) -> usize {
 }
 
 async fn dispatch_tool_call<T>(
-    state: &AppState,
+    state: &AgentContext,
     tool_call: &T,
     worktree_path: &Path,
     agent_type: Option<AgentType>,
@@ -52,7 +52,7 @@ where
 
     // Resolve project_id from worktree_path so agent tools are project-scoped.
     let project_id = {
-        let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+        let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
         let path_str = worktree_path.to_string_lossy();
         repo.resolve(&path_str).await.ok().flatten()
     };
@@ -257,12 +257,12 @@ fn non_empty(opt: Option<String>) -> Option<String> {
 }
 
 async fn call_task_list(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     project_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: TaskListParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
 
     let limit = p.limit.unwrap_or(50);
     let offset = p.offset.unwrap_or(0);
@@ -292,12 +292,12 @@ async fn call_task_list(
 }
 
 async fn call_task_show(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: TaskShowParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
-    let session_repo = SessionRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
+    let session_repo = SessionRepository::new(state.db.clone(), state.event_bus.clone());
 
     match repo.resolve(&p.id).await {
         Ok(Some(task)) => {
@@ -365,13 +365,13 @@ async fn call_task_show(
 }
 
 async fn call_task_activity_list(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     use crate::db::ActivityQuery;
 
     let p: TaskActivityListParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
 
     // Resolve short_id to full UUID
     let task_id = match repo.resolve(&p.id).await {
@@ -423,11 +423,11 @@ async fn call_task_activity_list(
 }
 
 async fn call_epic_show(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: EpicShowParams = parse_args(arguments)?;
-    let repo = EpicRepository::new(state.db().clone(), state.event_bus());
+    let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
 
     match repo.resolve(&p.id).await {
         Ok(Some(epic)) => Ok(serde_json::to_value(epic).map_err(|e| e.to_string())?),
@@ -437,11 +437,11 @@ async fn call_epic_show(
 }
 
 async fn call_epic_update(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: EpicUpdateParams = parse_args(arguments)?;
-    let repo = EpicRepository::new(state.db().clone(), state.event_bus());
+    let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
 
     let Some(epic) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("epic not found: {}", p.id) }));
@@ -470,17 +470,17 @@ async fn call_epic_update(
 }
 
 async fn call_epic_tasks(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: EpicTasksParams = parse_args(arguments)?;
-    let epic_repo = EpicRepository::new(state.db().clone(), state.event_bus());
+    let epic_repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
 
     let Some(epic) = epic_repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("epic not found: {}", p.id) }));
     };
 
-    let task_repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let task_repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
     let limit = p.limit.unwrap_or(50).clamp(1, 200);
     let offset = p.offset.unwrap_or(0).max(0);
     let mut all = task_repo
@@ -508,11 +508,11 @@ async fn call_epic_tasks(
 }
 
 async fn call_task_create(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: TaskCreateParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
 
     let issue_type = p.issue_type.as_deref().unwrap_or("task");
     let description = p.description.as_deref().unwrap_or("");
@@ -531,7 +531,7 @@ async fn call_task_create(
     };
 
     // Resolve epic_id (accepts UUID or short_id).
-    let epic_repo = EpicRepository::new(state.db().clone(), state.event_bus());
+    let epic_repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
     let epic = epic_repo
         .resolve(&p.epic_id)
         .await
@@ -598,11 +598,11 @@ async fn call_task_create(
 }
 
 async fn call_task_update(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: TaskUpdateParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
 
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
@@ -675,11 +675,11 @@ async fn call_task_update(
 }
 
 async fn call_task_update_ac(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: TaskUpdateAcParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
 
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
@@ -707,7 +707,7 @@ async fn call_task_update_ac(
 }
 
 async fn call_request_pm(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     #[derive(Deserialize)]
@@ -718,7 +718,7 @@ async fn call_request_pm(
     }
 
     let p: RequestPmParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
 
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
@@ -762,11 +762,11 @@ async fn call_request_pm(
 }
 
 async fn call_task_comment_add(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: TaskCommentAddParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
 
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
@@ -793,14 +793,14 @@ async fn call_task_comment_add(
 }
 
 async fn call_memory_read(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: MemoryReadParams = parse_args(arguments)?;
     let project_path = resolve_project_path(p.project);
     let project_id = project_id_for_path(state, &project_path).await?;
 
-    let repo = NoteRepository::new(state.db().clone(), state.event_bus());
+    let repo = NoteRepository::new(state.db.clone(), state.event_bus.clone());
     let note = resolve_note_by_identifier(&repo, &project_id, &p.identifier)
         .await
         .ok_or_else(|| format!("note not found: {}", p.identifier))?;
@@ -810,14 +810,14 @@ async fn call_memory_read(
 }
 
 async fn call_memory_search(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: MemorySearchParams = parse_args(arguments)?;
     let project_path = resolve_project_path(p.project);
     let project_id = project_id_for_path(state, &project_path).await?;
 
-    let repo = NoteRepository::new(state.db().clone(), state.event_bus());
+    let repo = NoteRepository::new(state.db.clone(), state.event_bus.clone());
     let limit = p.limit.unwrap_or(10).clamp(1, 100) as usize;
     let results = repo
         .search(
@@ -848,14 +848,14 @@ async fn call_memory_search(
 }
 
 async fn call_memory_list(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: MemoryListParams = parse_args(arguments)?;
     let project_path = resolve_project_path(p.project);
     let project_id = project_id_for_path(state, &project_path).await?;
 
-    let repo = NoteRepository::new(state.db().clone(), state.event_bus());
+    let repo = NoteRepository::new(state.db.clone(), state.event_bus.clone());
     let depth = p.depth.unwrap_or(1);
 
     let notes = repo
@@ -931,7 +931,7 @@ async fn call_shell(
 }
 
 async fn call_read(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
@@ -993,7 +993,7 @@ async fn call_read(
     }
 
     state
-        .file_time()
+        .file_time
         .read(&worktree_path.display().to_string(), &path)
         .await?;
 
@@ -1008,7 +1008,7 @@ async fn call_read(
 }
 
 async fn call_write(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
@@ -1019,11 +1019,11 @@ async fn call_write(
     ensure_path_within_worktree(&path, worktree_path)?;
 
     state
-        .file_time()
+        .file_time
         .with_lock(&path, async {
             if path.exists() {
                 state
-                    .file_time()
+                    .file_time
                     .assert(&worktree_path.display().to_string(), &path)
                     .await
                     .map_err(|e| match e.as_str() {
@@ -1059,12 +1059,12 @@ async fn call_write(
                 .map_err(|e| format!("write failed: {e}"))?;
 
             state
-                .file_time()
+                .file_time
                 .read(&worktree_path.display().to_string(), &path)
                 .await?;
 
-            state.lsp().touch_file(worktree_path, &path, true).await;
-            let diag_xml = format_diagnostics_xml(state.lsp().diagnostics(worktree_path).await);
+            state.lsp.touch_file(worktree_path, &path, true).await;
+            let diag_xml = format_diagnostics_xml(state.lsp.diagnostics(worktree_path).await);
 
             Ok(serde_json::json!({
                 "ok": true,
@@ -1402,7 +1402,7 @@ fn try_indentation_flexible_match(
 }
 
 async fn call_edit(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
@@ -1413,10 +1413,10 @@ async fn call_edit(
     ensure_path_within_worktree(&path, worktree_path)?;
 
     state
-        .file_time()
+        .file_time
         .with_lock(&path, async {
             state
-                .file_time()
+                .file_time
                 .assert(&worktree_path.display().to_string(), &path)
                 .await
                 .map_err(|e| match e.as_str() {
@@ -1452,12 +1452,12 @@ async fn call_edit(
                 .map_err(|e| format!("write failed: {e}"))?;
 
             state
-                .file_time()
+                .file_time
                 .read(&worktree_path.display().to_string(), &path)
                 .await?;
 
-            state.lsp().touch_file(worktree_path, &path, true).await;
-            let diag_xml = format_diagnostics_xml(state.lsp().diagnostics(worktree_path).await);
+            state.lsp.touch_file(worktree_path, &path, true).await;
+            let diag_xml = format_diagnostics_xml(state.lsp.diagnostics(worktree_path).await);
 
             let mut result = serde_json::json!({
                 "ok": true,
@@ -1473,7 +1473,7 @@ async fn call_edit(
 }
 
 async fn call_apply_patch(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
@@ -1493,7 +1493,7 @@ async fn call_apply_patch(
         match op {
             super::patch::FileOp::Update { .. } | super::patch::FileOp::Delete { .. } => {
                 state
-                    .file_time()
+                    .file_time
                     .assert(&worktree_key, &resolved)
                     .await
                     .map_err(|e| {
@@ -1532,11 +1532,11 @@ async fn call_apply_patch(
     for (file_path, action) in &results {
         if *action != "deleted" {
             state
-                .file_time()
+                .file_time
                 .read(&worktree_key, file_path)
                 .await?;
             state
-                .lsp()
+                .lsp
                 .touch_file(worktree_path, file_path, true)
                 .await;
         }
@@ -1546,7 +1546,7 @@ async fn call_apply_patch(
         }));
     }
 
-    let diag_xml = format_diagnostics_xml(state.lsp().diagnostics(worktree_path).await);
+    let diag_xml = format_diagnostics_xml(state.lsp.diagnostics(worktree_path).await);
 
     Ok(serde_json::json!({
         "ok": true,
@@ -1564,7 +1564,7 @@ struct LspParams {
 }
 
 async fn call_lsp(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
@@ -1577,7 +1577,7 @@ async fn call_lsp(
             let character = p.character.ok_or("character is required for hover")?;
             // LSP uses 0-based positions; accept 1-based from agents
             let result = state
-                .lsp()
+                .lsp
                 .hover(
                     worktree_path,
                     &path,
@@ -1591,7 +1591,7 @@ async fn call_lsp(
             let line = p.line.ok_or("line is required for definition")?;
             let character = p.character.ok_or("character is required for definition")?;
             let result = state
-                .lsp()
+                .lsp
                 .go_to_definition(
                     worktree_path,
                     &path,
@@ -1605,7 +1605,7 @@ async fn call_lsp(
             let line = p.line.ok_or("line is required for references")?;
             let character = p.character.ok_or("character is required for references")?;
             let result = state
-                .lsp()
+                .lsp
                 .find_references(
                     worktree_path,
                     &path,
@@ -1616,7 +1616,7 @@ async fn call_lsp(
             Ok(serde_json::json!({ "operation": "references", "result": result }))
         }
         "symbols" => {
-            let result = state.lsp().document_symbols(worktree_path, &path).await?;
+            let result = state.lsp.document_symbols(worktree_path, &path).await?;
             Ok(serde_json::json!({ "operation": "symbols", "result": result }))
         }
         other => Err(format!(
@@ -1714,8 +1714,8 @@ fn merge_acceptance_criteria(existing_json: &str, incoming: &[serde_json::Value]
     serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
 }
 
-async fn project_id_for_path(state: &AppState, project_path: &str) -> Result<String, String> {
-    let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+async fn project_id_for_path(state: &AgentContext, project_path: &str) -> Result<String, String> {
+    let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
     repo.resolve(project_path)
         .await
         .map_err(|e| e.to_string())?
@@ -1804,13 +1804,13 @@ struct TaskResetCountersParams {
 }
 
 async fn call_task_transition(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     use crate::db::repositories::task::transitions::{PM_MERGE_ACTIONS, merge_and_transition};
     use crate::models::{TaskStatus, TransitionAction};
     let p: TaskTransitionParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
@@ -1928,11 +1928,11 @@ async fn call_task_transition(
 }
 
 async fn call_task_delete_branch(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: TaskDeleteBranchParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
@@ -1974,11 +1974,11 @@ async fn call_task_delete_branch(
 }
 
 async fn call_task_archive_activity(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: TaskArchiveActivityParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
@@ -1990,11 +1990,11 @@ async fn call_task_archive_activity(
 }
 
 async fn call_task_reset_counters(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: TaskResetCountersParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
@@ -2002,7 +2002,7 @@ async fn call_task_reset_counters(
         "UPDATE tasks SET reopen_count = 0, continuation_count = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1"
     )
     .bind(&task.id)
-    .execute(state.db().pool())
+    .execute(state.db.pool())
     .await
     .map_err(|e| e.to_string())?;
     let updated = repo
@@ -2010,7 +2010,7 @@ async fn call_task_reset_counters(
         .await
         .map_err(|e| e.to_string())?
         .unwrap_or(task.clone());
-    let _ = state.events().send(crate::events::DjinnEventEnvelope::task_updated(&updated, false));
+    state.event_bus.send(crate::events::DjinnEventEnvelope::task_updated(&updated, false));
     Ok(
         serde_json::json!({ "ok": true, "task_id": task.short_id, "reopen_count": 0, "continuation_count": 0 }),
     )
@@ -2022,11 +2022,11 @@ struct TaskKillSessionParams {
 }
 
 async fn call_task_kill_session(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: TaskKillSessionParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
@@ -2116,11 +2116,11 @@ fn tool_task_list() -> RmcpTool {
 }
 
 async fn call_task_blocked_list(
-    state: &AppState,
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: TaskShowParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db().clone(), state.event_bus());
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
@@ -2596,7 +2596,7 @@ pub(crate) fn tool_schemas_pm_groomer() -> Vec<serde_json::Value> {
 /// };
 /// ```
 pub(crate) async fn call_tool(
-    state: &AppState,
+    state: &AgentContext,
     name: &str,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
@@ -2666,7 +2666,7 @@ mod tests {
                 .clone(),
         );
 
-        let state = AppState::new(create_test_db(), CancellationToken::new());
+        let state = crate::server::AppState::new(create_test_db(), CancellationToken::new()).agent_context();
         let result = call_write(&state, &args, worktree.path()).await;
         assert!(result.is_err());
         let err = result.err().unwrap_or_default();

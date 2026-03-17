@@ -5,7 +5,6 @@ use crate::commands::CommandResult;
 use crate::commands::run_commands;
 use crate::db::VerificationCacheRepository;
 use crate::error::Result;
-use crate::server::AppState;
 
 use super::settings::load_commands;
 
@@ -27,10 +26,10 @@ pub async fn verify_commit(
     project_id: &str,
     commit_sha: &str,
     worktree_path: &Path,
-    app_state: &AppState,
+    db: &crate::db::connection::Database,
 ) -> Result<VerificationResult> {
     let start = Instant::now();
-    let cache_repo = VerificationCacheRepository::new(app_state.db().clone());
+    let cache_repo = VerificationCacheRepository::new(db.clone());
 
     let (setup_commands, verification_commands) = load_commands(worktree_path)
         .map_err(crate::error::Error::Internal)?;
@@ -86,13 +85,10 @@ mod tests {
     use crate::commands::CommandResult;
     use crate::db::VerificationCacheRepository;
     use crate::db::connection::Database;
-    use crate::server::AppState;
     use tempfile::tempdir;
-    use tokio_util::sync::CancellationToken;
 
-    fn test_state() -> AppState {
-        let db = Database::open_in_memory().expect("in-memory db");
-        AppState::new(db, CancellationToken::new())
+    fn test_db() -> Database {
+        Database::open_in_memory().expect("in-memory db")
     }
 
     /// Write a `.djinn/settings.json` into the given directory.
@@ -118,7 +114,7 @@ mod tests {
             ),
             r#"[{"name":"verify","command":"echo ok","timeout_secs":10}]"#,
         );
-        let state = test_state();
+        let state = test_db();
 
         let result = verify_commit("p1", "sha1", dir.path(), &state)
             .await
@@ -130,7 +126,7 @@ mod tests {
         assert_eq!(result.verification_results.len(), 1);
         assert!(marker.exists());
 
-        let repo = VerificationCacheRepository::new(state.db().clone());
+        let repo = VerificationCacheRepository::new(state.clone());
         let cached = repo.get("p1", "sha1").await.expect("get cache");
         assert!(cached.is_some());
     }
@@ -151,8 +147,8 @@ mod tests {
                 verify_marker.display()
             ),
         );
-        let state = test_state();
-        let repo = VerificationCacheRepository::new(state.db().clone());
+        let state = test_db();
+        let repo = VerificationCacheRepository::new(state.clone());
         let serialized = serde_json::to_string(&vec![CommandResult {
             name: "verify".into(),
             exit_code: 0,
@@ -185,7 +181,7 @@ mod tests {
             r#"[{"name":"setup","command":"echo setup","timeout_secs":10}]"#,
             r#"[{"name":"verify","command":"false","timeout_secs":10}]"#,
         );
-        let state = test_state();
+        let state = test_db();
 
         let result = verify_commit("p1", "sha3", dir.path(), &state)
             .await
@@ -196,7 +192,7 @@ mod tests {
         assert_eq!(result.verification_results.len(), 1);
         assert_ne!(result.verification_results[0].exit_code, 0);
 
-        let repo = VerificationCacheRepository::new(state.db().clone());
+        let repo = VerificationCacheRepository::new(state.clone());
         let cached = repo.get("p1", "sha3").await.expect("get cache");
         assert!(cached.is_none());
     }
@@ -204,7 +200,7 @@ mod tests {
     #[tokio::test]
     async fn verify_commit_no_settings_file_passes_with_no_commands() {
         let dir = tempdir().expect("tempdir");
-        let state = test_state();
+        let state = test_db();
 
         let result = verify_commit("p1", "sha5", dir.path(), &state)
             .await

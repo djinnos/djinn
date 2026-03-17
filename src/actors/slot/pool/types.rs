@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 
 use super::super::{SlotHandle, SlotPoolConfig};
 
@@ -13,7 +13,7 @@ pub type SlotFactory = Arc<
             usize,
             String,
             mpsc::Sender<super::super::SlotEvent>,
-            AppState,
+            AgentContext,
             tokio_util::sync::CancellationToken,
         ) -> SlotHandle
         + Send
