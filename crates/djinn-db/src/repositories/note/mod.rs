@@ -18,6 +18,7 @@ mod graph;
 mod indexing;
 mod search;
 mod scoring;
+pub(crate) mod rrf;
 
 use file_helpers::{build_catalog, write_note_file};
 pub use file_helpers::{file_path_for, folder_for_type, is_singleton, permalink_for, slugify};
