@@ -1517,6 +1517,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_end_leaves_no_clients_for_worktree() {
+        // Simulates the lifecycle calling shutdown_for_worktree on session end.
+        // After the call, the manager must have no clients for that worktree.
+        let mgr = LspManager::new();
+        let worktree = "/tmp/task-abc/worktree";
+        let other = "/tmp/task-xyz/worktree";
+
+        let (k1, c1) = spawn_fake_client(&format!("{worktree}/src")).await;
+        let (k2, c2) = spawn_fake_client(&format!("{worktree}/tests")).await;
+        let (k3, c3) = spawn_fake_client(&format!("{other}/src")).await;
+
+        {
+            let mut inner = mgr.inner.lock().await;
+            inner.clients.insert(k1, c1);
+            inner.clients.insert(k2, c2);
+            inner.clients.insert(k3, c3);
+        }
+
+        // Simulate session end for the first task's worktree.
+        mgr.shutdown_for_worktree(Path::new(worktree)).await;
+
+        let remaining: Vec<String> = mgr.inner.lock().await.clients.keys().cloned().collect();
+        assert!(
+            remaining.iter().all(|k| !k.contains(worktree)),
+            "no clients should remain for the ended session's worktree"
+        );
+        assert_eq!(remaining.len(), 1, "clients for other worktrees must be untouched");
+    }
+
+    #[tokio::test]
     async fn lsp_manager_diagnostics_empty_by_default() {
         let mgr = LspManager::new();
         assert!(mgr.diagnostics(Path::new("/tmp")).await.is_empty());
