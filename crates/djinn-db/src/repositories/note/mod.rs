@@ -851,4 +851,169 @@ mod tests {
         assert!(!ids.contains(&seed_id));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn temporal_scores_empty_candidates_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let scores = repo.temporal_scores(&project.id, &[]).await.unwrap();
+        assert!(scores.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn temporal_scores_higher_access_count_wins_same_age() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let high = repo
+            .create(&project.id, tmp.path(), "High Access", "body", "reference", "[]")
+            .await
+            .unwrap();
+        let low = repo
+            .create(&project.id, tmp.path(), "Low Access", "body", "reference", "[]")
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "UPDATE notes
+             SET created_at = datetime('now', '-1 day'),
+                 updated_at = datetime('now', '-1 day')
+             WHERE id IN (?1, ?2)",
+        )
+        .bind(&high.id)
+        .bind(&low.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        sqlx::query("UPDATE notes SET access_count = 10 WHERE id = ?1")
+            .bind(&high.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE notes SET access_count = 0 WHERE id = ?1")
+            .bind(&low.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let scores = repo
+            .temporal_scores(&project.id, &[high.id.clone(), low.id.clone()])
+            .await
+            .unwrap();
+        let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
+        assert!(m[&high.id] > m[&low.id]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn temporal_scores_recent_update_wins_same_access_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let recent = repo
+            .create(&project.id, tmp.path(), "Recent", "body", "reference", "[]")
+            .await
+            .unwrap();
+        let stale = repo
+            .create(&project.id, tmp.path(), "Stale", "body", "reference", "[]")
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE notes SET access_count = 3 WHERE id IN (?1, ?2)")
+            .bind(&recent.id)
+            .bind(&stale.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE notes SET created_at = datetime('now', '-30 day') WHERE id IN (?1, ?2)")
+            .bind(&recent.id)
+            .bind(&stale.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE notes SET updated_at = datetime('now') WHERE id = ?1")
+            .bind(&recent.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE notes SET updated_at = datetime('now', '-30 day') WHERE id = ?1")
+            .bind(&stale.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let scores = repo
+            .temporal_scores(&project.id, &[recent.id.clone(), stale.id.clone()])
+            .await
+            .unwrap();
+        let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
+        assert!(m[&recent.id] > m[&stale.id]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn temporal_scores_edge_cases_are_finite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let zero_age = repo
+            .create(&project.id, tmp.path(), "Zero Age", "body", "reference", "[]")
+            .await
+            .unwrap();
+        let old = repo
+            .create(&project.id, tmp.path(), "Old", "body", "reference", "[]")
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "UPDATE notes
+             SET access_count = 0,
+                 created_at = datetime('now'),
+                 updated_at = datetime('now')
+             WHERE id = ?1",
+        )
+        .bind(&zero_age.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "UPDATE notes
+             SET access_count = 0,
+                 created_at = datetime('now', '-365 day'),
+                 updated_at = datetime('now', '-365 day')
+             WHERE id = ?1",
+        )
+        .bind(&old.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let scores = repo
+            .temporal_scores(&project.id, &[zero_age.id.clone(), old.id.clone()])
+            .await
+            .unwrap();
+        let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
+
+        assert!(m[&zero_age.id].is_finite());
+        assert!(m[&old.id].is_finite());
+        assert!(m[&zero_age.id] > m[&old.id]);
+    }
+
+
 }

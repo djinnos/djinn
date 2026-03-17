@@ -1,12 +1,64 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::SystemTime;
 
 use crate::error::DbResult as Result;
 
 use super::NoteRepository;
 
 const HOP_DECAY: f64 = 0.7;
+const HOTNESS_ALPHA: f64 = 0.2;
+const HALF_LIFE_DAYS: f64 = 7.0;
 
 impl NoteRepository {
+    pub async fn temporal_scores(
+        &self,
+        project_id: &str,
+        candidate_ids: &[String],
+    ) -> Result<Vec<(String, f64)>> {
+        if candidate_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = std::iter::repeat_n("?", candidate_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "SELECT id, access_count, created_at, updated_at
+             FROM notes
+             WHERE project_id = ? AND id IN ({})",
+            placeholders
+        );
+
+        let mut q = sqlx::query_as::<_, (String, i64, String, String)>(&query).bind(project_id);
+        for id in candidate_ids {
+            q = q.bind(id);
+        }
+
+        let rows = q.fetch_all(self.db.pool()).await?;
+        let now = SystemTime::now();
+
+        let mut scores: Vec<(String, f64)> = rows
+            .into_iter()
+            .map(|(id, access_count, created_at, updated_at)| {
+                let created_age_days = age_days_from_timestamp(&created_at, now);
+                let updated_age_days = age_days_from_timestamp(&updated_at, now);
+
+                let safe_created_age = created_age_days.max(f64::EPSILON);
+                let safe_updated_age = updated_age_days.max(f64::EPSILON);
+
+                let base_actr = ((access_count.max(0) as f64) + 1.0).ln() - safe_created_age.ln();
+                let recency_boost = 2f64.powf(-(safe_updated_age / HALF_LIFE_DAYS));
+                let hotness = HOTNESS_ALPHA * recency_boost;
+                let score = base_actr + hotness;
+
+                (id, score)
+            })
+            .collect();
+
+        scores.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(scores)
+    }
+
     pub async fn graph_proximity_scores(
         &self,
         seed_ids: &[String],
@@ -78,4 +130,53 @@ impl NoteRepository {
         results.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         Ok(results)
     }
+}
+
+fn age_days_from_timestamp(value: &str, now: SystemTime) -> f64 {
+    let Ok(duration) = now.duration_since(SystemTime::UNIX_EPOCH) else {
+        return f64::EPSILON;
+    };
+    let now_unix = duration.as_secs_f64();
+
+    let value = value.trim();
+    let Some((date_part, time_part)) = value.split_once(' ') else {
+        return f64::EPSILON;
+    };
+    let Some((y, m, d)) = parse_ymd(date_part) else {
+        return f64::EPSILON;
+    };
+    let Some((hh, mm, ss)) = parse_hms(time_part) else {
+        return f64::EPSILON;
+    };
+
+    let days = days_from_civil(y, m, d);
+    let timestamp_unix = days as f64 * 86_400.0 + (hh as f64 * 3600.0) + (mm as f64 * 60.0) + ss;
+    let seconds = (now_unix - timestamp_unix).max(0.0);
+    (seconds / 86_400.0).max(f64::EPSILON)
+}
+
+fn parse_ymd(value: &str) -> Option<(i32, u32, u32)> {
+    let mut parts = value.split('-');
+    let y = parts.next()?.parse::<i32>().ok()?;
+    let m = parts.next()?.parse::<u32>().ok()?;
+    let d = parts.next()?.parse::<u32>().ok()?;
+    Some((y, m, d))
+}
+
+fn parse_hms(value: &str) -> Option<(u32, u32, f64)> {
+    let mut parts = value.split(':');
+    let hh = parts.next()?.parse::<u32>().ok()?;
+    let mm = parts.next()?.parse::<u32>().ok()?;
+    let ss = parts.next()?.parse::<f64>().ok()?;
+    Some((hh, mm, ss))
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let y = year - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = month as i32 + if month > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + day as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era as i64) * 146_097 + doe as i64 - 719_468
 }
