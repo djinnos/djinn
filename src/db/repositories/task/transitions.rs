@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::future::Future;
 
 use djinn_git::GitError;
 use crate::db::{ProjectRepository, SessionRepository, TaskRepository};
@@ -7,6 +9,18 @@ use crate::agent::context::AgentContext;
 
 const MERGE_CONFLICT_PREFIX: &str = "merge_conflict:";
 const MERGE_VALIDATION_PREFIX: &str = "merge_validation_failed:";
+
+/// Callback type for running a pre-merge verification gate.
+///
+/// Takes `(task_id, project_path)` and returns `Ok(())` if verification
+/// passes, or `Err(feedback)` with a human-readable failure description.
+/// Provided by the server layer so that `transitions.rs` has no dependency
+/// on `crate::actors`.
+pub type VerificationGateFn = Box<
+    dyn Fn(String, String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct MergeConflictMetadata {
@@ -56,14 +70,16 @@ pub const PM_MERGE_ACTIONS: MergeActions = MergeActions {
 pub async fn merge_after_task_review(
     task_id: &str,
     app_state: &AgentContext,
+    verification_gate: Option<VerificationGateFn>,
 ) -> Option<(TransitionAction, Option<String>)> {
-    merge_and_transition(task_id, app_state, &REVIEWER_MERGE_ACTIONS).await
+    merge_and_transition(task_id, app_state, &REVIEWER_MERGE_ACTIONS, verification_gate).await
 }
 
 pub async fn merge_and_transition(
     task_id: &str,
     app_state: &AgentContext,
     actions: &MergeActions,
+    verification_gate: Option<VerificationGateFn>,
 ) -> Option<(TransitionAction, Option<String>)> {
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task = match repo.get(task_id).await {
@@ -94,7 +110,11 @@ pub async fn merge_and_transition(
     };
 
     let project_path_str = project_dir.to_string_lossy().to_string();
-    if let Err(feedback) = run_verification_gate(task_id, &project_path_str, app_state).await {
+    let verification_result = match verification_gate {
+        Some(gate) => gate(task_id.to_string(), project_path_str.clone()).await,
+        None => Ok(()),
+    };
+    if let Err(feedback) = verification_result {
         tracing::warn!(
             task_id = %task_id,
             "pre-merge verification failed; releasing task"
@@ -232,14 +252,6 @@ pub async fn merge_and_transition(
         }
     }
 }
-async fn run_verification_gate(
-    task_id: &str,
-    project_path: &str,
-    app_state: &AgentContext,
-) -> Result<(), String> {
-    crate::actors::slot::verification::run_verification_gate(task_id, project_path, app_state).await
-}
-
 pub(crate) async fn cleanup_paused_worker_session(task_id: &str, app_state: &AgentContext) {
     let repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let Ok(Some(paused)) = repo.paused_for_task(task_id).await else {
