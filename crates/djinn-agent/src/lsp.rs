@@ -47,6 +47,8 @@ type OpenedFiles = Arc<Mutex<HashMap<String, i32>>>;
 
 struct LspClient {
     stdin: Arc<Mutex<ChildStdin>>,
+    pid: u32,
+    reader_handle: tokio::task::JoinHandle<()>,
     diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
     pending: PendingResponses,
     seq: Arc<AtomicU64>,
@@ -75,7 +77,32 @@ impl LspManager {
 
     pub async fn shutdown_all(&self) {
         let mut inner = self.inner.lock().await;
-        inner.clients.clear();
+        for (_, client) in inner.clients.drain() {
+            kill_client(client);
+        }
+    }
+
+    /// Kill all LSP clients whose project root is under `worktree`.
+    /// Must be called before removing a worktree directory.
+    pub async fn shutdown_for_worktree(&self, worktree: &Path) {
+        let worktree_str = worktree.to_string_lossy();
+        let mut inner = self.inner.lock().await;
+        let keys: Vec<String> = inner
+            .clients
+            .keys()
+            .filter(|key| {
+                key.split_once("::")
+                    .map(|(_, root)| root.starts_with(worktree_str.as_ref()))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        for key in keys {
+            if let Some(client) = inner.clients.remove(&key) {
+                tracing::info!(key = %key, pid = client.pid, "lsp: killing client for worktree teardown");
+                kill_client(client);
+            }
+        }
     }
 
     pub async fn touch_file(&self, worktree: &Path, path: &Path, wait_for_diagnostics: bool) {
@@ -593,6 +620,15 @@ fn find_root(path: &Path, worktree: &Path, sentinels: &[&str]) -> Option<PathBuf
     }
 }
 
+/// Abort the reader task and SIGTERM the LSP process.
+fn kill_client(client: LspClient) {
+    client.reader_handle.abort();
+    // SAFETY: pid is a valid process id obtained from the child at spawn time.
+    unsafe {
+        libc::kill(client.pid as libc::pid_t, libc::SIGTERM);
+    }
+}
+
 async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, String> {
     let binary_path = resolve_binary(server).await?;
     tracing::info!(server = server.id, binary = %binary_path.display(), "lsp: spawning server");
@@ -626,6 +662,9 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
             format!("failed to spawn {}: {e}", server.id)
         })?;
 
+    let pid = child
+        .id()
+        .ok_or_else(|| "could not get child PID".to_string())?;
     let stdin = child
         .stdin
         .take()
@@ -642,7 +681,7 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
     let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
     let pending_reader = pending.clone();
 
-    tokio::spawn(async move {
+    let reader_handle = tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
         let mut content_length: usize = 0;
         loop {
@@ -787,6 +826,8 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
 
     Ok(LspClient {
         stdin,
+        pid,
+        reader_handle,
         diagnostics,
         pending,
         seq,
@@ -1392,6 +1433,88 @@ mod tests {
     }
 
     // --- LspManager unit tests (no real LSP process) ---
+
+    /// Spawn a harmless `sleep 10` process and wrap it as a fake LspClient for
+    /// testing shutdown behaviour without a real LSP server.
+    async fn spawn_fake_client(root: &str) -> (String, LspClient) {
+        use std::process::Stdio;
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("10")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep must be available for tests");
+        let pid = child.id().unwrap_or(0);
+        let stdin = Arc::new(Mutex::new(child.stdin.take().unwrap()));
+        let _stdout = child.stdout.take().unwrap();
+        let reader_handle = tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        let key = format!("test-lsp::{root}");
+        let client = LspClient {
+            stdin,
+            pid,
+            reader_handle,
+            diagnostics: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            seq: Arc::new(AtomicU64::new(2)),
+            opened: Arc::new(Mutex::new(HashMap::new())),
+        };
+        (key, client)
+    }
+
+    #[tokio::test]
+    async fn shutdown_for_worktree_removes_matching_clients() {
+        let mgr = LspManager::new();
+        let wt1 = "/tmp/worktree1";
+        let wt2 = "/tmp/worktree2";
+
+        let (k1, c1) = spawn_fake_client(&format!("{wt1}/proj")).await;
+        let (k2, c2) = spawn_fake_client(&format!("{wt1}/proj2")).await;
+        let (k3, c3) = spawn_fake_client(&format!("{wt2}/proj")).await;
+
+        {
+            let mut inner = mgr.inner.lock().await;
+            inner.clients.insert(k1, c1);
+            inner.clients.insert(k2, c2);
+            inner.clients.insert(k3, c3);
+        }
+
+        assert_eq!(mgr.inner.lock().await.clients.len(), 3);
+
+        mgr.shutdown_for_worktree(Path::new(wt1)).await;
+
+        let remaining: Vec<String> = mgr.inner.lock().await.clients.keys().cloned().collect();
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining[0].contains(wt2), "only wt2 client should remain");
+    }
+
+    #[tokio::test]
+    async fn shutdown_for_worktree_noop_on_no_match() {
+        let mgr = LspManager::new();
+        let (k, c) = spawn_fake_client("/tmp/other/proj").await;
+        mgr.inner.lock().await.clients.insert(k, c);
+
+        mgr.shutdown_for_worktree(Path::new("/tmp/nonexistent")).await;
+
+        assert_eq!(mgr.inner.lock().await.clients.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_all_kills_all_clients() {
+        let mgr = LspManager::new();
+        let (k1, c1) = spawn_fake_client("/tmp/wt/proj").await;
+        let (k2, c2) = spawn_fake_client("/tmp/wt/proj2").await;
+        {
+            let mut inner = mgr.inner.lock().await;
+            inner.clients.insert(k1, c1);
+            inner.clients.insert(k2, c2);
+        }
+        assert_eq!(mgr.inner.lock().await.clients.len(), 2);
+        mgr.shutdown_all().await;
+        assert_eq!(mgr.inner.lock().await.clients.len(), 0);
+    }
 
     #[tokio::test]
     async fn lsp_manager_diagnostics_empty_by_default() {
