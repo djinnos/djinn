@@ -1,1 +1,1 @@
-pub use djinn_provider::crypto::*;
+pub use djinn_db::crypto::*;

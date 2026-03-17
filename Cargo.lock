@@ -598,7 +598,9 @@ name = "djinn-db"
 version = "0.1.0"
 dependencies = [
  "djinn-core",
+ "libc",
  "refinery",
+ "ring",
  "serde_json",
  "sqlx",
  "tokio",
@@ -629,7 +631,6 @@ dependencies = [
  "djinn-core",
  "djinn-db",
  "futures",
- "libc",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
