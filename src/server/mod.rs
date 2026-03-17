@@ -82,7 +82,7 @@ mod tests {
     use tower::ServiceExt;
 
     use djinn_provider::repos::CredentialRepository;
-    use crate::models::DjinnSettings;
+    use djinn_core::models::DjinnSettings;
     use crate::server::{self, AppState};
     use crate::test_helpers;
     use tokio_util::sync::CancellationToken;

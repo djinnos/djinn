@@ -13,7 +13,7 @@ use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_db::{Database, NoteRepository, ProjectRepository, SettingsRepository};
 use crate::events::DjinnEventEnvelope;
-use crate::provider::{CatalogService, HealthTracker};
+use djinn_provider::catalog::{CatalogService, HealthTracker};
 use crate::sync::SyncManager;
 
 mod settings;
@@ -244,7 +244,7 @@ impl AppState {
     /// catalog refresh from models.dev.  Call once after server startup.
     pub async fn initialize(&self) {
         use djinn_provider::repos::CustomProviderRepository;
-        use crate::models::{Model, Provider};
+        use djinn_core::models::{Model, Provider};
 
         // Load custom providers from DB → merge into in-memory catalog.
         let repo = CustomProviderRepository::new(self.db().clone(), self.event_bus());
@@ -272,7 +272,7 @@ impl AppState {
                             attachment: false,
                             context_window: 0,
                             output_limit: 0,
-                            pricing: crate::models::Pricing::default(),
+                            pricing: djinn_core::models::Pricing::default(),
                         })
                         .collect();
                     self.catalog().add_custom_provider(provider, seed_models);
@@ -283,7 +283,7 @@ impl AppState {
 
         // Inject synthetic catalog entries for built-in providers (e.g.
         // chatgpt_codex, gcp_vertex_ai) that aren't in models.dev.
-        use crate::provider::builtin::BUILTIN_PROVIDERS;
+        use djinn_provider::catalog::builtin::BUILTIN_PROVIDERS;
         self.catalog().inject_builtin_providers(BUILTIN_PROVIDERS);
 
         // Kick off background refresh from models.dev.
@@ -393,7 +393,7 @@ impl AppState {
         let Some(raw) = raw else {
             return;
         };
-        match serde_json::from_str::<Vec<crate::provider::health::ModelHealth>>(&raw) {
+        match serde_json::from_str::<Vec<djinn_provider::catalog::health::ModelHealth>>(&raw) {
             Ok(snapshot) => self.health_tracker().restore_all(snapshot),
             Err(e) => tracing::warn!(error = %e, "failed to parse model health state"),
         }

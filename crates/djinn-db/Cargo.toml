@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }
+dirs = "6"
 refinery = { version = "0.9", features = ["int8-versions"] }
 ring = "0.17"
 serde = { version = "1", features = ["derive"] }

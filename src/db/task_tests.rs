@@ -3,10 +3,10 @@ use tokio::sync::broadcast;
 use crate::events::{EventBus, event_bus_for};
 use djinn_db::Database;
 use djinn_db::EpicRepository;
-use crate::models::{Task, TaskStatus, TransitionAction};
+use djinn_core::models::{Task, TaskStatus, TransitionAction};
 use crate::test_helpers;
 use djinn_db::Error;
-async fn make_epic(db: &Database, events: EventBus) -> crate::models::Epic {
+async fn make_epic(db: &Database, events: EventBus) -> djinn_core::models::Epic {
     EpicRepository::new(db.clone(), events)
         .create("Test Epic", "", "", "", "", None)
         .await

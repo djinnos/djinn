@@ -632,6 +632,7 @@ dependencies = [
 name = "djinn-db"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "djinn-core",
  "libc",
  "refinery",

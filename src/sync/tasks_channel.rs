@@ -16,8 +16,8 @@ use tokio::sync::broadcast;
 
 use crate::events::DjinnEventEnvelope;
 
+use djinn_core::models::Task;
 use djinn_db::{Database, TaskRepository};
-use crate::models::Task;
 
 /// The sync branch name.
 pub const BRANCH: &str = "djinn/tasks";
@@ -436,7 +436,7 @@ mod tests {
     use djinn_db::EpicRepository;
     use djinn_db::TaskRepository;
     use crate::events::event_bus_for;
-    use crate::models::TransitionAction;
+    use djinn_core::models::TransitionAction;
 
     /// Create a temp dir with a git repo + bare "origin" remote.
     /// Returns (project_path, _temp_dir_guard).
