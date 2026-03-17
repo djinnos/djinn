@@ -22,7 +22,7 @@ impl AgentRole for TaskReviewerRole {
     }
 
     fn render_prompt(&self, task: &Task, ctx: &TaskContext) -> String {
-        crate::prompts::render_prompt(crate::AgentType::TaskReviewer, task, ctx)
+        crate::prompts::render_prompt_for_role(self.config(), task, ctx)
     }
 
     fn on_complete<'a>(

@@ -65,6 +65,7 @@ impl AgentType {
         self.role_config().dispatch_role
     }
 
+    #[cfg(test)]
     pub(crate) fn tool_schemas(&self) -> Vec<serde_json::Value> {
         (self.role_config().tool_schemas)()
     }

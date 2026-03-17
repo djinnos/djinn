@@ -4,11 +4,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::AgentType;
 use crate::message::{Conversation, Message};
 use crate::prompts::TaskContext;
 use crate::provider::create_provider;
-use crate::roles::{AgentRole, role_for_task_dispatch};
+use crate::roles::{AgentRole, role_for_task_dispatch, role_impl_for};
 use crate::commands::run_commands;
 use crate::verification::settings::load_commands;
 use djinn_db::SessionRepository;
@@ -962,7 +961,10 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     let project_path = params.project_path;
     let project_id = params.project_id;
 
-    let agent_type: AgentType = params.agent_type.parse().unwrap_or(AgentType::Groomer);
+    let role = {
+        let agent_type: crate::AgentType = params.agent_type.parse().unwrap_or(crate::AgentType::Groomer);
+        role_impl_for(agent_type)
+    };
 
     macro_rules! return_free {
         () => {{
@@ -1000,7 +1002,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         &project_id,
         &task_id,
         &model_id,
-        agent_type.as_str(),
+        role.config().name,
     ));
     tracing::info!(
         task_id = %task_id,
@@ -1011,7 +1013,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         task_id = %task_id,
         project_id = %project_id,
         model_id = %model_id,
-        agent_type = %agent_type.as_str(),
+        agent_type = %role.config().name,
         "Lifecycle: project-scoped dispatch accepted"
     );
 
@@ -1052,8 +1054,8 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     };
 
     // ── Build prompt ──────────────────────────────────────────────────────
-    let system_prompt = crate::prompts::render_project_prompt(
-        agent_type,
+    let system_prompt = crate::prompts::render_project_prompt_for_role(
+        role.config(),
         &project_path,
         verification_commands.as_deref(),
     );
@@ -1067,7 +1069,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
     // ── Build provider ────────────────────────────────────────────────────
-    let telemetry_meta = build_telemetry_meta(agent_type.as_str(), &task_id);
+    let telemetry_meta = build_telemetry_meta(role.config().name, &task_id);
     let provider_config = match provider_credential {
         ProviderCredential::OAuthConfig(mut cfg) => {
             cfg.model_id = model_name.clone();
@@ -1105,7 +1107,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
             &project_id,
             None,
             &model_id,
-            agent_type.as_str(),
+            role.config().name,
             Some(&project_path),
             None,
         )
@@ -1120,7 +1122,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     let current_session_id = current_record_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-    let tools = agent_type.tool_schemas();
+    let tools = (role.config().tool_schemas)();
     let mut conversation = Conversation::new();
     conversation.push(Message::system(system_prompt));
     conversation.push(Message::user(
@@ -1139,7 +1141,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         &current_session_id,
         &project_path,
         &project_dir, // worktree = project dir (no worktree for groomer)
-        agent_type.as_str(),
+        role.config().name,
         &cancel,
         &pause,
         &app_state,
