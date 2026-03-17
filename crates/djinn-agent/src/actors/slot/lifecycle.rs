@@ -798,6 +798,9 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             &app_state,
         )
         .await;
+        // Worktree is preserved for resume, but LSP clients are demand-spawned
+        // so they'll be re-created when the session resumes and touches files.
+        app_state.lsp.shutdown_for_worktree(&worktree_path).await;
         return_free!();
     }
     if cancel.is_cancelled() {
@@ -810,6 +813,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             &app_state,
         )
         .await;
+        app_state.lsp.shutdown_for_worktree(&worktree_path).await;
         cleanup_worktree(&task_id, &worktree_path, &app_state).await;
         transition_interrupted(
             &task_id,
@@ -869,6 +873,9 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         )
         .await;
         // Don't clean up worktree — will be reused on resume.
+        // LSP clients are demand-spawned; shut them down now to free resources.
+        // They'll be re-created when the session resumes and touches files.
+        app_state.lsp.shutdown_for_worktree(&worktree_path).await;
     } else {
         // Non-worker or failed: close session and clean up.
         let session_status = if final_result.is_ok() {
@@ -884,6 +891,8 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             &app_state,
         )
         .await;
+        // Shut down LSP clients before removing the worktree directory.
+        app_state.lsp.shutdown_for_worktree(&worktree_path).await;
         cleanup_worktree(&task_id, &worktree_path, &app_state).await;
     }
 
