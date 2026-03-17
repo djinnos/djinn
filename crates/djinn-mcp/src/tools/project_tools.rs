@@ -5,8 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use djinn_db::ProjectRepository;
 use crate::server::DjinnMcpServer;
+use djinn_db::ProjectRepository;
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
 
@@ -456,7 +456,10 @@ impl DjinnMcpServer {
             Ok(c) => c,
             Err(e) => {
                 errors.push(format!("failed to read {}: {e}", settings_path.display()));
-                return Json(ProjectSettingsValidateResponse { valid: false, errors });
+                return Json(ProjectSettingsValidateResponse {
+                    valid: false,
+                    errors,
+                });
             }
         };
 
@@ -464,7 +467,10 @@ impl DjinnMcpServer {
             Ok(v) => v,
             Err(e) => {
                 errors.push(format!("invalid JSON syntax: {e}"));
-                return Json(ProjectSettingsValidateResponse { valid: false, errors });
+                return Json(ProjectSettingsValidateResponse {
+                    valid: false,
+                    errors,
+                });
             }
         };
 
@@ -480,7 +486,10 @@ impl DjinnMcpServer {
 
         if let Err(e) = serde_json::from_value::<StrictDjinnSettings>(value) {
             errors.push(format!("schema validation failed: {e}"));
-            return Json(ProjectSettingsValidateResponse { valid: false, errors });
+            return Json(ProjectSettingsValidateResponse {
+                valid: false,
+                errors,
+            });
         }
 
         Json(ProjectSettingsValidateResponse {

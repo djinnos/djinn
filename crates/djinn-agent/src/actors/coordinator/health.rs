@@ -5,7 +5,10 @@ impl CoordinatorActor {
     /// Spawn background health-check tasks for all projects (or one) that have
     /// setup/verification commands configured (ADR-014, task bit0).
     pub(super) async fn validate_all_project_health(&mut self, project_id_filter: Option<String>) {
-        let repo = ProjectRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
+        let repo = ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
         let projects = match repo.list().await {
             Ok(p) => p,
             Err(e) => {
@@ -87,11 +90,13 @@ impl CoordinatorActor {
             if project_cfg.0.is_empty() && project_cfg.1.is_empty() {
                 // No commands configured — always healthy; clear any stale failure.
                 if self.unhealthy_projects.remove(&project.id).is_some() {
-                    let _ = self.events_tx.send(DjinnEventEnvelope::project_health_changed(
-                        &project.id,
-                        true,
-                        None,
-                    ));
+                    let _ = self
+                        .events_tx
+                        .send(DjinnEventEnvelope::project_health_changed(
+                            &project.id,
+                            true,
+                            None,
+                        ));
                 }
                 continue;
             }
@@ -110,17 +115,11 @@ impl CoordinatorActor {
             );
 
             tokio::spawn(async move {
-                let (healthy, error) = match run_project_health_check(
-                    project_id.clone(),
-                    path,
-                    db,
-                    events_tx,
-                )
-                .await
-                {
-                    Ok(()) => (true, None),
-                    Err(e) => (false, Some(e)),
-                };
+                let (healthy, error) =
+                    match run_project_health_check(project_id.clone(), path, db, events_tx).await {
+                        Ok(()) => (true, None),
+                        Err(e) => (false, Some(e)),
+                    };
                 let _ = sender
                     .send(CoordinatorMessage::SetProjectHealth {
                         project_id,
@@ -146,11 +145,12 @@ pub(super) async fn run_project_health_check(
     let project_path = std::path::PathBuf::from(&path);
 
     // Resolve target branch (falls back to "main").
-    let target_branch = GitSettingsRepository::new(db.clone(), crate::events::event_bus_for(&events_tx))
-        .get(&project_id)
-        .await
-        .map(|s| s.target_branch)
-        .unwrap_or_else(|_| "main".to_string());
+    let target_branch =
+        GitSettingsRepository::new(db.clone(), crate::events::event_bus_for(&events_tx))
+            .get(&project_id)
+            .await
+            .map(|s| s.target_branch)
+            .unwrap_or_else(|_| "main".to_string());
 
     let git = GitActorHandle::spawn(project_path.clone())
         .map_err(|e| format!("failed to open git repo at {path}: {e}"))?;
@@ -182,14 +182,10 @@ pub(super) async fn run_project_health_check(
             return Err("failed to resolve non-empty target branch HEAD".to_string());
         }
 
-        let verification = crate::verification::service::verify_commit(
-            &project_id,
-            &commit_sha,
-            &wt_path,
-            &db,
-        )
-        .await
-        .map_err(|e| format!("health-check verification error: {e}"))?;
+        let verification =
+            crate::verification::service::verify_commit(&project_id, &commit_sha, &wt_path, &db)
+                .await
+                .map_err(|e| format!("health-check verification error: {e}"))?;
 
         for r in &verification.setup_results {
             let _ = events_tx.send(DjinnEventEnvelope::verification_step(

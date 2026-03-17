@@ -79,8 +79,7 @@ pub trait CoordinatorOps: Send + Sync {
     async fn resume_project(&self, project_id: &str) -> Result<(), String>;
     async fn resume(&self) -> Result<(), String>;
     async fn pause_project(&self, project_id: &str) -> Result<(), String>;
-    async fn pause_project_immediate(&self, project_id: &str, reason: &str)
-        -> Result<(), String>;
+    async fn pause_project_immediate(&self, project_id: &str, reason: &str) -> Result<(), String>;
     async fn pause_immediate(&self, reason: &str) -> Result<(), String>;
     fn get_status(&self) -> Result<CoordinatorStatus, String>;
     fn get_project_status(&self, project_id: &str) -> Result<CoordinatorStatus, String>;
@@ -112,8 +111,7 @@ pub trait LspOps: Send + Sync {
 pub trait SyncOps: Send + Sync {
     async fn enable_project(&self, project_id: &str) -> Result<(), String>;
     async fn disable_project(&self, project_id: &str) -> Result<(), String>;
-    async fn delete_remote_branch(&self, channel: &str, project_path: &Path)
-        -> Result<(), String>;
+    async fn delete_remote_branch(&self, channel: &str, project_path: &Path) -> Result<(), String>;
     async fn export_all(&self, user_id: Option<&str>) -> Vec<SyncResult>;
     async fn import_all(&self) -> Vec<SyncResult>;
     async fn status(&self) -> Vec<ChannelStatus>;

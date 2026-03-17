@@ -1,11 +1,11 @@
-use djinn_db::{TaskRepository, ActivityQuery, ReadyQuery};
-use tokio::sync::broadcast;
 use crate::events::{EventBus, event_bus_for};
+use crate::test_helpers;
+use djinn_core::models::{Task, TaskStatus, TransitionAction};
 use djinn_db::Database;
 use djinn_db::EpicRepository;
-use djinn_core::models::{Task, TaskStatus, TransitionAction};
-use crate::test_helpers;
 use djinn_db::Error;
+use djinn_db::{ActivityQuery, ReadyQuery, TaskRepository};
+use tokio::sync::broadcast;
 async fn make_epic(db: &Database, events: EventBus) -> djinn_core::models::Epic {
     EpicRepository::new(db.clone(), events)
         .create("Test Epic", "", "", "", "", None)
@@ -38,7 +38,7 @@ async fn open_task(repo: &TaskRepository, epic_id: &str) -> Task {
 async fn create_and_get_task() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = repo
@@ -66,7 +66,7 @@ async fn create_and_get_task() {
 async fn creating_task_reopens_closed_epic() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic_repo = EpicRepository::new(db.clone(),  event_bus_for(&tx));
+    let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
     let epic = epic_repo
         .create("Test Epic", "", "", "", "", None)
         .await
@@ -88,7 +88,7 @@ async fn creating_task_reopens_closed_epic() {
 async fn short_id_lookup() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = repo
@@ -103,7 +103,7 @@ async fn short_id_lookup() {
 async fn create_emits_event() {
     let db = test_helpers::create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap(); // consume EpicCreated
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
@@ -122,7 +122,7 @@ async fn create_emits_event() {
 async fn update_emits_event() {
     let db = test_helpers::create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap();
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
@@ -151,7 +151,7 @@ async fn update_emits_event() {
 async fn transition_emits_event_start() {
     let db = test_helpers::create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap();
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
@@ -191,7 +191,7 @@ async fn transition_emits_event_start() {
 async fn transition_emits_event_close_with_closed_at() {
     let db = test_helpers::create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap();
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
@@ -219,7 +219,7 @@ async fn transition_emits_event_close_with_closed_at() {
 async fn transition_emits_event_reopen() {
     let db = test_helpers::create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap();
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
@@ -256,7 +256,7 @@ async fn transition_emits_event_reopen() {
 async fn set_status_transitions() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = repo
@@ -275,7 +275,7 @@ async fn set_status_transitions() {
 async fn reopen_increments_counter() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = repo
@@ -291,7 +291,7 @@ async fn reopen_increments_counter() {
 async fn blocker_management() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let t1 = repo
@@ -328,7 +328,7 @@ async fn blocker_management() {
 async fn blocker_cycle_detection() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let t1 = repo
@@ -357,7 +357,7 @@ async fn blocker_cycle_detection() {
 async fn start_blocked_by_unresolved_blocker() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let ac = r#"[{"description":"default","met":false}]"#;
@@ -394,7 +394,7 @@ async fn start_blocked_by_unresolved_blocker() {
 async fn list_ready_excludes_blocked_tasks() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let t1 = repo
@@ -431,7 +431,7 @@ async fn list_ready_excludes_blocked_tasks() {
 async fn activity_log() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = repo
@@ -458,7 +458,7 @@ async fn activity_log() {
 async fn list_by_epic() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     repo.create(&epic.id, "A", "", "", "task", 1, "", Some("open"))
@@ -478,7 +478,7 @@ async fn list_by_epic() {
 async fn delete_task_emits_event() {
     let db = test_helpers::create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap();
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
@@ -518,7 +518,7 @@ async fn status_enum_roundtrips() {
 async fn full_happy_path() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     // Tasks are created as "open".
@@ -581,7 +581,7 @@ async fn full_happy_path() {
 async fn invalid_transition_returns_error() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = open_task(&repo, &epic.id).await;
@@ -615,7 +615,7 @@ async fn invalid_transition_returns_error() {
 async fn task_review_reject_increments_reopen() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = open_task(&repo, &epic.id).await;
@@ -667,7 +667,7 @@ async fn task_review_reject_increments_reopen() {
 async fn task_review_reject_conflict_does_not_increment_reopen() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = open_task(&repo, &epic.id).await;
@@ -719,7 +719,7 @@ async fn task_review_reject_conflict_does_not_increment_reopen() {
 async fn force_close_from_any_state() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = open_task(&repo, &epic.id).await;
@@ -749,7 +749,7 @@ async fn force_close_from_any_state() {
 async fn reopen_clears_closed_at_and_increments_reopen() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = open_task(&repo, &epic.id).await;
@@ -790,7 +790,7 @@ async fn reopen_clears_closed_at_and_increments_reopen() {
 async fn start_blocked_when_acceptance_criteria_empty() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = open_task(&repo, &epic.id).await;
@@ -824,7 +824,7 @@ async fn start_blocked_when_acceptance_criteria_empty() {
 async fn start_allows_when_acceptance_criteria_present() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = open_task(&repo, &epic.id).await;
@@ -855,7 +855,7 @@ async fn start_allows_when_acceptance_criteria_present() {
 async fn start_blocked_by_unresolved_blockers() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let t1 = open_task(&repo, &epic.id).await;
@@ -881,7 +881,7 @@ async fn start_blocked_by_unresolved_blockers() {
 async fn start_allowed_when_blocker_is_closed() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let blocker = open_task(&repo, &epic.id).await;
@@ -909,7 +909,7 @@ async fn start_allowed_when_blocker_is_closed() {
 async fn user_override_to_closed() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = open_task(&repo, &epic.id).await;
@@ -934,7 +934,7 @@ async fn user_override_to_closed() {
 async fn requires_reason_enforced() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = open_task(&repo, &epic.id).await;
@@ -971,7 +971,7 @@ async fn requires_reason_enforced() {
 async fn transition_writes_activity_log() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = open_task(&repo, &epic.id).await;
@@ -1000,7 +1000,7 @@ async fn transition_writes_activity_log() {
 async fn query_activity_filters() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let t1 = open_task(&repo, &epic.id).await;
@@ -1051,7 +1051,7 @@ async fn query_activity_filters() {
 async fn set_merge_commit_sha_persists_value() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let task = open_task(&repo, &epic.id).await;
@@ -1070,8 +1070,8 @@ async fn set_merge_commit_sha_persists_value() {
 async fn board_health_report() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
-    let repo = TaskRepository::new(db.clone(),  event_bus_for(&tx));
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     // Create tasks: one open, one in_progress.
     let _t1 = open_task(&repo, &epic.id).await;
@@ -1103,7 +1103,7 @@ async fn board_health_report() {
 async fn reconcile_heals_stale_tasks() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     let t = open_task(&repo, &epic.id).await;
@@ -1186,8 +1186,8 @@ fn make_peer_task(
 async fn upsert_peer_closed_task_not_regressed() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(64);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
-    let repo = TaskRepository::new(db.clone(),  event_bus_for(&tx));
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     // Create and close a task locally.
     let task = open_task(&repo, &epic.id).await;
@@ -1212,8 +1212,8 @@ async fn upsert_peer_closed_task_not_regressed() {
 async fn upsert_peer_closed_updated_by_peer_close() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(64);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
-    let repo = TaskRepository::new(db.clone(),  event_bus_for(&tx));
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     // Create and close a task locally.
     let task = open_task(&repo, &epic.id).await;
@@ -1243,8 +1243,8 @@ async fn upsert_peer_closed_updated_by_peer_close() {
 async fn upsert_peer_non_terminal_lww_works() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(64);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
-    let repo = TaskRepository::new(db.clone(),  event_bus_for(&tx));
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     // Create an open task.
     let task = open_task(&repo, &epic.id).await;
@@ -1270,8 +1270,8 @@ async fn upsert_peer_non_terminal_lww_works() {
 async fn list_for_export_includes_open_tasks() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(64);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
-    let repo = TaskRepository::new(db.clone(),  event_bus_for(&tx));
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     let _t1 = open_task(&repo, &epic.id).await;
     let _t2 = open_task(&repo, &epic.id).await;
@@ -1284,8 +1284,8 @@ async fn list_for_export_includes_open_tasks() {
 async fn list_for_export_includes_recently_closed() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(64);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
-    let repo = TaskRepository::new(db.clone(),  event_bus_for(&tx));
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     let task = open_task(&repo, &epic.id).await;
     repo.set_status(&task.id, "closed").await.unwrap();
@@ -1302,8 +1302,8 @@ async fn list_for_export_includes_recently_closed() {
 async fn list_for_export_excludes_old_closed() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(64);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
-    let repo = TaskRepository::new(db.clone(),  event_bus_for(&tx));
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     let task = open_task(&repo, &epic.id).await;
     repo.set_status(&task.id, "closed").await.unwrap();
@@ -1326,7 +1326,7 @@ async fn list_for_export_excludes_old_closed() {
 async fn increment_continuation_count_emits_task_updated_event() {
     let db = test_helpers::create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap(); // consume EpicCreated
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
@@ -1353,7 +1353,7 @@ async fn increment_continuation_count_emits_task_updated_event() {
 async fn blocker_swap_atomic_no_race_window() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
 
     let blocker_a = repo
@@ -1365,7 +1365,16 @@ async fn blocker_swap_atomic_no_race_window() {
         .await
         .unwrap();
     let task = repo
-        .create(&epic.id, "Blocked-Task", "", "", "task", 1, "", Some("open"))
+        .create(
+            &epic.id,
+            "Blocked-Task",
+            "",
+            "",
+            "task",
+            1,
+            "",
+            Some("open"),
+        )
         .await
         .unwrap();
 
@@ -1373,13 +1382,9 @@ async fn blocker_swap_atomic_no_race_window() {
     repo.add_blocker(&task.id, &blocker_a.id).await.unwrap();
 
     // Atomic swap: remove blocker_a and add blocker_b in one transaction.
-    repo.update_blockers_atomic(
-        &task.id,
-        &[blocker_b.id.clone()],
-        &[blocker_a.id.clone()],
-    )
-    .await
-    .unwrap();
+    repo.update_blockers_atomic(&task.id, &[blocker_b.id.clone()], &[blocker_a.id.clone()])
+        .await
+        .unwrap();
 
     // Task should still be blocked (by blocker_b now).
     let ready = repo.list_ready(ReadyQuery::default()).await.unwrap();
@@ -1403,7 +1408,7 @@ async fn blocker_swap_atomic_no_race_concurrent() {
 
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let epic = make_epic(&db,  event_bus_for(&tx)).await;
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = Arc::new(TaskRepository::new(db, event_bus_for(&tx)));
 
     let blocker_a = repo
@@ -1415,7 +1420,16 @@ async fn blocker_swap_atomic_no_race_concurrent() {
         .await
         .unwrap();
     let task = repo
-        .create(&epic.id, "Blocked-Task", "", "", "task", 1, "", Some("open"))
+        .create(
+            &epic.id,
+            "Blocked-Task",
+            "",
+            "",
+            "task",
+            1,
+            "",
+            Some("open"),
+        )
         .await
         .unwrap();
 

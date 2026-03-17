@@ -8,6 +8,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::server::AppState;
 use djinn_agent::actors::slot::{
     ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,
     format_family_for_provider, load_provider_credential, parse_model_id,
@@ -16,7 +17,6 @@ use djinn_agent::message::{ContentBlock, Conversation, Message, Role};
 use djinn_agent::provider::{StreamEvent, create_provider};
 use djinn_db::{EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, TaskRepository};
 use djinn_mcp::server::DjinnMcpServer;
-use crate::server::AppState;
 
 const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../../crates/djinn-agent/src/prompts/chat.md");
 const MAX_TOOL_ITERATIONS: usize = 20;
@@ -465,12 +465,10 @@ pub(super) async fn completions_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DJINN_CHAT_SYSTEM_PROMPT, ToolCallPayload, compose_system_prompt, sse_json_event,
-    };
-    use djinn_mcp::server::DjinnMcpServer;
+    use super::{DJINN_CHAT_SYSTEM_PROMPT, ToolCallPayload, compose_system_prompt, sse_json_event};
     use crate::server::AppState;
     use crate::test_helpers;
+    use djinn_mcp::server::DjinnMcpServer;
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
@@ -590,7 +588,10 @@ mod tests {
         assert!(serialized.contains("event: tool_call"));
 
         let value = serde_json::to_value(payload).expect("payload serializes");
-        assert_eq!(value.get("name").and_then(|v| v.as_str()), Some("task_list"));
+        assert_eq!(
+            value.get("name").and_then(|v| v.as_str()),
+            Some("task_list")
+        );
         assert_eq!(value.get("id").and_then(|v| v.as_str()), Some("call-123"));
         assert_eq!(
             value.get("input"),
@@ -608,7 +609,10 @@ mod tests {
 
         let value = serde_json::to_value(payload).expect("payload serializes");
 
-        assert_eq!(value.get("name").and_then(|v| v.as_str()), Some("memory_search"));
+        assert_eq!(
+            value.get("name").and_then(|v| v.as_str()),
+            Some("memory_search")
+        );
         assert_eq!(value.get("id").and_then(|v| v.as_str()), Some("call-456"));
         assert_eq!(value.get("input"), Some(&json!({"query": "foo"})));
     }

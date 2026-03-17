@@ -260,10 +260,7 @@ impl CatalogService {
     /// and merged-child propagation.
     ///
     /// This is the single source of truth for "is provider X connected?".
-    pub fn connected_provider_ids(
-        &self,
-        vault_credentials: &[Credential],
-    ) -> HashSet<String> {
+    pub fn connected_provider_ids(&self, vault_credentials: &[Credential]) -> HashSet<String> {
         use super::builtin;
 
         // 1. API-key credentials from the vault.

@@ -3,13 +3,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use djinn_provider::repos::CredentialRepository;
-use djinn_provider::repos::CustomProviderRepository;
 use crate::server::DjinnMcpServer;
 use djinn_core::models::{CustomProvider, Model, Provider, SeedModel};
 use djinn_provider::catalog::builtin;
 use djinn_provider::catalog::health::ModelHealth;
 use djinn_provider::catalog::validate::{self, ValidationRequest};
+use djinn_provider::repos::CredentialRepository;
+use djinn_provider::repos::CustomProviderRepository;
 
 // ── Shared response helpers ───────────────────────────────────────────────────
 
@@ -827,8 +827,7 @@ impl DjinnMcpServer {
         };
 
         // Persist to DB.
-        let repo =
-            CustomProviderRepository::new(self.state.db().clone(), self.state.event_bus());
+        let repo = CustomProviderRepository::new(self.state.db().clone(), self.state.event_bus());
         if let Err(e) = repo.upsert(&provider).await {
             tracing::warn!(id = %input.id, error = %e, "provider_add_custom: DB upsert failed");
             return Json(ProviderAddCustomResponse {

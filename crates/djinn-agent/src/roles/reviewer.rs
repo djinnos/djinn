@@ -1,21 +1,19 @@
 use crate::actors::slot::task_review::{
     STALE_ESCALATION_THRESHOLD, all_acceptance_criteria_met, is_stale_review_cycle,
 };
-use crate::compaction::{REVIEWER_PROMPT, SUMMARISER_SYSTEM_TASK_REVIEWER};
+use crate::context::AgentContext;
 use crate::extension;
 use crate::output_parser::ParsedAgentOutput;
 use crate::prompts::TaskContext;
-use djinn_db::TaskRepository;
 use crate::task_merge::{VerificationGateFn, merge_after_task_review};
 use djinn_core::models::{Task, TransitionAction};
-use crate::context::AgentContext;
+use djinn_db::TaskRepository;
 use futures::future::BoxFuture;
 
-use super::{AgentRole, CompactionPrompts, RoleConfig};
+use super::{AgentRole, RoleConfig};
 
 pub(crate) struct TaskReviewerRole;
 
-#[allow(dead_code)]
 impl AgentRole for TaskReviewerRole {
     fn config(&self) -> &RoleConfig {
         &TASK_REVIEWER_CONFIG
@@ -38,12 +36,18 @@ impl AgentRole for TaskReviewerRole {
                     if all_acceptance_criteria_met(&task.acceptance_criteria) {
                         tracing::info!(task_id = %task_id, "task reviewer: all AC met → approve");
                         let gate_state = app_state.clone();
-                        let gate: VerificationGateFn = Box::new(move |task_id: String, project_path: String| {
-                            let s = gate_state.clone();
-                            Box::pin(async move {
-                                crate::actors::slot::verification::run_verification_gate(&task_id, &project_path, &s).await
-                            })
-                        });
+                        let gate: VerificationGateFn =
+                            Box::new(move |task_id: String, project_path: String| {
+                                let s = gate_state.clone();
+                                Box::pin(async move {
+                                    crate::actors::slot::verification::run_verification_gate(
+                                        &task_id,
+                                        &project_path,
+                                        &s,
+                                    )
+                                    .await
+                                })
+                            });
                         merge_after_task_review(task_id, app_state, Some(gate)).await
                     } else {
                         let feedback = output.reviewer_feedback.clone().unwrap_or_else(|| {
@@ -117,12 +121,6 @@ pub(crate) const TASK_REVIEWER_CONFIG: RoleConfig = RoleConfig {
     },
     release_action: || TransitionAction::ReleaseTaskReview,
     initial_message: crate::prompts::TASK_REVIEWER_TEMPLATE,
-    compaction: CompactionPrompts {
-        mid_session: REVIEWER_PROMPT,
-        mid_session_system: SUMMARISER_SYSTEM_TASK_REVIEWER,
-        pre_resume: REVIEWER_PROMPT,
-        pre_resume_system: SUMMARISER_SYSTEM_TASK_REVIEWER,
-    },
     preserves_session: false,
     is_project_scoped: false,
 };

@@ -2,9 +2,9 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::commands::run_commands;
+use anyhow::Result;
 use djinn_core::commands::CommandResult;
 use djinn_db::VerificationCacheRepository;
-use anyhow::Result;
 
 use super::settings::load_commands;
 
@@ -31,8 +31,8 @@ pub async fn verify_commit(
     let start = Instant::now();
     let cache_repo = VerificationCacheRepository::new(db.clone());
 
-    let (setup_commands, verification_commands) = load_commands(worktree_path)
-        .map_err(anyhow::Error::msg)?;
+    let (setup_commands, verification_commands) =
+        load_commands(worktree_path).map_err(anyhow::Error::msg)?;
 
     let setup_results = run_commands(&setup_commands, worktree_path)
         .await
@@ -59,10 +59,10 @@ pub async fn verify_commit(
         .unwrap_or(true);
 
     if passed {
-        let output_json = serde_json::to_string(&verification_results).map_err(|e| {
-            anyhow::anyhow!("failed to serialize verification results: {e}")
-        })?;
-        let verification_duration_ms: u64 = verification_results.iter().map(|r| r.duration_ms).sum();
+        let output_json = serde_json::to_string(&verification_results)
+            .map_err(|e| anyhow::anyhow!("failed to serialize verification results: {e}"))?;
+        let verification_duration_ms: u64 =
+            verification_results.iter().map(|r| r.duration_ms).sum();
         cache_repo
             .insert(
                 project_id,
@@ -87,8 +87,8 @@ pub async fn verify_commit(
 mod tests {
     use super::*;
     use djinn_core::commands::CommandResult;
-    use djinn_db::VerificationCacheRepository;
     use djinn_db::Database;
+    use djinn_db::VerificationCacheRepository;
     use tempfile::tempdir;
 
     fn test_db() -> Database {

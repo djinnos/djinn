@@ -9,14 +9,14 @@ use rmcp::object;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::sandbox;
+use crate::context::AgentContext;
+use crate::lsp::format_diagnostics_xml;
+use djinn_core::models::Task;
 use djinn_db::EpicRepository;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
-use crate::lsp::format_diagnostics_xml;
-use djinn_core::models::Task;
-use crate::context::AgentContext;
 
 #[derive(Deserialize)]
 struct IncomingToolCall {
@@ -453,7 +453,17 @@ async fn call_epic_update(
     let owner = epic.owner.as_str();
 
     let updated = repo
-        .update(&epic.id, djinn_db::EpicUpdateInput { title, description, emoji, color, owner, memory_refs: None })
+        .update(
+            &epic.id,
+            djinn_db::EpicUpdateInput {
+                title,
+                description,
+                emoji,
+                color,
+                owner,
+                memory_refs: None,
+            },
+        )
         .await
         .map_err(|e| e.to_string())?;
 
@@ -1157,11 +1167,7 @@ enum FuzzyResult {
 }
 
 /// Trim trailing whitespace from each line, then find the match.
-fn try_line_trimmed_match(
-    content: &str,
-    old_text: &str,
-    new_text: &str,
-) -> Option<FuzzyResult> {
+fn try_line_trimmed_match(content: &str, old_text: &str, new_text: &str) -> Option<FuzzyResult> {
     let trimmed_content: String = content
         .lines()
         .map(|l| l.trim_end())
@@ -1184,8 +1190,7 @@ fn try_line_trimmed_match(
     let start = trimmed_content.find(&trimmed_old)?;
     let end = start + trimmed_old.len();
 
-    let (orig_start, orig_end) =
-        map_trimmed_to_original(content, &trimmed_content, start, end);
+    let (orig_start, orig_end) = map_trimmed_to_original(content, &trimmed_content, start, end);
     let mut result = String::with_capacity(content.len());
     result.push_str(&content[..orig_start]);
     result.push_str(new_text);
@@ -1210,22 +1215,16 @@ fn map_trimmed_to_original(
     let mut found_start = false;
     let mut found_end = false;
 
-    for (i, (orig_line, trimmed_line)) in
-        orig_lines.iter().zip(trimmed_lines.iter()).enumerate()
-    {
+    for (i, (orig_line, trimmed_line)) in orig_lines.iter().zip(trimmed_lines.iter()).enumerate() {
         let newline: usize = usize::from(i < orig_lines.len() - 1);
 
-        if !found_start
-            && trimmed_start < trimmed_offset + trimmed_line.len() + newline
-        {
+        if !found_start && trimmed_start < trimmed_offset + trimmed_line.len() + newline {
             let offset_in_line = trimmed_start - trimmed_offset;
             result_start = orig_offset + offset_in_line;
             found_start = true;
         }
 
-        if !found_end
-            && trimmed_end <= trimmed_offset + trimmed_line.len() + newline
-        {
+        if !found_end && trimmed_end <= trimmed_offset + trimmed_line.len() + newline {
             let offset_in_line = trimmed_end - trimmed_offset;
             let clamped = offset_in_line.min(orig_line.len() + newline);
             result_end = orig_offset + clamped;
@@ -1343,8 +1342,7 @@ fn try_indentation_flexible_match(
         .chars()
         .filter(|&c| c == '\n')
         .count();
-    let old_line_count =
-        stripped_old.chars().filter(|&c| c == '\n').count() + 1;
+    let old_line_count = stripped_old.chars().filter(|&c| c == '\n').count() + 1;
 
     let content_lines: Vec<&str> = content.lines().collect();
 
@@ -1366,8 +1364,8 @@ fn try_indentation_flexible_match(
     orig_end = orig_end.min(content.len());
 
     let first_orig_line = content_lines[match_start_line];
-    let base_indent: &str = &first_orig_line
-        [..first_orig_line.len() - first_orig_line.trim_start().len()];
+    let base_indent: &str =
+        &first_orig_line[..first_orig_line.len() - first_orig_line.trim_start().len()];
 
     let new_lines: Vec<&str> = new_text.lines().collect();
     let first_new_indent = new_lines
@@ -1388,8 +1386,7 @@ fn try_indentation_flexible_match(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let needs_trailing_newline =
-        content[..orig_end].ends_with('\n') && !reindented.ends_with('\n');
+    let needs_trailing_newline = content[..orig_end].ends_with('\n') && !reindented.ends_with('\n');
 
     let mut result = String::with_capacity(content.len());
     result.push_str(&content[..orig_start]);
@@ -1420,19 +1417,15 @@ async fn call_edit(
                 .assert(&worktree_path.display().to_string(), &path)
                 .await
                 .map_err(|e| match e.as_str() {
-                    _ if e.starts_with(
-                        "file must be read before modification in this session:",
-                    ) =>
+                    _ if e
+                        .starts_with("file must be read before modification in this session:") =>
                     {
                         format!(
                             "You must read the file {} before editing it. Use the read tool first",
                             path.display()
                         )
                     }
-                    _ if e.starts_with(
-                        "file was modified since last read in this session:",
-                    ) =>
-                    {
+                    _ if e.starts_with("file was modified since last read in this session:") => {
                         format!(
                             "File {} has been modified since last read. Please read it again.",
                             path.display()
@@ -1497,17 +1490,15 @@ async fn call_apply_patch(
                     .assert(&worktree_key, &resolved)
                     .await
                     .map_err(|e| {
-                        if e.starts_with(
-                            "file must be read before modification in this session:",
-                        ) {
+                        if e.starts_with("file must be read before modification in this session:") {
                             format!(
                                 "You must read the file {} before editing it. \
                                  Use the read tool first",
                                 resolved.display()
                             )
-                        } else if e.starts_with(
-                            "file was modified since last read in this session:",
-                        ) {
+                        } else if e
+                            .starts_with("file was modified since last read in this session:")
+                        {
                             format!(
                                 "File {} has been modified since last read. \
                                  Please read it again.",
@@ -1531,14 +1522,8 @@ async fn call_apply_patch(
     let mut affected = Vec::new();
     for (file_path, action) in &results {
         if *action != "deleted" {
-            state
-                .file_time
-                .read(&worktree_key, file_path)
-                .await?;
-            state
-                .lsp
-                .touch_file(worktree_path, file_path, true)
-                .await;
+            state.file_time.read(&worktree_key, file_path).await?;
+            state.lsp.touch_file(worktree_path, file_path, true).await;
         }
         affected.push(serde_json::json!({
             "path": file_path.display().to_string(),
@@ -1833,15 +1818,21 @@ async fn call_task_transition(
         let gate: VerificationGateFn = Box::new(move |task_id: String, project_path: String| {
             let s = gate_state.clone();
             Box::pin(async move {
-                crate::actors::slot::verification::run_verification_gate(&task_id, &project_path, &s).await
+                crate::actors::slot::verification::run_verification_gate(
+                    &task_id,
+                    &project_path,
+                    &s,
+                )
+                .await
             })
         });
-        let (merge_action, reason) = merge_and_transition(&task.id, state, &PM_MERGE_ACTIONS, Some(gate))
-            .await
-            .unwrap_or((
-                TransitionAction::PmInterventionComplete,
-                Some("merge_and_transition returned None".to_string()),
-            ));
+        let (merge_action, reason) =
+            merge_and_transition(&task.id, state, &PM_MERGE_ACTIONS, Some(gate))
+                .await
+                .unwrap_or((
+                    TransitionAction::PmInterventionComplete,
+                    Some("merge_and_transition returned None".to_string()),
+                ));
         let updated = repo
             .transition(
                 &task.id,
@@ -1906,14 +1897,9 @@ async fn call_task_transition(
             // on the transition that follows.
             let last_replacement_id = ids.last().unwrap();
             if let Ok(Some(last_task)) = repo.resolve(last_replacement_id).await {
-                let downstream = repo
-                    .list_blocked_by(&task.id)
-                    .await
-                    .unwrap_or_default();
+                let downstream = repo.list_blocked_by(&task.id).await.unwrap_or_default();
                 for blocked_ref in &downstream {
-                    let _ = repo
-                        .add_blocker(&blocked_ref.task_id, &last_task.id)
-                        .await;
+                    let _ = repo.add_blocker(&blocked_ref.task_id, &last_task.id).await;
                 }
             }
         }
@@ -1950,21 +1936,15 @@ async fn call_task_delete_branch(
     };
 
     // Interrupt and clean up any paused worker session (handles worktree cleanup too).
-    crate::task_merge::interrupt_paused_worker_session(&task.id, state)
-        .await;
-    crate::task_merge::cleanup_paused_worker_session(&task.id, state)
-        .await;
+    crate::task_merge::interrupt_paused_worker_session(&task.id, state).await;
+    crate::task_merge::cleanup_paused_worker_session(&task.id, state).await;
 
     // Delete the task branch from git.
-    let project_dir = match crate::task_merge::resolve_project_path_for_id(
-        &task.project_id,
-        state,
-    )
-    .await
-    {
-        Some(p) => std::path::PathBuf::from(p),
-        None => return Ok(serde_json::json!({ "error": "project not found" })),
-    };
+    let project_dir =
+        match crate::task_merge::resolve_project_path_for_id(&task.project_id, state).await {
+            Some(p) => std::path::PathBuf::from(p),
+            None => return Ok(serde_json::json!({ "error": "project not found" })),
+        };
     let base_branch = format!("task/{}", task.short_id);
     match state.git_actor(&project_dir).await {
         Ok(git) => {
@@ -2022,7 +2002,11 @@ async fn call_task_reset_counters(
         .await
         .map_err(|e| e.to_string())?
         .unwrap_or(task.clone());
-    state.event_bus.send(djinn_core::events::DjinnEventEnvelope::task_updated(&updated, false));
+    state
+        .event_bus
+        .send(djinn_core::events::DjinnEventEnvelope::task_updated(
+            &updated, false,
+        ));
     Ok(
         serde_json::json!({ "ok": true, "task_id": task.short_id, "reopen_count": 0, "continuation_count": 0 }),
     )
@@ -2045,10 +2029,8 @@ async fn call_task_kill_session(
 
     // Interrupt the paused session and delete saved conversation.
     // This forces a fresh session on next dispatch without deleting the branch.
-    crate::task_merge::interrupt_paused_worker_session(&task.id, state)
-        .await;
-    crate::task_merge::cleanup_paused_worker_session(&task.id, state)
-        .await;
+    crate::task_merge::interrupt_paused_worker_session(&task.id, state).await;
+    crate::task_merge::cleanup_paused_worker_session(&task.id, state).await;
 
     Ok(serde_json::json!({
         "ok": true,
@@ -2360,7 +2342,6 @@ fn tool_edit() -> RmcpTool {
     )
 }
 
-#[allow(dead_code)]
 fn tool_task_create() -> RmcpTool {
     RmcpTool::new(
         "task_create".to_string(),
@@ -2427,7 +2408,6 @@ fn tool_task_transition() -> RmcpTool {
     )
 }
 
-#[allow(dead_code)]
 fn tool_task_delete_branch() -> RmcpTool {
     RmcpTool::new(
         "task_delete_branch".to_string(),
@@ -2442,7 +2422,6 @@ fn tool_task_delete_branch() -> RmcpTool {
     )
 }
 
-#[allow(dead_code)]
 fn tool_task_archive_activity() -> RmcpTool {
     RmcpTool::new(
         "task_archive_activity".to_string(),
@@ -2457,7 +2436,6 @@ fn tool_task_archive_activity() -> RmcpTool {
     )
 }
 
-#[allow(dead_code)]
 fn tool_task_reset_counters() -> RmcpTool {
     RmcpTool::new(
         "task_reset_counters".to_string(),
@@ -2472,7 +2450,6 @@ fn tool_task_reset_counters() -> RmcpTool {
     )
 }
 
-#[allow(dead_code)]
 fn tool_task_kill_session() -> RmcpTool {
     RmcpTool::new(
         "task_kill_session".to_string(),
@@ -2554,19 +2531,16 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
     tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
-    tool_values
-        .push(serde_json::to_value(tool_apply_patch()).expect("serialize tool_apply_patch"));
-    tool_values
-        .push(serde_json::to_value(tool_request_pm()).expect("serialize tool_request_pm"));
+    tool_values.push(serde_json::to_value(tool_apply_patch()).expect("serialize tool_apply_patch"));
+    tool_values.push(serde_json::to_value(tool_request_pm()).expect("serialize tool_request_pm"));
     tool_values
 }
 
 /// Tool schemas for TaskReviewer: base + acceptance-criteria update tool.
 pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    tool_values.push(
-        serde_json::to_value(tool_task_update_ac()).expect("serialize tool_task_update_ac"),
-    );
+    tool_values
+        .push(serde_json::to_value(tool_task_update_ac()).expect("serialize tool_task_update_ac"));
     tool_values
 }
 
@@ -2577,16 +2551,13 @@ pub(crate) fn tool_schemas_pm_groomer() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
         serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
         serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
-        serde_json::to_value(tool_task_delete_branch())
-            .expect("serialize tool_task_delete_branch"),
+        serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
         serde_json::to_value(tool_task_archive_activity())
             .expect("serialize tool_task_archive_activity"),
         serde_json::to_value(tool_task_reset_counters())
             .expect("serialize tool_task_reset_counters"),
-        serde_json::to_value(tool_task_kill_session())
-            .expect("serialize tool_task_kill_session"),
-        serde_json::to_value(tool_task_blocked_list())
-            .expect("serialize tool_task_blocked_list"),
+        serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
+        serde_json::to_value(tool_task_blocked_list()).expect("serialize tool_task_blocked_list"),
         serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
         serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
         serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
@@ -2869,3 +2840,4 @@ fn tool_lsp() -> RmcpTool {
         }),
     )
 }
+

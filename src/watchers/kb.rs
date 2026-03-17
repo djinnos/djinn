@@ -7,8 +7,8 @@ use notify_debouncer_mini::{DebouncedEventKind, Debouncer, new_debouncer};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use djinn_db::{Database, NoteRepository, ProjectRepository};
 use crate::events::DjinnEventEnvelope;
+use djinn_db::{Database, NoteRepository, ProjectRepository};
 
 /// Debounce window — reindex fires this long after the last file change.
 const DEBOUNCE: Duration = Duration::from_secs(2);
@@ -39,7 +39,8 @@ pub fn spawn_kb_watchers(
     tokio::spawn(async move {
         // Initial setup: watch all existing projects.
         {
-            let project_repo = ProjectRepository::new(db.clone(), crate::events::event_bus_for(&events_tx));
+            let project_repo =
+                ProjectRepository::new(db.clone(), crate::events::event_bus_for(&events_tx));
             match project_repo.list().await {
                 Ok(projects) => {
                     let mut guard = state_clone.lock().await;

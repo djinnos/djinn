@@ -1,9 +1,9 @@
 use thiserror::Error;
 use tokio::sync::oneshot;
 
+use crate::context::AgentContext;
 use djinn_core::commands::{CommandResult, CommandSpec};
 use djinn_db::TaskRepository;
-use crate::context::AgentContext;
 
 #[derive(Debug)]
 pub(crate) enum SlotCommand {

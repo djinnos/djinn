@@ -232,8 +232,7 @@ impl NoteRepository {
         // Best-effort file removal — don't fail if file is already gone.
         let _ = std::fs::remove_file(&current.file_path);
 
-        self
-            .events
+        self.events
             .send(DjinnEventEnvelope::note_deleted(&id_for_event));
         Ok(())
     }

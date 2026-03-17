@@ -66,8 +66,7 @@ impl CustomProviderRepository {
         .bind(&seed_json)
         .execute(self.db.pool())
         .await?;
-        self
-            .events
+        self.events
             .send(DjinnEventEnvelope::custom_provider_upserted(provider));
         Ok(())
     }
@@ -81,8 +80,7 @@ impl CustomProviderRepository {
             .await?;
         let deleted = result.rows_affected() > 0;
         if deleted {
-            self
-                .events
+            self.events
                 .send(DjinnEventEnvelope::custom_provider_deleted(id));
         }
         Ok(deleted)

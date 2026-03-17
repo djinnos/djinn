@@ -31,9 +31,9 @@ use serde::Serialize;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
-use djinn_db::{Database, ProjectRepository};
 use crate::events::DjinnEventEnvelope;
 use backoff::BackoffState;
+use djinn_db::{Database, ProjectRepository};
 pub use tasks_channel::TaskSyncError;
 
 // ── Channel registration ──────────────────────────────────────────────────────
@@ -317,12 +317,12 @@ impl SyncManager {
                                 st.last_error = None;
                             }
                         }
-                        let _ = self.inner.events_tx.send(DjinnEventEnvelope::sync_completed(
-                            def.name,
-                            "export",
-                            count,
-                            None,
-                        ));
+                        let _ = self
+                            .inner
+                            .events_tx
+                            .send(DjinnEventEnvelope::sync_completed(
+                                def.name, "export", count, None,
+                            ));
                         results.push(SyncResult {
                             channel: def.name.to_string(),
                             ok: true,
@@ -341,12 +341,15 @@ impl SyncManager {
                                 })
                                 .unwrap_or(Duration::ZERO)
                         };
-                        let _ = self.inner.events_tx.send(DjinnEventEnvelope::sync_completed(
-                            def.name,
-                            "export",
-                            0,
-                            Some(e.to_string().as_str()),
-                        ));
+                        let _ = self
+                            .inner
+                            .events_tx
+                            .send(DjinnEventEnvelope::sync_completed(
+                                def.name,
+                                "export",
+                                0,
+                                Some(e.to_string().as_str()),
+                            ));
                         tracing::warn!(
                             channel = def.name,
                             project = project.name,
@@ -409,12 +412,12 @@ impl SyncManager {
                                 st.last_error = None;
                             }
                         }
-                        let _ = self.inner.events_tx.send(DjinnEventEnvelope::sync_completed(
-                            def.name,
-                            "import",
-                            count,
-                            None,
-                        ));
+                        let _ = self
+                            .inner
+                            .events_tx
+                            .send(DjinnEventEnvelope::sync_completed(
+                                def.name, "import", count, None,
+                            ));
                         results.push(SyncResult {
                             channel: def.name.to_string(),
                             ok: true,
@@ -435,12 +438,15 @@ impl SyncManager {
                                 st.last_error = Some(e.to_string());
                             }
                         }
-                        let _ = self.inner.events_tx.send(DjinnEventEnvelope::sync_completed(
-                            def.name,
-                            "import",
-                            0,
-                            Some(e.to_string().as_str()),
-                        ));
+                        let _ = self
+                            .inner
+                            .events_tx
+                            .send(DjinnEventEnvelope::sync_completed(
+                                def.name,
+                                "import",
+                                0,
+                                Some(e.to_string().as_str()),
+                            ));
                         results.push(SyncResult {
                             channel: def.name.to_string(),
                             ok: false,
@@ -469,7 +475,10 @@ impl SyncManager {
 // ── Module-level helpers ──────────────────────────────────────────────────────
 
 fn project_repo(inner: &Inner) -> ProjectRepository {
-    ProjectRepository::new(inner.db.clone(), crate::events::event_bus_for(&inner.events_tx))
+    ProjectRepository::new(
+        inner.db.clone(),
+        crate::events::event_bus_for(&inner.events_tx),
+    )
 }
 
 /// Current UTC time as an ISO-8601 string (second precision).
@@ -538,8 +547,8 @@ fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::broadcast;
     use crate::events::event_bus_for;
+    use tokio::sync::broadcast;
 
     #[test]
     fn registered_channels_has_tasks() {
@@ -839,9 +848,8 @@ mod tests {
     fn background_task_match_filters_from_sync_true() {
         // Verify the envelope-based filter logic: from_sync=true events should NOT
         // trigger export (spawn_background_task checks entity_type == "task" && !from_sync).
-        let should_trigger = |env: &DjinnEventEnvelope| -> bool {
-            env.entity_type == "task" && !env.from_sync
-        };
+        let should_trigger =
+            |env: &DjinnEventEnvelope| -> bool { env.entity_type == "task" && !env.from_sync };
 
         let task = djinn_core::models::Task {
             id: "t".to_string(),

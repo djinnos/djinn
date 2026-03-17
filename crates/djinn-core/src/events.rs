@@ -72,80 +72,257 @@ impl DjinnEventEnvelope {
     }
 
     pub fn epic_created(epic: &Epic) -> Self {
-        Self { entity_type: "epic", action: "created", payload: serde_json::to_value(epic).unwrap(), id: None, project_id: None, from_sync: false }
+        Self {
+            entity_type: "epic",
+            action: "created",
+            payload: serde_json::to_value(epic).unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
     }
     pub fn epic_updated(epic: &Epic) -> Self {
-        Self { entity_type: "epic", action: "updated", payload: serde_json::to_value(epic).unwrap(), id: None, project_id: None, from_sync: false }
+        Self {
+            entity_type: "epic",
+            action: "updated",
+            payload: serde_json::to_value(epic).unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
     }
     pub fn epic_deleted(id: &str) -> Self {
-        Self { entity_type: "epic", action: "deleted", payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(), id: Some(id.to_string()), project_id: None, from_sync: false }
+        Self {
+            entity_type: "epic",
+            action: "deleted",
+            payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(),
+            id: Some(id.to_string()),
+            project_id: None,
+            from_sync: false,
+        }
     }
     pub fn task_created(task: &Task, from_sync: bool) -> Self {
-        Self { entity_type: "task", action: "created", payload: serde_json::to_value(serde_json::json!({"task": task, "from_sync": from_sync})).unwrap(), id: None, project_id: None, from_sync }
+        Self {
+            entity_type: "task",
+            action: "created",
+            payload: serde_json::to_value(
+                serde_json::json!({"task": task, "from_sync": from_sync}),
+            )
+            .unwrap(),
+            id: None,
+            project_id: None,
+            from_sync,
+        }
     }
     pub fn task_updated(task: &Task, from_sync: bool) -> Self {
-        Self { entity_type: "task", action: "updated", payload: serde_json::to_value(serde_json::json!({"task": task, "from_sync": from_sync})).unwrap(), id: None, project_id: None, from_sync }
+        Self {
+            entity_type: "task",
+            action: "updated",
+            payload: serde_json::to_value(
+                serde_json::json!({"task": task, "from_sync": from_sync}),
+            )
+            .unwrap(),
+            id: None,
+            project_id: None,
+            from_sync,
+        }
     }
     pub fn task_deleted(id: &str) -> Self {
-        Self { entity_type: "task", action: "deleted", payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(), id: Some(id.to_string()), project_id: None, from_sync: false }
+        Self {
+            entity_type: "task",
+            action: "deleted",
+            payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(),
+            id: Some(id.to_string()),
+            project_id: None,
+            from_sync: false,
+        }
     }
     pub fn note_created(note: &Note) -> Self {
-        Self { entity_type: "note", action: "created", payload: serde_json::to_value(note).unwrap(), id: None, project_id: None, from_sync: false }
+        Self {
+            entity_type: "note",
+            action: "created",
+            payload: serde_json::to_value(note).unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
     }
     pub fn note_updated(note: &Note) -> Self {
-        Self { entity_type: "note", action: "updated", payload: serde_json::to_value(note).unwrap(), id: None, project_id: None, from_sync: false }
+        Self {
+            entity_type: "note",
+            action: "updated",
+            payload: serde_json::to_value(note).unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
     }
     pub fn note_deleted(id: &str) -> Self {
-        Self { entity_type: "note", action: "deleted", payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(), id: Some(id.to_string()), project_id: None, from_sync: false }
+        Self {
+            entity_type: "note",
+            action: "deleted",
+            payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(),
+            id: Some(id.to_string()),
+            project_id: None,
+            from_sync: false,
+        }
     }
     pub fn git_settings_updated(project_id: &str, settings: &GitSettings) -> Self {
-        Self { entity_type: "git_settings", action: "updated", payload: serde_json::to_value(serde_json::json!({"project_id": project_id, "settings": settings})).unwrap(), id: None, project_id: Some(project_id.to_string()), from_sync: false }
+        Self {
+            entity_type: "git_settings",
+            action: "updated",
+            payload: serde_json::to_value(
+                serde_json::json!({"project_id": project_id, "settings": settings}),
+            )
+            .unwrap(),
+            id: None,
+            project_id: Some(project_id.to_string()),
+            from_sync: false,
+        }
     }
     pub fn custom_provider_upserted(provider: &CustomProvider) -> Self {
-        Self { entity_type: "custom_provider", action: "updated", payload: serde_json::to_value(provider).unwrap(), id: None, project_id: None, from_sync: false }
+        Self {
+            entity_type: "custom_provider",
+            action: "updated",
+            payload: serde_json::to_value(provider).unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
     }
     pub fn custom_provider_deleted(id: &str) -> Self {
-        Self { entity_type: "custom_provider", action: "deleted", payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(), id: Some(id.to_string()), project_id: None, from_sync: false }
+        Self {
+            entity_type: "custom_provider",
+            action: "deleted",
+            payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(),
+            id: Some(id.to_string()),
+            project_id: None,
+            from_sync: false,
+        }
     }
     pub fn credential_created(credential: &Credential) -> Self {
-        Self { entity_type: "credential", action: "created", payload: serde_json::to_value(credential).unwrap(), id: None, project_id: None, from_sync: false }
+        Self {
+            entity_type: "credential",
+            action: "created",
+            payload: serde_json::to_value(credential).unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
     }
     pub fn credential_updated(credential: &Credential) -> Self {
-        Self { entity_type: "credential", action: "updated", payload: serde_json::to_value(credential).unwrap(), id: None, project_id: None, from_sync: false }
+        Self {
+            entity_type: "credential",
+            action: "updated",
+            payload: serde_json::to_value(credential).unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
     }
     pub fn credential_deleted(id: &str) -> Self {
-        Self { entity_type: "credential", action: "deleted", payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(), id: Some(id.to_string()), project_id: None, from_sync: false }
+        Self {
+            entity_type: "credential",
+            action: "deleted",
+            payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(),
+            id: Some(id.to_string()),
+            project_id: None,
+            from_sync: false,
+        }
     }
-    pub fn session_dispatched(project_id: &str, task_id: &str, model_id: &str, agent_type: &str) -> Self {
+    pub fn session_dispatched(
+        project_id: &str,
+        task_id: &str,
+        model_id: &str,
+        agent_type: &str,
+    ) -> Self {
         Self { entity_type: "session", action: "dispatched", payload: serde_json::to_value(serde_json::json!({"project_id": project_id, "task_id": task_id, "model_id": model_id, "agent_type": agent_type})).unwrap(), id: None, project_id: Some(project_id.to_string()), from_sync: false }
     }
-    pub fn session_token_update(session_id: &str, task_id: &str, tokens_in: i64, tokens_out: i64, context_window: i64, usage_pct: f64) -> Self {
+    pub fn session_token_update(
+        session_id: &str,
+        task_id: &str,
+        tokens_in: i64,
+        tokens_out: i64,
+        context_window: i64,
+        usage_pct: f64,
+    ) -> Self {
         Self { entity_type: "session", action: "token_update", payload: serde_json::to_value(serde_json::json!({"session_id": session_id, "task_id": task_id, "tokens_in": tokens_in, "tokens_out": tokens_out, "context_window": context_window, "usage_pct": usage_pct})).unwrap(), id: None, project_id: None, from_sync: false }
     }
-    pub fn session_message(session_id: &str, task_id: &str, agent_type: &str, message: &serde_json::Value) -> Self {
+    pub fn session_message(
+        session_id: &str,
+        task_id: &str,
+        agent_type: &str,
+        message: &serde_json::Value,
+    ) -> Self {
         Self { entity_type: "session", action: "message", payload: serde_json::to_value(serde_json::json!({"session_id": session_id, "task_id": task_id, "agent_type": agent_type, "message": message})).unwrap(), id: None, project_id: None, from_sync: false }
     }
-    pub fn sync_completed(channel: &str, direction: &str, count: usize, error: Option<&str>) -> Self {
+    pub fn sync_completed(
+        channel: &str,
+        direction: &str,
+        count: usize,
+        error: Option<&str>,
+    ) -> Self {
         Self { entity_type: "sync", action: "completed", payload: serde_json::to_value(serde_json::json!({"channel": channel, "direction": direction, "count": count, "error": error})).unwrap(), id: None, project_id: None, from_sync: false }
     }
     pub fn project_health_changed(project_id: &str, healthy: bool, error: Option<&str>) -> Self {
-        Self { entity_type: "project", action: if healthy { "health_ok" } else { "health_error" }, payload: serde_json::to_value(serde_json::json!({"project_id": project_id, "healthy": healthy, "error": error})).unwrap(), id: None, project_id: Some(project_id.to_string()), from_sync: false }
+        Self {
+            entity_type: "project",
+            action: if healthy { "health_ok" } else { "health_error" },
+            payload: serde_json::to_value(
+                serde_json::json!({"project_id": project_id, "healthy": healthy, "error": error}),
+            )
+            .unwrap(),
+            id: None,
+            project_id: Some(project_id.to_string()),
+            from_sync: false,
+        }
     }
-    pub fn verification_step(project_id: &str, task_id: Option<&str>, phase: &str, step: &impl serde::Serialize) -> Self {
+    pub fn verification_step(
+        project_id: &str,
+        task_id: Option<&str>,
+        phase: &str,
+        step: &impl serde::Serialize,
+    ) -> Self {
         Self { entity_type: "verification", action: "step", payload: serde_json::to_value(serde_json::json!({"project_id": project_id, "task_id": task_id, "phase": phase, "step": step})).unwrap(), id: None, project_id: Some(project_id.to_string()), from_sync: false }
     }
     pub fn task_lifecycle_step(task_id: &str, step: &str, detail: &serde_json::Value) -> Self {
-        Self { entity_type: "lifecycle", action: "step", payload: serde_json::to_value(serde_json::json!({"task_id": task_id, "step": step, "detail": detail})).unwrap(), id: None, project_id: None, from_sync: false }
+        Self {
+            entity_type: "lifecycle",
+            action: "step",
+            payload: serde_json::to_value(
+                serde_json::json!({"task_id": task_id, "step": step, "detail": detail}),
+            )
+            .unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
     }
-    pub fn activity_logged(task_id: Option<&str>, action: &str, actor: &str, actor_role: &str, payload: &serde_json::Value) -> Self {
+    pub fn activity_logged(
+        task_id: Option<&str>,
+        action: &str,
+        actor: &str,
+        actor_role: &str,
+        payload: &serde_json::Value,
+    ) -> Self {
         Self { entity_type: "activity", action: "logged", payload: serde_json::to_value(serde_json::json!({"task_id": task_id, "action": action, "actor": actor, "actor_role": actor_role, "payload": payload})).unwrap(), id: None, project_id: None, from_sync: false }
     }
 
-    pub fn entity_type(&self) -> &'static str { self.entity_type }
-    pub fn action(&self) -> &'static str { self.action }
-    pub fn from_sync(&self) -> bool { self.from_sync }
-    pub fn payload(&self) -> &serde_json::Value { &self.payload }
-    pub fn parse_payload<T: DeserializeOwned>(&self) -> Option<T> { serde_json::from_value(self.payload.clone()).ok() }
+    pub fn entity_type(&self) -> &'static str {
+        self.entity_type
+    }
+    pub fn action(&self) -> &'static str {
+        self.action
+    }
+    pub fn from_sync(&self) -> bool {
+        self.from_sync
+    }
+    pub fn payload(&self) -> &serde_json::Value {
+        &self.payload
+    }
+    pub fn parse_payload<T: DeserializeOwned>(&self) -> Option<T> {
+        serde_json::from_value(self.payload.clone()).ok()
+    }
 }
 
 /// A type-erased event sink. Wraps a callback so that djinn-db repositories
@@ -249,7 +426,12 @@ mod tests {
         #[derive(serde::Serialize)]
         #[serde(tag = "type")]
         enum TestStep {
-            Started { index: u32, total: u32, name: String, command: String },
+            Started {
+                index: u32,
+                total: u32,
+                name: String,
+                command: String,
+            },
         }
 
         let step = TestStep::Started {
@@ -258,7 +440,8 @@ mod tests {
             name: "clippy".into(),
             command: "cargo clippy".into(),
         };
-        let envelope = DjinnEventEnvelope::verification_step("p1", Some("t1"), "verification", &step);
+        let envelope =
+            DjinnEventEnvelope::verification_step("p1", Some("t1"), "verification", &step);
 
         assert_eq!(envelope.entity_type(), "verification");
         assert_eq!(envelope.action(), "step");

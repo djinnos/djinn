@@ -1,5 +1,5 @@
-use crate::database::Database;
 use crate::Result;
+use crate::database::Database;
 
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct CachedVerification {

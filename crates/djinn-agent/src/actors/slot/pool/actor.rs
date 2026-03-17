@@ -6,8 +6,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::actors::coordinator::CoordinatorHandle;
-use djinn_db::TaskRepository;
 use crate::context::AgentContext;
+use djinn_db::TaskRepository;
 
 use super::super::{ModelSlotConfig, SlotEvent, SlotHandle, SlotPoolConfig, SlotState};
 use super::types::{PoolError, PoolMessage, SlotFactory, now_unix_string};

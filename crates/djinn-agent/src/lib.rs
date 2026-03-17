@@ -2,8 +2,8 @@
 // Covers: commands, agent context/roles/lifecycle, verification, actors.
 
 pub mod commands;
-pub mod process;
 pub mod events;
+pub mod process;
 
 // ─── Agent module (was src/agent/) ───────────────────────────────────────────
 
@@ -12,8 +12,8 @@ pub mod config;
 pub mod context;
 pub(crate) mod extension;
 pub mod file_time;
-pub(crate) mod task_merge;
 pub mod lsp;
+pub(crate) mod task_merge;
 pub use djinn_provider::message;
 pub mod oauth;
 pub(crate) mod output_parser;
@@ -118,8 +118,14 @@ mod tests {
         let cfg = roles::config_for(agent_type);
         assert_eq!(agent_type.as_str(), cfg.name);
         assert_eq!(agent_type.dispatch_role(), cfg.dispatch_role);
-        assert_eq!(agent_type.role_config().preserves_session, cfg.preserves_session);
-        assert_eq!(agent_type.role_config().is_project_scoped, cfg.is_project_scoped);
+        assert_eq!(
+            agent_type.role_config().preserves_session,
+            cfg.preserves_session
+        );
+        assert_eq!(
+            agent_type.role_config().is_project_scoped,
+            cfg.is_project_scoped
+        );
         assert_eq!(agent_type.tool_schemas(), (cfg.tool_schemas)());
     }
 
@@ -144,12 +150,30 @@ mod tests {
     #[test]
     fn for_task_status_covers_all_expected_paths() {
         assert_eq!(AgentType::for_task_status("open", false), AgentType::Worker);
-        assert_eq!(AgentType::for_task_status("open", true), AgentType::ConflictResolver);
-        assert_eq!(AgentType::for_task_status("needs_task_review", false), AgentType::TaskReviewer);
-        assert_eq!(AgentType::for_task_status("in_task_review", false), AgentType::TaskReviewer);
-        assert_eq!(AgentType::for_task_status("needs_pm_intervention", false), AgentType::PM);
-        assert_eq!(AgentType::for_task_status("in_pm_intervention", false), AgentType::PM);
-        assert_eq!(AgentType::for_task_status("backlog", false), AgentType::Worker);
+        assert_eq!(
+            AgentType::for_task_status("open", true),
+            AgentType::ConflictResolver
+        );
+        assert_eq!(
+            AgentType::for_task_status("needs_task_review", false),
+            AgentType::TaskReviewer
+        );
+        assert_eq!(
+            AgentType::for_task_status("in_task_review", false),
+            AgentType::TaskReviewer
+        );
+        assert_eq!(
+            AgentType::for_task_status("needs_pm_intervention", false),
+            AgentType::PM
+        );
+        assert_eq!(
+            AgentType::for_task_status("in_pm_intervention", false),
+            AgentType::PM
+        );
+        assert_eq!(
+            AgentType::for_task_status("backlog", false),
+            AgentType::Worker
+        );
     }
 
     #[test]
@@ -171,10 +195,16 @@ mod tests {
         assert_eq!((cfg.start_action)("open"), Some(TransitionAction::Start));
 
         let cfg = AgentType::TaskReviewer.role_config();
-        assert_eq!((cfg.start_action)("needs_task_review"), Some(TransitionAction::TaskReviewStart));
+        assert_eq!(
+            (cfg.start_action)("needs_task_review"),
+            Some(TransitionAction::TaskReviewStart)
+        );
 
         let cfg = AgentType::PM.role_config();
-        assert_eq!((cfg.start_action)("needs_pm_intervention"), Some(TransitionAction::PmInterventionStart));
+        assert_eq!(
+            (cfg.start_action)("needs_pm_intervention"),
+            Some(TransitionAction::PmInterventionStart)
+        );
 
         let cfg = AgentType::Groomer.role_config();
         assert_eq!((cfg.start_action)("open"), None);
@@ -182,10 +212,25 @@ mod tests {
 
     #[test]
     fn release_action_via_role_config() {
-        assert_eq!((AgentType::Worker.role_config().release_action)(), TransitionAction::Release);
-        assert_eq!((AgentType::ConflictResolver.role_config().release_action)(), TransitionAction::Release);
-        assert_eq!((AgentType::TaskReviewer.role_config().release_action)(), TransitionAction::ReleaseTaskReview);
-        assert_eq!((AgentType::PM.role_config().release_action)(), TransitionAction::PmInterventionRelease);
-        assert_eq!((AgentType::Groomer.role_config().release_action)(), TransitionAction::Release);
+        assert_eq!(
+            (AgentType::Worker.role_config().release_action)(),
+            TransitionAction::Release
+        );
+        assert_eq!(
+            (AgentType::ConflictResolver.role_config().release_action)(),
+            TransitionAction::Release
+        );
+        assert_eq!(
+            (AgentType::TaskReviewer.role_config().release_action)(),
+            TransitionAction::ReleaseTaskReview
+        );
+        assert_eq!(
+            (AgentType::PM.role_config().release_action)(),
+            TransitionAction::PmInterventionRelease
+        );
+        assert_eq!(
+            (AgentType::Groomer.role_config().release_action)(),
+            TransitionAction::Release
+        );
     }
 }

@@ -40,8 +40,7 @@ struct LspInner {
 }
 
 /// Pending response channels keyed by JSON-RPC request id.
-type PendingResponses =
-    Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>;
+type PendingResponses = Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>;
 
 /// Tracks per-file open state: version counter for didChange notifications.
 type OpenedFiles = Arc<Mutex<HashMap<String, i32>>>;
@@ -74,7 +73,6 @@ impl LspManager {
         }
     }
 
-    #[allow(dead_code)]
     pub async fn shutdown_all(&self) {
         let mut inner = self.inner.lock().await;
         inner.clients.clear();
@@ -326,9 +324,7 @@ fn clone_client_refs(c: &LspClient) -> (ClientStdin, DiagnosticsMap, OpenedFiles
     (c.stdin.clone(), c.diagnostics.clone(), c.opened.clone())
 }
 
-fn clone_client_request_refs(
-    c: &LspClient,
-) -> (ClientStdin, PendingResponses, Arc<AtomicU64>) {
+fn clone_client_request_refs(c: &LspClient) -> (ClientStdin, PendingResponses, Arc<AtomicU64>) {
     (c.stdin.clone(), c.pending.clone(), c.seq.clone())
 }
 
@@ -386,7 +382,9 @@ fn server_for_path(path: &Path) -> Option<ServerDef> {
 /// Djinn-managed binary directory for auto-installed LSP servers.
 fn djinn_bin_dir() -> PathBuf {
     dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"))
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share")
+        })
         .join("djinn")
         .join("bin")
 }
@@ -461,7 +459,9 @@ fn resolve_binary_inner(
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
             tracing::info!(packages = ?packages, prefix = %bin_dir.display(), "lsp: running npm install");
-            let output = cmd.output().map_err(|e| format!("npm install failed: {e}"))?;
+            let output = cmd
+                .output()
+                .map_err(|e| format!("npm install failed: {e}"))?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -496,9 +496,7 @@ fn resolve_binary_inner(
                         .ok()
                     && o.status.success()
                 {
-                    let p = PathBuf::from(
-                        String::from_utf8_lossy(&o.stdout).trim().to_string(),
-                    );
+                    let p = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string());
                     if p.is_file() {
                         tracing::info!(path = %p.display(), "lsp: resolved via rustup which");
                         return Ok(p);
@@ -690,9 +688,10 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
                                 .and_then(|x| x.as_array())
                                 .cloned()
                                 .unwrap_or_default();
-                            let error_count = ds.iter().filter(|d| {
-                                d.get("severity").and_then(|s| s.as_u64()) == Some(1)
-                            }).count();
+                            let error_count = ds
+                                .iter()
+                                .filter(|d| d.get("severity").and_then(|s| s.as_u64()) == Some(1))
+                                .count();
                             tracing::info!(
                                 uri = %uri,
                                 total = ds.len(),
@@ -701,32 +700,27 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
                             );
                             let mut out = Vec::new();
                             for d in ds {
-                                let sev = d
-                                    .get("severity")
-                                    .and_then(|x| x.as_u64())
-                                    .unwrap_or(0)
-                                    as u32;
+                                let sev =
+                                    d.get("severity").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
                                 let msg = d
                                     .get("message")
                                     .and_then(|x| x.as_str())
                                     .unwrap_or("")
                                     .to_string();
-                                let diag_line = d
-                                    .get("range")
-                                    .and_then(|r| r.get("start"))
-                                    .and_then(|s| s.get("line"))
-                                    .and_then(|x| x.as_u64())
-                                    .unwrap_or(0)
-                                    as u32
-                                    + 1;
-                                let character = d
-                                    .get("range")
-                                    .and_then(|r| r.get("start"))
-                                    .and_then(|s| s.get("character"))
-                                    .and_then(|x| x.as_u64())
-                                    .unwrap_or(0)
-                                    as u32
-                                    + 1;
+                                let diag_line =
+                                    d.get("range")
+                                        .and_then(|r| r.get("start"))
+                                        .and_then(|s| s.get("line"))
+                                        .and_then(|x| x.as_u64())
+                                        .unwrap_or(0) as u32
+                                        + 1;
+                                let character =
+                                    d.get("range")
+                                        .and_then(|r| r.get("start"))
+                                        .and_then(|s| s.get("character"))
+                                        .and_then(|x| x.as_u64())
+                                        .unwrap_or(0) as u32
+                                        + 1;
                                 out.push(Diagnostic {
                                     file: uri.clone(),
                                     line: diag_line,
@@ -891,9 +885,7 @@ fn format_location(loc: &serde_json::Value) -> String {
         .or_else(|| loc.get("targetUri"))
         .and_then(|u| u.as_str())
         .unwrap_or("?");
-    let range = loc
-        .get("range")
-        .or_else(|| loc.get("targetSelectionRange"));
+    let range = loc.get("range").or_else(|| loc.get("targetSelectionRange"));
     let (line, character) = match range {
         Some(r) => {
             let start = r.get("start").unwrap_or(r);
@@ -1151,11 +1143,7 @@ impl LspManager {
     }
 
     /// Send textDocument/documentSymbol and return formatted symbol list.
-    pub async fn document_symbols(
-        &self,
-        worktree: &Path,
-        path: &Path,
-    ) -> Result<String, String> {
+    pub async fn document_symbols(&self, worktree: &Path, path: &Path) -> Result<String, String> {
         let (stdin, pending, seq, opened) = self.get_request_refs(worktree, path).await?;
         let uri = ensure_did_open(&stdin, path, &opened).await?;
 
@@ -1335,10 +1323,7 @@ mod tests {
             language_id_for_path(Path::new("a.tsx")),
             Some("typescriptreact")
         );
-        assert_eq!(
-            language_id_for_path(Path::new("a.js")),
-            Some("javascript")
-        );
+        assert_eq!(language_id_for_path(Path::new("a.js")), Some("javascript"));
         assert_eq!(
             language_id_for_path(Path::new("a.jsx")),
             Some("javascriptreact")
@@ -1347,10 +1332,7 @@ mod tests {
         assert_eq!(language_id_for_path(Path::new("a.toml")), Some("toml"));
         assert_eq!(language_id_for_path(Path::new("a.yaml")), Some("yaml"));
         assert_eq!(language_id_for_path(Path::new("a.yml")), Some("yaml"));
-        assert_eq!(
-            language_id_for_path(Path::new("a.md")),
-            Some("markdown")
-        );
+        assert_eq!(language_id_for_path(Path::new("a.md")), Some("markdown"));
         assert_eq!(language_id_for_path(Path::new("a.txt")), None);
     }
 
@@ -1461,10 +1443,10 @@ mod tests {
         let uri = "file:///test.rs".to_string();
 
         // Simulate initial diagnostics from first didOpen
-        diagnostics.lock().await.insert(
-            uri.clone(),
-            vec![make_diag(&uri, 1, 1, 1, "old error")],
-        );
+        diagnostics
+            .lock()
+            .await
+            .insert(uri.clone(), vec![make_diag(&uri, 1, 1, 1, "old error")]);
         assert_eq!(diagnostics.lock().await.get(&uri).unwrap().len(), 1);
 
         // Simulate clearing before re-touch (what touch_file now does)
@@ -1522,10 +1504,7 @@ mod tests {
         let result = resolve_binary_inner(&server, &bin_dir, &path_dir.to_string_lossy());
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap(),
-            path_dir.join("typescript-language-server")
-        );
+        assert_eq!(result.unwrap(), path_dir.join("typescript-language-server"));
     }
 
     #[test]

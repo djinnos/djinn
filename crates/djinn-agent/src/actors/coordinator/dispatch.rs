@@ -306,9 +306,10 @@ impl CoordinatorActor {
 
                 let (release_action, release_to) = match task.status.as_str() {
                     "in_task_review" => (TransitionAction::ReleaseTaskReview, "needs_task_review"),
-                    "in_pm_intervention" => {
-                        (TransitionAction::PmInterventionRelease, "needs_pm_intervention")
-                    }
+                    "in_pm_intervention" => (
+                        TransitionAction::PmInterventionRelease,
+                        "needs_pm_intervention",
+                    ),
                     _ => (TransitionAction::Release, "open"),
                 };
 
@@ -441,7 +442,10 @@ impl CoordinatorActor {
     /// Return IDs of all registered projects that are dispatch-enabled
     /// (not paused, not unhealthy).
     async fn enabled_project_ids(&self) -> Vec<String> {
-        let repo = djinn_db::ProjectRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
+        let repo = djinn_db::ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
         match repo.list().await {
             Ok(projects) => projects
                 .into_iter()

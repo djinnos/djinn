@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use djinn_agent::actors::slot::{ModelSlotConfig, SlotPoolConfig};
+use djinn_core::models::DjinnSettings;
 use djinn_db::SettingsRepository;
 use djinn_provider::repos::CredentialRepository;
-use djinn_core::models::DjinnSettings;
 
 use super::{AppState, SETTINGS_RAW_KEY};
 

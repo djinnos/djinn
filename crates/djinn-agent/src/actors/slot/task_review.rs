@@ -1,5 +1,5 @@
-use djinn_db::TaskRepository;
 use crate::context::AgentContext;
+use djinn_db::TaskRepository;
 
 pub(crate) const STALE_ESCALATION_THRESHOLD: i64 = 3;
 
@@ -19,7 +19,11 @@ pub(crate) fn all_acceptance_criteria_met(ac_json: &str) -> bool {
 
 /// Returns true if the AC met-state is identical to the snapshot from when
 /// the current review cycle started (i.e. the worker made no AC progress).
-pub(crate) async fn is_stale_review_cycle(task_id: &str, current_ac_json: &str, app_state: &AgentContext) -> bool {
+pub(crate) async fn is_stale_review_cycle(
+    task_id: &str,
+    current_ac_json: &str,
+    app_state: &AgentContext,
+) -> bool {
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let snapshot_json = match repo.last_review_start_ac_snapshot(task_id).await {
         Ok(Some(s)) => s,
@@ -73,36 +77,6 @@ mod transition_tests {
     use super::*;
     use crate::test_helpers;
 
-    #[allow(dead_code)]
-    async fn set_task_status(db: &djinn_db::Database, task_id: &str, status: &str) {
-        sqlx::query("UPDATE tasks SET status = ?1 WHERE id = ?2")
-            .bind(status)
-            .bind(task_id)
-            .execute(db.pool())
-            .await
-            .expect("update task status");
-    }
-
-    #[allow(dead_code)]
-    async fn set_task_ac(db: &djinn_db::Database, task_id: &str, ac_json: &str) {
-        sqlx::query("UPDATE tasks SET acceptance_criteria = ?1 WHERE id = ?2")
-            .bind(ac_json)
-            .bind(task_id)
-            .execute(db.pool())
-            .await
-            .expect("update AC");
-    }
-
-    #[allow(dead_code)]
-    async fn set_continuation_count(db: &djinn_db::Database, task_id: &str, count: i64) {
-        sqlx::query("UPDATE tasks SET continuation_count = ?1 WHERE id = ?2")
-            .bind(count)
-            .bind(task_id)
-            .execute(db.pool())
-            .await
-            .expect("update continuation_count");
-    }
-
     async fn insert_review_snapshot(db: &djinn_db::Database, task_id: &str, ac_json: &str) {
         let payload = serde_json::json!({"to_status":"in_task_review","ac_snapshot":serde_json::from_str::<serde_json::Value>(ac_json).expect("valid ac json")}).to_string();
         sqlx::query("INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) VALUES (?1, ?2, 'test', 'system', 'status_changed', ?3)")
@@ -127,7 +101,10 @@ mod transition_tests {
     #[tokio::test]
     async fn is_stale_review_cycle_cases() {
         let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
+        let ctx = test_helpers::agent_context_from_db(
+            db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
         let project = test_helpers::create_test_project(&db).await;
         let epic = test_helpers::create_test_epic(&db, &project.id).await;
         let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
@@ -152,5 +129,4 @@ mod transition_tests {
         insert_review_snapshot(&ctx.db, &task3.id, &three).await;
         assert!(!is_stale_review_cycle(&task3.id, &five, &ctx).await);
     }
-
 }

@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use djinn_provider::repos::CredentialRepository;
+use crate::context::AgentContext;
+use djinn_core::models::Task;
+use djinn_core::models::{SessionRecord, SessionStatus, TransitionAction};
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
-use djinn_core::models::Task;
-use djinn_core::models::{SessionRecord, SessionStatus, TransitionAction};
-use crate::context::AgentContext;
+use djinn_provider::repos::CredentialRepository;
 
 use super::*;
 
@@ -19,7 +19,10 @@ const MAX_VERIFICATION_CHARS: usize = 3000;
 /// Return the most recent N high-signal comments (PM, reviewer, verification)
 /// from the activity log, in chronological order (oldest first).
 /// Each entry is formatted as "**Label:** body".
-pub(crate) fn recent_feedback(activity: &[djinn_core::models::ActivityEntry], max: usize) -> Vec<String> {
+pub(crate) fn recent_feedback(
+    activity: &[djinn_core::models::ActivityEntry],
+    max: usize,
+) -> Vec<String> {
     let high_signal: Vec<&djinn_core::models::ActivityEntry> = activity
         .iter()
         .rev()
@@ -73,7 +76,7 @@ fn truncate_feedback(text: &str, max: usize) -> String {
     )
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn log_snippet(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
     let mut out = String::new();
@@ -104,7 +107,9 @@ pub(crate) fn format_command_names(specs: &[djinn_core::commands::CommandSpec]) 
 }
 
 /// Format command specs as `- **name**: \`command\`` for display in prompts.
-pub(crate) fn format_command_details(specs: &[djinn_core::commands::CommandSpec]) -> Option<String> {
+pub(crate) fn format_command_details(
+    specs: &[djinn_core::commands::CommandSpec],
+) -> Option<String> {
     if specs.is_empty() {
         return None;
     }
@@ -216,7 +221,10 @@ pub(crate) async fn default_target_branch(project_id: &str, app_state: &AgentCon
     "main".to_string()
 }
 
-pub(crate) async fn project_path_for_id(project_id: &str, app_state: &AgentContext) -> Option<String> {
+pub(crate) async fn project_path_for_id(
+    project_id: &str,
+    app_state: &AgentContext,
+) -> Option<String> {
     let repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     repo.get_path(project_id).await.ok().flatten()
 }
@@ -373,7 +381,10 @@ calls will be treated as a failure.\n\n";
 /// Build an initial user message for a fresh worker session. If the activity
 /// log contains PM or reviewer feedback, include it prominently so the worker
 /// acts on it immediately rather than discovering it buried in the system prompt.
-pub(crate) async fn initial_user_message_for_task(task_id: &str, app_state: &AgentContext) -> String {
+pub(crate) async fn initial_user_message_for_task(
+    task_id: &str,
+    app_state: &AgentContext,
+) -> String {
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
 
@@ -395,7 +406,10 @@ fn is_database_locked(e: &anyhow::Error) -> bool {
     if let Some(djinn_db::Error::Sqlx(sqlx_err)) = e.downcast_ref::<djinn_db::Error>()
         && let Some(db_err) = sqlx_err.as_database_error()
     {
-        return db_err.code().map(|c| matches!(c.as_ref(), "5" | "6")).unwrap_or(false);
+        return db_err
+            .code()
+            .map(|c| matches!(c.as_ref(), "5" | "6"))
+            .unwrap_or(false);
     }
     false
 }
@@ -503,9 +517,7 @@ pub fn format_family_for_provider(
     }
 }
 
-pub fn capabilities_for_provider(
-    provider_id: &str,
-) -> crate::provider::ProviderCapabilities {
+pub fn capabilities_for_provider(provider_id: &str) -> crate::provider::ProviderCapabilities {
     use crate::provider::ProviderCapabilities;
     let lower = provider_id.to_lowercase();
     if lower.contains("synthetic") || lower.contains("local") {
@@ -523,10 +535,7 @@ pub fn capabilities_for_provider(
     }
 }
 
-pub fn auth_method_for_provider(
-    provider_id: &str,
-    api_key: &str,
-) -> crate::provider::AuthMethod {
+pub fn auth_method_for_provider(provider_id: &str, api_key: &str) -> crate::provider::AuthMethod {
     use crate::provider::AuthMethod;
     if provider_id.to_lowercase().contains("anthropic") {
         AuthMethod::ApiKeyHeader {
@@ -578,11 +587,7 @@ pub async fn load_provider_credential(
             {
                 if tokens.is_expired() {
                     // Attempt silent refresh.
-                    match crate::oauth::codex::refresh_cached_token(
-                        &tokens,
-                        &credential_repo,
-                    )
-                    .await
+                    match crate::oauth::codex::refresh_cached_token(&tokens, &credential_repo).await
                     {
                         Ok(refreshed) => {
                             return Ok(ProviderCredential::OAuthConfig(
@@ -614,8 +619,7 @@ pub async fn load_provider_credential(
                     ));
                 }
                 // Copilot refresh requires the github_token → try exchange.
-                match crate::oauth::copilot::refresh_copilot_token(&tokens, &credential_repo)
-                    .await
+                match crate::oauth::copilot::refresh_copilot_token(&tokens, &credential_repo).await
                 {
                     Ok(refreshed) => {
                         return Ok(ProviderCredential::OAuthConfig(
@@ -677,4 +681,3 @@ pub(crate) fn build_telemetry_meta(
         session_id: Some(task_id.to_owned()),
     }
 }
-

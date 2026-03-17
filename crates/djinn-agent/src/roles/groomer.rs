@@ -1,16 +1,14 @@
-use crate::compaction::{GENERIC_PROMPT, SUMMARISER_SYSTEM_GENERIC};
+use crate::context::AgentContext;
 use crate::extension;
 use crate::output_parser::ParsedAgentOutput;
 use crate::prompts::TaskContext;
 use djinn_core::models::{Task, TransitionAction};
-use crate::context::AgentContext;
 use futures::future::BoxFuture;
 
-use super::{AgentRole, CompactionPrompts, RoleConfig};
+use super::{AgentRole, RoleConfig};
 
 pub(crate) struct GroomerRole;
 
-#[allow(dead_code)]
 impl AgentRole for GroomerRole {
     fn config(&self) -> &RoleConfig {
         &GROOMER_CONFIG
@@ -42,12 +40,6 @@ pub(crate) const GROOMER_CONFIG: RoleConfig = RoleConfig {
     start_action: |_status| None,
     release_action: || TransitionAction::Release,
     initial_message: crate::prompts::GROOMER_TEMPLATE,
-    compaction: CompactionPrompts {
-        mid_session: GENERIC_PROMPT,
-        mid_session_system: SUMMARISER_SYSTEM_GENERIC,
-        pre_resume: GENERIC_PROMPT,
-        pre_resume_system: SUMMARISER_SYSTEM_GENERIC,
-    },
     preserves_session: false,
     is_project_scoped: true,
 };

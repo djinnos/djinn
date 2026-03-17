@@ -179,8 +179,6 @@ struct DeltaFunction {
 
 #[derive(Deserialize)]
 struct DeltaToolCall {
-    #[allow(dead_code)]
-    index: Option<u32>,
     id: Option<String>,
     function: Option<DeltaFunction>,
 }

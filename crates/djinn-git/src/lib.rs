@@ -152,7 +152,11 @@ pub async fn run_git_command(path: PathBuf, args: Vec<String>) -> Result<Command
     })
 }
 
-pub async fn create_branch(path: PathBuf, short_id: String, target_branch: String) -> Result<(), GitError> {
+pub async fn create_branch(
+    path: PathBuf,
+    short_id: String,
+    target_branch: String,
+) -> Result<(), GitError> {
     let branch_name = format!("task/{short_id}");
     let _ = run_git_command(
         path.clone(),
@@ -513,18 +517,27 @@ pub async fn squash_merge_detached_worktree(
 pub async fn rebase_with_retry(path: &Path, upstream: &str) -> Result<(), GitError> {
     let mut last_error: Option<GitError> = None;
     for attempt in 1..=REBASE_MAX_ATTEMPTS {
-        match run_git_command(path.to_path_buf(), vec!["rebase".into(), upstream.to_string()]).await {
+        match run_git_command(
+            path.to_path_buf(),
+            vec!["rebase".into(), upstream.to_string()],
+        )
+        .await
+        {
             Ok(_) => {
                 last_error = None;
                 break;
             }
             Err(e) if attempt < REBASE_MAX_ATTEMPTS && is_retryable_git_command_error(&e) => {
-                let _ = run_git_command(path.to_path_buf(), vec!["rebase".into(), "--abort".into()]).await;
+                let _ =
+                    run_git_command(path.to_path_buf(), vec!["rebase".into(), "--abort".into()])
+                        .await;
                 last_error = Some(e);
                 tokio::time::sleep(retry_delay(attempt)).await;
             }
             Err(e) => {
-                let _ = run_git_command(path.to_path_buf(), vec!["rebase".into(), "--abort".into()]).await;
+                let _ =
+                    run_git_command(path.to_path_buf(), vec!["rebase".into(), "--abort".into()])
+                        .await;
                 return Err(e);
             }
         }

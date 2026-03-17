@@ -90,10 +90,6 @@ impl OpenAIResponsesProvider {
 
 #[derive(Debug, Deserialize)]
 struct ResponseMetadata {
-    #[allow(dead_code)]
-    id: String,
-    #[allow(dead_code)]
-    model: String,
     output: Vec<OutputItemInfo>,
     usage: Option<ResponseUsage>,
 }
@@ -107,34 +103,13 @@ struct ResponseUsage {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum OutputItemInfo {
-    Reasoning {
-        #[allow(dead_code)]
-        id: String,
-    },
-    Message {
-        #[allow(dead_code)]
-        id: String,
-        #[allow(dead_code)]
-        content: Vec<ContentPart>,
-    },
+    Reasoning {},
+    Message {},
     FunctionCall {
-        #[allow(dead_code)]
-        id: String,
         call_id: String,
         name: String,
         arguments: String,
     },
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ContentPart {
-    OutputText {
-        #[allow(dead_code)]
-        text: String,
-    },
-    #[serde(other)]
-    Unknown,
 }
 
 /// Parsed SSE event from the Responses API stream.
@@ -142,15 +117,9 @@ enum ContentPart {
 #[serde(tag = "type")]
 enum ResponsesStreamEvent {
     #[serde(rename = "response.created")]
-    ResponseCreated {
-        #[allow(dead_code)]
-        response: ResponseMetadata,
-    },
+    ResponseCreated {},
     #[serde(rename = "response.in_progress")]
-    ResponseInProgress {
-        #[allow(dead_code)]
-        response: ResponseMetadata,
-    },
+    ResponseInProgress {},
     #[serde(rename = "response.output_text.delta")]
     OutputTextDelta { delta: String },
     #[serde(rename = "response.output_item.done")]

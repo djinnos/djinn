@@ -185,10 +185,7 @@ pub fn resolve_oauth_provider(provider_id: &str) -> Option<&'static str> {
 /// Checks the vault credential key names for the well-known OAuth credential
 /// DB keys.  This is the crate-internal version; the server layer adds a
 /// filesystem-cache fallback for backward compatibility.
-pub fn is_oauth_key_present(
-    oauth_keys: &[String],
-    credential_key_names: &HashSet<String>,
-) -> bool {
+pub fn is_oauth_key_present(oauth_keys: &[String], credential_key_names: &HashSet<String>) -> bool {
     const CODEX_OAUTH_DB_KEY: &str = "__OAUTH_CHATGPT_CODEX";
     const COPILOT_OAUTH_DB_KEY: &str = "__OAUTH_GITHUB_COPILOT";
 

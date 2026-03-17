@@ -23,9 +23,9 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+use djinn_db::{Database, default_db_path};
 use djinn_server::daemon;
 use djinn_server::db::checkpoint;
-use djinn_db::{Database, default_db_path};
 use djinn_server::logging;
 use djinn_server::server::{self, AppState};
 

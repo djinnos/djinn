@@ -142,7 +142,8 @@ impl TaskRepository {
             .await?;
         tx.commit().await?;
 
-        self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+        self.events
+            .send(DjinnEventEnvelope::task_updated(&task, false));
 
         // Blocker resolution: when a task reaches post-merge/closed states, notify any tasks
         // it was blocking that are now fully unblocked, so coordinators can dispatch them.
@@ -180,7 +181,8 @@ impl TaskRepository {
             .fetch_one(self.db.pool())
             .await?;
 
-        self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+        self.events
+            .send(DjinnEventEnvelope::task_updated(&task, false));
         Ok(task)
     }
 
@@ -205,7 +207,8 @@ impl TaskRepository {
             maybe_reopen_epic(&self.db, &self.events, epic_id).await?;
         }
 
-        self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+        self.events
+            .send(DjinnEventEnvelope::task_updated(&task, false));
         Ok(task)
     }
 }

@@ -7,9 +7,9 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use djinn_core::events::EventBus;
+use djinn_core::models::Project;
 use djinn_core::models::{Epic, Task};
 use djinn_db::{Database, EpicCreateInput, EpicRepository, ProjectRepository, TaskRepository};
-use djinn_core::models::Project;
 
 use crate::context::AgentContext;
 use crate::file_time::FileTime;
@@ -45,7 +45,9 @@ pub async fn create_test_project(db: &Database) -> Project {
     let id = uuid::Uuid::now_v7();
     let path = format!("/tmp/djinn-test-project-{id}");
     let name = format!("test-project-{id}");
-    repo.create(&name, &path).await.expect("failed to create test project")
+    repo.create(&name, &path)
+        .await
+        .expect("failed to create test project")
 }
 
 pub async fn create_test_epic(db: &Database, project_id: &str) -> Epic {

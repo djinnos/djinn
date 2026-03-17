@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use djinn_git::GitError;
+use crate::context::AgentContext;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
-use crate::context::AgentContext;
+use djinn_git::GitError;
 
 use super::*;
 
@@ -409,7 +409,11 @@ pub(crate) async fn commit_final_work_if_needed(
     Ok(())
 }
 
-pub(crate) async fn cleanup_worktree(task_id: &str, worktree_path: &Path, app_state: &AgentContext) {
+pub(crate) async fn cleanup_worktree(
+    task_id: &str,
+    worktree_path: &Path,
+    app_state: &AgentContext,
+) {
     // Never remove the main worktree (project root). Linked worktrees have `.git`
     // as a file; the main worktree has `.git` as a directory.
     let git_entry = worktree_path.join(".git");

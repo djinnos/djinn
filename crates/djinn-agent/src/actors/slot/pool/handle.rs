@@ -15,7 +15,11 @@ pub struct SlotPoolHandle {
 }
 
 impl SlotPoolHandle {
-    pub fn spawn(app_state: AgentContext, cancel: CancellationToken, config: SlotPoolConfig) -> Self {
+    pub fn spawn(
+        app_state: AgentContext,
+        cancel: CancellationToken,
+        config: SlotPoolConfig,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel(64);
         tokio::spawn(SlotPool::new(receiver, app_state, cancel, config).run());
         Self { sender }

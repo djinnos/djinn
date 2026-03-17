@@ -11,8 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
 use djinn_mcp::bridge::{
-    ChannelStatus, CoordinatorOps, CoordinatorStatus, GitOps, LspOps, LspWarning,
-    ModelPoolStatus, PoolStatus, RunningTaskInfo, RuntimeOps, SlotPoolOps, SyncOps, SyncResult,
+    ChannelStatus, CoordinatorOps, CoordinatorStatus, GitOps, LspOps, LspWarning, ModelPoolStatus,
+    PoolStatus, RunningTaskInfo, RuntimeOps, SlotPoolOps, SyncOps, SyncResult,
 };
 
 use djinn_agent::actors::coordinator::CoordinatorHandle;
@@ -33,7 +33,10 @@ pub struct SyncBridge(pub SyncManager);
 #[async_trait]
 impl CoordinatorOps for CoordinatorBridge {
     async fn resume_project(&self, project_id: &str) -> Result<(), String> {
-        self.0.resume_project(project_id).await.map_err(|e| e.to_string())
+        self.0
+            .resume_project(project_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn resume(&self) -> Result<(), String> {
@@ -41,14 +44,13 @@ impl CoordinatorOps for CoordinatorBridge {
     }
 
     async fn pause_project(&self, project_id: &str) -> Result<(), String> {
-        self.0.pause_project(project_id).await.map_err(|e| e.to_string())
+        self.0
+            .pause_project(project_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
-    async fn pause_project_immediate(
-        &self,
-        project_id: &str,
-        reason: &str,
-    ) -> Result<(), String> {
+    async fn pause_project_immediate(&self, project_id: &str, reason: &str) -> Result<(), String> {
         self.0
             .pause_project_immediate(project_id, reason)
             .await
@@ -56,7 +58,10 @@ impl CoordinatorOps for CoordinatorBridge {
     }
 
     async fn pause_immediate(&self, reason: &str) -> Result<(), String> {
-        self.0.pause_immediate(reason).await.map_err(|e| e.to_string())
+        self.0
+            .pause_immediate(reason)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     fn get_status(&self) -> Result<CoordinatorStatus, String> {
@@ -70,7 +75,10 @@ impl CoordinatorOps for CoordinatorBridge {
     }
 
     fn get_project_status(&self, project_id: &str) -> Result<CoordinatorStatus, String> {
-        let s = self.0.get_project_status(project_id).map_err(|e| e.to_string())?;
+        let s = self
+            .0
+            .get_project_status(project_id)
+            .map_err(|e| e.to_string())?;
         Ok(CoordinatorStatus {
             paused: s.paused,
             tasks_dispatched: s.tasks_dispatched,
@@ -135,11 +143,18 @@ impl SlotPoolOps for SlotPoolBridge {
     }
 
     async fn kill_session(&self, task_id: &str) -> Result<(), String> {
-        self.0.kill_session(task_id).await.map_err(|e| e.to_string())
+        self.0
+            .kill_session(task_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn session_for_task(&self, task_id: &str) -> Result<Option<RunningTaskInfo>, String> {
-        let result = self.0.session_for_task(task_id).await.map_err(|e| e.to_string())?;
+        let result = self
+            .0
+            .session_for_task(task_id)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(result.map(|t| RunningTaskInfo {
             task_id: t.task_id,
             model_id: t.model_id,
@@ -162,7 +177,10 @@ impl LspOps for LspBridge {
             .warnings()
             .await
             .into_iter()
-            .map(|w| LspWarning { server: w.server, message: w.message })
+            .map(|w| LspWarning {
+                server: w.server,
+                message: w.message,
+            })
             .collect()
     }
 }
@@ -172,18 +190,20 @@ impl LspOps for LspBridge {
 #[async_trait]
 impl SyncOps for SyncBridge {
     async fn enable_project(&self, project_id: &str) -> Result<(), String> {
-        self.0.enable_project(project_id).await.map_err(|e| e.to_string())
+        self.0
+            .enable_project(project_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn disable_project(&self, project_id: &str) -> Result<(), String> {
-        self.0.disable_project(project_id).await.map_err(|e| e.to_string())
+        self.0
+            .disable_project(project_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
-    async fn delete_remote_branch(
-        &self,
-        channel: &str,
-        project_path: &Path,
-    ) -> Result<(), String> {
+    async fn delete_remote_branch(&self, channel: &str, project_path: &Path) -> Result<(), String> {
         self.0
             .delete_remote_branch(channel, project_path)
             .await

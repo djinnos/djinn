@@ -124,7 +124,11 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
 }
 
 /// Role-based variant of `render_prompt` — does not require `AgentType`.
-pub(crate) fn render_prompt_for_role(config: &RoleConfig, task: &Task, ctx: &TaskContext) -> String {
+pub(crate) fn render_prompt_for_role(
+    config: &RoleConfig,
+    task: &Task,
+    ctx: &TaskContext,
+) -> String {
     let (role_name, role_template) = (config.display_name, config.initial_message);
 
     let ac = format_acceptance_criteria(&task.acceptance_criteria);

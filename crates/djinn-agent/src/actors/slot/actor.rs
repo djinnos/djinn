@@ -221,20 +221,15 @@ impl SlotHandle {
                     // Resolve role before entering the lifecycle so the lifecycle
                     // function receives a concrete `Arc<dyn AgentRole>` rather than
                     // performing the lookup internally.
-                    let conflict_ctx =
-                        conflict_context_for_dispatch(&task_id, &app_state).await;
+                    let conflict_ctx = conflict_context_for_dispatch(&task_id, &app_state).await;
                     let task = {
                         use djinn_db::TaskRepository;
-                        let repo = TaskRepository::new(
-                            app_state.db.clone(),
-                            app_state.event_bus.clone(),
-                        );
+                        let repo =
+                            TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
                         repo.get(&task_id).await.ok().flatten()
                     };
                     let role = match task {
-                        Some(ref t) => {
-                            role_for_task_dispatch(t, conflict_ctx.is_some())
-                        }
+                        Some(ref t) => role_for_task_dispatch(t, conflict_ctx.is_some()),
                         None => {
                             // Task not found — lifecycle will handle this gracefully.
                             crate::roles::role_impl_for(crate::AgentType::Worker)
@@ -373,7 +368,11 @@ mod tests {
         let db = test_helpers::create_test_db();
         let cancel = CancellationToken::new();
         let temp = tempfile::tempdir().expect("tempdir");
-        (test_helpers::agent_context_from_db(db, cancel.clone()), cancel, temp)
+        (
+            test_helpers::agent_context_from_db(db, cancel.clone()),
+            cancel,
+            temp,
+        )
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

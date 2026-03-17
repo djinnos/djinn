@@ -12,9 +12,7 @@ use std::path::PathBuf;
 
 use tokio::sync::{mpsc, oneshot};
 
-pub use crate::{
-    CommandOutput, CommitInfo, GitError, MergeResult, StatusSummary, WorktreeInfo,
-};
+pub use crate::{CommandOutput, CommitInfo, GitError, MergeResult, StatusSummary, WorktreeInfo};
 
 // ─── Messages ─────────────────────────────────────────────────────────────────
 

@@ -36,11 +36,7 @@ pub async fn run_commands(
         let output = timeout(duration, spawn_command(cmd))
             .await
             .map_err(|_| {
-                anyhow::anyhow!(
-                    "command '{}' timed out after {}s",
-                    spec.name,
-                    timeout_secs
-                )
+                anyhow::anyhow!("command '{}' timed out after {}s", spec.name, timeout_secs)
             })?
             .map_err(|e| anyhow::anyhow!("failed to run '{}': {}", spec.name, e))?;
 
