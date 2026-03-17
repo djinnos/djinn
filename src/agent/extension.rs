@@ -454,7 +454,7 @@ async fn call_epic_update(
     let owner = epic.owner.as_str();
 
     let updated = repo
-        .update(&epic.id, crate::db::repositories::epic::EpicUpdateInput { title, description, emoji, color, owner, memory_refs: None })
+        .update(&epic.id, djinn_db::EpicUpdateInput { title, description, emoji, color, owner, memory_refs: None })
         .await
         .map_err(|e| e.to_string())?;
 

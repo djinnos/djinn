@@ -1,9 +1,8 @@
+use djinn_core::events::{DjinnEventEnvelope, EventBus};
+use djinn_core::models::{SessionRecord, SessionStatus};
 
-
-use crate::db::connection::Database;
-use crate::error::Result;
-use crate::events::{DjinnEventEnvelope, EventBus};
-use crate::models::{SessionRecord, SessionStatus};
+use crate::database::Database;
+use crate::Result;
 
 /// Column list shared by all session SELECT queries.
 const SESSION_COLS: &str = "id, project_id, task_id, model_id, agent_type, started_at, ended_at, \
@@ -333,37 +332,57 @@ impl SessionRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use tokio::sync::broadcast;
-    use crate::db::EpicRepository;
-    use crate::db::TaskRepository;
-    use crate::events::event_bus_for;
-    use crate::test_helpers;
+    use std::sync::{Arc, Mutex};
 
-    async fn create_task(
-        repo_events: EventBus,
-        db: Database,
-    ) -> (String, String) {
-        let epic_repo = EpicRepository::new(db.clone(), repo_events.clone());
+    use djinn_core::events::{DjinnEventEnvelope, EventBus};
+    use djinn_core::models::SessionRecord;
+
+    use super::*;
+    use crate::repositories::epic::EpicRepository;
+
+    fn test_db() -> Database {
+        Database::open_in_memory().unwrap()
+    }
+
+    fn capturing_bus() -> (EventBus, Arc<Mutex<Vec<DjinnEventEnvelope>>>) {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let bus = EventBus::new({
+            let captured = captured.clone();
+            move |ev| captured.lock().unwrap().push(ev)
+        });
+        (bus, captured)
+    }
+
+    /// Create a task via raw SQL (no TaskRepository dep), returns (project_id, task_id).
+    async fn create_task(db: &Database, bus: EventBus) -> (String, String) {
+        let epic_repo = EpicRepository::new(db.clone(), bus);
         let epic = epic_repo
             .create("Epic", "", "", "", "", None)
             .await
             .unwrap();
 
-        let task_repo = TaskRepository::new(db, repo_events);
-        let task = task_repo
-            .create(&epic.id, "Task", "", "", "task", 0, "", None)
-            .await
-            .unwrap();
-        (task.project_id, task.id)
+        let task_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                issue_type, priority, owner, status, continuation_count, memory_refs)
+             VALUES (?1, ?2, 'tsst', ?3, 'Task', '', '', 'task', 0, '', 'backlog', 0, '[]')",
+        )
+        .bind(&task_id)
+        .bind(&epic.project_id)
+        .bind(&epic.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        (epic.project_id, task_id)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn complete_emits_event() {
-        let db = test_helpers::create_test_db();
-        let (tx, mut rx) = broadcast::channel(1024);
-        let (project_id, task_id) = create_task(event_bus_for(&tx), db.clone()).await;
-        let repo = SessionRepository::new(db, event_bus_for(&tx));
+        let db = test_db();
+        let (bus, captured) = capturing_bus();
+        let (project_id, task_id) = create_task(&db, bus.clone()).await;
+        let repo = SessionRepository::new(db, bus);
 
         let created = repo
             .create(
@@ -378,17 +397,14 @@ mod tests {
             .unwrap();
         assert_eq!(created.status, "running");
 
-        let mut created_seen = false;
-        for _ in 0..8 {
-            let envelope = rx.recv().await.unwrap();
-            if envelope.entity_type == "session" && envelope.action == "started" {
-                let s: crate::models::SessionRecord = envelope.parse_payload().unwrap();
-                assert_eq!(s.id, created.id);
-                created_seen = true;
-                break;
-            }
-        }
-        assert!(created_seen, "expected SessionCreated event");
+        let events = captured.lock().unwrap();
+        let started = events.iter().find(|e| e.entity_type == "session" && e.action == "started");
+        assert!(started.is_some(), "expected session.started event");
+        let s: SessionRecord = serde_json::from_value(started.unwrap().payload.clone()).unwrap();
+        assert_eq!(s.id, created.id);
+        drop(events);
+
+        captured.lock().unwrap().clear();
 
         let updated = repo
             .update(&created.id, SessionStatus::Completed, 10, 20)
@@ -399,98 +415,65 @@ mod tests {
         assert_eq!(updated.tokens_out, 20);
         assert!(updated.ended_at.is_some());
 
-        let mut updated_seen = false;
-        for _ in 0..8 {
-            let envelope = rx.recv().await.unwrap();
-            if envelope.entity_type == "session" && envelope.action == "completed" {
-                let s: crate::models::SessionRecord = envelope.parse_payload().unwrap();
-                assert_eq!(s.id, created.id);
-                updated_seen = true;
-                break;
-            }
-        }
-        assert!(updated_seen, "expected SessionUpdated event");
+        let events = captured.lock().unwrap();
+        let completed = events.iter().find(|e| e.entity_type == "session" && e.action == "completed");
+        assert!(completed.is_some(), "expected session.completed event");
+        let s: SessionRecord = serde_json::from_value(completed.unwrap().payload.clone()).unwrap();
+        assert_eq!(s.id, created.id);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn interrupt_all_running_emits_session_updated_for_each_interrupted_session() {
-        let db = test_helpers::create_test_db();
-        let (tx, mut rx) = broadcast::channel(1024);
-        let (project_id, task_id) = create_task(event_bus_for(&tx), db.clone()).await;
-        let repo = SessionRepository::new(db, event_bus_for(&tx));
+        let db = test_db();
+        let (bus, captured) = capturing_bus();
+        let (project_id, task_id) = create_task(&db, bus.clone()).await;
+        let repo = SessionRepository::new(db, bus);
 
         let first = repo
-            .create(
-                &project_id,
-                Some(&task_id),
-                "openai/gpt-5",
-                "worker",
-                None,
-                None,
-            )
+            .create(&project_id, Some(&task_id), "openai/gpt-5", "worker", None, None)
             .await
             .unwrap();
         let second = repo
-            .create(
-                &project_id,
-                Some(&task_id),
-                "openai/gpt-5",
-                "worker",
-                None,
-                None,
-            )
+            .create(&project_id, Some(&task_id), "openai/gpt-5", "worker", None, None)
             .await
             .unwrap();
 
-        // Drain all prior events (epic + task + 2 session creates).
-        while rx.try_recv().is_ok() {}
+        captured.lock().unwrap().clear();
 
         let rows = repo.interrupt_all_running().await.unwrap();
         assert_eq!(rows, 2);
 
-        let mut updated_ids = std::collections::HashSet::new();
-        for _ in 0..2 {
-            let envelope = rx.recv().await.unwrap();
-            assert_eq!(envelope.entity_type, "session");
-            assert_eq!(envelope.action, "interrupted");
-            let session: crate::models::SessionRecord = envelope.parse_payload().unwrap();
-            assert_eq!(session.status, "interrupted");
-            assert!(session.ended_at.is_some());
-            updated_ids.insert(session.id);
-        }
+        let events = captured.lock().unwrap();
+        let interrupted: Vec<_> = events.iter()
+            .filter(|e| e.entity_type == "session" && e.action == "interrupted")
+            .collect();
+        assert_eq!(interrupted.len(), 2);
 
-        assert!(updated_ids.contains(&first.id));
-        assert!(updated_ids.contains(&second.id));
+        let ids: std::collections::HashSet<String> = interrupted.iter()
+            .map(|e| {
+                let s: SessionRecord = serde_json::from_value(e.payload.clone()).unwrap();
+                assert_eq!(s.status, "interrupted");
+                assert!(s.ended_at.is_some());
+                s.id
+            })
+            .collect();
+        assert!(ids.contains(&first.id));
+        assert!(ids.contains(&second.id));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_and_active_queries() {
-        let db = test_helpers::create_test_db();
-        let (tx, _) = broadcast::channel(1024);
-        let (project_id, task_id) = create_task(event_bus_for(&tx), db.clone()).await;
-        let repo = SessionRepository::new(db, event_bus_for(&tx));
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db, EventBus::noop());
 
         let first = repo
-            .create(
-                &project_id,
-                Some(&task_id),
-                "openai/gpt-5",
-                "worker",
-                None,
-                None,
-            )
+            .create(&project_id, Some(&task_id), "openai/gpt-5", "worker", None, None)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let second = repo
-            .create(
-                &project_id,
-                Some(&task_id),
-                "openai/gpt-5",
-                "worker",
-                None,
-                None,
-            )
+            .create(&project_id, Some(&task_id), "openai/gpt-5", "worker", None, None)
             .await
             .unwrap();
 

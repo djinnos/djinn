@@ -1,9 +1,9 @@
+use djinn_core::events::{DjinnEventEnvelope, EventBus};
+use djinn_core::models::Epic;
 use sqlx::Row;
 
-use crate::db::connection::Database;
-use crate::error::{Error, Result};
-use crate::events::{DjinnEventEnvelope, EventBus};
-use crate::models::Epic;
+use crate::database::Database;
+use crate::{Error, Result};
 
 // ── Query / result types ─────────────────────────────────────────────────────
 
@@ -54,8 +54,6 @@ pub struct EpicCountQuery {
 enum SqlParam {
     Text(String),
 }
-
-
 
 pub struct EpicCreateInput<'a> {
     pub title: &'a str,
@@ -152,7 +150,7 @@ impl EpicRepository {
         .bind(&id)
         .bind(project_id)
         .bind(&short_id)
-                .bind(input.title)
+        .bind(input.title)
         .bind(input.description)
         .bind(input.emoji)
         .bind(input.color)
@@ -182,7 +180,7 @@ impl EpicRepository {
              WHERE id = ?1",
         )
         .bind(id)
-                .bind(input.title)
+        .bind(input.title)
         .bind(input.description)
         .bind(input.emoji)
         .bind(input.color)
@@ -234,9 +232,7 @@ impl EpicRepository {
             .execute(self.db.pool())
             .await?;
 
-        self
-            .events
-            .send(DjinnEventEnvelope::epic_deleted(id));
+        self.events.send(DjinnEventEnvelope::epic_deleted(id));
         Ok(())
     }
 
@@ -276,11 +272,10 @@ impl EpicRepository {
     /// Reopen a closed epic: set status=open, clear closed_at.
     pub async fn reopen(&self, id: &str) -> Result<Epic> {
         self.db.ensure_initialized().await?;
-        // Verify current status is closed.
         let current = self
             .get(id)
             .await?
-            .ok_or_else(|| Error::Internal(format!("epic not found: {id}")))?;
+            .ok_or_else(|| Error::InvalidData(format!("epic not found: {id}")))?;
         if current.status != "closed" {
             return Err(Error::InvalidTransition(format!(
                 "epic must be closed to reopen (current: {})",
@@ -402,7 +397,7 @@ impl EpicRepository {
                     .collect::<Vec<_>>();
                 Ok(serde_json::json!({ "groups": groups }))
             }
-            Some(other) => Err(Error::Internal(format!("unknown group_by: {other}"))),
+            Some(other) => Err(Error::InvalidData(format!("unknown group_by: {other}"))),
             None => {
                 let sql = format!("SELECT COUNT(*) FROM epics WHERE {where_sql}");
                 let mut q = sqlx::query_scalar::<_, i64>(&sql);
@@ -419,7 +414,8 @@ impl EpicRepository {
     /// Generate a unique 4-char base36 short ID for the epics table.
     async fn generate_short_id(&self, seed_id: &str) -> Result<String> {
         self.db.ensure_initialized().await?;
-        let seed = uuid::Uuid::parse_str(seed_id).map_err(|e| Error::Internal(e.to_string()))?;
+        let seed = uuid::Uuid::parse_str(seed_id)
+            .map_err(|e| Error::InvalidData(e.to_string()))?;
         let candidate = short_id_from_uuid(&seed);
         if !short_id_exists(self.db.pool(), "epics", &candidate).await? {
             return Ok(candidate);
@@ -430,7 +426,7 @@ impl EpicRepository {
                 return Ok(candidate);
             }
         }
-        Err(Error::Internal(
+        Err(Error::InvalidData(
             "short_id collision after 16 retries".into(),
         ))
     }
@@ -532,16 +528,29 @@ async fn short_id_exists(pool: &sqlx::SqlitePool, table: &str, short_id: &str) -
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use djinn_core::events::{DjinnEventEnvelope, EventBus};
+    use djinn_core::models::Epic;
+
     use super::*;
-    use tokio::sync::broadcast;
-    use crate::events::event_bus_for;
-    use crate::test_helpers;
+
+    fn test_db() -> Database {
+        Database::open_in_memory().unwrap()
+    }
+
+    fn capturing_bus() -> (EventBus, Arc<Mutex<Vec<DjinnEventEnvelope>>>) {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let bus = EventBus::new({
+            let captured = captured.clone();
+            move |ev| captured.lock().unwrap().push(ev)
+        });
+        (bus, captured)
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_and_get_epic() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, event_bus_for(&tx));
+        let repo = EpicRepository::new(test_db(), EventBus::noop());
 
         let epic = repo
             .create("My Epic", "", "🚀", "#8b5cf6", "user@example.com", None)
@@ -557,9 +566,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn short_id_lookup() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, event_bus_for(&tx));
+        let repo = EpicRepository::new(test_db(), EventBus::noop());
 
         let epic = repo.create("Lookup", "", "", "", "", None).await.unwrap();
         let found = repo.get_by_short_id(&epic.short_id).await.unwrap().unwrap();
@@ -568,28 +575,26 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_emits_event() {
-        let db = test_helpers::create_test_db();
-        let (tx, mut rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, event_bus_for(&tx));
+        let (bus, captured) = capturing_bus();
+        let repo = EpicRepository::new(test_db(), bus);
 
-        repo.create("Event Epic", "", "", "", "", None)
-            .await
-            .unwrap();
-        let envelope = rx.recv().await.unwrap();
-        assert_eq!(envelope.entity_type, "epic");
-        assert_eq!(envelope.action, "created");
-        let e: Epic = envelope.parse_payload().unwrap();
+        repo.create("Event Epic", "", "", "", "", None).await.unwrap();
+
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "epic");
+        assert_eq!(events[0].action, "created");
+        let e: Epic = serde_json::from_value(events[0].payload.clone()).unwrap();
         assert_eq!(e.title, "Event Epic");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_emits_event() {
-        let db = test_helpers::create_test_db();
-        let (tx, mut rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, event_bus_for(&tx));
+        let (bus, captured) = capturing_bus();
+        let repo = EpicRepository::new(test_db(), bus);
 
         let epic = repo.create("Old", "", "", "", "", None).await.unwrap();
-        let _ = rx.recv().await.unwrap();
+        captured.lock().unwrap().clear();
 
         let updated = repo
             .update(&epic.id, EpicUpdateInput { title: "New", description: "desc", emoji: "🎯", color: "#fff", owner: "", memory_refs: None })
@@ -597,32 +602,31 @@ mod tests {
             .unwrap();
         assert_eq!(updated.title, "New");
 
-        let envelope = rx.recv().await.unwrap();
-        assert_eq!(envelope.entity_type, "epic");
-        assert_eq!(envelope.action, "updated");
-        let e: Epic = envelope.parse_payload().unwrap();
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "epic");
+        assert_eq!(events[0].action, "updated");
+        let e: Epic = serde_json::from_value(events[0].payload.clone()).unwrap();
         assert_eq!(e.title, "New");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn close_emits_event() {
-        let db = test_helpers::create_test_db();
-        let (tx, mut rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, event_bus_for(&tx));
+        let (bus, captured) = capturing_bus();
+        let repo = EpicRepository::new(test_db(), bus);
 
-        let epic = repo
-            .create("Closeable", "", "", "", "", None)
-            .await
-            .unwrap();
-        let _ = rx.recv().await.unwrap();
+        let epic = repo.create("Closeable", "", "", "", "", None).await.unwrap();
+        captured.lock().unwrap().clear();
+
         let closed = repo.close(&epic.id).await.unwrap();
         assert_eq!(closed.status, "closed");
         assert!(closed.closed_at.is_some());
 
-        let envelope = rx.recv().await.unwrap();
-        assert_eq!(envelope.entity_type, "epic");
-        assert_eq!(envelope.action, "updated");
-        let e: Epic = envelope.parse_payload().unwrap();
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "epic");
+        assert_eq!(events[0].action, "updated");
+        let e: Epic = serde_json::from_value(events[0].payload.clone()).unwrap();
         assert_eq!(e.id, epic.id);
         assert_eq!(e.status, "closed");
         assert!(e.closed_at.is_some());
@@ -630,22 +634,21 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reopen_emits_event() {
-        let db = test_helpers::create_test_db();
-        let (tx, mut rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, event_bus_for(&tx));
+        let (bus, captured) = capturing_bus();
+        let repo = EpicRepository::new(test_db(), bus);
 
         let epic = repo.create("Reopen", "", "", "", "", None).await.unwrap();
-        let _ = rx.recv().await.unwrap();
         repo.close(&epic.id).await.unwrap();
-        let _ = rx.recv().await.unwrap();
+        captured.lock().unwrap().clear();
 
         let reopened = repo.reopen(&epic.id).await.unwrap();
         assert_eq!(reopened.status, "open");
 
-        let envelope = rx.recv().await.unwrap();
-        assert_eq!(envelope.entity_type, "epic");
-        assert_eq!(envelope.action, "updated");
-        let e: Epic = envelope.parse_payload().unwrap();
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "epic");
+        assert_eq!(events[0].action, "updated");
+        let e: Epic = serde_json::from_value(events[0].payload.clone()).unwrap();
         assert_eq!(e.id, epic.id);
         assert_eq!(e.status, "open");
         assert!(e.closed_at.is_none());
@@ -653,30 +656,25 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_emits_event() {
-        let db = test_helpers::create_test_db();
-        let (tx, mut rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, event_bus_for(&tx));
+        let (bus, captured) = capturing_bus();
+        let repo = EpicRepository::new(test_db(), bus);
 
-        let epic = repo
-            .create("Delete me", "", "", "", "", None)
-            .await
-            .unwrap();
-        let _ = rx.recv().await.unwrap();
+        let epic = repo.create("Delete me", "", "", "", "", None).await.unwrap();
+        captured.lock().unwrap().clear();
 
         repo.delete(&epic.id).await.unwrap();
         assert!(repo.get(&epic.id).await.unwrap().is_none());
 
-        let envelope = rx.recv().await.unwrap();
-        assert_eq!(envelope.entity_type, "epic");
-        assert_eq!(envelope.action, "deleted");
-        assert_eq!(envelope.payload["id"].as_str().unwrap(), epic.id);
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "epic");
+        assert_eq!(events[0].action, "deleted");
+        assert_eq!(events[0].payload["id"].as_str().unwrap(), epic.id);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resolve_by_id_and_short_id() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, event_bus_for(&tx));
+        let repo = EpicRepository::new(test_db(), EventBus::noop());
 
         let epic = repo.create("Resolve", "", "", "", "", None).await.unwrap();
 
@@ -691,9 +689,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reopen_from_closed() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, event_bus_for(&tx));
+        let repo = EpicRepository::new(test_db(), EventBus::noop());
 
         let epic = repo.create("Reopen", "", "", "", "", None).await.unwrap();
         repo.close(&epic.id).await.unwrap();
@@ -705,9 +701,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reopen_from_open_is_error() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-        let repo = EpicRepository::new(db, event_bus_for(&tx));
+        let repo = EpicRepository::new(test_db(), EventBus::noop());
 
         let epic = repo.create("Open", "", "", "", "", None).await.unwrap();
         assert!(repo.reopen(&epic.id).await.is_err());
@@ -715,30 +709,47 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn task_counts_aggregation() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-        let epic_repo = EpicRepository::new(db.clone(),  event_bus_for(&tx));
-        let task_repo = crate::db::TaskRepository::new(db, event_bus_for(&tx));
+        let db = test_db();
+        let repo = EpicRepository::new(db.clone(), EventBus::noop());
 
-        let epic = epic_repo
-            .create("Counts", "", "", "", "", None)
-            .await
-            .unwrap();
-        task_repo
-            .create(&epic.id, "T1", "", "", "task", 0, "", None)
-            .await
-            .unwrap();
-        task_repo
-            .create(&epic.id, "T2", "", "", "task", 0, "", None)
-            .await
-            .unwrap();
-        let t3 = task_repo
-            .create(&epic.id, "T3", "", "", "task", 0, "", None)
-            .await
-            .unwrap();
-        task_repo.set_status(&t3.id, "closed").await.unwrap();
+        let epic = repo.create("Counts", "", "", "", "", None).await.unwrap();
+        let pool = db.pool();
 
-        let counts = epic_repo.task_counts(&epic.id).await.unwrap();
+        // Insert tasks directly via SQL.
+        for short in ["t001", "t002"] {
+            let id = uuid::Uuid::now_v7().to_string();
+            sqlx::query(
+                "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                    issue_type, priority, owner, status, continuation_count, memory_refs)
+                 VALUES (?1, ?2, ?3, ?4, 'T', '', '', 'task', 0, '', 'backlog', 0, '[]')",
+            )
+            .bind(&id)
+            .bind(&epic.project_id)
+            .bind(short)
+            .bind(&epic.id)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        let t3_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                issue_type, priority, owner, status, continuation_count, memory_refs)
+             VALUES (?1, ?2, 't003', ?3, 'T3', '', '', 'task', 0, '', 'backlog', 0, '[]')",
+        )
+        .bind(&t3_id)
+        .bind(&epic.project_id)
+        .bind(&epic.id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE tasks SET status = 'closed' WHERE id = ?1")
+            .bind(&t3_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let counts = repo.task_counts(&epic.id).await.unwrap();
         assert_eq!(counts.task_count, 3);
         assert_eq!(counts.open_count, 2);
         assert_eq!(counts.closed_count, 1);
@@ -746,31 +757,35 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_with_count_returns_child_count() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-        let epic_repo = EpicRepository::new(db.clone(),  event_bus_for(&tx));
-        let task_repo = crate::db::TaskRepository::new(db, event_bus_for(&tx));
+        let db = test_db();
+        let repo = EpicRepository::new(db.clone(), EventBus::noop());
 
-        let epic = epic_repo
-            .create("Delete", "", "", "", "", None)
-            .await
-            .unwrap();
-        task_repo
-            .create(&epic.id, "T1", "", "", "task", 0, "", None)
-            .await
-            .unwrap();
-        task_repo
-            .create(&epic.id, "T2", "", "", "task", 0, "", None)
-            .await
-            .unwrap();
+        let epic = repo.create("Delete", "", "", "", "", None).await.unwrap();
+        let pool = db.pool();
 
-        let count = epic_repo.delete_with_count(&epic.id).await.unwrap();
+        for short in ["t001", "t002"] {
+            let id = uuid::Uuid::now_v7().to_string();
+            sqlx::query(
+                "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                    issue_type, priority, owner, status, continuation_count, memory_refs)
+                 VALUES (?1, ?2, ?3, ?4, 'T', '', '', 'task', 0, '', 'backlog', 0, '[]')",
+            )
+            .bind(&id)
+            .bind(&epic.project_id)
+            .bind(short)
+            .bind(&epic.id)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+
+        let count = repo.delete_with_count(&epic.id).await.unwrap();
         assert_eq!(count, 2);
-        assert!(epic_repo.get(&epic.id).await.unwrap().is_none());
+        assert!(repo.get(&epic.id).await.unwrap().is_none());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn encode_base36_roundtrip() {
+    #[test]
+    fn encode_base36_roundtrip() {
         assert_eq!(encode_base36(0), "0000");
         assert_eq!(encode_base36(1_679_615), "zzzz");
         for s in [encode_base36(12345), encode_base36(999999)] {

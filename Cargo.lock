@@ -601,9 +601,12 @@ dependencies = [
  "libc",
  "refinery",
  "ring",
+ "serde",
  "serde_json",
  "sqlx",
  "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
