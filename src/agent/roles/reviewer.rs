@@ -6,7 +6,7 @@ use crate::agent::extension;
 use crate::agent::output_parser::ParsedAgentOutput;
 use crate::agent::prompts::TaskContext;
 use crate::db::TaskRepository;
-use crate::db::repositories::task::transitions::merge_after_task_review;
+use crate::db::repositories::task::transitions::{VerificationGateFn, merge_after_task_review};
 use crate::models::{Task, TransitionAction};
 use crate::agent::context::AgentContext;
 use futures::future::BoxFuture;
@@ -37,7 +37,14 @@ impl AgentRole for TaskReviewerRole {
                 Ok(Some(task)) => {
                     if all_acceptance_criteria_met(&task.acceptance_criteria) {
                         tracing::info!(task_id = %task_id, "task reviewer: all AC met → approve");
-                        merge_after_task_review(task_id, app_state).await
+                        let gate_state = app_state.clone();
+                        let gate: VerificationGateFn = Box::new(move |task_id: String, project_path: String| {
+                            let s = gate_state.clone();
+                            Box::pin(async move {
+                                crate::actors::slot::verification::run_verification_gate(&task_id, &project_path, &s).await
+                            })
+                        });
+                        merge_after_task_review(task_id, app_state, Some(gate)).await
                     } else {
                         let feedback = output.reviewer_feedback.clone().unwrap_or_else(|| {
                             "reviewer found unmet acceptance criteria".to_string()
