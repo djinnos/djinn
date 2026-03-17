@@ -330,8 +330,12 @@ fn format_verification_failure_feedback(result: &crate::verification::service::V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use djinn_core::commands::CommandResult;
+    use crate::test_helpers::{agent_context_from_db, create_test_db, create_test_epic, create_test_project, create_test_task, test_events};
     use crate::verification::service::VerificationResult;
+    use djinn_core::commands::CommandResult;
+    use djinn_core::models::TransitionAction;
+    use djinn_db::TaskRepository;
+    use tokio_util::sync::CancellationToken;
 
     fn make_result(stdout: &str, stderr: &str) -> VerificationResult {
         VerificationResult {
@@ -382,5 +386,107 @@ mod tests {
 
         assert!(feedback.contains("[output truncated]"));
         assert!(feedback.len() < 7_000);
+    }
+
+    #[test]
+    fn truncate_output_edge_cases() {
+        assert_eq!(truncate_output("", 10), "");
+        let exact = "abcde";
+        assert_eq!(truncate_output(exact, exact.len()), exact);
+        let unicode = "a😀b";
+        assert_eq!(truncate_output(unicode, 2), "a");
+        assert_eq!(truncate_output(unicode, 5), "a😀");
+    }
+
+    async fn setup_verifying_task_with_count(count: i64) -> (TaskRepository, String, AgentContext) {
+        let db = create_test_db();
+        let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let task = create_test_task(&db, &project.id, &epic.id).await;
+        let task_repo = TaskRepository::new(db.clone(), test_events());
+
+        task_repo
+            .set_status(&task.id, "open")
+            .await
+            .expect("set status open");
+        task_repo
+            .transition(&task.id, TransitionAction::Start, "test", "system", None, None)
+            .await
+            .expect("transition to in_progress");
+        task_repo
+            .transition(
+                &task.id,
+                TransitionAction::SubmitVerification,
+                "test",
+                "system",
+                None,
+                None,
+            )
+            .await
+            .expect("transition to verifying");
+
+        if count > 0 {
+            sqlx::query("UPDATE tasks SET verification_failure_count = ?1 WHERE id = ?2")
+                .bind(count)
+                .bind(&task.id)
+                .execute(db.pool())
+                .await
+                .expect("set verification_failure_count");
+        }
+
+        (task_repo, task.id, app_state)
+    }
+
+    #[tokio::test]
+    async fn handle_verification_failure_first_failure_goes_open() {
+        let (task_repo, task_id, app_state) = setup_verifying_task_with_count(0).await;
+        let feedback = "first failure feedback";
+        handle_verification_failure(&task_id, feedback, &task_repo, &app_state).await;
+
+        let task = task_repo.get(&task_id).await.expect("get task").expect("task exists");
+        assert_eq!(task.status, "open");
+
+        let activity = task_repo.list_activity(&task_id).await.expect("list activity");
+        let verification_comment = activity
+            .iter()
+            .find(|e| e.actor_role == "verification" && e.event_type == "comment")
+            .expect("verification comment present");
+        let payload: serde_json::Value =
+            serde_json::from_str(&verification_comment.payload).expect("json payload");
+        assert_eq!(payload["body"], feedback);
+    }
+
+    #[tokio::test]
+    async fn handle_verification_failure_second_failure_still_goes_open() {
+        let (task_repo, task_id, app_state) = setup_verifying_task_with_count(1).await;
+        handle_verification_failure(&task_id, "second failure", &task_repo, &app_state).await;
+        let task = task_repo.get(&task_id).await.expect("get task").expect("task exists");
+        assert_eq!(task.status, "open");
+    }
+
+    #[tokio::test]
+    async fn handle_verification_failure_threshold_escalates_directly() {
+        let (task_repo, task_id, app_state) = setup_verifying_task_with_count(2).await;
+        handle_verification_failure(&task_id, "third failure", &task_repo, &app_state).await;
+        let task = task_repo.get(&task_id).await.expect("get task").expect("task exists");
+        assert_eq!(task.status, "needs_pm_intervention");
+
+        let activity = task_repo.list_activity(&task_id).await.expect("list activity");
+        let statuses: Vec<serde_json::Value> = activity
+            .iter()
+            .filter(|e| e.event_type == "status_changed")
+            .map(|e| serde_json::from_str(&e.payload).expect("status payload json"))
+            .collect();
+        assert!(!statuses.iter().any(|p| p["to_status"] == "open"));
+        assert!(statuses.iter().any(|p| p["to_status"] == "needs_pm_intervention"));
+    }
+
+    #[tokio::test]
+    async fn handle_verification_failure_past_threshold_escalates() {
+        let (task_repo, task_id, app_state) = setup_verifying_task_with_count(5).await;
+        handle_verification_failure(&task_id, "many failures", &task_repo, &app_state).await;
+        let task = task_repo.get(&task_id).await.expect("get task").expect("task exists");
+        assert_eq!(task.status, "needs_pm_intervention");
     }
 }
