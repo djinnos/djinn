@@ -14,7 +14,7 @@ pub use epic::Epic;
 pub use git_settings::GitSettings;
 pub use note::{
     BrokenLink, BuildContextResponse, GitLogEntry, GraphEdge, GraphNode, GraphResponse,
-    HealthReport, Note, NoteCompact, NoteOverview, NoteSearchResult, OrphanNote,
+    HealthReport, Note, NoteAbstract, NoteCompact, NoteOverview, NoteSearchResult, OrphanNote,
     ReindexSummary, StaleFolder,
 };
 pub use project::Project;
