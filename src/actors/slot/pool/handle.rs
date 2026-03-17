@@ -1,7 +1,7 @@
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 
 use super::super::SlotPoolConfig;
 use super::actor::SlotPool;
@@ -15,7 +15,7 @@ pub struct SlotPoolHandle {
 }
 
 impl SlotPoolHandle {
-    pub fn spawn(app_state: AppState, cancel: CancellationToken, config: SlotPoolConfig) -> Self {
+    pub fn spawn(app_state: AgentContext, cancel: CancellationToken, config: SlotPoolConfig) -> Self {
         let (sender, receiver) = mpsc::channel(64);
         tokio::spawn(SlotPool::new(receiver, app_state, cancel, config).run());
         Self { sender }
@@ -23,7 +23,7 @@ impl SlotPoolHandle {
 
     #[cfg(test)]
     pub(crate) fn spawn_with_factory(
-        app_state: AppState,
+        app_state: AgentContext,
         cancel: CancellationToken,
         config: SlotPoolConfig,
         slot_factory: SlotFactory,

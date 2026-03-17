@@ -6,7 +6,7 @@ use crate::agent::extension;
 use crate::agent::output_parser::ParsedAgentOutput;
 use crate::agent::prompts::TaskContext;
 use crate::models::{Task, TransitionAction};
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 use futures::future::BoxFuture;
 
 use super::{AgentRole, CompactionPrompts, RoleConfig};
@@ -28,7 +28,7 @@ impl AgentRole for WorkerRole {
         &'a self,
         _task_id: &'a str,
         _output: &'a ParsedAgentOutput,
-        _app_state: &'a AppState,
+        _app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
         Box::pin(async { Some((TransitionAction::SubmitVerification, None)) })
     }
@@ -36,7 +36,7 @@ impl AgentRole for WorkerRole {
     fn initial_user_message<'a>(
         &'a self,
         task_id: &'a str,
-        app_state: &'a AppState,
+        app_state: &'a AgentContext,
     ) -> BoxFuture<'a, String> {
         Box::pin(initial_user_message_for_task(task_id, app_state))
     }

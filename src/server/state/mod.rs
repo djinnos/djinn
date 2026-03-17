@@ -44,7 +44,7 @@ struct Inner {
     /// djinn/ namespace git sync manager.
     pub sync: SyncManager,
     /// Long-running coordinator actor handle.
-    pub coordinator: Mutex<Option<CoordinatorHandle>>,
+    pub coordinator: Arc<tokio::sync::Mutex<Option<CoordinatorHandle>>>,
     /// Long-running slot pool actor handle.
     pub pool: Mutex<Option<SlotPoolHandle>>,
     /// User identity for sync (JSONL filename). Single source of truth.
@@ -82,7 +82,7 @@ impl AppState {
                 health_tracker: HealthTracker::new(),
                 role_registry: Arc::new(RoleRegistry::new()),
                 sync,
-                coordinator: Mutex::new(None),
+                coordinator: Arc::new(tokio::sync::Mutex::new(None)),
                 pool: Mutex::new(None),
                 sync_user_id,
                 verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
@@ -171,6 +171,8 @@ impl AppState {
             health_tracker: self.inner.health_tracker.clone(),
             file_time: self.inner.file_time.clone(),
             lsp: self.inner.lsp.clone(),
+            catalog: self.inner.catalog.clone(),
+            coordinator: self.inner.coordinator.clone(),
         }
     }
 
@@ -207,7 +209,7 @@ impl AppState {
         }
 
         let pool = SlotPoolHandle::spawn(
-            self.clone(),
+            self.agent_context(),
             self.cancel().clone(),
             SlotPoolConfig {
                 models: Vec::new(),
