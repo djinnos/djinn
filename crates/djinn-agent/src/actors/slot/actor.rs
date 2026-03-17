@@ -6,7 +6,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::context::AgentContext;
+use crate::roles::role_for_task_dispatch;
 
+use super::helpers::conflict_context_for_dispatch;
 use super::{
     ProjectLifecycleParams, SlotCommand, SlotError, SlotEvent, run_project_lifecycle,
     run_task_lifecycle,
@@ -215,10 +217,33 @@ impl SlotHandle {
             Arc::new(|task_id, project_path, model_id, app_state, kill, pause| {
                 Box::pin(async move {
                     let (sink, _rx) = mpsc::channel::<SlotEvent>(1);
+                    // Resolve role before entering the lifecycle so the lifecycle
+                    // function receives a concrete `Arc<dyn AgentRole>` rather than
+                    // performing the lookup internally.
+                    let conflict_ctx =
+                        conflict_context_for_dispatch(&task_id, &app_state).await;
+                    let task = {
+                        use djinn_db::TaskRepository;
+                        let repo = TaskRepository::new(
+                            app_state.db.clone(),
+                            app_state.event_bus.clone(),
+                        );
+                        repo.get(&task_id).await.ok().flatten()
+                    };
+                    let role = match task {
+                        Some(ref t) => {
+                            role_for_task_dispatch(t, conflict_ctx.is_some())
+                        }
+                        None => {
+                            // Task not found — lifecycle will handle this gracefully.
+                            crate::roles::role_impl_for(crate::AgentType::Worker)
+                        }
+                    };
                     run_task_lifecycle(
                         task_id,
                         project_path,
                         model_id,
+                        role,
                         app_state,
                         kill,
                         pause,
