@@ -172,16 +172,16 @@ impl NoteRepository {
     }
 }
 
-pub(super) struct UpdateNoteIndexParams<'a> {
-    pub(super) id: &'a str,
-    pub(super) file_path: &'a str,
-    pub(super) permalink: &'a str,
-    pub(super) title: &'a str,
-    pub(super) note_type: &'a str,
-    pub(super) folder: &'a str,
-    pub(super) tags: &'a str,
-    pub(super) content: &'a str,
-    pub(super) project_id: &'a str,
+pub struct UpdateNoteIndexParams<'a> {
+    pub id: &'a str,
+    pub file_path: &'a str,
+    pub permalink: &'a str,
+    pub title: &'a str,
+    pub note_type: &'a str,
+    pub folder: &'a str,
+    pub tags: &'a str,
+    pub content: &'a str,
+    pub project_id: &'a str,
 }
 
 // ── Scanned note type ─────────────────────────────────────────────────────────
