@@ -2646,7 +2646,8 @@ mod tests {
                 .clone(),
         );
 
-        let state = crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+        let state =
+            crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
         let result = call_write(&state, &args, worktree.path()).await;
         assert!(result.is_err());
         let err = result.err().unwrap_or_default();
@@ -2836,4 +2837,3 @@ fn tool_lsp() -> RmcpTool {
         }),
     )
 }
-

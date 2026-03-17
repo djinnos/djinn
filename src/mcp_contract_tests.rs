@@ -48,10 +48,8 @@ mod board_tools {
             .await
             .expect("age task beyond stale threshold");
 
-        let state = crate::server::AppState::new(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
+        let state =
+            crate::server::AppState::new(db.clone(), tokio_util::sync::CancellationToken::new());
         state.initialize_agents().await;
         let app = crate::server::router(state);
         let session_id = initialize_mcp_session(&app).await;
@@ -147,11 +145,11 @@ mod execution_tools {
 mod credential_tools {
     use serde_json::json;
 
-    use djinn_provider::repos::CredentialRepository;
     use crate::events::EventBus;
     use crate::test_helpers::{
         create_test_app_with_db, create_test_db, initialize_mcp_session, mcp_call_tool,
     };
+    use djinn_provider::repos::CredentialRepository;
 
     #[tokio::test]
     async fn credential_set_success_shape() {
@@ -172,19 +170,22 @@ mod credential_tools {
         assert_eq!(res["key_name"], "ANTHROPIC_API_KEY");
         assert!(res["id"].as_str().unwrap_or_default().len() > 8);
 
-        let row: Option<Vec<u8>> = sqlx::query_scalar(
-            "SELECT encrypted_value FROM credentials WHERE key_name = ?1",
-        )
-        .bind("ANTHROPIC_API_KEY")
-        .fetch_optional(db.pool())
-        .await
-        .unwrap();
+        let row: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = ?1")
+                .bind("ANTHROPIC_API_KEY")
+                .fetch_optional(db.pool())
+                .await
+                .unwrap();
         let ciphertext = row.expect("missing credential row");
         assert!(!ciphertext.is_empty());
         assert_ne!(ciphertext, b"secret-1");
 
         let repo = CredentialRepository::new(db.clone(), EventBus::noop());
-        let decrypted = repo.get_decrypted("ANTHROPIC_API_KEY").await.unwrap().unwrap();
+        let decrypted = repo
+            .get_decrypted("ANTHROPIC_API_KEY")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(decrypted, "secret-1");
     }
 
@@ -244,13 +245,12 @@ mod memory_tools {
     use djinn_mcp::tools::memory_tools::*;
     use serde_json::json;
 
-    use djinn_db::NoteRepository;
     use crate::events::EventBus;
     use crate::test_helpers::{
         create_test_app, create_test_app_with_db, create_test_db, create_test_epic,
-        create_test_project, create_test_project_with_dir, initialize_mcp_session,
-        mcp_call_tool,
+        create_test_project, create_test_project_with_dir, initialize_mcp_session, mcp_call_tool,
     };
+    use djinn_db::NoteRepository;
 
     #[tokio::test]
     async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
@@ -279,10 +279,7 @@ mod memory_tools {
         assert!(created.get("permalink").and_then(|v| v.as_str()).is_some());
 
         let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        let project_id: String = project_repo
-            .resolve_or_create(project)
-            .await
-            .unwrap();
+        let project_id: String = project_repo.resolve_or_create(project).await.unwrap();
         let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
         let note = note_repo
             .get_by_permalink(&project_id, created["permalink"].as_str().unwrap())
@@ -457,10 +454,22 @@ mod memory_tools {
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Delete Me", "content": "bye", "type": "reference"})).await;
 
-        let deleted = mcp_call_tool(&app, &session_id, "memory_delete", json!({"project": project, "identifier": "Delete Me"})).await;
+        let deleted = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_delete",
+            json!({"project": project, "identifier": "Delete Me"}),
+        )
+        .await;
         assert_eq!(deleted["ok"], true);
 
-        let missing = mcp_call_tool(&app, &session_id, "memory_delete", json!({"project": project, "identifier": "Delete Me"})).await;
+        let missing = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_delete",
+            json!({"project": project, "identifier": "Delete Me"}),
+        )
+        .await;
         assert_eq!(missing["ok"], false);
         assert!(missing.get("error").is_some());
     }
@@ -473,18 +482,48 @@ mod memory_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "A", "content": "x", "type": "adr"})).await;
-        mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "B", "content": "x", "type": "reference"})).await;
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_write",
+            json!({"project": project, "title": "A", "content": "x", "type": "adr"}),
+        )
+        .await;
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_write",
+            json!({"project": project, "title": "B", "content": "x", "type": "reference"}),
+        )
+        .await;
 
-        let all = mcp_call_tool(&app, &session_id, "memory_list", json!({"project": project})).await;
+        let all = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_list",
+            json!({"project": project}),
+        )
+        .await;
         assert!(all["notes"].as_array().unwrap().len() >= 2);
 
-        let folder = mcp_call_tool(&app, &session_id, "memory_list", json!({"project": project, "folder": "decisions"})).await;
+        let folder = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_list",
+            json!({"project": project, "folder": "decisions"}),
+        )
+        .await;
         for n in folder["notes"].as_array().unwrap() {
             assert_eq!(n["folder"], "decisions");
         }
 
-        let typed = mcp_call_tool(&app, &session_id, "memory_list", json!({"project": project, "type": "reference"})).await;
+        let typed = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_list",
+            json!({"project": project, "type": "reference"}),
+        )
+        .await;
         for n in typed["notes"].as_array().unwrap() {
             assert_eq!(n["note_type"], "reference");
         }
@@ -498,10 +537,22 @@ mod memory_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Node B", "content": "b", "type": "reference"})).await;
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_write",
+            json!({"project": project, "title": "Node B", "content": "b", "type": "reference"}),
+        )
+        .await;
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Node A", "content": "links [[Node B]]", "type": "reference"})).await;
 
-        let graph = mcp_call_tool(&app, &session_id, "memory_graph", json!({"project": project})).await;
+        let graph = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_graph",
+            json!({"project": project}),
+        )
+        .await;
         assert!(!graph["edges"].as_array().unwrap().is_empty());
     }
 
@@ -513,12 +564,42 @@ mod memory_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Older", "content": "o", "type": "reference"})).await;
-        mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Newer", "content": "n", "type": "reference"})).await;
-        mcp_call_tool(&app, &session_id, "memory_read", json!({"project": project, "identifier": "Older"})).await;
-        mcp_call_tool(&app, &session_id, "memory_read", json!({"project": project, "identifier": "Newer"})).await;
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_write",
+            json!({"project": project, "title": "Older", "content": "o", "type": "reference"}),
+        )
+        .await;
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_write",
+            json!({"project": project, "title": "Newer", "content": "n", "type": "reference"}),
+        )
+        .await;
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_read",
+            json!({"project": project, "identifier": "Older"}),
+        )
+        .await;
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_read",
+            json!({"project": project, "identifier": "Newer"}),
+        )
+        .await;
 
-        let recent = mcp_call_tool(&app, &session_id, "memory_recent", json!({"project": project, "timeframe": "7d", "limit": 2})).await;
+        let recent = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_recent",
+            json!({"project": project, "timeframe": "7d", "limit": 2}),
+        )
+        .await;
         assert_eq!(recent["notes"].as_array().unwrap()[0]["title"], "Newer");
     }
 
@@ -531,8 +612,19 @@ mod memory_tools {
         let session_id = initialize_mcp_session(&app).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Catalog Item", "content": "c", "type": "reference"})).await;
-        let catalog = mcp_call_tool(&app, &session_id, "memory_catalog", json!({"project": project})).await;
-        assert!(catalog["catalog"].as_str().unwrap().contains("Catalog Item"));
+        let catalog = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_catalog",
+            json!({"project": project}),
+        )
+        .await;
+        assert!(
+            catalog["catalog"]
+                .as_str()
+                .unwrap()
+                .contains("Catalog Item")
+        );
     }
 
     #[tokio::test]
@@ -543,14 +635,32 @@ mod memory_tools {
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Source", "content": "[[Missing Target]]", "type": "reference"})).await;
 
-        let health = mcp_call_tool(&app, &session_id, "memory_health", json!({"project": project})).await;
+        let health = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_health",
+            json!({"project": project}),
+        )
+        .await;
         assert!(health.get("orphan_note_count").is_some());
         assert!(health.get("broken_link_count").is_some());
 
-        let orphans = mcp_call_tool(&app, &session_id, "memory_orphans", json!({"project": project})).await;
+        let orphans = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_orphans",
+            json!({"project": project}),
+        )
+        .await;
         assert!(orphans["orphans"].is_array());
 
-        let broken = mcp_call_tool(&app, &session_id, "memory_broken_links", json!({"project": project})).await;
+        let broken = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_broken_links",
+            json!({"project": project}),
+        )
+        .await;
         assert!(broken["broken_links"].is_array());
     }
 
@@ -568,7 +678,13 @@ mod memory_tools {
         let edited = mcp_call_tool(&app, &session_id, "memory_edit", json!({"project": project, "identifier": permalink, "operation": "append", "content": "line two"})).await;
         assert!(edited.get("error").is_none() || edited["error"].is_null());
 
-        let history = mcp_call_tool(&app, &session_id, "memory_history", json!({"project": project, "permalink": created["permalink"], "limit": 10})).await;
+        let history = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_history",
+            json!({"project": project, "permalink": created["permalink"], "limit": 10}),
+        )
+        .await;
         assert!(history.get("error").is_none() || history["error"].is_null());
 
         let entries = history["history"]
@@ -577,15 +693,31 @@ mod memory_tools {
             .expect("memory_history should return history/entries array");
 
         if entries.is_empty() {
-            let diff = mcp_call_tool(&app, &session_id, "memory_diff", json!({"project": project, "permalink": created["permalink"]})).await;
+            let diff = mcp_call_tool(
+                &app,
+                &session_id,
+                "memory_diff",
+                json!({"project": project, "permalink": created["permalink"]}),
+            )
+            .await;
             assert!(diff.get("error").is_none() || diff["error"].is_null());
             let d = diff["diff"].as_str().unwrap();
             assert!(d.contains("@@") || d.contains("diff --git") || d.is_empty());
             return;
         }
 
-        let latest_sha = entries.first().and_then(|e| e["sha"].as_str()).unwrap().to_string();
-        let diff = mcp_call_tool(&app, &session_id, "memory_diff", json!({"project": project, "permalink": created["permalink"], "sha": latest_sha})).await;
+        let latest_sha = entries
+            .first()
+            .and_then(|e| e["sha"].as_str())
+            .unwrap()
+            .to_string();
+        let diff = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_diff",
+            json!({"project": project, "permalink": created["permalink"], "sha": latest_sha}),
+        )
+        .await;
         assert!(diff.get("error").is_none() || diff["error"].is_null());
         let d = diff["diff"].as_str().unwrap();
         assert!(d.contains("@@") || d.contains("diff --git") || !d.is_empty());
@@ -601,7 +733,13 @@ mod memory_tools {
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Reindex Seed", "content": "seed", "type": "reference"})).await;
 
-        let reindex = mcp_call_tool(&app, &session_id, "memory_reindex", json!({"project": project})).await;
+        let reindex = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_reindex",
+            json!({"project": project}),
+        )
+        .await;
         assert!(reindex.get("error").is_none() || reindex["error"].is_null());
         assert!(reindex.get("updated").and_then(|v| v.as_i64()).is_some());
         assert!(reindex.get("created").and_then(|v| v.as_i64()).is_some());
@@ -620,12 +758,22 @@ mod memory_tools {
         let target = mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Context Target", "content": "target body", "type": "reference"})).await;
         let seed = mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Context Seed", "content": "see [[Context Target]]", "type": "reference"})).await;
 
-        let built = mcp_call_tool(&app, &session_id, "memory_build_context", json!({"project": project, "url": seed["permalink"], "depth": 1, "max_related": 5})).await;
+        let built = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_build_context",
+            json!({"project": project, "url": seed["permalink"], "depth": 1, "max_related": 5}),
+        )
+        .await;
         assert!(built.get("error").is_none() || built["error"].is_null());
         let primary = built["primary"].as_array().unwrap();
         let related = built["related"].as_array().unwrap();
         assert_eq!(primary[0]["permalink"], seed["permalink"]);
-        assert!(related.iter().any(|n| n["permalink"] == target["permalink"]));
+        assert!(
+            related
+                .iter()
+                .any(|n| n["permalink"] == target["permalink"])
+        );
     }
 
     #[tokio::test]
@@ -642,17 +790,30 @@ mod memory_tools {
         let task = mcp_call_tool(&app, &session_id, "task_create", json!({"project": project, "epic_id": epic.id, "title": "Task referencing memory note", "issue_type": "task", "priority": 2, "status": "open", "memory_refs": [note["permalink"]]})).await;
         assert!(task.get("error").is_none() || task["error"].is_null());
 
-        let refs = mcp_call_tool(&app, &session_id, "memory_task_refs", json!({"project": project, "permalink": note["permalink"]})).await;
+        let refs = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_task_refs",
+            json!({"project": project, "permalink": note["permalink"]}),
+        )
+        .await;
         assert!(refs.get("error").is_none() || refs["error"].is_null());
         let tasks = refs["tasks"].as_array().unwrap();
-        assert!(tasks.iter().any(|t| t["id"] == task["id"] && t["title"] == "Task referencing memory note"));
+        assert!(
+            tasks
+                .iter()
+                .any(|t| t["id"] == task["id"] && t["title"] == "Task referencing memory note")
+        );
     }
 
     // ── Param deserialization ─────────────────────────────────────────────────
 
     #[test]
     fn write_params_deserialize() {
-        let p: WriteParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p","title":"T","content":"C","type":"adr"})).unwrap();
+        let p: WriteParams = serde_json::from_value(
+            serde_json::json!({"project":"/tmp/p","title":"T","content":"C","type":"adr"}),
+        )
+        .unwrap();
         assert_eq!(p.project, "/tmp/p");
         assert_eq!(p.title, "T");
         assert_eq!(p.content, "C");
@@ -662,14 +823,17 @@ mod memory_tools {
 
     #[test]
     fn read_params_deserialize() {
-        let p: ReadParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p","identifier":"abc"})).unwrap();
+        let p: ReadParams =
+            serde_json::from_value(serde_json::json!({"project":"/tmp/p","identifier":"abc"}))
+                .unwrap();
         assert_eq!(p.project, "/tmp/p");
         assert_eq!(p.identifier, "abc");
     }
 
     #[test]
     fn search_params_deserialize() {
-        let p: SearchParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p","query":"rust"})).unwrap();
+        let p: SearchParams =
+            serde_json::from_value(serde_json::json!({"project":"/tmp/p","query":"rust"})).unwrap();
         assert_eq!(p.project, "/tmp/p");
         assert_eq!(p.query, "rust");
         assert!(p.limit.is_none());
@@ -688,7 +852,10 @@ mod memory_tools {
 
     #[test]
     fn move_params_deserialize() {
-        let p: MoveParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p","identifier":"a","type":"adr","title":"new"})).unwrap();
+        let p: MoveParams = serde_json::from_value(
+            serde_json::json!({"project":"/tmp/p","identifier":"a","type":"adr","title":"new"}),
+        )
+        .unwrap();
         assert_eq!(p.project, "/tmp/p");
         assert_eq!(p.identifier, "a");
         assert_eq!(p.title.as_deref(), Some("new"));
@@ -697,14 +864,19 @@ mod memory_tools {
 
     #[test]
     fn delete_params_deserialize() {
-        let p: DeleteParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p","identifier":"a"})).unwrap();
+        let p: DeleteParams =
+            serde_json::from_value(serde_json::json!({"project":"/tmp/p","identifier":"a"}))
+                .unwrap();
         assert_eq!(p.project, "/tmp/p");
         assert_eq!(p.identifier, "a");
     }
 
     #[test]
     fn list_params_deserialize() {
-        let p: ListParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p","folder":"decisions","type":"adr","depth":2})).unwrap();
+        let p: ListParams = serde_json::from_value(
+            serde_json::json!({"project":"/tmp/p","folder":"decisions","type":"adr","depth":2}),
+        )
+        .unwrap();
         assert_eq!(p.project, "/tmp/p");
         assert_eq!(p.folder.as_deref(), Some("decisions"));
         assert_eq!(p.note_type.as_deref(), Some("adr"));
@@ -713,7 +885,8 @@ mod memory_tools {
 
     #[test]
     fn list_params_deserialize_minimal() {
-        let p: ListParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
+        let p: ListParams =
+            serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
         assert_eq!(p.project, "/tmp/p");
         assert!(p.folder.is_none());
         assert!(p.note_type.is_none());
@@ -722,13 +895,17 @@ mod memory_tools {
 
     #[test]
     fn graph_params_deserialize() {
-        let p: GraphParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
+        let p: GraphParams =
+            serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
         assert_eq!(p.project, "/tmp/p");
     }
 
     #[test]
     fn recent_params_deserialize() {
-        let p: RecentParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p","timeframe":"7d","limit":5})).unwrap();
+        let p: RecentParams = serde_json::from_value(
+            serde_json::json!({"project":"/tmp/p","timeframe":"7d","limit":5}),
+        )
+        .unwrap();
         assert_eq!(p.project, "/tmp/p");
         assert_eq!(p.timeframe.as_deref(), Some("7d"));
         assert_eq!(p.limit, Some(5));
@@ -736,31 +913,38 @@ mod memory_tools {
 
     #[test]
     fn catalog_params_deserialize() {
-        let p: CatalogParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
+        let p: CatalogParams =
+            serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
         assert_eq!(p.project, "/tmp/p");
     }
 
     #[test]
     fn health_params_deserialize() {
-        let p: HealthParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
+        let p: HealthParams =
+            serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
         assert_eq!(p.project.as_deref(), Some("/tmp/p"));
     }
 
     #[test]
     fn orphans_params_deserialize() {
-        let p: OrphansParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
+        let p: OrphansParams =
+            serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
         assert_eq!(p.project, "/tmp/p");
     }
 
     #[test]
     fn broken_links_params_deserialize() {
-        let p: BrokenLinksParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
+        let p: BrokenLinksParams =
+            serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
         assert_eq!(p.project, "/tmp/p");
     }
 
     #[test]
     fn history_params_deserialize() {
-        let p: HistoryParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p","permalink":"decisions/a","limit":10})).unwrap();
+        let p: HistoryParams = serde_json::from_value(
+            serde_json::json!({"project":"/tmp/p","permalink":"decisions/a","limit":10}),
+        )
+        .unwrap();
         assert_eq!(p.project, "/tmp/p");
         assert_eq!(p.permalink, "decisions/a");
         assert_eq!(p.limit, Some(10));
@@ -768,7 +952,10 @@ mod memory_tools {
 
     #[test]
     fn diff_params_deserialize() {
-        let p: DiffParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p","permalink":"decisions/a","sha":"abc"})).unwrap();
+        let p: DiffParams = serde_json::from_value(
+            serde_json::json!({"project":"/tmp/p","permalink":"decisions/a","sha":"abc"}),
+        )
+        .unwrap();
         assert_eq!(p.project, "/tmp/p");
         assert_eq!(p.permalink, "decisions/a");
         assert_eq!(p.sha.as_deref(), Some("abc"));
@@ -785,13 +972,17 @@ mod memory_tools {
 
     #[test]
     fn reindex_params_deserialize() {
-        let p: ReindexParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
+        let p: ReindexParams =
+            serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
         assert_eq!(p.project, "/tmp/p");
     }
 
     #[test]
     fn task_refs_params_deserialize() {
-        let p: TaskRefsParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p","permalink":"references/n"})).unwrap();
+        let p: TaskRefsParams = serde_json::from_value(
+            serde_json::json!({"project":"/tmp/p","permalink":"references/n"}),
+        )
+        .unwrap();
         assert_eq!(p.project, "/tmp/p");
         assert_eq!(p.permalink, "references/n");
     }
@@ -812,13 +1003,25 @@ mod project_tools {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().to_string_lossy().to_string();
 
-        let added = mcp_call_tool(&app, &session_id, "project_add", json!({"name": "proj-a", "path": path.clone()})).await;
+        let added = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            json!({"name": "proj-a", "path": path.clone()}),
+        )
+        .await;
         assert_eq!(added["status"], "ok");
         assert!(added["project"]["id"].as_str().unwrap_or_default().len() > 8);
         assert_eq!(added["project"]["path"], json!(path));
 
         let listed = mcp_call_tool(&app, &session_id, "project_list", json!({})).await;
-        assert!(listed["projects"].as_array().expect("projects array").iter().any(|p| p["path"] == json!(path)));
+        assert!(
+            listed["projects"]
+                .as_array()
+                .expect("projects array")
+                .iter()
+                .any(|p| p["path"] == json!(path))
+        );
     }
 
     #[tokio::test]
@@ -828,9 +1031,26 @@ mod project_tools {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().to_string_lossy().to_string();
 
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "proj-a", "path": path.clone()})).await;
-        let dup = mcp_call_tool(&app, &session_id, "project_add", json!({"name": "proj-b", "path": path})).await;
-        assert!(dup["status"].as_str().unwrap_or_default().starts_with("error:"));
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            json!({"name": "proj-a", "path": path.clone()}),
+        )
+        .await;
+        let dup = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            json!({"name": "proj-b", "path": path}),
+        )
+        .await;
+        assert!(
+            dup["status"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("error:")
+        );
     }
 
     #[tokio::test]
@@ -840,13 +1060,36 @@ mod project_tools {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().to_string_lossy().to_string();
 
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "proj-remove", "path": path.clone()})).await;
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            json!({"name": "proj-remove", "path": path.clone()}),
+        )
+        .await;
 
-        let removed = mcp_call_tool(&app, &session_id, "project_remove", json!({"name": "proj-remove", "path": path.clone()})).await;
+        let removed = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_remove",
+            json!({"name": "proj-remove", "path": path.clone()}),
+        )
+        .await;
         assert_eq!(removed["status"], "ok");
 
-        let missing = mcp_call_tool(&app, &session_id, "project_remove", json!({"name": "proj-remove", "path": path})).await;
-        assert!(missing["status"].as_str().unwrap_or_default().starts_with("error:"));
+        let missing = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_remove",
+            json!({"name": "proj-remove", "path": path}),
+        )
+        .await;
+        assert!(
+            missing["status"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("error:")
+        );
     }
 
     #[tokio::test]
@@ -856,13 +1099,36 @@ mod project_tools {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().to_string_lossy().to_string();
 
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "proj-guard", "path": path.clone()})).await;
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            json!({"name": "proj-guard", "path": path.clone()}),
+        )
+        .await;
 
-        let rejected = mcp_call_tool(&app, &session_id, "project_remove", json!({"name": "proj-guard", "path": "/wrong/path"})).await;
-        assert!(rejected["status"].as_str().unwrap_or_default().starts_with("error:"));
+        let rejected = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_remove",
+            json!({"name": "proj-guard", "path": "/wrong/path"}),
+        )
+        .await;
+        assert!(
+            rejected["status"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("error:")
+        );
 
         let listed = mcp_call_tool(&app, &session_id, "project_list", json!({})).await;
-        assert!(listed["projects"].as_array().unwrap().iter().any(|p| p["name"] == "proj-guard"));
+        assert!(
+            listed["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["name"] == "proj-guard")
+        );
     }
 
     #[tokio::test]
@@ -872,12 +1138,30 @@ mod project_tools {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().to_string_lossy().to_string();
 
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "proj-config", "path": path.clone()})).await;
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            json!({"name": "proj-config", "path": path.clone()}),
+        )
+        .await;
 
-        let set = mcp_call_tool(&app, &session_id, "project_config_set", json!({"project": path.clone(), "key": "target_branch", "value": "develop"})).await;
+        let set = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_config_set",
+            json!({"project": path.clone(), "key": "target_branch", "value": "develop"}),
+        )
+        .await;
         assert_eq!(set["status"], "ok");
 
-        let got = mcp_call_tool(&app, &session_id, "project_config_get", json!({"project": path})).await;
+        let got = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_config_get",
+            json!({"project": path}),
+        )
+        .await;
         assert_eq!(got["status"], "ok");
         assert_eq!(got["target_branch"], "develop");
     }
@@ -891,14 +1175,43 @@ mod project_tools {
         std::fs::create_dir_all(&djinn).expect("create .djinn");
 
         std::fs::write(djinn.join("settings.json"), r#"{"setup":[{"name":"setup","command":"echo ok"}],"verification":[{"name":"verify","command":"echo ok"}],"extra":true}"#).expect("write settings");
-        let valid = mcp_call_tool(&app, &session_id, "project_settings_validate", json!({"worktree_path": dir.path().to_string_lossy().to_string()})).await;
+        let valid = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_settings_validate",
+            json!({"worktree_path": dir.path().to_string_lossy().to_string()}),
+        )
+        .await;
         assert_eq!(valid["valid"], true);
-        assert!(valid["errors"].as_array().expect("errors").iter().any(|e| e.as_str().unwrap_or_default().contains("warning: unknown top-level key 'extra'")));
+        assert!(valid["errors"].as_array().expect("errors").iter().any(|e| {
+            e.as_str()
+                .unwrap_or_default()
+                .contains("warning: unknown top-level key 'extra'")
+        }));
 
-        std::fs::write(djinn.join("settings.json"), r#"{"setup":[{"name":"missing-command"}]}"#).expect("write invalid settings");
-        let invalid = mcp_call_tool(&app, &session_id, "project_settings_validate", json!({"worktree_path": dir.path().to_string_lossy().to_string()})).await;
+        std::fs::write(
+            djinn.join("settings.json"),
+            r#"{"setup":[{"name":"missing-command"}]}"#,
+        )
+        .expect("write invalid settings");
+        let invalid = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_settings_validate",
+            json!({"worktree_path": dir.path().to_string_lossy().to_string()}),
+        )
+        .await;
         assert_eq!(invalid["valid"], false);
-        assert!(invalid["errors"].as_array().expect("errors").iter().any(|e| e.as_str().unwrap_or_default().contains("schema validation failed")));
+        assert!(
+            invalid["errors"]
+                .as_array()
+                .expect("errors")
+                .iter()
+                .any(|e| e
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("schema validation failed"))
+        );
     }
 }
 
@@ -925,7 +1238,13 @@ mod settings_tools {
         let session_id = initialize_mcp_session(&app).await;
 
         // Only set dispatch_limit — model_priority requires connected credentials.
-        let set = mcp_call_tool(&app, &session_id, "settings_set", json!({"dispatch_limit": 7})).await;
+        let set = mcp_call_tool(
+            &app,
+            &session_id,
+            "settings_set",
+            json!({"dispatch_limit": 7}),
+        )
+        .await;
         assert_eq!(set["ok"], true);
 
         let get = mcp_call_tool(&app, &session_id, "settings_get", json!({})).await;
@@ -945,9 +1264,20 @@ mod settings_tools {
         let session_id = initialize_mcp_session(&app).await;
 
         // Validation rejects model_priority referencing providers with no credentials.
-        let res = mcp_call_tool(&app, &session_id, "settings_set", json!({"model_priority_worker": ["no-such-provider/some-model"]})).await;
+        let res = mcp_call_tool(
+            &app,
+            &session_id,
+            "settings_set",
+            json!({"model_priority_worker": ["no-such-provider/some-model"]}),
+        )
+        .await;
         assert_eq!(res["ok"], false);
-        assert!(res["error"].as_str().unwrap_or_default().contains("disconnected"));
+        assert!(
+            res["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("disconnected")
+        );
     }
 }
 
@@ -983,12 +1313,12 @@ mod system_tools {
 mod task_tools {
     use serde_json::json;
 
-    use djinn_db::TaskRepository;
     use crate::events::EventBus;
     use crate::test_helpers::{
         create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
         create_test_task, initialize_mcp_session, mcp_call_tool,
     };
+    use djinn_db::TaskRepository;
 
     #[tokio::test]
     async fn task_create_success_shape() {
@@ -1006,7 +1336,11 @@ mod task_tools {
         assert_eq!(payload["epic_id"], epic.id);
 
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
-        let created = repo.get(payload["id"].as_str().unwrap()).await.unwrap().unwrap();
+        let created = repo
+            .get(payload["id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(created.title, "Create task contract test");
         assert_eq!(created.status, "backlog");
         assert_eq!(created.epic_id, Some(epic.id));
@@ -1018,7 +1352,13 @@ mod task_tools {
         let app = create_test_app_with_db(db.clone());
         let sid = initialize_mcp_session(&app).await;
 
-        let payload = mcp_call_tool(&app, &sid, "task_create", json!({"project": "any/project", "title": ""})).await;
+        let payload = mcp_call_tool(
+            &app,
+            &sid,
+            "task_create",
+            json!({"project": "any/project", "title": ""}),
+        )
+        .await;
         assert!(payload["error"].as_str().is_some());
     }
 
@@ -1031,11 +1371,23 @@ mod task_tools {
         let app = create_test_app_with_db(db.clone());
         let sid = initialize_mcp_session(&app).await;
 
-        let ok = mcp_call_tool(&app, &sid, "task_show", json!({"project": project.path, "id": task.id})).await;
+        let ok = mcp_call_tool(
+            &app,
+            &sid,
+            "task_show",
+            json!({"project": project.path, "id": task.id}),
+        )
+        .await;
         assert!(ok["id"].as_str().is_some());
         assert!(ok["title"].as_str().is_some());
 
-        let err = mcp_call_tool(&app, &sid, "task_show", json!({"project": project.path, "id": "missing-task-id"})).await;
+        let err = mcp_call_tool(
+            &app,
+            &sid,
+            "task_show",
+            json!({"project": project.path, "id": "missing-task-id"}),
+        )
+        .await;
         assert!(err["error"].as_str().is_some());
     }
 
@@ -1047,23 +1399,109 @@ mod task_tools {
         let epic2 = create_test_epic(&db, &project.id).await;
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
 
-        let t1 = repo.create_in_project(&project.id, Some(&epic1.id), "alpha ready", "desc", "design", "task", 1, "owner", None).await.unwrap();
-        let _t2 = repo.create_in_project(&project.id, Some(&epic1.id), "beta progress", "desc", "design", "task", 2, "owner", None).await.unwrap();
-        let _t3 = repo.create_in_project(&project.id, Some(&epic2.id), "gamma text", "desc", "design", "task", 3, "owner", None).await.unwrap();
-        repo.transition(&t1.id, djinn_core::models::TransitionAction::Accept, "a", "user", None, None).await.unwrap();
-        repo.update(&t1.id, "alpha ready", "desc", "design", 1, "owner", "", r#"[{"description":"default","met":false}]"#).await.unwrap();
-        repo.transition(&t1.id, djinn_core::models::TransitionAction::Start, "a", "user", None, None).await.unwrap();
+        let t1 = repo
+            .create_in_project(
+                &project.id,
+                Some(&epic1.id),
+                "alpha ready",
+                "desc",
+                "design",
+                "task",
+                1,
+                "owner",
+                None,
+            )
+            .await
+            .unwrap();
+        let _t2 = repo
+            .create_in_project(
+                &project.id,
+                Some(&epic1.id),
+                "beta progress",
+                "desc",
+                "design",
+                "task",
+                2,
+                "owner",
+                None,
+            )
+            .await
+            .unwrap();
+        let _t3 = repo
+            .create_in_project(
+                &project.id,
+                Some(&epic2.id),
+                "gamma text",
+                "desc",
+                "design",
+                "task",
+                3,
+                "owner",
+                None,
+            )
+            .await
+            .unwrap();
+        repo.transition(
+            &t1.id,
+            djinn_core::models::TransitionAction::Accept,
+            "a",
+            "user",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.update(
+            &t1.id,
+            "alpha ready",
+            "desc",
+            "design",
+            1,
+            "owner",
+            "",
+            r#"[{"description":"default","met":false}]"#,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &t1.id,
+            djinn_core::models::TransitionAction::Start,
+            "a",
+            "user",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let app = create_test_app_with_db(db.clone());
         let sid = initialize_mcp_session(&app).await;
 
-        let by_status = mcp_call_tool(&app, &sid, "task_list", json!({"project": project.path, "status": "in_progress"})).await;
+        let by_status = mcp_call_tool(
+            &app,
+            &sid,
+            "task_list",
+            json!({"project": project.path, "status": "in_progress"}),
+        )
+        .await;
         assert!(!by_status["tasks"].as_array().unwrap().is_empty());
 
-        let by_text = mcp_call_tool(&app, &sid, "task_list", json!({"project": project.path, "text": "gamma"})).await;
+        let by_text = mcp_call_tool(
+            &app,
+            &sid,
+            "task_list",
+            json!({"project": project.path, "text": "gamma"}),
+        )
+        .await;
         assert_eq!(by_text["tasks"].as_array().unwrap().len(), 1);
 
-        let paged = mcp_call_tool(&app, &sid, "task_list", json!({"project": project.path, "limit": 1, "offset": 0})).await;
+        let paged = mcp_call_tool(
+            &app,
+            &sid,
+            "task_list",
+            json!({"project": project.path, "limit": 1, "offset": 0}),
+        )
+        .await;
         assert_eq!(paged["limit"], 1);
         assert_eq!(paged["offset"], 0);
     }
@@ -1077,13 +1515,25 @@ mod task_tools {
         let app = create_test_app_with_db(db.clone());
         let sid = initialize_mcp_session(&app).await;
 
-        let ok = mcp_call_tool(&app, &sid, "task_update", json!({"project": project.path, "id": task.id, "title": "updated"})).await;
+        let ok = mcp_call_tool(
+            &app,
+            &sid,
+            "task_update",
+            json!({"project": project.path, "id": task.id, "title": "updated"}),
+        )
+        .await;
         assert_eq!(ok["title"], "updated");
 
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
         assert_eq!(repo.get(&task.id).await.unwrap().unwrap().title, "updated");
 
-        let err = mcp_call_tool(&app, &sid, "task_update", json!({"project": project.path, "id": "missing-id", "title": "x"})).await;
+        let err = mcp_call_tool(
+            &app,
+            &sid,
+            "task_update",
+            json!({"project": project.path, "id": "missing-id", "title": "x"}),
+        )
+        .await;
         assert!(err["error"].as_str().is_some());
     }
 
@@ -1113,8 +1563,26 @@ mod task_tools {
         let epic = create_test_epic(&db, &project.id).await;
         let t1 = create_test_task(&db, &project.id, &epic.id).await;
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
-        repo.transition(&t1.id, djinn_core::models::TransitionAction::Accept, "u1", "user", None, None).await.unwrap();
-        repo.transition(&t1.id, djinn_core::models::TransitionAction::Start, "u1", "user", None, None).await.unwrap();
+        repo.transition(
+            &t1.id,
+            djinn_core::models::TransitionAction::Accept,
+            "u1",
+            "user",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &t1.id,
+            djinn_core::models::TransitionAction::Start,
+            "u1",
+            "user",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         let _t2 = create_test_task(&db, &project.id, &epic.id).await;
 
         let app = create_test_app_with_db(db.clone());
@@ -1123,7 +1591,13 @@ mod task_tools {
         let plain = mcp_call_tool(&app, &sid, "task_count", json!({"project": project.path})).await;
         assert!(plain["total_count"].as_i64().unwrap() >= 2);
 
-        let grouped = mcp_call_tool(&app, &sid, "task_count", json!({"project": project.path, "group_by": "status"})).await;
+        let grouped = mcp_call_tool(
+            &app,
+            &sid,
+            "task_count",
+            json!({"project": project.path, "group_by": "status"}),
+        )
+        .await;
         assert!(grouped["groups"].as_array().is_some());
     }
 
@@ -1136,14 +1610,21 @@ mod task_tools {
         let app = create_test_app_with_db(db.clone());
         let sid = initialize_mcp_session(&app).await;
 
-        let claimed = mcp_call_tool(&app, &sid, "task_claim", json!({"project": project.path})).await;
+        let claimed =
+            mcp_call_tool(&app, &sid, "task_claim", json!({"project": project.path})).await;
         assert!(claimed["id"].as_str().is_some() || claimed["task"].is_null());
 
         let db2 = create_test_db();
         let project2 = create_test_project(&db2).await;
         let app2 = create_test_app_with_db(db2);
         let sid2 = initialize_mcp_session(&app2).await;
-        let empty = mcp_call_tool(&app2, &sid2, "task_claim", json!({"project": project2.path})).await;
+        let empty = mcp_call_tool(
+            &app2,
+            &sid2,
+            "task_claim",
+            json!({"project": project2.path}),
+        )
+        .await;
         assert!(empty["task"].is_null());
     }
 
@@ -1156,7 +1637,8 @@ mod task_tools {
         let app = create_test_app_with_db(db.clone());
         let sid = initialize_mcp_session(&app).await;
 
-        let payload = mcp_call_tool(&app, &sid, "task_ready", json!({"project": project.path})).await;
+        let payload =
+            mcp_call_tool(&app, &sid, "task_ready", json!({"project": project.path})).await;
         assert!(payload["tasks"].as_array().is_some());
     }
 
@@ -1179,16 +1661,40 @@ mod task_tools {
         let c_err = mcp_call_tool(&app, &sid, "task_comment_add", json!({"project": project.path, "id": "missing", "actor_id": "u1", "actor_role": "user", "body": "hello"})).await;
         assert!(c_err["error"].as_str().is_some());
 
-        let activity = mcp_call_tool(&app, &sid, "task_activity_list", json!({"project": project.path, "id": blocked.id})).await;
+        let activity = mcp_call_tool(
+            &app,
+            &sid,
+            "task_activity_list",
+            json!({"project": project.path, "id": blocked.id}),
+        )
+        .await;
         assert!(activity["entries"].as_array().is_some());
 
-        let blockers = mcp_call_tool(&app, &sid, "task_blockers_list", json!({"project": project.path, "id": blocked.id})).await;
+        let blockers = mcp_call_tool(
+            &app,
+            &sid,
+            "task_blockers_list",
+            json!({"project": project.path, "id": blocked.id}),
+        )
+        .await;
         assert!(blockers["blockers"].as_array().is_some());
 
-        let blocked_list = mcp_call_tool(&app, &sid, "task_blocked_list", json!({"project": project.path, "id": blocker.id})).await;
+        let blocked_list = mcp_call_tool(
+            &app,
+            &sid,
+            "task_blocked_list",
+            json!({"project": project.path, "id": blocker.id}),
+        )
+        .await;
         assert!(blocked_list["tasks"].as_array().is_some());
 
-        let refs = mcp_call_tool(&app, &sid, "task_memory_refs", json!({"project": project.path, "id": blocked.id})).await;
+        let refs = mcp_call_tool(
+            &app,
+            &sid,
+            "task_memory_refs",
+            json!({"project": project.path, "id": blocked.id}),
+        )
+        .await;
         assert!(refs["memory_refs"].as_array().is_some());
     }
 }
@@ -1198,11 +1704,11 @@ mod task_tools {
 mod session_tools {
     use serde_json::json;
 
-    use djinn_db::SessionMessageRepository;
     use crate::test_helpers::{
         create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
         create_test_session, create_test_task, initialize_mcp_session, mcp_call_tool,
     };
+    use djinn_db::SessionMessageRepository;
 
     #[tokio::test]
     async fn session_list_returns_empty_for_task_without_sessions() {
@@ -1213,10 +1719,25 @@ mod session_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        let payload = mcp_call_tool(&app, &session_id, "session_list", json!({ "task_id": task.id, "project": project.path })).await;
+        let payload = mcp_call_tool(
+            &app,
+            &session_id,
+            "session_list",
+            json!({ "task_id": task.id, "project": project.path }),
+        )
+        .await;
         assert_eq!(payload.get("error"), None);
-        assert_eq!(payload.get("task_id").and_then(|v| v.as_str()), Some(task.id.as_str()));
-        assert!(payload.get("sessions").and_then(|v| v.as_array()).unwrap().is_empty());
+        assert_eq!(
+            payload.get("task_id").and_then(|v| v.as_str()),
+            Some(task.id.as_str())
+        );
+        assert!(
+            payload
+                .get("sessions")
+                .and_then(|v| v.as_array())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1236,12 +1757,26 @@ mod session_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        let payload = mcp_call_tool(&app, &session_id, "session_list", json!({ "task_id": task_a1.id, "project": project_a.path })).await;
+        let payload = mcp_call_tool(
+            &app,
+            &session_id,
+            "session_list",
+            json!({ "task_id": task_a1.id, "project": project_a.path }),
+        )
+        .await;
         assert_eq!(payload.get("error"), None);
         let sessions = payload.get("sessions").and_then(|v| v.as_array()).unwrap();
         assert_eq!(sessions.len(), 2);
-        assert!(sessions.iter().all(|s| s.get("task_id").and_then(|v| v.as_str()) == Some(task_a1.id.as_str())));
-        assert!(sessions.iter().all(|s| s.get("project_id").and_then(|v| v.as_str()) == Some(project_a.id.as_str())));
+        assert!(
+            sessions
+                .iter()
+                .all(|s| s.get("task_id").and_then(|v| v.as_str()) == Some(task_a1.id.as_str()))
+        );
+        assert!(
+            sessions.iter().all(
+                |s| s.get("project_id").and_then(|v| v.as_str()) == Some(project_a.id.as_str())
+            )
+        );
     }
 
     #[tokio::test]
@@ -1254,9 +1789,23 @@ mod session_tools {
         let app = create_test_app_with_db(db);
         let mcp_session = initialize_mcp_session(&app).await;
 
-        let payload = mcp_call_tool(&app, &mcp_session, "session_show", json!({ "id": session.id, "project": project.path })).await;
+        let payload = mcp_call_tool(
+            &app,
+            &mcp_session,
+            "session_show",
+            json!({ "id": session.id, "project": project.path }),
+        )
+        .await;
         assert_eq!(payload.get("error"), None);
-        for key in ["id", "task_id", "model_id", "agent_type", "status", "tokens_in", "tokens_out"] {
+        for key in [
+            "id",
+            "task_id",
+            "model_id",
+            "agent_type",
+            "status",
+            "tokens_in",
+            "tokens_out",
+        ] {
             assert!(payload.get(key).is_some(), "missing key {key}");
         }
     }
@@ -1268,7 +1817,13 @@ mod session_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        let payload = mcp_call_tool(&app, &session_id, "session_show", json!({ "id": "missing-session-id", "project": project.path })).await;
+        let payload = mcp_call_tool(
+            &app,
+            &session_id,
+            "session_show",
+            json!({ "id": "missing-session-id", "project": project.path }),
+        )
+        .await;
         assert!(payload.get("error").and_then(|v| v.as_str()).is_some());
         assert_eq!(payload.get("id"), None);
     }
@@ -1280,7 +1835,13 @@ mod session_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        let payload = mcp_call_tool(&app, &session_id, "session_active", json!({ "project": project.path })).await;
+        let payload = mcp_call_tool(
+            &app,
+            &session_id,
+            "session_active",
+            json!({ "project": project.path }),
+        )
+        .await;
         assert!(payload.get("error").and_then(|v| v.as_str()).is_some());
     }
 
@@ -1294,7 +1855,13 @@ mod session_tools {
         let app = create_test_app_with_db(db);
         let mcp_session = initialize_mcp_session(&app).await;
 
-        let result = mcp_call_tool(&app, &mcp_session, "session_for_task", json!({ "task_id": task.id, "project": project.path })).await;
+        let result = mcp_call_tool(
+            &app,
+            &mcp_session,
+            "session_for_task",
+            json!({ "task_id": task.id, "project": project.path }),
+        )
+        .await;
         assert!(result.get("error").and_then(|v| v.as_str()).is_some());
     }
 
@@ -1308,20 +1875,50 @@ mod session_tools {
         let s2 = create_test_session(&db, &project.id, &task.id).await;
 
         let msg_repo = SessionMessageRepository::new(db.clone(), crate::events::EventBus::noop());
-        msg_repo.insert_message(&s1.id, &task.id, "user", &serde_json::json!([{"type":"text","text":"first"}]).to_string(), None).await.unwrap();
-        msg_repo.insert_message(&s2.id, &task.id, "assistant", &serde_json::json!([{"type":"text","text":"second"}]).to_string(), None).await.unwrap();
+        msg_repo
+            .insert_message(
+                &s1.id,
+                &task.id,
+                "user",
+                &serde_json::json!([{"type":"text","text":"first"}]).to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+        msg_repo
+            .insert_message(
+                &s2.id,
+                &task.id,
+                "assistant",
+                &serde_json::json!([{"type":"text","text":"second"}]).to_string(),
+                None,
+            )
+            .await
+            .unwrap();
 
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        let payload = mcp_call_tool(&app, &session_id, "task_timeline", json!({ "task_id": task.id, "project": project.path })).await;
+        let payload = mcp_call_tool(
+            &app,
+            &session_id,
+            "task_timeline",
+            json!({ "task_id": task.id, "project": project.path }),
+        )
+        .await;
         assert_eq!(payload.get("error"), None);
         let sessions = payload.get("sessions").and_then(|v| v.as_array()).unwrap();
         let messages = payload.get("messages").and_then(|v| v.as_array()).unwrap();
         assert_eq!(sessions.len(), 2);
         assert_eq!(messages.len(), 2);
-        let ts0 = messages[0].get("timestamp").and_then(|v| v.as_str()).unwrap();
-        let ts1 = messages[1].get("timestamp").and_then(|v| v.as_str()).unwrap();
+        let ts0 = messages[0]
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        let ts1 = messages[1]
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap();
         assert!(ts0 <= ts1);
     }
 
@@ -1332,7 +1929,13 @@ mod session_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        let payload = mcp_call_tool(&app, &session_id, "task_timeline", json!({ "task_id": "missing-task", "project": project.path })).await;
+        let payload = mcp_call_tool(
+            &app,
+            &session_id,
+            "task_timeline",
+            json!({ "task_id": "missing-task", "project": project.path }),
+        )
+        .await;
         assert!(payload.get("error").and_then(|v| v.as_str()).is_some());
         assert!(payload.get("sessions").is_none());
         assert!(payload.get("messages").is_none());
@@ -1347,25 +1950,43 @@ mod session_tools {
         let sess = create_test_session(&db, &project.id, &task.id).await;
 
         let msg_repo = SessionMessageRepository::new(db.clone(), crate::events::EventBus::noop());
-        msg_repo.insert_message(&sess.id, &task.id, "user", &serde_json::json!([{"type":"text","text":"hello"}]).to_string(), None).await.unwrap();
+        msg_repo
+            .insert_message(
+                &sess.id,
+                &task.id,
+                "user",
+                &serde_json::json!([{"type":"text","text":"hello"}]).to_string(),
+                None,
+            )
+            .await
+            .unwrap();
 
         let app = create_test_app_with_db(db);
         let mcp_session = initialize_mcp_session(&app).await;
-        let payload = mcp_call_tool(&app, &mcp_session, "session_messages", json!({ "id": sess.id, "project": project.path })).await;
+        let payload = mcp_call_tool(
+            &app,
+            &mcp_session,
+            "session_messages",
+            json!({ "id": sess.id, "project": project.path }),
+        )
+        .await;
         assert_eq!(payload.get("error"), None);
         let messages = payload.get("messages").and_then(|v| v.as_array()).unwrap();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].get("role").and_then(|v| v.as_str()), Some("user"));
+        assert_eq!(
+            messages[0].get("role").and_then(|v| v.as_str()),
+            Some("user")
+        );
     }
 }
 
 // ── provider_tools ────────────────────────────────────────────────────────────
 
 mod provider_tools {
-    use djinn_provider::repos::CredentialRepository;
     use crate::test_helpers::{
         create_test_app_with_db, create_test_db, initialize_mcp_session, mcp_call_tool,
     };
+    use djinn_provider::repos::CredentialRepository;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn provider_catalog_returns_expected_shape() {
@@ -1373,7 +1994,8 @@ mod provider_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        let result = mcp_call_tool(&app, &session_id, "provider_catalog", serde_json::json!({})).await;
+        let result =
+            mcp_call_tool(&app, &session_id, "provider_catalog", serde_json::json!({})).await;
         let providers = result["providers"].as_array().expect("providers array");
         assert!(!providers.is_empty());
         assert!(providers[0].get("id").is_some());
@@ -1387,11 +2009,28 @@ mod provider_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        let valid = mcp_call_tool(&app, &session_id, "provider_models", serde_json::json!({"provider_id":"openai"})).await;
+        let valid = mcp_call_tool(
+            &app,
+            &session_id,
+            "provider_models",
+            serde_json::json!({"provider_id":"openai"}),
+        )
+        .await;
         assert_eq!(valid["provider_id"], "openai");
-        assert!(valid["models"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
+        assert!(
+            valid["models"]
+                .as_array()
+                .map(|a| !a.is_empty())
+                .unwrap_or(false)
+        );
 
-        let unknown = mcp_call_tool(&app, &session_id, "provider_models", serde_json::json!({"provider_id":"no-such-provider"})).await;
+        let unknown = mcp_call_tool(
+            &app,
+            &session_id,
+            "provider_models",
+            serde_json::json!({"provider_id":"no-such-provider"}),
+        )
+        .await;
         assert_eq!(unknown["total"], 0);
         assert!(unknown["models"].as_array().unwrap().is_empty());
     }
@@ -1407,10 +2046,20 @@ mod provider_tools {
             .await
             .unwrap();
 
-        let result = mcp_call_tool(&app, &session_id, "provider_connected", serde_json::json!({})).await;
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "provider_connected",
+            serde_json::json!({}),
+        )
+        .await;
         let providers = result["providers"].as_array().expect("providers array");
         assert!(!providers.is_empty());
-        assert!(providers.iter().all(|p| p["connected"].as_bool().unwrap_or(false)));
+        assert!(
+            providers
+                .iter()
+                .all(|p| p["connected"].as_bool().unwrap_or(false))
+        );
         assert!(providers.iter().any(|p| p["id"] == "openai"));
     }
 
@@ -1425,7 +2074,13 @@ mod provider_tools {
             .await
             .unwrap();
 
-        let result = mcp_call_tool(&app, &session_id, "provider_models_connected", serde_json::json!({})).await;
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "provider_models_connected",
+            serde_json::json!({}),
+        )
+        .await;
         let models = result["models"].as_array().expect("models array");
         assert!(!models.is_empty());
         assert!(models.iter().all(|m| m["provider_id"] == "openai"));
@@ -1437,11 +2092,23 @@ mod provider_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        let found = mcp_call_tool(&app, &session_id, "provider_model_lookup", serde_json::json!({"model_id":"openai/gpt-4o-mini"})).await;
+        let found = mcp_call_tool(
+            &app,
+            &session_id,
+            "provider_model_lookup",
+            serde_json::json!({"model_id":"openai/gpt-4o-mini"}),
+        )
+        .await;
         assert!(found["found"].as_bool().unwrap_or(false));
         assert!(found.get("model").is_some());
 
-        let not_found = mcp_call_tool(&app, &session_id, "provider_model_lookup", serde_json::json!({"model_id":"nope/unknown-model"})).await;
+        let not_found = mcp_call_tool(
+            &app,
+            &session_id,
+            "provider_model_lookup",
+            serde_json::json!({"model_id":"nope/unknown-model"}),
+        )
+        .await;
         assert!(!not_found["found"].as_bool().unwrap_or(true));
         assert!(not_found["model"].is_null());
     }
@@ -1452,14 +2119,32 @@ mod provider_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        let status = mcp_call_tool(&app, &session_id, "model_health", serde_json::json!({"action":"status"})).await;
+        let status = mcp_call_tool(
+            &app,
+            &session_id,
+            "model_health",
+            serde_json::json!({"action":"status"}),
+        )
+        .await;
         assert_eq!(status["action"], "status");
         assert!(status["models"].is_array());
 
-        let reset_err = mcp_call_tool(&app, &session_id, "model_health", serde_json::json!({"action":"reset"})).await;
+        let reset_err = mcp_call_tool(
+            &app,
+            &session_id,
+            "model_health",
+            serde_json::json!({"action":"reset"}),
+        )
+        .await;
         assert!(reset_err["error"].as_str().is_some());
 
-        let enable_err = mcp_call_tool(&app, &session_id, "model_health", serde_json::json!({"action":"enable"})).await;
+        let enable_err = mcp_call_tool(
+            &app,
+            &session_id,
+            "model_health",
+            serde_json::json!({"action":"enable"}),
+        )
+        .await;
         assert!(enable_err["error"].as_str().is_some());
     }
 
@@ -1473,9 +2158,19 @@ mod provider_tools {
         assert!(added["ok"].as_bool().unwrap_or(false));
         assert_eq!(added["id"], "my-custom");
 
-        let removed = mcp_call_tool(&app, &session_id, "provider_remove", serde_json::json!({"provider_id":"my-custom"})).await;
+        let removed = mcp_call_tool(
+            &app,
+            &session_id,
+            "provider_remove",
+            serde_json::json!({"provider_id":"my-custom"}),
+        )
+        .await;
         assert!(removed["ok"].as_bool().unwrap_or(false));
-        assert!(removed["custom_provider_deleted"].as_bool().unwrap_or(false));
+        assert!(
+            removed["custom_provider_deleted"]
+                .as_bool()
+                .unwrap_or(false)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1484,7 +2179,13 @@ mod provider_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        let removed = mcp_call_tool(&app, &session_id, "provider_remove", serde_json::json!({"provider_id":"openai"})).await;
+        let removed = mcp_call_tool(
+            &app,
+            &session_id,
+            "provider_remove",
+            serde_json::json!({"provider_id":"openai"}),
+        )
+        .await;
         assert!(removed.get("error").is_some());
     }
 
@@ -1507,7 +2208,13 @@ mod provider_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        let result = mcp_call_tool(&app, &session_id, "provider_oauth_start", serde_json::json!({"provider_id":"no-such-provider"})).await;
+        let result = mcp_call_tool(
+            &app,
+            &session_id,
+            "provider_oauth_start",
+            serde_json::json!({"provider_id":"no-such-provider"}),
+        )
+        .await;
         assert!(!result["ok"].as_bool().unwrap_or(true));
         assert!(result["error"].as_str().is_some());
         assert!(result.get("oauth_supported").is_some());
