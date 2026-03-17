@@ -1,9 +1,8 @@
+use djinn_core::events::{DjinnEventEnvelope, EventBus};
+use djinn_core::models::Project;
 
-
-use crate::db::connection::Database;
-use crate::error::Result;
-use crate::events::{DjinnEventEnvelope, EventBus};
-use crate::models::Project;
+use crate::database::Database;
+use crate::Result;
 
 #[derive(Clone, Debug, serde::Serialize, sqlx::FromRow)]
 pub struct ProjectConfig {
@@ -140,9 +139,7 @@ impl ProjectRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        self
-            .events
-            .send(DjinnEventEnvelope::project_created(&project));
+        self.events.send(DjinnEventEnvelope::project_created(&project));
         Ok(project)
     }
 
@@ -161,9 +158,7 @@ impl ProjectRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        self
-            .events
-            .send(DjinnEventEnvelope::project_updated(&project));
+        self.events.send(DjinnEventEnvelope::project_updated(&project));
         Ok(project)
     }
 
@@ -290,25 +285,36 @@ impl ProjectRepository {
             .execute(self.db.pool())
             .await?;
 
-        self
-            .events
-            .send(DjinnEventEnvelope::project_deleted(id));
+        self.events.send(DjinnEventEnvelope::project_deleted(id));
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use djinn_core::events::{DjinnEventEnvelope, EventBus};
+    use djinn_core::models::Project;
+
     use super::*;
-    use tokio::sync::broadcast;
-    use crate::events::event_bus_for;
-    use crate::test_helpers;
+
+    fn test_db() -> Database {
+        Database::open_in_memory().unwrap()
+    }
+
+    fn capturing_bus() -> (EventBus, Arc<Mutex<Vec<DjinnEventEnvelope>>>) {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let bus = EventBus::new({
+            let captured = captured.clone();
+            move |ev| captured.lock().unwrap().push(ev)
+        });
+        (bus, captured)
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_and_get_project() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(1024);
-        let repo = ProjectRepository::new(db, event_bus_for(&tx));
+        let repo = ProjectRepository::new(test_db(), EventBus::noop());
 
         let project = repo.create("myapp", "/home/user/myapp").await.unwrap();
         assert_eq!(project.name, "myapp");
@@ -321,62 +327,60 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_emits_event() {
-        let db = test_helpers::create_test_db();
-        let (tx, mut rx) = broadcast::channel(1024);
-        let repo = ProjectRepository::new(db, event_bus_for(&tx));
+        let (bus, captured) = capturing_bus();
+        let repo = ProjectRepository::new(test_db(), bus);
 
         repo.create("proj", "/tmp/proj").await.unwrap();
 
-        let envelope = rx.recv().await.unwrap();
-        assert_eq!(envelope.entity_type, "project");
-        assert_eq!(envelope.action, "created");
-        let p: Project = envelope.parse_payload().unwrap();
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "project");
+        assert_eq!(events[0].action, "created");
+        let p: Project = serde_json::from_value(events[0].payload.clone()).unwrap();
         assert_eq!(p.name, "proj");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_project() {
-        let db = test_helpers::create_test_db();
-        let (tx, mut rx) = broadcast::channel(1024);
-        let repo = ProjectRepository::new(db, event_bus_for(&tx));
+        let (bus, captured) = capturing_bus();
+        let repo = ProjectRepository::new(test_db(), bus);
 
         let project = repo.create("old", "/old").await.unwrap();
-        let _ = rx.recv().await.unwrap(); // consume create event
+        captured.lock().unwrap().clear();
 
         let updated = repo.update(&project.id, "new", "/new").await.unwrap();
         assert_eq!(updated.name, "new");
         assert_eq!(updated.path, "/new");
 
-        let envelope = rx.recv().await.unwrap();
-        assert_eq!(envelope.entity_type, "project");
-        assert_eq!(envelope.action, "updated");
-        let p: Project = envelope.parse_payload().unwrap();
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "project");
+        assert_eq!(events[0].action, "updated");
+        let p: Project = serde_json::from_value(events[0].payload.clone()).unwrap();
         assert_eq!(p.name, "new");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_project() {
-        let db = test_helpers::create_test_db();
-        let (tx, mut rx) = broadcast::channel(1024);
-        let repo = ProjectRepository::new(db, event_bus_for(&tx));
+        let (bus, captured) = capturing_bus();
+        let repo = ProjectRepository::new(test_db(), bus);
 
         let project = repo.create("del", "/del").await.unwrap();
-        let _ = rx.recv().await.unwrap(); // consume create event
+        captured.lock().unwrap().clear();
 
         repo.delete(&project.id).await.unwrap();
         assert!(repo.get(&project.id).await.unwrap().is_none());
 
-        let envelope = rx.recv().await.unwrap();
-        assert_eq!(envelope.entity_type, "project");
-        assert_eq!(envelope.action, "deleted");
-        assert_eq!(envelope.payload["id"].as_str().unwrap(), project.id);
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "project");
+        assert_eq!(events[0].action, "deleted");
+        assert_eq!(events[0].payload["id"].as_str().unwrap(), project.id);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_projects() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(1024);
-        let repo = ProjectRepository::new(db, event_bus_for(&tx));
+        let repo = ProjectRepository::new(test_db(), EventBus::noop());
 
         repo.create("beta", "/beta").await.unwrap();
         repo.create("alpha", "/alpha").await.unwrap();
@@ -390,9 +394,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_by_path_returns_project() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(1024);
-        let repo = ProjectRepository::new(db, event_bus_for(&tx));
+        let repo = ProjectRepository::new(test_db(), EventBus::noop());
 
         let project = repo.create("lookup", "/lookup/path").await.unwrap();
         let found = repo.get_by_path("/lookup/path").await.unwrap().unwrap();

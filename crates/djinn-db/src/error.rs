@@ -7,6 +7,7 @@ pub enum DbError {
     Sqlx(sqlx::Error),
     Json(serde_json::Error),
     InvalidData(String),
+    InvalidTransition(String),
 }
 
 impl fmt::Display for DbError {
@@ -15,6 +16,7 @@ impl fmt::Display for DbError {
             Self::Sqlx(err) => write!(f, "database error: {err}"),
             Self::Json(err) => write!(f, "json error: {err}"),
             Self::InvalidData(msg) => write!(f, "invalid data: {msg}"),
+            Self::InvalidTransition(msg) => write!(f, "invalid transition: {msg}"),
         }
     }
 }
@@ -24,7 +26,7 @@ impl std::error::Error for DbError {
         match self {
             Self::Sqlx(err) => Some(err),
             Self::Json(err) => Some(err),
-            Self::InvalidData(_) => None,
+            Self::InvalidData(_) | Self::InvalidTransition(_) => None,
         }
     }
 }

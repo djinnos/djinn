@@ -30,6 +30,7 @@ impl From<djinn_db::Error> for Error {
             djinn_db::Error::Sqlx(err) => Self::from(err),
             djinn_db::Error::Json(err) => Self::Internal(err.to_string()),
             djinn_db::Error::InvalidData(msg) => Self::Internal(msg),
+            djinn_db::Error::InvalidTransition(msg) => Self::InvalidTransition(msg),
         }
     }
 }

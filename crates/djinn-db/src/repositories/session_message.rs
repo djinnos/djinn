@@ -1,10 +1,9 @@
-
-
+use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::message::{Conversation, Message, Role};
-use crate::db::connection::Database;
-use crate::error::Result;
-use crate::events::{DjinnEventEnvelope, EventBus};
-use crate::models::SessionMessage;
+use djinn_core::models::SessionMessage;
+
+use crate::database::Database;
+use crate::Result;
 
 pub struct SessionMessageRepository {
     db: Database,
@@ -184,43 +183,53 @@ impl SessionMessageRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use djinn_core::message::{Message, Role};
-    use crate::db::EpicRepository;
-    use crate::db::SessionRepository;
-    use crate::db::TaskRepository;
-    use crate::db::connection::Database;
-    use tokio::sync::broadcast;
-    use crate::events::{DjinnEventEnvelope, EventBus, event_bus_for};
+    use std::sync::{Arc, Mutex};
 
-    async fn make_test_db() -> (Database, broadcast::Sender<DjinnEventEnvelope>) {
-        let db = Database::open_in_memory().expect("in-memory db");
-        db.ensure_initialized().await.expect("migrate");
-        let (tx, _rx) = broadcast::channel(64);
-        (db, tx)
+    use djinn_core::events::{DjinnEventEnvelope, EventBus};
+    use djinn_core::message::{Message, Role};
+
+    use super::*;
+    use crate::repositories::epic::EpicRepository;
+    use crate::repositories::session::SessionRepository;
+
+    fn test_db() -> Database {
+        Database::open_in_memory().unwrap()
     }
 
-    async fn create_session(
-        db: Database,
-        events: EventBus,
-    ) -> (String, String, String) {
-        let epic_repo = EpicRepository::new(db.clone(), events.clone());
+    fn capturing_bus() -> (EventBus, Arc<Mutex<Vec<DjinnEventEnvelope>>>) {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let bus = EventBus::new({
+            let captured = captured.clone();
+            move |ev| captured.lock().unwrap().push(ev)
+        });
+        (bus, captured)
+    }
+
+    async fn create_session(db: Database, bus: EventBus) -> (String, String, String) {
+        let epic_repo = EpicRepository::new(db.clone(), bus.clone());
         let epic = epic_repo
             .create("Epic", "", "", "", "", None)
             .await
             .unwrap();
 
-        let task_repo = TaskRepository::new(db.clone(), events.clone());
-        let task = task_repo
-            .create(&epic.id, "Task", "", "", "task", 0, "", Some("open"))
-            .await
-            .unwrap();
+        let task_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                issue_type, priority, owner, status, continuation_count, memory_refs)
+             VALUES (?1, ?2, 'tsst', ?3, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
+        )
+        .bind(&task_id)
+        .bind(&epic.project_id)
+        .bind(&epic.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
 
-        let session_repo = SessionRepository::new(db, events);
+        let session_repo = SessionRepository::new(db, bus);
         let session = session_repo
             .create(
-                &task.project_id,
-                Some(&task.id),
+                &epic.project_id,
+                Some(&task_id),
                 "test-model",
                 "worker",
                 None,
@@ -229,15 +238,15 @@ mod tests {
             .await
             .unwrap();
 
-        (task.project_id, task.id, session.id)
+        (epic.project_id, task_id, session.id)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn round_trip_insert_and_load() {
-        let (db, tx) = make_test_db().await;
-        let (_project_id, task_id, session_id) = create_session(db.clone(),  event_bus_for(&tx)).await;
+        let db = test_db();
+        let (_project_id, task_id, session_id) = create_session(db.clone(), EventBus::noop()).await;
 
-        let repo = SessionMessageRepository::new(db, event_bus_for(&tx));
+        let repo = SessionMessageRepository::new(db, EventBus::noop());
 
         let messages = vec![
             Message::system("You are a helpful assistant."),
@@ -262,11 +271,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn insert_message_emits_event() {
-        let (db, tx) = make_test_db().await;
-        let (_project_id, task_id, session_id) = create_session(db.clone(),  event_bus_for(&tx)).await;
-        let mut rx = tx.subscribe();
+        let db = test_db();
+        let (bus, captured) = capturing_bus();
+        let (_project_id, task_id, session_id) = create_session(db.clone(), bus.clone()).await;
 
-        let repo = SessionMessageRepository::new(db, event_bus_for(&tx));
+        let repo = SessionMessageRepository::new(db, bus);
+
+        captured.lock().unwrap().clear();
 
         repo.insert_message(
             &session_id,
@@ -278,28 +289,20 @@ mod tests {
         .await
         .expect("insert");
 
-        // Drain events looking for the SessionMessageInserted event.
-        let mut found = false;
-        for _ in 0..16 {
-            match rx.try_recv() {
-                Ok(envelope) if envelope.entity_type == "session_message" && envelope.action == "inserted" => {
-                    assert_eq!(envelope.payload["role"].as_str().unwrap(), "user");
-                    found = true;
-                    break;
-                }
-                Ok(_) => continue,
-                Err(_) => break,
-            }
-        }
-        assert!(found, "expected SessionMessageInserted event");
+        let events = captured.lock().unwrap();
+        let found = events.iter().find(|e| {
+            e.entity_type == "session_message" && e.action == "inserted"
+        });
+        assert!(found.is_some(), "expected session_message.inserted event");
+        assert_eq!(found.unwrap().payload["role"].as_str().unwrap(), "user");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_conversation_removes_messages() {
-        let (db, tx) = make_test_db().await;
-        let (_project_id, task_id, session_id) = create_session(db.clone(),  event_bus_for(&tx)).await;
+        let db = test_db();
+        let (_project_id, task_id, session_id) = create_session(db.clone(), EventBus::noop()).await;
 
-        let repo = SessionMessageRepository::new(db, event_bus_for(&tx));
+        let repo = SessionMessageRepository::new(db, EventBus::noop());
 
         let messages = vec![Message::user("one"), Message::assistant("two")];
         repo.insert_messages_batch(&session_id, &task_id, &messages)
