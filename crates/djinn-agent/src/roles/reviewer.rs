@@ -126,3 +126,154 @@ pub(crate) const TASK_REVIEWER_CONFIG: RoleConfig = RoleConfig {
     preserves_session: false,
     is_project_scoped: false,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output_parser::ParsedAgentOutput;
+    use crate::test_helpers;
+
+    fn ac(items: &[bool]) -> String {
+        serde_json::to_string(
+            &items
+                .iter()
+                .map(|met| serde_json::json!({"description": "x", "met": met}))
+                .collect::<Vec<_>>(),
+        )
+        .expect("serialize AC json")
+    }
+
+    async fn set_task_ac(db: &djinn_db::Database, task_id: &str, ac_json: &str) {
+        sqlx::query("UPDATE tasks SET acceptance_criteria = ?1 WHERE id = ?2")
+            .bind(ac_json)
+            .bind(task_id)
+            .execute(db.pool())
+            .await
+            .expect("update AC");
+    }
+
+    async fn set_continuation_count(db: &djinn_db::Database, task_id: &str, count: i64) {
+        sqlx::query("UPDATE tasks SET continuation_count = ?1 WHERE id = ?2")
+            .bind(count)
+            .bind(task_id)
+            .execute(db.pool())
+            .await
+            .expect("update continuation_count");
+    }
+
+    async fn insert_review_snapshot(db: &djinn_db::Database, task_id: &str, ac_json: &str) {
+        let payload = serde_json::json!({"to_status":"in_task_review","ac_snapshot":serde_json::from_str::<serde_json::Value>(ac_json).expect("valid ac json")}).to_string();
+        sqlx::query("INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) VALUES (?1, ?2, 'test', 'system', 'status_changed', ?3)")
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(task_id)
+            .bind(payload)
+            .execute(db.pool())
+            .await
+            .expect("insert snapshot");
+    }
+
+    #[tokio::test]
+    async fn on_complete_unmet_ac_without_snapshot_rejects() {
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(
+            db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        set_task_ac(&ctx.db, &task.id, &ac(&[true, false])).await;
+
+        let role = TaskReviewerRole;
+        let output = ParsedAgentOutput::new(true);
+        let result = role.on_complete(&task.id, &output, &ctx).await;
+
+        assert_eq!(
+            result,
+            Some((
+                TransitionAction::TaskReviewReject,
+                Some("reviewer found unmet acceptance criteria".to_string()),
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn on_complete_unmet_ac_stale_cycle_rejects_stale() {
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(
+            db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let current = ac(&[true, false]);
+        set_task_ac(&ctx.db, &task.id, &current).await;
+        insert_review_snapshot(&ctx.db, &task.id, &current).await;
+        set_continuation_count(&ctx.db, &task.id, 0).await;
+
+        let role = TaskReviewerRole;
+        let output = ParsedAgentOutput::new(true);
+        let result = role.on_complete(&task.id, &output, &ctx).await;
+
+        assert_eq!(
+            result,
+            Some((
+                TransitionAction::TaskReviewRejectStale,
+                Some("reviewer found unmet acceptance criteria".to_string()),
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn on_complete_unmet_ac_stale_cycle_at_threshold_escalates() {
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(
+            db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let current = ac(&[false, false]);
+        set_task_ac(&ctx.db, &task.id, &current).await;
+        insert_review_snapshot(&ctx.db, &task.id, &current).await;
+        set_continuation_count(&ctx.db, &task.id, STALE_ESCALATION_THRESHOLD - 1).await;
+
+        let role = TaskReviewerRole;
+        let output = ParsedAgentOutput::new(true);
+        let result = role.on_complete(&task.id, &output, &ctx).await;
+
+        assert_eq!(
+            result,
+            Some((
+                TransitionAction::Escalate,
+                Some(format!(
+                    "stale reopen limit reached after {} cycles: reviewer found unmet acceptance criteria",
+                    STALE_ESCALATION_THRESHOLD
+                )),
+            )),
+        );
+    }
+
+    #[tokio::test]
+    async fn on_complete_missing_task_releases_review() {
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(
+            db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+
+        let role = TaskReviewerRole;
+        let output = ParsedAgentOutput::new(true);
+        let result = role.on_complete("missing-task-id", &output, &ctx).await;
+
+        assert_eq!(
+            result,
+            Some((
+                TransitionAction::ReleaseTaskReview,
+                Some("task not found during reviewer verdict".to_string()),
+            )),
+        );
+    }
+}
