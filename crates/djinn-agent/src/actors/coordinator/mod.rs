@@ -34,6 +34,17 @@ use djinn_provider::catalog::health::HealthTracker;
 /// detection so it can distinguish live pipelines from orphans after restart.
 pub type VerificationTracker = Arc<std::sync::Mutex<HashSet<String>>>;
 
+pub struct CoordinatorDeps {
+    pub events_tx: broadcast::Sender<DjinnEventEnvelope>,
+    pub cancel: CancellationToken,
+    pub db: Database,
+    pub pool: SlotPoolHandle,
+    pub catalog: CatalogService,
+    pub health: HealthTracker,
+    pub role_registry: Arc<RoleRegistry>,
+    pub verification_tracker: VerificationTracker,
+}
+
 mod dispatch;
 mod health;
 
@@ -202,20 +213,22 @@ struct CoordinatorActor {
 //              catalog, health, paused, dispatched, recovered = 12 ✓ (≤20)
 
 impl CoordinatorActor {
-    #[allow(clippy::too_many_arguments)]
     fn new(
+        deps: CoordinatorDeps,
         receiver: mpsc::Receiver<CoordinatorMessage>,
         self_sender: mpsc::Sender<CoordinatorMessage>,
-        events_tx: broadcast::Sender<DjinnEventEnvelope>,
-        cancel: CancellationToken,
-        db: Database,
-        pool: SlotPoolHandle,
-        catalog: CatalogService,
-        health: HealthTracker,
-        role_registry: Arc<RoleRegistry>,
         status_tx: watch::Sender<SharedCoordinatorState>,
-        verification_tracker: VerificationTracker,
     ) -> Self {
+        let CoordinatorDeps {
+            events_tx,
+            cancel,
+            db,
+            pool,
+            catalog,
+            health,
+            role_registry,
+            verification_tracker,
+        } = deps;
         let events = events_tx.subscribe();
         let mut tick = time::interval(STUCK_INTERVAL);
         tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -638,17 +651,7 @@ pub struct CoordinatorHandle {
 
 impl CoordinatorHandle {
     /// Spawn the `CoordinatorActor` and return a handle to it.
-    #[allow(clippy::too_many_arguments)]
-    pub fn spawn(
-        events_tx: broadcast::Sender<DjinnEventEnvelope>,
-        cancel: CancellationToken,
-        db: Database,
-        pool: SlotPoolHandle,
-        catalog: CatalogService,
-        health: HealthTracker,
-        role_registry: Arc<RoleRegistry>,
-        verification_tracker: VerificationTracker,
-    ) -> Self {
+    pub fn spawn(deps: CoordinatorDeps) -> Self {
         let (sender, receiver) = mpsc::channel(32);
         let initial_state = SharedCoordinatorState {
             paused_projects: HashSet::new(),
@@ -658,19 +661,7 @@ impl CoordinatorHandle {
             recovered: 0,
         };
         let (status_tx, status_rx) = watch::channel(initial_state);
-        let actor = CoordinatorActor::new(
-            receiver,
-            sender.clone(),
-            events_tx,
-            cancel,
-            db,
-            pool,
-            catalog,
-            health,
-            role_registry,
-            status_tx,
-            verification_tracker,
-        );
+        let actor = CoordinatorActor::new(deps, receiver, sender.clone(), status_tx);
         tokio::spawn(actor.run());
         Self { sender, status_rx }
     }
@@ -890,16 +881,16 @@ mod tests {
         let health = HealthTracker::new();
         let verification_tracker = VerificationTracker::default();
         let role_registry = Arc::new(RoleRegistry::new());
-        CoordinatorHandle::spawn(
-            tx.clone(),
+        CoordinatorHandle::spawn(CoordinatorDeps {
+            events_tx: tx.clone(),
             cancel,
-            db.clone(),
+            db: db.clone(),
             pool,
             catalog,
             health,
             role_registry,
             verification_tracker,
-        )
+        })
     }
 
     async fn make_epic(db: &Database, tx: broadcast::Sender<DjinnEventEnvelope>) -> djinn_core::models::Epic {
