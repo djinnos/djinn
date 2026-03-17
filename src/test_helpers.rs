@@ -62,6 +62,27 @@ pub async fn create_test_project(db: &Database) -> Project {
         .expect("failed to create test project")
 }
 
+/// Create a project backed by a real temporary directory on disk.
+/// Returns the project and a `TempDir` guard — the directory is cleaned up when the guard drops.
+pub async fn create_test_project_with_dir(
+    db: &Database,
+) -> (Project, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let repo = ProjectRepository::new(db.clone(), test_events());
+    let path = dir.path().to_string_lossy().to_string();
+    let name = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let project = repo
+        .create(&name, &path)
+        .await
+        .expect("failed to create test project");
+    (project, dir)
+}
+
 pub async fn create_test_epic(db: &Database, project_id: &str) -> Epic {
     let repo = EpicRepository::new(db.clone(), test_events());
     repo.create_for_project(
