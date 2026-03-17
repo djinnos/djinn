@@ -1,4 +1,5 @@
 use super::*;
+use crate::repositories::note::rrf::rrf_fuse;
 
 /// Sanitize a user query into valid FTS5 syntax.
 ///
@@ -26,7 +27,7 @@ fn sanitize_fts5_query(raw: &str) -> Option<String> {
 }
 
 impl NoteRepository {
-    /// Full-text search with BM25 ranking and content snippets.
+    /// Full-text search with FTS candidate generation and RRF-fused ranking.
     ///
     /// `query` is a natural-language search string. It is sanitized into safe
     /// FTS5 syntax before execution.
@@ -49,9 +50,8 @@ impl NoteRepository {
         let note_type = note_type.unwrap_or("");
         let limit = limit as i64;
 
-        let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
-            "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,
-                    snippet(notes_fts, 1, '<b>', '</b>', '...', 32)
+        let candidate_rows = sqlx::query_as::<_, (String, f64)>(
+            "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score
              FROM notes_fts
              JOIN notes n ON notes_fts.rowid = n.rowid
              WHERE notes_fts MATCH ?1
@@ -69,18 +69,74 @@ impl NoteRepository {
         .fetch_all(self.db.pool())
         .await?;
 
-        Ok(rows
+        if candidate_rows.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let candidate_ids: Vec<String> = candidate_rows.iter().map(|(id, _)| id.clone()).collect();
+        let lexical_scores: Vec<(String, f64)> = candidate_rows
             .into_iter()
-            .map(
-                |(id, permalink, title, folder, note_type, snippet)| NoteSearchResult {
-                    id,
-                    permalink,
-                    title,
-                    folder,
-                    note_type,
-                    snippet,
-                },
-            )
+            .map(|(id, bm25_score)| (id, -bm25_score))
+            .collect();
+
+        let temporal_scores = self.temporal_scores(project_id, &candidate_ids).await?;
+        let graph_scores = self.graph_proximity_scores(&candidate_ids, 2).await?;
+        let task_scores = self.task_affinity_scores(project_id, None).await?;
+
+        let signals = vec![
+            (lexical_scores, 60.0),
+            (temporal_scores, 60.0),
+            (graph_scores, 60.0),
+            (task_scores, 60.0),
+        ];
+        let fused = rrf_fuse(&signals, &HashMap::new());
+        let ranked_ids: Vec<String> = fused
+            .into_iter()
+            .filter_map(|(id, _)| candidate_ids.contains(&id).then_some(id))
+            .take(limit as usize)
+            .collect();
+
+        if ranked_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let placeholders = std::iter::repeat_n("?", ranked_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, permalink, title, folder, note_type,
+                    COALESCE(abstract, substr(content, 1, 200)) as abstract_text
+             FROM notes
+             WHERE project_id = ? AND id IN ({})",
+            placeholders
+        );
+        let mut q = sqlx::query_as::<_, (String, String, String, String, String, String)>(&sql)
+            .bind(project_id);
+        for id in &ranked_ids {
+            q = q.bind(id);
+        }
+        let rows = q.fetch_all(self.db.pool()).await?;
+        let by_id: HashMap<String, (String, String, String, String, String)> = rows
+            .into_iter()
+            .map(|(id, permalink, title, folder, note_type, abstract_text)| {
+                (id, (permalink, title, folder, note_type, abstract_text))
+            })
+            .collect();
+
+        Ok(ranked_ids
+            .into_iter()
+            .filter_map(|id| {
+                by_id
+                    .get(&id)
+                    .map(|(permalink, title, folder, note_type, abstract_text)| NoteSearchResult {
+                        id,
+                        permalink: permalink.clone(),
+                        title: title.clone(),
+                        folder: folder.clone(),
+                        note_type: note_type.clone(),
+                        snippet: abstract_text.clone(),
+                    })
+            })
             .collect())
     }
 

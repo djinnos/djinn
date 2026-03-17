@@ -394,6 +394,57 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn search_rrf_prefers_higher_access_count_for_equivalent_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let high = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "sharedterm alpha",
+                "same content",
+                "research",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let low = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "sharedterm beta",
+                "same content",
+                "research",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE notes SET access_count = 10 WHERE id = ?1")
+            .bind(&high.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE notes SET access_count = 0 WHERE id = ?1")
+            .bind(&low.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let results = repo
+            .search(&project.id, "sharedterm", None, None, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, high.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn catalog_generation() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
