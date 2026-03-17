@@ -35,7 +35,7 @@ struct Inner {
     pub db: Database,
     pub cancel: CancellationToken,
     pub events: broadcast::Sender<DjinnEventEnvelope>,
-    pub git_actors: Mutex<HashMap<PathBuf, GitActorHandle>>,
+    pub git_actors: Arc<Mutex<HashMap<PathBuf, GitActorHandle>>>,
     /// models.dev catalog + custom providers (in-memory, refreshed on startup).
     pub catalog: CatalogService,
     /// Per-model circuit-breaker health tracker.
@@ -58,7 +58,7 @@ struct Inner {
     /// (orphaned after server restart) from ones with a live pipeline.
     pub verifying_tasks: crate::actors::coordinator::VerificationTracker,
     /// Per-session file read timestamps used to enforce read-before-edit/write.
-    pub file_time: FileTime,
+    pub file_time: Arc<FileTime>,
     pub lsp: LspManager,
 }
 
@@ -77,7 +77,7 @@ impl AppState {
                 db,
                 cancel,
                 events,
-                git_actors: Mutex::new(HashMap::new()),
+                git_actors: Arc::new(Mutex::new(HashMap::new())),
                 catalog: CatalogService::new(),
                 health_tracker: HealthTracker::new(),
                 role_registry: Arc::new(RoleRegistry::new()),
@@ -86,7 +86,7 @@ impl AppState {
                 pool: Mutex::new(None),
                 sync_user_id,
                 verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
-                file_time: FileTime::new(),
+                file_time: Arc::new(FileTime::new()),
                 lsp: LspManager::new(),
             }),
         }
@@ -159,6 +159,19 @@ impl AppState {
 
     pub fn file_time(&self) -> &FileTime {
         &self.inner.file_time
+    }
+
+    pub fn agent_context(&self) -> crate::agent::context::AgentContext {
+        crate::agent::context::AgentContext {
+            db: self.inner.db.clone(),
+            event_bus: self.event_bus(),
+            git_actors: self.inner.git_actors.clone(),
+            verifying_tasks: self.inner.verifying_tasks.clone(),
+            role_registry: self.inner.role_registry.clone(),
+            health_tracker: self.inner.health_tracker.clone(),
+            file_time: self.inner.file_time.clone(),
+            lsp: self.inner.lsp.clone(),
+        }
     }
 
     pub fn lsp(&self) -> &LspManager {

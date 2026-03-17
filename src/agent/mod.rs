@@ -1,4 +1,5 @@
 pub(crate) mod compaction;
+pub mod context;
 pub mod config;
 pub(crate) mod extension;
 pub mod file_time;
