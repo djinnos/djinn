@@ -1,6 +1,12 @@
 use std::collections::HashMap;
 
-#[cfg_attr(not(test), expect(dead_code, reason = "RRF integration call-sites are added in follow-up task"))]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "RRF integration call-sites are added in follow-up task"
+    )
+)]
 pub fn rrf_fuse(
     signals: &[(Vec<(String, f64)>, f64)],
     confidence_map: &HashMap<String, f64>,
@@ -24,10 +30,8 @@ pub fn rrf_fuse(
         return Vec::new();
     }
 
-    let mut fused_scores: HashMap<String, f64> = all_note_ids
-        .iter()
-        .map(|id| (id.clone(), 0.0))
-        .collect();
+    let mut fused_scores: HashMap<String, f64> =
+        all_note_ids.iter().map(|id| (id.clone(), 0.0)).collect();
 
     for (ranked_list, k) in signals {
         let mut sorted = ranked_list.clone();
@@ -75,7 +79,10 @@ mod tests {
         )];
 
         let fused = rrf_fuse(&signals, &HashMap::new());
-        assert_eq!(fused.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec!["note-a", "note-b", "note-c"]);
+        assert_eq!(
+            fused.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            vec!["note-a", "note-b", "note-c"]
+        );
     }
 
     #[test]
@@ -85,10 +92,7 @@ mod tests {
                 vec![("note-a".to_string(), 2.0), ("note-b".to_string(), 1.0)],
                 60.0,
             ),
-            (
-                vec![("note-b".to_string(), 5.0)],
-                80.0,
-            ),
+            (vec![("note-b".to_string(), 5.0)], 80.0),
         ];
 
         let fused = rrf_fuse(&signals, &HashMap::new());

@@ -50,6 +50,7 @@ mod health;
 
 /// Interval between stuck-detection passes (AGENT-08).
 const STUCK_INTERVAL: Duration = Duration::from_secs(30);
+const STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 /// Cooldown before re-dispatching a task that failed lifecycle setup
 /// (e.g. missing credential).  Prevents hot dispatch loops.
@@ -204,6 +205,7 @@ struct CoordinatorActor {
     backlog_debounce: HashMap<String, Instant>,
     /// Projects with an active groomer session.
     active_groomer_sessions: HashSet<String>,
+    last_stale_sweep: StdInstant,
     // Metrics
     dispatched: u64,
     recovered: u64,
@@ -254,6 +256,7 @@ impl CoordinatorActor {
             verification_tracker,
             backlog_debounce: HashMap::new(),
             active_groomer_sessions: HashSet::new(),
+            last_stale_sweep: StdInstant::now(),
             dispatched: 0,
             recovered: 0,
         }
@@ -312,7 +315,23 @@ impl CoordinatorActor {
                     self.enforce_non_worker_session_timeout().await;
                     self.detect_and_recover_stuck_filtered(None).await;
                     self.ensure_groomer_dispatch(None).await;
-                self.dispatch_ready_tasks(None).await;
+                    self.dispatch_ready_tasks(None).await;
+                    if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
+                        let app_state = crate::context::AgentContext {
+                            db: self.db.clone(),
+                            event_bus: crate::events::event_bus_for(&self.events_tx),
+                            git_actors: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                            verifying_tasks: self.verification_tracker.clone(),
+                            role_registry: self.role_registry.clone(),
+                            health_tracker: self.health.clone(),
+                            file_time: Arc::new(crate::file_time::FileTime::new()),
+                            lsp: crate::lsp::LspManager::new(),
+                            catalog: self.catalog.clone(),
+                            coordinator: Arc::new(tokio::sync::Mutex::new(None)),
+                        };
+                        health::sweep_stale_resources(&self.db, &app_state).await;
+                        self.last_stale_sweep = StdInstant::now();
+                    }
                 }
             }
         }

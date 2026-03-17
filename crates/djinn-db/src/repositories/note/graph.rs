@@ -197,13 +197,12 @@ impl NoteRepository {
 
         let mut scores: HashMap<String, f64> = HashMap::new();
 
-        let task_refs: Option<String> = sqlx::query_scalar(
-            "SELECT memory_refs FROM tasks WHERE id = ?1 AND project_id = ?2",
-        )
-        .bind(task_id)
-        .bind(project_id)
-        .fetch_optional(self.db.pool())
-        .await?;
+        let task_refs: Option<String> =
+            sqlx::query_scalar("SELECT memory_refs FROM tasks WHERE id = ?1 AND project_id = ?2")
+                .bind(task_id)
+                .bind(project_id)
+                .fetch_optional(self.db.pool())
+                .await?;
 
         if let Some(refs_json) = task_refs
             && let Ok(note_ids) = serde_json::from_str::<Vec<String>>(&refs_json)
@@ -269,5 +268,4 @@ impl NoteRepository {
 
         Ok(ranked)
     }
-
 }
