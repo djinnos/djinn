@@ -6,7 +6,9 @@ pub use djinn_core::events::EventBus;
 /// this helper when constructing repositories that need an `EventBus`.
 pub fn event_bus_for(tx: &tokio::sync::broadcast::Sender<DjinnEventEnvelope>) -> EventBus {
     let tx = tx.clone();
-    EventBus::new(move |event| { let _ = tx.send(event); })
+    EventBus::new(move |event| {
+        let _ = tx.send(event);
+    })
 }
 
 #[cfg(test)]
@@ -23,7 +25,8 @@ mod tests {
             name: "clippy".into(),
             command: "cargo clippy".into(),
         };
-        let envelope = DjinnEventEnvelope::verification_step("p1", Some("t1"), "verification", &step);
+        let envelope =
+            DjinnEventEnvelope::verification_step("p1", Some("t1"), "verification", &step);
 
         assert_eq!(envelope.entity_type(), "verification");
         assert_eq!(envelope.action(), "step");

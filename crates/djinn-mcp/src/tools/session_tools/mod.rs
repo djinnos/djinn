@@ -1,12 +1,12 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
+use crate::server::DjinnMcpServer;
+use djinn_core::models::SessionRecord;
 use djinn_db::ActivityQuery;
 use djinn_db::SessionMessageRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
-use djinn_core::models::SessionRecord;
-use crate::server::DjinnMcpServer;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct SessionListParams {
@@ -358,8 +358,7 @@ impl DjinnMcpServer {
             Err(e) => return err(e),
         };
 
-        let session_repo =
-            SessionRepository::new(self.state.db().clone(), self.state.event_bus());
+        let session_repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let session = match session_repo.get_in_project(&project_id, &p.id).await {
             Ok(Some(s)) => s,
             Ok(None) => return err(format!("session not found: {}", p.id)),
@@ -444,8 +443,7 @@ impl DjinnMcpServer {
             Err(e) => return err(e.to_string()),
         };
 
-        let session_repo =
-            SessionRepository::new(self.state.db().clone(), self.state.event_bus());
+        let session_repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let msg_repo =
             SessionMessageRepository::new(self.state.db().clone(), self.state.event_bus());
 

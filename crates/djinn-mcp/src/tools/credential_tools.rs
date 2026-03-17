@@ -2,8 +2,8 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use djinn_provider::repos::CredentialRepository;
 use crate::server::DjinnMcpServer;
+use djinn_provider::repos::CredentialRepository;
 
 // ── credential_set ────────────────────────────────────────────────────────────
 

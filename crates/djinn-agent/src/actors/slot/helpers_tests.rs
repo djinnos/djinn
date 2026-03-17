@@ -27,11 +27,26 @@ fn parse_merge_validation_metadata_patterns() {
 fn provider_helpers_cover_branches() {
     use crate::provider::{AuthMethod, FormatFamily};
 
-    assert_eq!(format_family_for_provider("anthropic", "claude-3"), FormatFamily::Anthropic);
-    assert_eq!(format_family_for_provider("google", "gemini-2.0"), FormatFamily::Google);
-    assert_eq!(format_family_for_provider("vertex-ai", "gemini-2.0"), FormatFamily::Google);
-    assert_eq!(format_family_for_provider("foo", "codex-mini"), FormatFamily::OpenAIResponses);
-    assert_eq!(format_family_for_provider("openai", "gpt-4o"), FormatFamily::OpenAI);
+    assert_eq!(
+        format_family_for_provider("anthropic", "claude-3"),
+        FormatFamily::Anthropic
+    );
+    assert_eq!(
+        format_family_for_provider("google", "gemini-2.0"),
+        FormatFamily::Google
+    );
+    assert_eq!(
+        format_family_for_provider("vertex-ai", "gemini-2.0"),
+        FormatFamily::Google
+    );
+    assert_eq!(
+        format_family_for_provider("foo", "codex-mini"),
+        FormatFamily::OpenAIResponses
+    );
+    assert_eq!(
+        format_family_for_provider("openai", "gpt-4o"),
+        FormatFamily::OpenAI
+    );
 
     let anthropic = capabilities_for_provider("anthropic");
     assert!(anthropic.streaming);
@@ -47,7 +62,10 @@ fn provider_helpers_cover_branches() {
     let default_caps = capabilities_for_provider("openai");
     let expected_default = crate::provider::ProviderCapabilities::default();
     assert_eq!(default_caps.streaming, expected_default.streaming);
-    assert_eq!(default_caps.max_tokens_default, expected_default.max_tokens_default);
+    assert_eq!(
+        default_caps.max_tokens_default,
+        expected_default.max_tokens_default
+    );
 
     match auth_method_for_provider("anthropic", "k") {
         AuthMethod::ApiKeyHeader { header, key } => {
@@ -56,10 +74,15 @@ fn provider_helpers_cover_branches() {
         }
         _ => panic!("expected api key header"),
     }
-    assert!(matches!(auth_method_for_provider("openai", "k"), AuthMethod::BearerToken(v) if v == "k"));
+    assert!(
+        matches!(auth_method_for_provider("openai", "k"), AuthMethod::BearerToken(v) if v == "k")
+    );
 
     assert_eq!(default_base_url("anthropic"), "https://api.anthropic.com");
-    assert_eq!(default_base_url("google"), "https://generativelanguage.googleapis.com");
+    assert_eq!(
+        default_base_url("google"),
+        "https://generativelanguage.googleapis.com"
+    );
     assert_eq!(default_base_url("other"), "https://api.openai.com");
 }
 
@@ -103,12 +126,24 @@ async fn recent_feedback_filters_orders_and_limits() {
     let task = create_test_task(&db, &project.id, &epic.id).await;
     let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
 
-    repo.log_activity(Some(&task.id), "w1", "worker", "comment", r#"{"body":"ignore worker"}"#)
-        .await
-        .unwrap();
-    repo.log_activity(Some(&task.id), "pm1", "pm", "comment", r#"{"body":"pm note"}"#)
-        .await
-        .unwrap();
+    repo.log_activity(
+        Some(&task.id),
+        "w1",
+        "worker",
+        "comment",
+        r#"{"body":"ignore worker"}"#,
+    )
+    .await
+    .unwrap();
+    repo.log_activity(
+        Some(&task.id),
+        "pm1",
+        "pm",
+        "comment",
+        r#"{"body":"pm note"}"#,
+    )
+    .await
+    .unwrap();
     repo.log_activity(
         Some(&task.id),
         "r1",

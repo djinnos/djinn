@@ -29,9 +29,7 @@ use crate::tools::session_tools::{
     SessionActiveParams, SessionListParams, SessionMessagesParams, SessionShowParams,
     TaskTimelineParams,
 };
-use crate::tools::settings_tools::{
-    SettingsGetParams, SettingsResetParams, SettingsSetParams,
-};
+use crate::tools::settings_tools::{SettingsGetParams, SettingsResetParams, SettingsSetParams};
 use crate::tools::sync_tools::{
     TaskSyncDisableParams, TaskSyncEnableParams, TaskSyncExportParams, TaskSyncImportParams,
     TaskSyncStatusParams,
@@ -188,7 +186,7 @@ impl DjinnMcpServer {
                 self.project_settings_validate(Parameters(decode_args::<
                     ProjectSettingsValidateParams,
                 >(name, args)?))
-                .await,
+                    .await,
             ),
             "model_health" => map_json(
                 name,

@@ -4,9 +4,9 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::server::DjinnMcpServer;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
-use crate::server::DjinnMcpServer;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ExecutionStartParams {
@@ -512,8 +512,7 @@ impl DjinnMcpServer {
             .collect::<HashMap<_, _>>();
         let max_sessions: u32 = pool_status.per_model.values().map(|c| c.total).sum();
 
-        let session_repo =
-            SessionRepository::new(self.state.db().clone(), self.state.event_bus());
+        let session_repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let mut sessions = Vec::new();
         for running in pool_status.running_tasks {
             let db_session = session_repo
@@ -688,8 +687,7 @@ impl DjinnMcpServer {
             }
         };
 
-        let session_repo =
-            SessionRepository::new(self.state.db().clone(), self.state.event_bus());
+        let session_repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let db_session = session_repo.active_for_task(&task.id).await.ok().flatten();
 
         match running {

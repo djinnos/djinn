@@ -414,8 +414,7 @@ impl EpicRepository {
     /// Generate a unique 4-char base36 short ID for the epics table.
     async fn generate_short_id(&self, seed_id: &str) -> Result<String> {
         self.db.ensure_initialized().await?;
-        let seed = uuid::Uuid::parse_str(seed_id)
-            .map_err(|e| Error::InvalidData(e.to_string()))?;
+        let seed = uuid::Uuid::parse_str(seed_id).map_err(|e| Error::InvalidData(e.to_string()))?;
         let candidate = short_id_from_uuid(&seed);
         if !short_id_exists(self.db.pool(), "epics", &candidate).await? {
             return Ok(candidate);
@@ -578,7 +577,9 @@ mod tests {
         let (bus, captured) = capturing_bus();
         let repo = EpicRepository::new(test_db(), bus);
 
-        repo.create("Event Epic", "", "", "", "", None).await.unwrap();
+        repo.create("Event Epic", "", "", "", "", None)
+            .await
+            .unwrap();
 
         let events = captured.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -597,7 +598,17 @@ mod tests {
         captured.lock().unwrap().clear();
 
         let updated = repo
-            .update(&epic.id, EpicUpdateInput { title: "New", description: "desc", emoji: "🎯", color: "#fff", owner: "", memory_refs: None })
+            .update(
+                &epic.id,
+                EpicUpdateInput {
+                    title: "New",
+                    description: "desc",
+                    emoji: "🎯",
+                    color: "#fff",
+                    owner: "",
+                    memory_refs: None,
+                },
+            )
             .await
             .unwrap();
         assert_eq!(updated.title, "New");
@@ -615,7 +626,10 @@ mod tests {
         let (bus, captured) = capturing_bus();
         let repo = EpicRepository::new(test_db(), bus);
 
-        let epic = repo.create("Closeable", "", "", "", "", None).await.unwrap();
+        let epic = repo
+            .create("Closeable", "", "", "", "", None)
+            .await
+            .unwrap();
         captured.lock().unwrap().clear();
 
         let closed = repo.close(&epic.id).await.unwrap();
@@ -659,7 +673,10 @@ mod tests {
         let (bus, captured) = capturing_bus();
         let repo = EpicRepository::new(test_db(), bus);
 
-        let epic = repo.create("Delete me", "", "", "", "", None).await.unwrap();
+        let epic = repo
+            .create("Delete me", "", "", "", "", None)
+            .await
+            .unwrap();
         captured.lock().unwrap().clear();
 
         repo.delete(&epic.id).await.unwrap();

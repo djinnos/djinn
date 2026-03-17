@@ -7,8 +7,8 @@
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::GitSettings;
 
-use crate::database::Database;
 use crate::Result;
+use crate::database::Database;
 
 pub struct GitSettingsRepository {
     db: Database,
@@ -73,7 +73,9 @@ impl GitSettingsRepository {
         .await?;
         self.events.send(DjinnEventEnvelope::git_settings_updated(
             project_id,
-            &GitSettings { target_branch: branch.to_owned() },
+            &GitSettings {
+                target_branch: branch.to_owned(),
+            },
         ));
         Ok(())
     }
@@ -93,7 +95,9 @@ impl GitSettingsRepository {
         .await?;
         self.events.send(DjinnEventEnvelope::git_settings_updated(
             "global",
-            &GitSettings { target_branch: branch.to_owned() },
+            &GitSettings {
+                target_branch: branch.to_owned(),
+            },
         ));
         Ok(())
     }

@@ -1,8 +1,8 @@
 use uuid::Uuid;
 
-use djinn_db::crypto;
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Credential;
+use djinn_db::crypto;
 use djinn_db::{Database, Result};
 
 pub struct CredentialRepository {
@@ -64,12 +64,10 @@ impl CredentialRepository {
         .await?;
 
         if is_new {
-            self
-                .events
+            self.events
                 .send(DjinnEventEnvelope::credential_created(&cred));
         } else {
-            self
-                .events
+            self.events
                 .send(DjinnEventEnvelope::credential_updated(&cred));
         }
 
@@ -105,7 +103,8 @@ impl CredentialRepository {
         }
 
         if let Some(id) = deleted_id {
-            self.events.send(DjinnEventEnvelope::credential_deleted(&id));
+            self.events
+                .send(DjinnEventEnvelope::credential_deleted(&id));
             Ok(true)
         } else {
             Ok(false)
@@ -132,7 +131,8 @@ impl CredentialRepository {
             .await?;
 
         for id in ids {
-            self.events.send(DjinnEventEnvelope::credential_deleted(&id));
+            self.events
+                .send(DjinnEventEnvelope::credential_deleted(&id));
         }
 
         Ok(result.rows_affected())

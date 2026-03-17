@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use djinn_db::SettingsRepository;
 use crate::server::DjinnMcpServer;
 use djinn_core::models::DjinnSettings;
+use djinn_db::SettingsRepository;
 
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 

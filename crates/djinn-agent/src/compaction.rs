@@ -8,10 +8,10 @@
 
 use futures::StreamExt;
 
+use crate::context::AgentContext;
 use crate::message::{Conversation, Message, Role};
 use crate::provider::{LlmProvider, StreamEvent};
 use djinn_db::SessionMessageRepository;
-use crate::context::AgentContext;
 
 // ─── Threshold ────────────────────────────────────────────────────────────────
 

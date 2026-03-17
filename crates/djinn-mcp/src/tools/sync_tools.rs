@@ -3,8 +3,8 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::server::DjinnMcpServer;
 use crate::bridge::{ChannelStatus, SyncResult};
+use crate::server::DjinnMcpServer;
 
 // ── Param structs ─────────────────────────────────────────────────────────────
 
@@ -338,4 +338,3 @@ impl DjinnMcpServer {
         })
     }
 }
-

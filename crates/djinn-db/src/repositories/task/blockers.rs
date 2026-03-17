@@ -52,11 +52,13 @@ impl TaskRepository {
         tx.commit().await?;
 
         if let Some(task) = self.get(task_id).await? {
-            self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+            self.events
+                .send(DjinnEventEnvelope::task_updated(&task, false));
         }
 
         if let Some(task) = self.get(blocking_id).await? {
-            self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+            self.events
+                .send(DjinnEventEnvelope::task_updated(&task, false));
         }
 
         Ok(())
@@ -71,11 +73,13 @@ impl TaskRepository {
             .await?;
 
         if let Some(task) = self.get(task_id).await? {
-            self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+            self.events
+                .send(DjinnEventEnvelope::task_updated(&task, false));
         }
 
         if let Some(task) = self.get(blocking_id).await? {
-            self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+            self.events
+                .send(DjinnEventEnvelope::task_updated(&task, false));
         }
 
         Ok(())
@@ -155,7 +159,8 @@ impl TaskRepository {
         }
         for id in &notified {
             if let Some(task) = self.get(id).await? {
-                self.events.send(DjinnEventEnvelope::task_updated(&task, false));
+                self.events
+                    .send(DjinnEventEnvelope::task_updated(&task, false));
             }
         }
 
@@ -219,7 +224,8 @@ impl TaskRepository {
         .await?;
 
         for t in unblocked {
-            self.events.send(DjinnEventEnvelope::task_updated(&t, false));
+            self.events
+                .send(DjinnEventEnvelope::task_updated(&t, false));
         }
         Ok(())
     }

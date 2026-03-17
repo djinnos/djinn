@@ -1,8 +1,8 @@
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Setting;
 
-use crate::database::Database;
 use crate::Result;
+use crate::database::Database;
 
 pub struct SettingsRepository {
     db: Database,

@@ -66,7 +66,9 @@ pub fn encrypt(plaintext: &str) -> Result<Vec<u8>> {
 /// Decrypt a blob produced by [`encrypt`].
 pub fn decrypt(blob: &[u8]) -> Result<String> {
     if blob.len() < NONCE_LEN {
-        return Err(Error::InvalidData("invalid encrypted blob: too short".into()));
+        return Err(Error::InvalidData(
+            "invalid encrypted blob: too short".into(),
+        ));
     }
 
     let key = build_key();

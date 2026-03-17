@@ -239,7 +239,13 @@ pub(crate) mod stubs {
     #[async_trait]
     impl GitOps for StubGitOps {
         async fn git_actor(&self, _: &Path) -> Result<GitActorHandle, GitError> {
-            Err(GitError::CommandFailed { code: 1, command: "rev-parse".into(), cwd: ".".into(), stdout: String::new(), stderr: "no repository found".into() })
+            Err(GitError::CommandFailed {
+                code: 1,
+                command: "rev-parse".into(),
+                cwd: ".".into(),
+                stdout: String::new(),
+                stderr: "no repository found".into(),
+            })
         }
     }
 

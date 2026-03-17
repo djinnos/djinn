@@ -1,17 +1,15 @@
-use crate::compaction::{GENERIC_PROMPT, SUMMARISER_SYSTEM_GENERIC};
+use crate::context::AgentContext;
 use crate::extension;
 use crate::output_parser::ParsedAgentOutput;
 use crate::prompts::TaskContext;
-use djinn_db::TaskRepository;
 use djinn_core::models::{Task, TransitionAction};
-use crate::context::AgentContext;
+use djinn_db::TaskRepository;
 use futures::future::BoxFuture;
 
-use super::{AgentRole, CompactionPrompts, RoleConfig};
+use super::{AgentRole, RoleConfig};
 
 pub(crate) struct PmRole;
 
-#[allow(dead_code)]
 impl AgentRole for PmRole {
     fn config(&self) -> &RoleConfig {
         &PM_CONFIG
@@ -66,12 +64,6 @@ pub(crate) const PM_CONFIG: RoleConfig = RoleConfig {
     },
     release_action: || TransitionAction::PmInterventionRelease,
     initial_message: crate::prompts::PM_TEMPLATE,
-    compaction: CompactionPrompts {
-        mid_session: GENERIC_PROMPT,
-        mid_session_system: SUMMARISER_SYSTEM_GENERIC,
-        pre_resume: GENERIC_PROMPT,
-        pre_resume_system: SUMMARISER_SYSTEM_GENERIC,
-    },
     preserves_session: false,
     is_project_scoped: false,
 };

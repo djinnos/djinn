@@ -2,8 +2,8 @@ use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::message::{Conversation, Message, Role};
 use djinn_core::models::SessionMessage;
 
-use crate::database::Database;
 use crate::Result;
+use crate::database::Database;
 
 pub struct SessionMessageRepository {
     db: Database,
@@ -290,9 +290,9 @@ mod tests {
         .expect("insert");
 
         let events = captured.lock().unwrap();
-        let found = events.iter().find(|e| {
-            e.entity_type == "session_message" && e.action == "inserted"
-        });
+        let found = events
+            .iter()
+            .find(|e| e.entity_type == "session_message" && e.action == "inserted");
         assert!(found.is_some(), "expected session_message.inserted event");
         assert_eq!(found.unwrap().payload["role"].as_str().unwrap(), "user");
     }

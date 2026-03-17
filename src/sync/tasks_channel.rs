@@ -271,7 +271,8 @@ pub async fn import(
     events: &broadcast::Sender<DjinnEventEnvelope>,
 ) -> Result<usize> {
     // Two-phase pull (SYNC-08): cheap SHA check before expensive fetch.
-    let settings = djinn_db::SettingsRepository::new(db.clone(), crate::events::event_bus_for(events));
+    let settings =
+        djinn_db::SettingsRepository::new(db.clone(), crate::events::event_bus_for(events));
     let sha_key = sha_settings_key(project_id);
     let remote_sha = ls_remote_sha(project).await;
     if let Some(ref sha) = remote_sha {
@@ -432,11 +433,11 @@ pub async fn delete_remote_branch(project: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::broadcast;
-    use djinn_db::EpicRepository;
-    use djinn_db::TaskRepository;
     use crate::events::event_bus_for;
     use djinn_core::models::TransitionAction;
+    use djinn_db::EpicRepository;
+    use djinn_db::TaskRepository;
+    use tokio::sync::broadcast;
 
     /// Create a temp dir with a git repo + bare "origin" remote.
     /// Returns (project_path, _temp_dir_guard).

@@ -1,8 +1,8 @@
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Project;
 
-use crate::database::Database;
 use crate::Result;
+use crate::database::Database;
 
 #[derive(Clone, Debug, serde::Serialize, sqlx::FromRow)]
 pub struct ProjectConfig {
@@ -139,7 +139,8 @@ impl ProjectRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        self.events.send(DjinnEventEnvelope::project_created(&project));
+        self.events
+            .send(DjinnEventEnvelope::project_created(&project));
         Ok(project)
     }
 
@@ -158,7 +159,8 @@ impl ProjectRepository {
         .fetch_one(self.db.pool())
         .await?;
 
-        self.events.send(DjinnEventEnvelope::project_updated(&project));
+        self.events
+            .send(DjinnEventEnvelope::project_updated(&project));
         Ok(project)
     }
 
@@ -217,7 +219,8 @@ impl ProjectRepository {
         let Some(config) = self.get_config(id).await? else {
             return Ok(None);
         };
-        self.events.send(DjinnEventEnvelope::project_config_updated(id, &config));
+        self.events
+            .send(DjinnEventEnvelope::project_config_updated(id, &config));
         Ok(Some(config))
     }
 

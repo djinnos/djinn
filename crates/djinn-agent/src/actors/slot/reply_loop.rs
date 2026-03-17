@@ -3,13 +3,13 @@ use std::path::Path;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::context::AgentContext;
 use crate::extension;
 use crate::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use crate::output_parser::ParsedAgentOutput;
 use crate::provider::telemetry;
 use crate::provider::{LlmProvider, StreamEvent};
 use djinn_core::events::DjinnEventEnvelope;
-use crate::context::AgentContext;
 
 use super::*;
 
@@ -924,7 +924,9 @@ mod tests {
                 events.push(Ok(StreamEvent::Done));
 
                 Ok(Box::pin(stream::iter(events))
-                    as Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>)
+                    as Pin<
+                        Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                    >)
             })
         }
     }
@@ -965,10 +967,7 @@ mod tests {
         app_state: &crate::context::AgentContext,
         session_id: &str,
     ) -> usize {
-        let repo = SessionMessageRepository::new(
-            app_state.db.clone(),
-            app_state.event_bus.clone(),
-        );
+        let repo = SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         repo.load_conversation(session_id)
             .await
             .map(|c| c.messages.len())
@@ -1026,7 +1025,11 @@ mod tests {
         assert!(result.is_ok(), "expected ok, got: {:?}", result);
 
         // All 3 mock responses were consumed.
-        assert_eq!(provider.remaining(), 0, "all mock responses should be consumed");
+        assert_eq!(
+            provider.remaining(),
+            0,
+            "all mock responses should be consumed"
+        );
 
         // Messages were persisted to DB before compaction.
         let persisted = count_persisted_messages(&app_state, &session_id).await;
@@ -1103,7 +1106,11 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "expected ok, got: {:?}", result);
-        assert_eq!(provider.remaining(), 0, "all 3 mock responses should be consumed");
+        assert_eq!(
+            provider.remaining(),
+            0,
+            "all 3 mock responses should be consumed"
+        );
 
         // No compaction should have fired: DB has NO persisted session messages.
         let persisted = count_persisted_messages(&app_state, &session_id).await;
@@ -1165,9 +1172,7 @@ mod tests {
                 };
                 if turn == 2 {
                     // Simulate a context-length-exceeded error on stream init.
-                    Box::pin(async move {
-                        Err(anyhow::anyhow!("context_length exceeded"))
-                    })
+                    Box::pin(async move { Err(anyhow::anyhow!("context_length exceeded")) })
                 } else {
                     inner.stream(conversation, tools)
                 }
@@ -1215,7 +1220,11 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok(), "expected ok after reactive compaction, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected ok after reactive compaction, got: {:?}",
+            result
+        );
 
         // Compaction fired → messages persisted.
         let persisted = count_persisted_messages(&app_state, &session_id).await;

@@ -5,11 +5,6 @@ use std::collections::HashMap;
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use djinn_db::EpicRepository;
-use djinn_db::SessionRepository;
-use djinn_db::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository};
-use djinn_core::models::SessionStatus;
-use djinn_core::models::{Task, TaskStatus, TransitionAction};
 use crate::server::DjinnMcpServer;
 use crate::tools::AnyJson;
 use crate::tools::validation::{
@@ -18,6 +13,11 @@ use crate::tools::validation::{
     validate_offset, validate_owner, validate_priority, validate_reason, validate_sort,
     validate_task_create_status, validate_title,
 };
+use djinn_core::models::SessionStatus;
+use djinn_core::models::{Task, TaskStatus, TransitionAction};
+use djinn_db::EpicRepository;
+use djinn_db::SessionRepository;
+use djinn_db::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository};
 
 mod board;
 mod types;
@@ -83,8 +83,7 @@ impl DjinnMcpServer {
 
         // Resolve parent epic (optional).
         let epic_id = if let Some(epic_ref) = p.epic_id.as_deref() {
-            let epic_repo =
-                EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+            let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
             let Some(epic) = epic_repo
                 .resolve_in_project(&project_id, epic_ref)
                 .await
@@ -174,11 +173,10 @@ impl DjinnMcpServer {
         if let Some(ref blockers) = p.blocked_by {
             let mut blocker_ids = Vec::new();
             for blocker_ref in blockers {
-                let blocking_id =
-                    match self.resolve_task_not_epic(&project_id, blocker_ref).await {
-                        Ok(id) => id,
-                        Err(e) => return Json(ErrorOr::Error(e)),
-                    };
+                let blocking_id = match self.resolve_task_not_epic(&project_id, blocker_ref).await {
+                    Ok(id) => id,
+                    Err(e) => return Json(ErrorOr::Error(e)),
+                };
                 blocker_ids.push(blocking_id);
             }
             if !blocker_ids.is_empty()
@@ -255,8 +253,7 @@ impl DjinnMcpServer {
 
         // Resolve new parent epic if provided.
         let epic_id: Option<String> = if let Some(ref par) = p.epic_id {
-            let epic_repo =
-                EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+            let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
             let Some(epic) = epic_repo
                 .resolve_in_project(&project_id, par)
                 .await
@@ -398,8 +395,7 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<TaskShowParams>,
     ) -> Json<ErrorOr<TaskShowResponse>> {
         let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
-        let session_repo =
-            SessionRepository::new(self.state.db().clone(), self.state.event_bus());
+        let session_repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let task_result = if let Some(project) = &p.project {
             let project_id = match self.require_project_id(project).await {
                 Ok(id) => id,
@@ -519,8 +515,7 @@ impl DjinnMcpServer {
         };
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
-        let session_repo =
-            SessionRepository::new(self.state.db().clone(), self.state.event_bus());
+        let session_repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo.list_filtered(query).await {
             Ok(result) => {
                 // Batch-fetch active sessions and session counts for the project
@@ -1054,10 +1049,9 @@ impl DjinnMcpServer {
             return Ok(task.id);
         }
         // Not found in tasks — check if it's an epic to give a clearer error.
-        if let Ok(Some(_)) =
-            EpicRepository::new(self.state.db().clone(), self.state.event_bus())
-                .resolve_in_project(project_id, id)
-                .await
+        if let Ok(Some(_)) = EpicRepository::new(self.state.db().clone(), self.state.event_bus())
+            .resolve_in_project(project_id, id)
+            .await
         {
             return Err(ErrorResponse::new(format!(
                 "epics cannot participate in blocker relationships: {id}"

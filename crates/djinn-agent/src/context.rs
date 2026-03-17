@@ -9,8 +9,8 @@ use crate::actors::coordinator::{CoordinatorHandle, VerificationTracker};
 use crate::file_time::FileTime;
 use crate::lsp::LspManager;
 use crate::roles::RoleRegistry;
-use djinn_db::Database;
 use djinn_core::events::EventBus;
+use djinn_db::Database;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
 /// Subset of application state required by agent lifecycle, coordinator, and

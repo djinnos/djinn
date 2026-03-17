@@ -12,10 +12,8 @@ pub use state::AppState;
 
 /// Build the application router.
 pub fn router(state: AppState) -> Router {
-    let mcp_service = djinn_mcp::server::DjinnMcpServer::into_service(
-        state.mcp_state(),
-        state.cancel().clone(),
-    );
+    let mcp_service =
+        djinn_mcp::server::DjinnMcpServer::into_service(state.mcp_state(), state.cancel().clone());
 
     let mcp_router = Router::new().fallback_service(mcp_service);
 
@@ -81,10 +79,10 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
 
-    use djinn_provider::repos::CredentialRepository;
-    use djinn_core::models::DjinnSettings;
     use crate::server::{self, AppState};
     use crate::test_helpers;
+    use djinn_core::models::DjinnSettings;
+    use djinn_provider::repos::CredentialRepository;
     use tokio_util::sync::CancellationToken;
 
     const CONTRACT_PROJECT_PATH: &str = "/home/fernando/git/djinnos/server";

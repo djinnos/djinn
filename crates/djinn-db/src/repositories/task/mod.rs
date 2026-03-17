@@ -218,13 +218,16 @@ pub(super) async fn short_id_exists(
 
 /// Reopen a closed epic when a task is added to it or moved to it.
 /// Inlined from EpicRepository::reopen to avoid a circular dependency.
-pub(super) async fn maybe_reopen_epic(db: &Database, events: &EventBus, epic_id: &str) -> Result<()> {
-    let closed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM epics WHERE id = ?1 AND status = 'closed'",
-    )
-    .bind(epic_id)
-    .fetch_one(db.pool())
-    .await?;
+pub(super) async fn maybe_reopen_epic(
+    db: &Database,
+    events: &EventBus,
+    epic_id: &str,
+) -> Result<()> {
+    let closed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM epics WHERE id = ?1 AND status = 'closed'")
+            .bind(epic_id)
+            .fetch_one(db.pool())
+            .await?;
 
     if closed == 0 {
         return Ok(());

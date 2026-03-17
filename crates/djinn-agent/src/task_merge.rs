@@ -1,11 +1,11 @@
+use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::future::Future;
 
-use djinn_git::GitError;
-use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
-use djinn_core::models::{SessionStatus, TransitionAction};
 use crate::context::AgentContext;
+use djinn_core::models::{SessionStatus, TransitionAction};
+use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
+use djinn_git::GitError;
 
 const MERGE_CONFLICT_PREFIX: &str = "merge_conflict:";
 const MERGE_VALIDATION_PREFIX: &str = "merge_validation_failed:";
@@ -72,7 +72,13 @@ pub(crate) async fn merge_after_task_review(
     app_state: &AgentContext,
     verification_gate: Option<VerificationGateFn>,
 ) -> Option<(TransitionAction, Option<String>)> {
-    merge_and_transition(task_id, app_state, &REVIEWER_MERGE_ACTIONS, verification_gate).await
+    merge_and_transition(
+        task_id,
+        app_state,
+        &REVIEWER_MERGE_ACTIONS,
+        verification_gate,
+    )
+    .await
 }
 
 pub(crate) async fn merge_and_transition(

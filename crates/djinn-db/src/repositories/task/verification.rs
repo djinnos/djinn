@@ -1,8 +1,5 @@
-// These helpers are defined as infrastructure for callers that provide a
-// VerificationRunner implementation.  They are not yet wired into the main
-// execution path, so suppress dead_code until they are consumed.
-#![allow(dead_code)]
-
+// TODO: wire VerificationRunner path into main task execution flow, then remove this expect.
+#![expect(dead_code, reason = "verification runner infrastructure not yet connected to production execution path")]
 use std::path::Path;
 
 use djinn_core::commands::{CommandResult, CommandSpec, VerificationRunner};

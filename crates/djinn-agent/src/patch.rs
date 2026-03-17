@@ -33,17 +33,9 @@ pub(crate) struct Patch {
 /// A single file operation within a patch.
 #[derive(Debug)]
 pub(crate) enum FileOp {
-    Update {
-        path: String,
-        chunks: Vec<Chunk>,
-    },
-    Add {
-        path: String,
-        content: String,
-    },
-    Delete {
-        path: String,
-    },
+    Update { path: String, chunks: Vec<Chunk> },
+    Add { path: String, content: String },
+    Delete { path: String },
 }
 
 impl FileOp {
@@ -295,7 +287,11 @@ pub(crate) async fn apply_patch(
 
 fn resolve_op_path(raw: &str, worktree: &Path) -> PathBuf {
     let p = Path::new(raw);
-    if p.is_absolute() { p.to_path_buf() } else { worktree.join(p) }
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        worktree.join(p)
+    }
 }
 
 /// Apply all chunks to the file content, returning the modified content.
@@ -369,11 +365,7 @@ fn try_match_line(
 ///   4. Unicode-normalized + trimmed match
 ///
 /// Falls back to the first context/remove line if the anchor fails.
-fn find_chunk_position(
-    lines: &[String],
-    chunk: &Chunk,
-    file_path: &str,
-) -> Result<usize, String> {
+fn find_chunk_position(lines: &[String], chunk: &Chunk, file_path: &str) -> Result<usize, String> {
     let anchor = &chunk.context_anchor;
 
     if !anchor.is_empty() {

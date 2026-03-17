@@ -43,7 +43,9 @@ impl From<sqlx::Error> for DbError {
 }
 
 impl From<serde_json::Error> for DbError {
-    fn from(value: serde_json::Error) -> Self { Self::Json(value) }
+    fn from(value: serde_json::Error) -> Self {
+        Self::Json(value)
+    }
 }
 
 impl From<djinn_core::error::Error> for DbError {

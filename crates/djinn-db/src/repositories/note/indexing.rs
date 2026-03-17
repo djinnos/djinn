@@ -211,7 +211,10 @@ fn scan_note_tree(
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
-            return Err(Error::InvalidData(format!("read_dir {}: {e}", dir.display())));
+            return Err(Error::InvalidData(format!(
+                "read_dir {}: {e}",
+                dir.display()
+            )));
         }
     };
 

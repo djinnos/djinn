@@ -18,14 +18,14 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{self, Instant, Interval};
 use tokio_util::sync::CancellationToken;
 
-use djinn_git::GitActorHandle;
 use crate::actors::slot::{PoolError, SlotPoolHandle};
 use crate::roles::RoleRegistry;
+use djinn_core::events::DjinnEventEnvelope;
+use djinn_db::Database;
 use djinn_db::GitSettingsRepository;
 use djinn_db::ProjectRepository;
-use djinn_db::Database;
 use djinn_db::{ReadyQuery, TaskRepository};
-use djinn_core::events::DjinnEventEnvelope;
+use djinn_git::GitActorHandle;
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
 
@@ -178,7 +178,6 @@ struct CoordinatorActor {
     db: Database,
     events_tx: broadcast::Sender<DjinnEventEnvelope>,
     pool: SlotPoolHandle,
-    #[cfg_attr(test, allow(dead_code))]
     catalog: CatalogService,
     health: HealthTracker,
     role_registry: Arc<RoleRegistry>,
@@ -265,7 +264,10 @@ impl CoordinatorActor {
         // Always start with execution paused for all projects.
         #[cfg(not(test))]
         {
-            let repo = djinn_db::ProjectRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
+            let repo = djinn_db::ProjectRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            );
             if let Ok(projects) = repo.list().await {
                 for p in projects {
                     self.paused_projects.insert(p.id);
@@ -349,8 +351,10 @@ impl CoordinatorActor {
                 reason,
             } => {
                 // Global pause = pause every known project individually.
-                let repo =
-                    djinn_db::ProjectRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
+                let repo = djinn_db::ProjectRepository::new(
+                    self.db.clone(),
+                    crate::events::event_bus_for(&self.events_tx),
+                );
                 if let Ok(projects) = repo.list().await {
                     for p in projects {
                         self.paused_projects.insert(p.id);
@@ -447,11 +451,13 @@ impl CoordinatorActor {
                 // Emit SSE event on health change.
                 let changed = healthy && was_unhealthy || !healthy && !was_unhealthy;
                 if changed {
-                    let _ = self.events_tx.send(DjinnEventEnvelope::project_health_changed(
-                        &project_id,
-                        healthy,
-                        error.as_deref(),
-                    ));
+                    let _ = self
+                        .events_tx
+                        .send(DjinnEventEnvelope::project_health_changed(
+                            &project_id,
+                            healthy,
+                            error.as_deref(),
+                        ));
                 }
                 self.publish_status();
                 // If project just became healthy and dispatch is enabled, trigger a dispatch pass.
@@ -512,7 +518,8 @@ impl CoordinatorActor {
                 else {
                     return;
                 };
-                let Some(task) = serde_json::from_value::<djinn_core::models::Task>(task_payload).ok()
+                let Some(task) =
+                    serde_json::from_value::<djinn_core::models::Task>(task_payload).ok()
                 else {
                     return;
                 };
@@ -533,7 +540,8 @@ impl CoordinatorActor {
                 }
             }
             ("session", "updated" | "completed" | "interrupted" | "failed") => {
-                let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>() else {
+                let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
+                else {
                     return;
                 };
                 if session.agent_type == "groomer"
@@ -567,8 +575,10 @@ impl CoordinatorActor {
 
         #[cfg(not(test))]
         {
-            let cred_repo =
-                djinn_provider::repos::CredentialRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
+            let cred_repo = djinn_provider::repos::CredentialRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            );
             let credentials = match cred_repo.list().await {
                 Ok(credentials) => credentials,
                 Err(_) => return Vec::new(),
@@ -631,11 +641,17 @@ impl CoordinatorActor {
     }
 
     fn task_repo(&self) -> TaskRepository {
-        TaskRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx))
+        TaskRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        )
     }
 
     async fn project_path_for_id(&self, project_id: &str) -> Option<String> {
-        let repo = ProjectRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
+        let repo = ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
         repo.get_path(project_id).await.ok().flatten()
     }
 }
@@ -845,13 +861,16 @@ mod tests {
     use super::*;
     use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
     use crate::roles::RoleRegistry;
+    use crate::test_helpers;
+    use djinn_core::models::TransitionAction;
     use djinn_db::EpicRepository;
     use djinn_db::TaskRepository;
-    use djinn_core::models::TransitionAction;
     use djinn_provider::catalog::health::HealthTracker;
-    use crate::test_helpers;
 
-    fn spawn_coordinator(db: &Database, tx: &broadcast::Sender<DjinnEventEnvelope>) -> CoordinatorHandle {
+    fn spawn_coordinator(
+        db: &Database,
+        tx: &broadcast::Sender<DjinnEventEnvelope>,
+    ) -> CoordinatorHandle {
         let cancel = CancellationToken::new();
         let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
         let sessions_dir = std::env::temp_dir().join(format!(
@@ -893,7 +912,10 @@ mod tests {
         })
     }
 
-    async fn make_epic(db: &Database, tx: broadcast::Sender<DjinnEventEnvelope>) -> djinn_core::models::Epic {
+    async fn make_epic(
+        db: &Database,
+        tx: broadcast::Sender<DjinnEventEnvelope>,
+    ) -> djinn_core::models::Epic {
         EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
             .create("Epic", "", "", "", "", None)
             .await

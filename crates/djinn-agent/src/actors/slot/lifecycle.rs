@@ -4,17 +4,17 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::commands::run_commands;
+use crate::context::AgentContext;
 use crate::message::{Conversation, Message};
 use crate::prompts::TaskContext;
 use crate::provider::create_provider;
 use crate::roles::AgentRole;
-use crate::commands::run_commands;
 use crate::verification::settings::load_commands;
-use djinn_db::SessionRepository;
-use djinn_db::TaskRepository;
 use djinn_core::models::SessionStatus;
 use djinn_core::models::TransitionAction;
-use crate::context::AgentContext;
+use djinn_db::SessionRepository;
+use djinn_db::TaskRepository;
 
 use super::reply_loop::{run_reply_loop, ReplyLoopContext};
 use super::*;
@@ -46,7 +46,9 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     let emit_step = |task_id: &str, step: &str, detail: serde_json::Value| {
         app_state
             .event_bus
-            .send(djinn_core::events::DjinnEventEnvelope::task_lifecycle_step(task_id, step, &detail));
+            .send(djinn_core::events::DjinnEventEnvelope::task_lifecycle_step(
+                task_id, step, &detail,
+            ));
     };
 
     // Helper macros for emitting slot events on exit.
@@ -113,7 +115,9 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
 
     // Notify the frontend immediately so it can show the agent avatar while
     // worktree/setup is still running.
-    app_state.event_bus.send(djinn_core::events::DjinnEventEnvelope::session_dispatched(
+    app_state
+        .event_bus
+        .send(djinn_core::events::DjinnEventEnvelope::session_dispatched(
             &task.project_id,
             &task.id,
             &model_id,
@@ -144,17 +148,33 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         }
         Err(e) => {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: invalid model ID");
-            transition_interrupted(&task_id, role.config().release_action, &e.to_string(), &app_state).await;
+            transition_interrupted(
+                &task_id,
+                role.config().release_action,
+                &e.to_string(),
+                &app_state,
+            )
+            .await;
             return_free!();
         }
     };
-    emit_step(&task.id, "credential_loading", serde_json::json!({"provider_id": catalog_provider_id}));
+    emit_step(
+        &task.id,
+        "credential_loading",
+        serde_json::json!({"provider_id": catalog_provider_id}),
+    );
     let provider_credential = match load_provider_credential(&catalog_provider_id, &app_state).await
     {
         Ok(cred) => cred,
         Err(e) => {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");
-            transition_interrupted(&task_id, role.config().release_action, &e.to_string(), &app_state).await;
+            transition_interrupted(
+                &task_id,
+                role.config().release_action,
+                &e.to_string(),
+                &app_state,
+            )
+            .await;
             return_free!();
         }
     };
@@ -269,7 +289,9 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     );
     emit_step(&task.id, "branch_created", serde_json::json!({}));
 
-    let _ = role.prepare_worktree(&worktree_path, &task, &app_state).await;
+    let _ = role
+        .prepare_worktree(&worktree_path, &task, &app_state)
+        .await;
 
     emit_step(&task.id, "preflight_checking", serde_json::json!({}));
     if !worktree_path.exists() || !worktree_path.is_dir() {
@@ -288,11 +310,10 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
 
     // ── Run setup commands before session ─────────────────────────────────────
     let (prompt_setup_commands, prompt_verification_commands) = {
-        let (setup_specs, verification_specs) = load_commands(&worktree_path)
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "failed to load project commands, using empty");
-                (Vec::new(), Vec::new())
-            });
+        let (setup_specs, verification_specs) = load_commands(&worktree_path).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to load project commands, using empty");
+            (Vec::new(), Vec::new())
+        });
         let prompt_setup_commands = format_command_names(&setup_specs);
         let prompt_verification_commands = format_command_names(&verification_specs);
         if !setup_specs.is_empty() {
@@ -448,7 +469,11 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                 ));
             }
 
-            if parts.is_empty() { None } else { Some(parts.join("\n\n")) }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n\n"))
+            }
         }
         _ => None,
     };
@@ -456,8 +481,10 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     // ── Build epic context for roles that need it (e.g. PM) ─────────────────
     let epic_context = if role.needs_epic_context() {
         if let Some(ref epic_id) = task.epic_id {
-            let epic_repo = djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-            let task_repo_ctx = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            let epic_repo =
+                djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            let task_repo_ctx =
+                TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
             match epic_repo.get(epic_id).await {
                 Ok(Some(epic)) => {
                     let mut ctx_lines = vec![
@@ -466,17 +493,27 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                         format!("**Memory refs:** {}", epic.memory_refs),
                     ];
                     // Load sibling tasks
-                    if let Ok(result) = task_repo_ctx.list_filtered(djinn_db::ListQuery {
-                        parent: Some(epic_id.clone()),
-                        limit: 50,
-                        ..Default::default()
-                    }).await {
+                    if let Ok(result) = task_repo_ctx
+                        .list_filtered(djinn_db::ListQuery {
+                            parent: Some(epic_id.clone()),
+                            limit: 50,
+                            ..Default::default()
+                        })
+                        .await
+                    {
                         let open = result.tasks.iter().filter(|t| t.status != "closed").count();
                         let closed = result.tasks.iter().filter(|t| t.status == "closed").count();
-                        ctx_lines.push(format!("\n### Sibling Tasks ({open} open, {closed} closed)"));
+                        ctx_lines.push(format!(
+                            "\n### Sibling Tasks ({open} open, {closed} closed)"
+                        ));
                         for t in &result.tasks {
-                            let status_marker = if t.status == "closed" { "closed" } else { &t.status };
-                            ctx_lines.push(format!("- [{}] {}: {}", status_marker, t.short_id, t.title));
+                            let status_marker = if t.status == "closed" {
+                                "closed"
+                            } else {
+                                &t.status
+                            };
+                            ctx_lines
+                                .push(format!("- [{}] {}: {}", status_marker, t.short_id, t.title));
                         }
                     }
                     Some(ctx_lines.join("\n"))
@@ -565,7 +602,11 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     let fresh_user_message = role.initial_user_message(&task_id, &app_state).await;
 
     // Try to resume from a paused session's saved conversation.
-    emit_step(&task.id, "session_creating", serde_json::json!({"resume": resume_record_id.is_some()}));
+    emit_step(
+        &task.id,
+        "session_creating",
+        serde_json::json!({"resume": resume_record_id.is_some()}),
+    );
     let (current_record_id, mut conversation) = if let Some(ref resume_id) = resume_record_id {
         match super::conversation_store::load(resume_id).await {
             Ok(Some(mut saved_conv)) => {
@@ -586,9 +627,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     resume_id,
                     &task_id,
                     &app_state,
-                    crate::compaction::CompactionContext::PreResume(
-                        role.config().name.to_string(),
-                    ),
+                    crate::compaction::CompactionContext::PreResume(role.config().name.to_string()),
                     context_window,
                 )
                 .await;
@@ -640,8 +679,13 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     Ok(r) => Some(r.id),
                     Err(e) => {
                         tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
-                        transition_interrupted(&task_id, role.config().release_action, &e.to_string(), &app_state)
-                            .await;
+                        transition_interrupted(
+                            &task_id,
+                            role.config().release_action,
+                            &e.to_string(),
+                            &app_state,
+                        )
+                        .await;
                         cleanup_worktree(&task_id, &worktree_path, &app_state).await;
                         return_free!();
                     }
@@ -668,7 +712,13 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             Ok(r) => Some(r.id),
             Err(e) => {
                 tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
-                transition_interrupted(&task_id, role.config().release_action, &e.to_string(), &app_state).await;
+                transition_interrupted(
+                    &task_id,
+                    role.config().release_action,
+                    &e.to_string(),
+                    &app_state,
+                )
+                .await;
                 cleanup_worktree(&task_id, &worktree_path, &app_state).await;
                 return_free!();
             }
@@ -749,7 +799,13 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         )
         .await;
         cleanup_worktree(&task_id, &worktree_path, &app_state).await;
-        transition_interrupted(&task_id, role.config().release_action, "session cancelled", &app_state).await;
+        transition_interrupted(
+            &task_id,
+            role.config().release_action,
+            "session cancelled",
+            &app_state,
+        )
+        .await;
         return_killed!();
     }
 
@@ -945,9 +1001,9 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
 }
 
 pub(crate) struct ProjectLifecycleParams {
-    pub project_id: String,
-    pub project_path: String,
-    pub role: Arc<dyn AgentRole>,
+    pub(crate) project_id: String,
+    pub(crate) project_path: String,
+    pub(crate) role: Arc<dyn AgentRole>,
     pub model_id: String,
     pub app_state: AgentContext,
     pub cancel: CancellationToken,
@@ -999,12 +1055,14 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         return_free!();
     }
 
-    app_state.event_bus.send(djinn_core::events::DjinnEventEnvelope::session_dispatched(
-        &project_id,
-        &task_id,
-        &model_id,
-        role.config().name,
-    ));
+    app_state
+        .event_bus
+        .send(djinn_core::events::DjinnEventEnvelope::session_dispatched(
+            &project_id,
+            &task_id,
+            &model_id,
+            role.config().name,
+        ));
     tracing::info!(
         task_id = %task_id,
         "Lifecycle(continuation): emitted session.dispatched SSE event"
@@ -1038,7 +1096,8 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
             return_free!();
         }
     };
-    let provider_credential = match load_provider_credential(&catalog_provider_id, &app_state).await {
+    let provider_credential = match load_provider_credential(&catalog_provider_id, &app_state).await
+    {
         Ok(cred) => cred,
         Err(e) => {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");

@@ -1,8 +1,8 @@
 use super::AgentType;
+use crate::context::AgentContext;
 use crate::output_parser::ParsedAgentOutput;
 use crate::prompts::TaskContext;
 use djinn_core::models::{Task, TransitionAction};
-use crate::context::AgentContext;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -21,15 +21,6 @@ pub(crate) use reviewer::{TASK_REVIEWER_CONFIG, TaskReviewerRole};
 pub(crate) use worker::{WORKER_CONFIG, WorkerRole};
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
-pub(crate) struct CompactionPrompts {
-    pub(crate) mid_session: &'static str,
-    pub(crate) mid_session_system: &'static str,
-    pub(crate) pre_resume: &'static str,
-    pub(crate) pre_resume_system: &'static str,
-}
-
-#[derive(Clone, Copy)]
 pub(crate) struct RoleConfig {
     pub(crate) name: &'static str,
     pub(crate) display_name: &'static str,
@@ -38,9 +29,6 @@ pub(crate) struct RoleConfig {
     pub(crate) start_action: fn(&str) -> Option<TransitionAction>,
     pub(crate) release_action: fn() -> TransitionAction,
     pub(crate) initial_message: &'static str,
-    #[allow(dead_code)]
-    pub(crate) compaction: CompactionPrompts,
-    #[allow(dead_code)]
     pub(crate) preserves_session: bool,
     pub(crate) is_project_scoped: bool,
 }
@@ -58,7 +46,6 @@ pub(crate) fn config_for(agent_type: AgentType) -> &'static RoleConfig {
 /// Thin role trait that every agent role must implement.
 ///
 /// Object-safe: async methods return `BoxFuture` so `dyn AgentRole` works.
-#[allow(dead_code)]
 pub(crate) trait AgentRole: Send + Sync + 'static {
     fn config(&self) -> &RoleConfig;
     fn render_prompt(&self, task: &Task, ctx: &TaskContext) -> String;
@@ -107,8 +94,14 @@ pub(crate) fn role_impl_for(agent_type: AgentType) -> Arc<dyn AgentRole> {
 
 /// Resolve `Arc<dyn AgentRole>` directly from a task and dispatch context,
 /// without exposing `AgentType` to the caller.
-pub(crate) fn role_for_task_dispatch(task: &Task, has_conflict_context: bool) -> Arc<dyn AgentRole> {
-    role_impl_for(AgentType::for_task_status(task.status.as_str(), has_conflict_context))
+pub(crate) fn role_for_task_dispatch(
+    task: &Task,
+    has_conflict_context: bool,
+) -> Arc<dyn AgentRole> {
+    role_impl_for(AgentType::for_task_status(
+        task.status.as_str(),
+        has_conflict_context,
+    ))
 }
 
 #[derive(Default)]
@@ -123,8 +116,6 @@ pub(crate) struct DispatchRule {
 
 pub struct RoleRegistry {
     pub(crate) roles: HashMap<&'static str, AgentType>,
-    #[allow(dead_code)]
-    pub(crate) role_impls: HashMap<&'static str, Box<dyn AgentRole>>,
     pub(crate) dispatch_rules: Vec<DispatchRule>,
 }
 
@@ -144,20 +135,6 @@ impl RoleRegistry {
             ("groomer", AgentType::Groomer),
         ]);
 
-        let role_impls: HashMap<&'static str, Box<dyn AgentRole>> = HashMap::from([
-            ("worker", Box::new(WorkerRole) as Box<dyn AgentRole>),
-            (
-                "conflict_resolver",
-                Box::new(ConflictResolverRole) as Box<dyn AgentRole>,
-            ),
-            (
-                "task_reviewer",
-                Box::new(TaskReviewerRole) as Box<dyn AgentRole>,
-            ),
-            ("pm", Box::new(PmRole) as Box<dyn AgentRole>),
-            ("groomer", Box::new(GroomerRole) as Box<dyn AgentRole>),
-        ]);
-
         let dispatch_rules = vec![
             conflict_resolver_dispatch_rule(),
             worker_dispatch_rule(),
@@ -168,7 +145,6 @@ impl RoleRegistry {
 
         Self {
             roles,
-            role_impls,
             dispatch_rules,
         }
     }
@@ -179,24 +155,6 @@ impl RoleRegistry {
             .find(|rule| (rule.claims)(task, ctx))
             .map(|rule| rule.role_name)
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn dispatch_roles(&self) -> Vec<&'static str> {
-        self.dispatch_rules
-            .iter()
-            .map(|r| r.role_name)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn dispatch_rule_for_role(&self, role_name: &str) -> Option<&DispatchRule> {
-        self.dispatch_rules
-            .iter()
-            .find(|rule| rule.role_name == role_name)
-    }
-
     /// Unique model-pool role names (dispatch_role from RoleConfig).
     pub(crate) fn model_pool_roles(&self) -> Vec<&'static str> {
         let mut seen = HashSet::new();

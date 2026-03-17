@@ -3,8 +3,6 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use djinn_db::{EpicCountQuery, EpicListQuery, EpicRepository, EpicTaskCounts};
-use djinn_db::{ListQuery, TaskRepository};
 use crate::server::DjinnMcpServer;
 use crate::tools::validation::{
     validate_color, validate_description, validate_emoji, validate_limit, validate_offset,
@@ -12,6 +10,8 @@ use crate::tools::validation::{
 };
 use djinn_core::models::Epic;
 use djinn_core::models::Task;
+use djinn_db::{EpicCountQuery, EpicListQuery, EpicRepository, EpicTaskCounts};
+use djinn_db::{ListQuery, TaskRepository};
 
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(untagged)]
@@ -387,7 +387,8 @@ impl DjinnMcpServer {
             }
         };
 
-        let memory_refs_json = p.memory_refs
+        let memory_refs_json = p
+            .memory_refs
             .as_ref()
             .map(|refs| serde_json::to_string(refs).unwrap_or_else(|_| "[]".to_string()));
 
@@ -402,7 +403,17 @@ impl DjinnMcpServer {
             }
         };
         match repo
-            .create_for_project(&project_id, djinn_db::EpicCreateInput { title: &title, description, emoji, color, owner: &owner, memory_refs: memory_refs_json.as_deref() })
+            .create_for_project(
+                &project_id,
+                djinn_db::EpicCreateInput {
+                    title: &title,
+                    description,
+                    emoji,
+                    color,
+                    owner: &owner,
+                    memory_refs: memory_refs_json.as_deref(),
+                },
+            )
             .await
         {
             Ok(epic) => Json(EpicSingleResponse {
@@ -612,7 +623,17 @@ impl DjinnMcpServer {
         };
 
         match repo
-             .update(&epic.id, djinn_db::EpicUpdateInput { title: &title, description, emoji, color, owner: &owner, memory_refs: Some(&memory_refs_str) })
+            .update(
+                &epic.id,
+                djinn_db::EpicUpdateInput {
+                    title: &title,
+                    description,
+                    emoji,
+                    color,
+                    owner: &owner,
+                    memory_refs: Some(&memory_refs_str),
+                },
+            )
             .await
         {
             Ok(updated) => Json(EpicSingleResponse {
@@ -927,4 +948,3 @@ impl DjinnMcpServer {
         }
     }
 }
-

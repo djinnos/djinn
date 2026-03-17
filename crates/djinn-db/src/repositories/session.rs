@@ -1,8 +1,8 @@
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{SessionRecord, SessionStatus};
 
-use crate::database::Database;
 use crate::Result;
+use crate::database::Database;
 
 /// Column list shared by all session SELECT queries.
 const SESSION_COLS: &str = "id, project_id, task_id, model_id, agent_type, started_at, ended_at, \
@@ -398,7 +398,9 @@ mod tests {
         assert_eq!(created.status, "running");
 
         let events = captured.lock().unwrap();
-        let started = events.iter().find(|e| e.entity_type == "session" && e.action == "started");
+        let started = events
+            .iter()
+            .find(|e| e.entity_type == "session" && e.action == "started");
         assert!(started.is_some(), "expected session.started event");
         let s: SessionRecord = serde_json::from_value(started.unwrap().payload.clone()).unwrap();
         assert_eq!(s.id, created.id);
@@ -416,7 +418,9 @@ mod tests {
         assert!(updated.ended_at.is_some());
 
         let events = captured.lock().unwrap();
-        let completed = events.iter().find(|e| e.entity_type == "session" && e.action == "completed");
+        let completed = events
+            .iter()
+            .find(|e| e.entity_type == "session" && e.action == "completed");
         assert!(completed.is_some(), "expected session.completed event");
         let s: SessionRecord = serde_json::from_value(completed.unwrap().payload.clone()).unwrap();
         assert_eq!(s.id, created.id);
@@ -430,11 +434,25 @@ mod tests {
         let repo = SessionRepository::new(db, bus);
 
         let first = repo
-            .create(&project_id, Some(&task_id), "openai/gpt-5", "worker", None, None)
+            .create(
+                &project_id,
+                Some(&task_id),
+                "openai/gpt-5",
+                "worker",
+                None,
+                None,
+            )
             .await
             .unwrap();
         let second = repo
-            .create(&project_id, Some(&task_id), "openai/gpt-5", "worker", None, None)
+            .create(
+                &project_id,
+                Some(&task_id),
+                "openai/gpt-5",
+                "worker",
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -444,12 +462,14 @@ mod tests {
         assert_eq!(rows, 2);
 
         let events = captured.lock().unwrap();
-        let interrupted: Vec<_> = events.iter()
+        let interrupted: Vec<_> = events
+            .iter()
             .filter(|e| e.entity_type == "session" && e.action == "interrupted")
             .collect();
         assert_eq!(interrupted.len(), 2);
 
-        let ids: std::collections::HashSet<String> = interrupted.iter()
+        let ids: std::collections::HashSet<String> = interrupted
+            .iter()
             .map(|e| {
                 let s: SessionRecord = serde_json::from_value(e.payload.clone()).unwrap();
                 assert_eq!(s.status, "interrupted");
@@ -468,12 +488,26 @@ mod tests {
         let repo = SessionRepository::new(db, EventBus::noop());
 
         let first = repo
-            .create(&project_id, Some(&task_id), "openai/gpt-5", "worker", None, None)
+            .create(
+                &project_id,
+                Some(&task_id),
+                "openai/gpt-5",
+                "worker",
+                None,
+                None,
+            )
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let second = repo
-            .create(&project_id, Some(&task_id), "openai/gpt-5", "worker", None, None)
+            .create(
+                &project_id,
+                Some(&task_id),
+                "openai/gpt-5",
+                "worker",
+                None,
+                None,
+            )
             .await
             .unwrap();
 

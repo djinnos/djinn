@@ -63,8 +63,7 @@ pub(super) async fn board_reconcile_impl(
             "coordinator actor not initialized",
         )));
     };
-    let session_repo =
-        SessionRepository::new(server.state.db().clone(), server.state.event_bus());
+    let session_repo = SessionRepository::new(server.state.db().clone(), server.state.event_bus());
 
     match repo.reconcile(stale_hours).await {
         Ok(result) => {

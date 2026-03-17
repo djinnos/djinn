@@ -7,10 +7,13 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
-use djinn_db::{Database, EpicCreateInput, EpicRepository, NoteRepository, ProjectRepository, SessionRepository, TaskRepository};
 use crate::events::EventBus;
-use djinn_core::models::{Epic, Note, Project, SessionRecord, Task};
 use crate::server::{self, AppState};
+use djinn_core::models::{Epic, Note, Project, SessionRecord, Task};
+use djinn_db::{
+    Database, EpicCreateInput, EpicRepository, NoteRepository, ProjectRepository,
+    SessionRepository, TaskRepository,
+};
 
 /// Create an in-memory database with all migrations applied.
 pub fn create_test_db() -> Database {

@@ -1,18 +1,16 @@
 use std::path::Path;
 
-use crate::compaction::{CONFLICT_RESOLVER_PROMPT, SUMMARISER_SYSTEM_CONFLICT_RESOLVER};
+use crate::context::AgentContext;
 use crate::extension;
 use crate::output_parser::ParsedAgentOutput;
 use crate::prompts::TaskContext;
 use djinn_core::models::{Task, TransitionAction};
-use crate::context::AgentContext;
 use futures::future::BoxFuture;
 
-use super::{AgentRole, CompactionPrompts, RoleConfig};
+use super::{AgentRole, RoleConfig};
 
 pub(crate) struct ConflictResolverRole;
 
-#[allow(dead_code)]
 impl AgentRole for ConflictResolverRole {
     fn config(&self) -> &RoleConfig {
         &CONFLICT_RESOLVER_CONFIG
@@ -86,12 +84,6 @@ pub(crate) const CONFLICT_RESOLVER_CONFIG: RoleConfig = RoleConfig {
     },
     release_action: || TransitionAction::Release,
     initial_message: crate::prompts::CONFLICT_RESOLVER_TEMPLATE,
-    compaction: CompactionPrompts {
-        mid_session: CONFLICT_RESOLVER_PROMPT,
-        mid_session_system: SUMMARISER_SYSTEM_CONFLICT_RESOLVER,
-        pre_resume: CONFLICT_RESOLVER_PROMPT,
-        pre_resume_system: SUMMARISER_SYSTEM_CONFLICT_RESOLVER,
-    },
     preserves_session: true,
     is_project_scoped: false,
 };

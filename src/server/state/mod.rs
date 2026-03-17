@@ -5,16 +5,16 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
-use djinn_agent::actors::coordinator::{CoordinatorDeps, CoordinatorHandle};
-use djinn_git::{GitActorHandle, GitError};
+use crate::events::DjinnEventEnvelope;
+use crate::sync::SyncManager;
+use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_db::{Database, NoteRepository, ProjectRepository, SettingsRepository};
-use crate::events::DjinnEventEnvelope;
+use djinn_git::{GitActorHandle, GitError};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
-use crate::sync::SyncManager;
 
 mod settings;
 
@@ -220,7 +220,7 @@ impl AppState {
                 role_priorities: std::collections::HashMap::new(),
             },
         );
-        let coordinator = CoordinatorHandle::spawn(CoordinatorDeps {
+        let coordinator = CoordinatorHandle::spawn(djinn_agent::actors::coordinator::CoordinatorDeps {
             events_tx: self.events().clone(),
             cancel: self.cancel().clone(),
             db: self.db().clone(),
@@ -243,8 +243,8 @@ impl AppState {
     /// Load custom providers from DB into the catalog and trigger a background
     /// catalog refresh from models.dev.  Call once after server startup.
     pub async fn initialize(&self) {
-        use djinn_provider::repos::CustomProviderRepository;
         use djinn_core::models::{Model, Provider};
+        use djinn_provider::repos::CustomProviderRepository;
 
         // Load custom providers from DB → merge into in-memory catalog.
         let repo = CustomProviderRepository::new(self.db().clone(), self.event_bus());

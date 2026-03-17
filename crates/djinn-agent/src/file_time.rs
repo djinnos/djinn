@@ -80,7 +80,10 @@ impl FileTime {
         let canonical = canonical_lock_key(path);
         let mutex = {
             let mut map = self.locks.lock().await;
-            Arc::clone(map.entry(canonical).or_insert_with(|| Arc::new(Mutex::new(()))))
+            Arc::clone(
+                map.entry(canonical)
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
         };
         let _guard = mutex.lock().await;
         f.await
