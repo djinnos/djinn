@@ -7,7 +7,7 @@ use std::path::Path;
 
 use djinn_core::commands::{CommandResult, CommandSpec, VerificationRunner};
 
-use crate::db::TaskRepository;
+use super::TaskRepository;
 
 pub(crate) async fn run_setup_commands_checked(
     cwd: &Path,
