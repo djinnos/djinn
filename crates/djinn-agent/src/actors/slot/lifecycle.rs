@@ -13,10 +13,11 @@ use crate::roles::AgentRole;
 use crate::verification::settings::load_commands;
 use djinn_core::models::SessionStatus;
 use djinn_core::models::TransitionAction;
+use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
 
-use super::reply_loop::{run_reply_loop, ReplyLoopContext};
+use super::reply_loop::{ReplyLoopContext, run_reply_loop};
 use super::*;
 use crate::task_merge::interrupt_paused_worker_session;
 
@@ -42,7 +43,16 @@ pub(crate) struct TaskLifecycleParams {
 }
 
 pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::Result<()> {
-    let TaskLifecycleParams { task_id, project_path, model_id, role, app_state, cancel, pause, event_tx } = params;
+    let TaskLifecycleParams {
+        task_id,
+        project_path,
+        model_id,
+        role,
+        app_state,
+        cancel,
+        pause,
+        event_tx,
+    } = params;
     let emit_step = |task_id: &str, step: &str, detail: serde_json::Value| {
         app_state
             .event_bus
@@ -666,14 +676,15 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     .update(resume_id, SessionStatus::Interrupted, 0, 0)
                     .await;
                 let record_id = match session_repo
-                    .create(
-                        &task.project_id,
-                        Some(&task.id),
-                        &model_id,
-                        role.config().name,
-                        worktree_path.to_str(),
-                        None,
-                    )
+                    .create(CreateSessionParams {
+                        project_id: &task.project_id,
+                        task_id: Some(&task.id),
+                        model: &model_id,
+                        agent_type: role.config().name,
+                        worktree_path: worktree_path.to_str(),
+                        goose_session_id: None,
+                        metadata_json: None,
+                    })
                     .await
                 {
                     Ok(r) => Some(r.id),
@@ -699,14 +710,15 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     } else {
         // Fresh session — no paused session to resume.
         let record_id = match session_repo
-            .create(
-                &task.project_id,
-                Some(&task.id),
-                &model_id,
-                role.config().name,
-                worktree_path.to_str(),
-                None,
-            )
+            .create(CreateSessionParams {
+                project_id: &task.project_id,
+                task_id: Some(&task.id),
+                model: &model_id,
+                agent_type: role.config().name,
+                worktree_path: worktree_path.to_str(),
+                goose_session_id: None,
+                metadata_json: None,
+            })
             .await
         {
             Ok(r) => Some(r.id),
@@ -1012,7 +1024,11 @@ pub(crate) struct ProjectLifecycleParams {
 }
 
 pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Result<()> {
-    let task_id = format!("project:{}:{}", params.project_id, params.role.config().name);
+    let task_id = format!(
+        "project:{}:{}",
+        params.project_id,
+        params.role.config().name
+    );
     let model_id = params.model_id;
     let app_state = params.app_state;
     let cancel = params.cancel;
@@ -1163,14 +1179,15 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
 
     // ── Create session record (no task_id for project-scoped agents) ─────
     let current_record_id = match session_repo
-        .create(
-            &project_id,
-            None,
-            &model_id,
-            role.config().name,
-            Some(&project_path),
-            None,
-        )
+        .create(CreateSessionParams {
+            project_id: &project_id,
+            task_id: None,
+            model: &model_id,
+            agent_type: role.config().name,
+            worktree_path: Some(&project_path),
+            goose_session_id: None,
+            metadata_json: None,
+        })
         .await
     {
         Ok(r) => Some(r.id),

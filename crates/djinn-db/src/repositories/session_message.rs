@@ -190,7 +190,7 @@ mod tests {
 
     use super::*;
     use crate::repositories::epic::EpicRepository;
-    use crate::repositories::session::SessionRepository;
+    use crate::repositories::session::{CreateSessionParams, SessionRepository};
 
     fn test_db() -> Database {
         Database::open_in_memory().unwrap()
@@ -227,14 +227,15 @@ mod tests {
 
         let session_repo = SessionRepository::new(db, bus);
         let session = session_repo
-            .create(
-                &epic.project_id,
-                Some(&task_id),
-                "test-model",
-                "worker",
-                None,
-                None,
-            )
+            .create(CreateSessionParams {
+                project_id: &epic.project_id,
+                task_id: Some(&task_id),
+                model: "test-model",
+                agent_type: "worker",
+                worktree_path: None,
+                goose_session_id: None,
+                metadata_json: None,
+            })
             .await
             .unwrap();
 

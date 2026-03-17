@@ -90,7 +90,21 @@ pub(super) async fn run_reply_loop(
     conversation: &mut Conversation,
     is_resumed_session: bool,
 ) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64) {
-    let ReplyLoopContext { provider, tools, task_id, task_short_id, session_id, project_path, worktree_path, role_name, context_window, model_id, cancel, global_cancel, app_state } = ctx;
+    let ReplyLoopContext {
+        provider,
+        tools,
+        task_id,
+        task_short_id,
+        session_id,
+        project_path,
+        worktree_path,
+        role_name,
+        context_window,
+        model_id,
+        cancel,
+        global_cancel,
+        app_state,
+    } = ctx;
     let mut output = ParsedAgentOutput::new(role_name == "task_reviewer");
 
     // Token counts and last assistant text are declared outside the async block
@@ -821,6 +835,7 @@ mod tests {
     use crate::message::{ContentBlock, Conversation, Message};
     use crate::provider::{LlmProvider, StreamEvent, TokenUsage};
     use crate::test_helpers;
+    use djinn_db::repositories::session::CreateSessionParams;
     use djinn_db::{SessionMessageRepository, SessionRepository};
     use futures::stream;
     use std::collections::VecDeque;
@@ -950,14 +965,15 @@ mod tests {
         // Create a real session row so session_messages FK constraint is satisfied.
         let session_repo = SessionRepository::new(db.clone(), ctx.event_bus.clone());
         let session = session_repo
-            .create(
-                &project.id,
-                Some(&task.id),
-                "test/mock-model",
-                "worker",
-                None,
-                None,
-            )
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: Some(&task.id),
+                model: "test/mock-model",
+                agent_type: "worker",
+                worktree_path: None,
+                goose_session_id: None,
+                metadata_json: None,
+            })
             .await
             .expect("create session");
         (ctx, project.path, task.id, session.id, cancel)

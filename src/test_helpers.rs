@@ -10,6 +10,7 @@ use tower::ServiceExt;
 use crate::events::EventBus;
 use crate::server::{self, AppState};
 use djinn_core::models::{Epic, Note, Project, SessionRecord, Task};
+use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::{
     Database, EpicCreateInput, EpicRepository, NoteRepository, ProjectRepository,
     SessionRepository, TaskRepository,
@@ -67,9 +68,7 @@ pub async fn create_test_project(db: &Database) -> Project {
 
 /// Create a project backed by a real temporary directory on disk.
 /// Returns the project and a `TempDir` guard — the directory is cleaned up when the guard drops.
-pub async fn create_test_project_with_dir(
-    db: &Database,
-) -> (Project, tempfile::TempDir) {
+pub async fn create_test_project_with_dir(db: &Database) -> (Project, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let repo = ProjectRepository::new(db.clone(), test_events());
     let path = dir.path().to_string_lossy().to_string();
@@ -137,14 +136,15 @@ pub async fn create_test_task(db: &Database, project_id: &str, epic_id: &str) ->
 
 pub async fn create_test_session(db: &Database, project_id: &str, task_id: &str) -> SessionRecord {
     let repo = SessionRepository::new(db.clone(), test_events());
-    repo.create(
+    repo.create(CreateSessionParams {
         project_id,
-        Some(task_id),
-        "test-model",
-        "worker",
-        Some("/tmp/djinn-test-worktree"),
-        None,
-    )
+        task_id: Some(task_id),
+        model: "test-model",
+        agent_type: "worker",
+        worktree_path: Some("/tmp/djinn-test-worktree"),
+        goose_session_id: None,
+        metadata_json: None,
+    })
     .await
     .expect("failed to create test session")
 }

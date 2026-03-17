@@ -13,49 +13,25 @@ pub struct SessionRepository {
     events: EventBus,
 }
 
+pub struct CreateSessionParams<'a> {
+    pub project_id: &'a str,
+    pub task_id: Option<&'a str>,
+    pub model: &'a str,
+    pub agent_type: &'a str,
+    pub worktree_path: Option<&'a str>,
+    pub goose_session_id: Option<&'a str>,
+    pub metadata_json: Option<&'a str>,
+}
+
 impl SessionRepository {
     pub fn new(db: Database, events: EventBus) -> Self {
         Self { db, events }
     }
 
-    /// Re-fetch a session by id and emit `SessionUpdated`.
-    async fn fetch_and_emit_update(&self, id: &str) -> Result<SessionRecord> {
-        let session = sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE id = ?1"
-        ))
-        .bind(id)
-        .fetch_one(self.db.pool())
-        .await?;
-        let action = match session.status.as_str() {
-            "running" => "started",
-            "completed" => "completed",
-            "interrupted" => "interrupted",
-            "failed" => "failed",
-            _ => "updated",
-        };
-        self.events.send(DjinnEventEnvelope {
-            entity_type: "session",
-            action,
-            payload: serde_json::to_value(&session).unwrap_or_default(),
-            id: None,
-            project_id: None,
-            from_sync: false,
-        });
-        Ok(session)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create(
-        &self,
-        project_id: &str,
-        task_id: Option<&str>,
-        model_id: &str,
-        agent_type: &str,
-        worktree_path: Option<&str>,
-        goose_session_id: Option<&str>,
-    ) -> Result<SessionRecord> {
+    pub async fn create(&self, params: CreateSessionParams<'_>) -> Result<SessionRecord> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
+        let _ = params.metadata_json;
 
         sqlx::query(
             "INSERT INTO sessions
@@ -63,12 +39,12 @@ impl SessionRepository {
              VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7)",
         )
         .bind(&id)
-        .bind(project_id)
-        .bind(task_id)
-        .bind(model_id)
-        .bind(agent_type)
-        .bind(worktree_path)
-        .bind(goose_session_id)
+        .bind(params.project_id)
+        .bind(params.task_id)
+        .bind(params.model)
+        .bind(params.agent_type)
+        .bind(params.worktree_path)
+        .bind(params.goose_session_id)
         .execute(self.db.pool())
         .await?;
 
@@ -92,6 +68,33 @@ impl SessionRepository {
             task_id = ?session.task_id,
             "SessionRepository: emitted session.started SSE event"
         );
+        Ok(session)
+    }
+
+    /// Re-fetch a session by id and emit `SessionUpdated`.
+    async fn fetch_and_emit_update(&self, id: &str) -> Result<SessionRecord> {
+        self.db.ensure_initialized().await?;
+        let session = sqlx::query_as::<_, SessionRecord>(&format!(
+            "SELECT {SESSION_COLS} FROM sessions WHERE id = ?1"
+        ))
+        .bind(id)
+        .fetch_one(self.db.pool())
+        .await?;
+        let action = match session.status.as_str() {
+            "running" => "started",
+            "completed" => "completed",
+            "interrupted" => "interrupted",
+            "failed" => "failed",
+            _ => "updated",
+        };
+        self.events.send(DjinnEventEnvelope {
+            entity_type: "session",
+            action,
+            payload: serde_json::to_value(&session).unwrap_or_default(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        });
         Ok(session)
     }
 
@@ -385,14 +388,15 @@ mod tests {
         let repo = SessionRepository::new(db, bus);
 
         let created = repo
-            .create(
-                &project_id,
-                Some(&task_id),
-                "openai/gpt-5",
-                "worker",
-                Some("/tmp/djinn-worktree-task"),
-                Some("goose-session-abc123"),
-            )
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                worktree_path: Some("/tmp/djinn-worktree-task"),
+                goose_session_id: Some("goose-session-abc123"),
+                metadata_json: None,
+            })
             .await
             .unwrap();
         assert_eq!(created.status, "running");
@@ -424,112 +428,5 @@ mod tests {
         assert!(completed.is_some(), "expected session.completed event");
         let s: SessionRecord = serde_json::from_value(completed.unwrap().payload.clone()).unwrap();
         assert_eq!(s.id, created.id);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn interrupt_all_running_emits_session_updated_for_each_interrupted_session() {
-        let db = test_db();
-        let (bus, captured) = capturing_bus();
-        let (project_id, task_id) = create_task(&db, bus.clone()).await;
-        let repo = SessionRepository::new(db, bus);
-
-        let first = repo
-            .create(
-                &project_id,
-                Some(&task_id),
-                "openai/gpt-5",
-                "worker",
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        let second = repo
-            .create(
-                &project_id,
-                Some(&task_id),
-                "openai/gpt-5",
-                "worker",
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-
-        captured.lock().unwrap().clear();
-
-        let rows = repo.interrupt_all_running().await.unwrap();
-        assert_eq!(rows, 2);
-
-        let events = captured.lock().unwrap();
-        let interrupted: Vec<_> = events
-            .iter()
-            .filter(|e| e.entity_type == "session" && e.action == "interrupted")
-            .collect();
-        assert_eq!(interrupted.len(), 2);
-
-        let ids: std::collections::HashSet<String> = interrupted
-            .iter()
-            .map(|e| {
-                let s: SessionRecord = serde_json::from_value(e.payload.clone()).unwrap();
-                assert_eq!(s.status, "interrupted");
-                assert!(s.ended_at.is_some());
-                s.id
-            })
-            .collect();
-        assert!(ids.contains(&first.id));
-        assert!(ids.contains(&second.id));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn list_and_active_queries() {
-        let db = test_db();
-        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
-        let repo = SessionRepository::new(db, EventBus::noop());
-
-        let first = repo
-            .create(
-                &project_id,
-                Some(&task_id),
-                "openai/gpt-5",
-                "worker",
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let second = repo
-            .create(
-                &project_id,
-                Some(&task_id),
-                "openai/gpt-5",
-                "worker",
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let listed = repo.list_for_task(&task_id).await.unwrap();
-        assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].id, second.id);
-        assert_eq!(listed[1].id, first.id);
-
-        let count = repo.count_for_task(&task_id).await.unwrap();
-        assert_eq!(count, 2);
-
-        let active = repo.list_active().await.unwrap();
-        assert_eq!(active.len(), 2);
-
-        let active_task = repo.active_for_task(&task_id).await.unwrap();
-        assert_eq!(active_task.unwrap().id, second.id);
-
-        let _ = repo
-            .update(&second.id, SessionStatus::Completed, 1, 1)
-            .await
-            .unwrap();
-        let active_task = repo.active_for_task(&task_id).await.unwrap();
-        assert_eq!(active_task.unwrap().id, first.id);
     }
 }

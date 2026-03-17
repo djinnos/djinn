@@ -220,16 +220,17 @@ impl AppState {
                 role_priorities: std::collections::HashMap::new(),
             },
         );
-        let coordinator = CoordinatorHandle::spawn(djinn_agent::actors::coordinator::CoordinatorDeps {
-            events_tx: self.events().clone(),
-            cancel: self.cancel().clone(),
-            db: self.db().clone(),
-            pool: pool.clone(),
-            catalog: self.catalog().clone(),
-            health: self.health_tracker().clone(),
-            role_registry: self.inner.role_registry.clone(),
-            verification_tracker: self.inner.verifying_tasks.clone(),
-        });
+        let coordinator =
+            CoordinatorHandle::spawn(djinn_agent::actors::coordinator::CoordinatorDeps {
+                events_tx: self.events().clone(),
+                cancel: self.cancel().clone(),
+                db: self.db().clone(),
+                pool: pool.clone(),
+                catalog: self.catalog().clone(),
+                health: self.health_tracker().clone(),
+                role_registry: self.inner.role_registry.clone(),
+                verification_tracker: self.inner.verifying_tasks.clone(),
+            });
 
         *self.inner.pool.lock().await = Some(pool.clone());
         *self.inner.coordinator.lock().await = Some(coordinator.clone());
