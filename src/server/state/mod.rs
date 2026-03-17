@@ -165,6 +165,11 @@ impl AppState {
         &self.inner.lsp
     }
 
+    /// Build a `McpState` scoped to what MCP tools need.
+    pub fn mcp_state(&self) -> crate::mcp::state::McpState {
+        crate::mcp::state::McpState::from(self.clone())
+    }
+
     pub async fn coordinator(&self) -> Option<CoordinatorHandle> {
         self.inner.coordinator.lock().await.clone()
     }

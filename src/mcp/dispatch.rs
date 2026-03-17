@@ -498,8 +498,8 @@ mod tests {
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
-    fn test_state() -> AppState {
-        AppState::new(create_test_db(), CancellationToken::new())
+    fn test_state() -> crate::mcp::state::McpState {
+        AppState::new(create_test_db(), CancellationToken::new()).mcp_state()
     }
 
     #[tokio::test]

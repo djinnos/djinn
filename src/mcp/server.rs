@@ -11,12 +11,12 @@ use rmcp::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::server::AppState;
+use crate::mcp::state::McpState;
 
 /// Per-session MCP server instance. Cloned for each new session.
 #[derive(Clone)]
 pub struct DjinnMcpServer {
-    pub state: AppState,
+    pub state: McpState,
     tool_router: ToolRouter<Self>,
 }
 
@@ -31,7 +31,7 @@ impl DjinnMcpServer {
             .collect()
     }
 
-    pub fn new(state: AppState) -> Self {
+    pub fn new(state: McpState) -> Self {
         Self {
             state: state.clone(),
             tool_router: Self::system_tool_router()
@@ -49,7 +49,7 @@ impl DjinnMcpServer {
     }
 
     /// Build a `StreamableHttpService` that creates one `DjinnMcpServer` per session.
-    pub fn into_service(state: AppState, cancel: CancellationToken) -> StreamableHttpService<Self> {
+    pub fn into_service(state: McpState, cancel: CancellationToken) -> StreamableHttpService<Self> {
         StreamableHttpService::new(
             move || Ok(DjinnMcpServer::new(state.clone())),
             Arc::new(LocalSessionManager::default()),

@@ -14,7 +14,7 @@ pub use state::AppState;
 /// Build the application router.
 pub fn router(state: AppState) -> Router {
     let mcp_service =
-        mcp::server::DjinnMcpServer::into_service(state.clone(), state.cancel().clone());
+        mcp::server::DjinnMcpServer::into_service(state.mcp_state(), state.cancel().clone());
 
     let mcp_router = Router::new().fallback_service(mcp_service);
 
@@ -309,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn all_tool_schemas_includes_cross_domain_tools() {
         let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
-        let mcp = crate::mcp::server::DjinnMcpServer::new(state);
+        let mcp = crate::mcp::server::DjinnMcpServer::new(state.mcp_state());
         let tools = mcp.all_tool_schemas();
         assert!(!tools.is_empty(), "all_tool_schemas should not be empty");
 
@@ -338,7 +338,7 @@ mod tests {
     #[tokio::test]
     async fn chat_uses_router_derived_tool_schemas() {
         let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
-        let mcp = crate::mcp::server::DjinnMcpServer::new(state);
+        let mcp = crate::mcp::server::DjinnMcpServer::new(state.mcp_state());
 
         let names = mcp
             .all_tool_schemas()
