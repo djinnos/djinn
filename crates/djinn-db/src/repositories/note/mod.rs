@@ -314,41 +314,83 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn catalog_generation() {
+    async fn fts5_search_prefers_title_over_content() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
-        repo.create(&project.id, tmp.path(), "First ADR", "body", "adr", "[]")
-            .await
-            .unwrap();
-        repo.create(&project.id, tmp.path(), "Second ADR", "body", "adr", "[]")
-            .await
-            .unwrap();
         repo.create(
             &project.id,
             tmp.path(),
-            "A Pattern",
-            "body",
-            "pattern",
+            "rankneedle in title",
+            "unrelated body",
+            "research",
+            "[]",
+        )
+        .await
+        .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "different title",
+            "This content has rankneedle.",
+            "research",
             "[]",
         )
         .await
         .unwrap();
 
-        let catalog = repo.catalog(&project.id).await.unwrap();
-        assert!(catalog.contains("# Knowledge Base"));
-        assert!(catalog.contains("## decisions"));
-        assert!(catalog.contains("First ADR"));
-        assert!(catalog.contains("Second ADR"));
-        assert!(catalog.contains("## patterns"));
-        assert!(catalog.contains("A Pattern"));
+        let results = repo
+            .search(&project.id, "rankneedle", None, None, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "rankneedle in title");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn list_with_folder_filter() {
+    async fn fts5_search_prefers_tags_over_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "tag-ranked note",
+            "unrelated body",
+            "research",
+            r#"["ranktag"]"#,
+        )
+        .await
+        .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "content-ranked note",
+            "This content has ranktag.",
+            "research",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let results = repo
+            .search(&project.id, "ranktag", None, None, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "tag-ranked note");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn catalog_generation() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);

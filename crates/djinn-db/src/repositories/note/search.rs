@@ -58,7 +58,7 @@ impl NoteRepository {
                AND n.project_id = ?2
                AND (?3 = '' OR n.folder = ?3)
                AND (?4 = '' OR n.note_type = ?4)
-             ORDER BY bm25(notes_fts)
+             ORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)
              LIMIT ?5",
         )
         .bind(&safe_query)
