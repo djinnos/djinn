@@ -3,7 +3,7 @@ use std::path::Path;
 use serde_json::json;
 
 use crate::db::repositories::note::NoteRepository;
-use crate::db::repositories::project::ProjectRepository;
+use djinn_db::ProjectRepository;
 use crate::mcp::tools::memory_tools::types::*;
 use crate::test_helpers::{
     create_test_app, create_test_app_with_db, create_test_db, create_test_epic,
@@ -36,7 +36,7 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     assert!(created.get("permalink").and_then(|v| v.as_str()).is_some());
 
     let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    let project = project_repo
+    let project: String = project_repo
         .resolve_or_create("/tmp/mcp-memory-write")
         .await
         .unwrap();

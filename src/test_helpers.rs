@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use crate::db::EpicRepository;
-use crate::db::repositories::epic::EpicCreateInput;
+use djinn_db::EpicCreateInput;
 use crate::db::NoteRepository;
 use crate::db::ProjectRepository;
 use crate::db::SessionRepository;
