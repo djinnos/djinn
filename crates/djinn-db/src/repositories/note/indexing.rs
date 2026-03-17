@@ -44,17 +44,17 @@ impl NoteRepository {
                     }
 
                     let updated = self
-                        .update_index_entry(
-                            &current.id,
-                            &scanned_note.file_path,
-                            &scanned_note.permalink,
-                            &scanned_note.title,
-                            &scanned_note.note_type,
-                            &scanned_note.folder,
-                            &scanned_note.tags,
-                            &scanned_note.content,
+                        .update_index_entry(UpdateNoteIndexParams {
+                            id: &current.id,
+                            file_path: &scanned_note.file_path,
+                            permalink: &scanned_note.permalink,
+                            title: &scanned_note.title,
+                            note_type: &scanned_note.note_type,
+                            folder: &scanned_note.folder,
+                            tags: &scanned_note.tags,
+                            content: &scanned_note.content,
                             project_id,
-                        )
+                        })
                         .await?;
                     self.events.send(DjinnEventEnvelope::note_updated(&updated));
                     summary.updated += 1;
@@ -124,19 +124,18 @@ impl NoteRepository {
         Ok(note)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn update_index_entry(
-        &self,
-        id: &str,
-        file_path: &str,
-        permalink: &str,
-        title: &str,
-        note_type: &str,
-        folder: &str,
-        tags: &str,
-        content: &str,
-        project_id: &str,
-    ) -> Result<Note> {
+    pub(super) async fn update_index_entry(&self, params: UpdateNoteIndexParams<'_>) -> Result<Note> {
+        let UpdateNoteIndexParams {
+            id,
+            file_path,
+            permalink,
+            title,
+            note_type,
+            folder,
+            tags,
+            content,
+            project_id,
+        } = params;
         let mut tx = self.db.pool().begin().await?;
 
         sqlx::query(
@@ -171,6 +170,18 @@ impl NoteRepository {
         tx.commit().await?;
         Ok(note)
     }
+}
+
+pub(super) struct UpdateNoteIndexParams<'a> {
+    pub(super) id: &'a str,
+    pub(super) file_path: &'a str,
+    pub(super) permalink: &'a str,
+    pub(super) title: &'a str,
+    pub(super) note_type: &'a str,
+    pub(super) folder: &'a str,
+    pub(super) tags: &'a str,
+    pub(super) content: &'a str,
+    pub(super) project_id: &'a str,
 }
 
 // ── Scanned note type ─────────────────────────────────────────────────────────
