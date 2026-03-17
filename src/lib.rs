@@ -5,7 +5,7 @@ pub mod db;
 pub mod error;
 pub mod events;
 pub mod logging;
-pub mod mcp;
+pub mod mcp_bridge;
 pub mod models {
     pub use djinn_core::models::*;
 }
@@ -18,3 +18,6 @@ pub mod watchers;
 
 #[cfg(test)]
 pub mod test_helpers;
+
+#[cfg(test)]
+mod mcp_contract_tests;

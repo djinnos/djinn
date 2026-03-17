@@ -17,10 +17,10 @@ use djinn_agent::provider::{StreamEvent, create_provider};
 use crate::db::{
     EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, TaskRepository,
 };
-use crate::mcp::server::DjinnMcpServer;
+use djinn_mcp::server::DjinnMcpServer;
 use crate::server::AppState;
 
-const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../agent/prompts/chat.md");
+const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../../crates/djinn-agent/src/prompts/chat.md");
 const MAX_TOOL_ITERATIONS: usize = 20;
 
 fn compose_system_prompt(
@@ -470,7 +470,7 @@ mod tests {
     use super::{
         DJINN_CHAT_SYSTEM_PROMPT, ToolCallPayload, compose_system_prompt, sse_json_event,
     };
-    use crate::mcp::server::DjinnMcpServer;
+    use djinn_mcp::server::DjinnMcpServer;
     use crate::server::AppState;
     use crate::test_helpers;
     use serde_json::json;
