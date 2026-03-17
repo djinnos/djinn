@@ -7,6 +7,7 @@
 
 use serde::Deserialize;
 
+#[cfg(test)]
 use super::AgentType;
 use crate::roles::RoleConfig;
 use djinn_core::models::Task;
@@ -73,8 +74,8 @@ pub struct TaskContext {
 
 /// Render a system prompt for a project-scoped agent (no task context).
 ///
-/// Used for agents like the Groomer that operate on an entire column rather
-/// than a single task.
+/// Test-only convenience wrapper — production code uses `render_project_prompt_for_role`.
+#[cfg(test)]
 pub fn render_project_prompt(
     agent_type: AgentType,
     project_path: &str,
@@ -115,7 +116,8 @@ pub(crate) fn render_project_prompt_for_role(
 
 /// Render a system prompt for `agent_type` using data from `task` and `ctx`.
 ///
-/// Returns a plain `String` ready for `agent.set_system_prompt_override()`.
+/// Test-only convenience wrapper — production code uses `render_prompt_for_role`.
+#[cfg(test)]
 pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> String {
     let config = agent_type.role_config();
     render_prompt_for_role(config, task, ctx)
