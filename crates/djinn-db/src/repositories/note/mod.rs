@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 
 use sqlx::Sqlite;
 
-
-use crate::db::connection::Database;
-use crate::error::{Error, Result};
-use crate::events::{DjinnEventEnvelope, EventBus};
-use crate::models::{
+use djinn_core::events::{DjinnEventEnvelope, EventBus};
+use djinn_core::models::{
     BrokenLink, GraphEdge, GraphNode, GraphResponse, HealthReport, Note, NoteCompact,
     NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
 };
+
+use crate::database::Database;
+use crate::error::{DbError as Error, DbResult as Result};
 
 mod crud;
 mod file_helpers;
@@ -46,29 +46,49 @@ impl NoteRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use tokio::sync::broadcast;
-    use crate::db::ProjectRepository;
-    use crate::events::event_bus_for;
-    use crate::test_helpers;
+    use std::path::Path;
 
-    async fn make_project(
-        db: &Database,
-        tx: broadcast::Sender<DjinnEventEnvelope>,
-        path: &Path,
-    ) -> crate::models::Project {
-        ProjectRepository::new(db.clone(), event_bus_for(&tx))
-            .create("test-project", path.to_str().unwrap())
+    use djinn_core::events::{DjinnEventEnvelope, EventBus};
+    use djinn_core::models::{Note, Project};
+    use tokio::sync::broadcast;
+
+    use crate::database::Database;
+
+    use super::*;
+
+    fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {
+        let tx = tx.clone();
+        EventBus::new(move |event| {
+            let _ = tx.send(event);
+        })
+    }
+
+    async fn make_project(db: &Database, path: &Path) -> Project {
+        db.ensure_initialized().await.unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
+            .bind(&id)
+            .bind("test-project")
+            .bind(path.to_str().unwrap())
+            .execute(db.pool())
             .await
-            .unwrap()
+            .unwrap();
+        sqlx::query_as::<_, Project>(
+            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote \
+             FROM projects WHERE id = ?1",
+        )
+        .bind(&id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_and_get_note() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let note = repo
@@ -100,9 +120,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn singleton_brief() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let note = repo
@@ -124,9 +144,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_by_permalink() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let note = repo
@@ -152,10 +172,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_note() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, mut rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let _ = rx.recv().await.unwrap(); // ProjectCreated
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let note = repo
@@ -188,10 +207,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_note() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, mut rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let _ = rx.recv().await.unwrap();
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let note = repo
@@ -221,9 +239,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fts5_search() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         repo.create(
@@ -260,9 +278,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fts5_search_folder_filter() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         repo.create(
@@ -297,9 +315,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn catalog_generation() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         repo.create(&project.id, tmp.path(), "First ADR", "body", "adr", "[]")
@@ -331,9 +349,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_with_folder_filter() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         repo.create(&project.id, tmp.path(), "ADR One", "body", "adr", "[]")
@@ -361,10 +379,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_emits_event() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, mut rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let _ = rx.recv().await.unwrap();
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         repo.create(
@@ -396,10 +413,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn touch_accessed_does_not_emit_event() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, mut rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
-        let _ = rx.recv().await.unwrap();
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let note = repo
@@ -456,9 +472,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wikilink_resolves_on_create() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         // Create target first.
@@ -495,9 +511,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn broken_link_detection() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         repo.create(
@@ -520,9 +536,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn orphan_detection() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         // Two notes: source links to target, isolated is orphaned.
@@ -571,9 +587,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resolve_previously_broken_links_on_create() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         // Create source first (target doesn't exist yet → broken link).
@@ -600,9 +616,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reindex_from_disk_detects_created_updated_and_deleted() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_helpers::create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
-        let project = make_project(&db, tx.clone(), tmp.path()).await;
+        let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let decisions_dir = tmp.path().join(".djinn").join("decisions");

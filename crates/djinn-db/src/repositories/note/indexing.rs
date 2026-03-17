@@ -211,12 +211,12 @@ fn scan_note_tree(
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
-            return Err(Error::Internal(format!("read_dir {}: {e}", dir.display())));
+            return Err(Error::InvalidData(format!("read_dir {}: {e}", dir.display())));
         }
     };
 
     for entry in entries {
-        let entry = entry.map_err(|e| Error::Internal(format!("read_dir entry error: {e}")))?;
+        let entry = entry.map_err(|e| Error::InvalidData(format!("read_dir entry error: {e}")))?;
         let path = entry.path();
 
         if path.is_dir() {
@@ -237,7 +237,7 @@ fn scan_note_tree(
         }
 
         let raw = std::fs::read_to_string(&path)
-            .map_err(|e| Error::Internal(format!("read note file {}: {e}", path.display())))?;
+            .map_err(|e| Error::InvalidData(format!("read note file {}: {e}", path.display())))?;
 
         if let Some(scanned) = parse_scanned_note(root, &path, &raw) {
             out.push(scanned);
