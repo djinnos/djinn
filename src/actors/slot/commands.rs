@@ -1,7 +1,7 @@
 use thiserror::Error;
 use tokio::sync::oneshot;
 
-use crate::commands::{CommandResult, CommandSpec};
+use djinn_core::commands::{CommandResult, CommandSpec};
 use crate::db::TaskRepository;
 use crate::agent::context::AgentContext;
 

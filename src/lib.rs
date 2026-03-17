@@ -2,7 +2,6 @@
 
 pub mod actors;
 pub mod agent;
-pub mod commands;
 pub mod daemon;
 pub mod db;
 pub mod error;

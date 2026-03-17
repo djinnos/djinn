@@ -330,7 +330,7 @@ fn format_verification_failure_feedback(result: &crate::verification::service::V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::CommandResult;
+    use djinn_core::commands::CommandResult;
     use crate::verification::service::VerificationResult;
 
     fn make_result(stdout: &str, stderr: &str) -> VerificationResult {

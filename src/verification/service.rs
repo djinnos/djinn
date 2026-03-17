@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::time::Instant;
 
-use crate::commands::CommandResult;
-use crate::commands::run_commands;
+use djinn_agent::commands::run_commands;
+use djinn_core::commands::CommandResult;
 use crate::db::VerificationCacheRepository;
 use crate::error::Result;
 
@@ -34,7 +34,9 @@ pub async fn verify_commit(
     let (setup_commands, verification_commands) = load_commands(worktree_path)
         .map_err(crate::error::Error::Internal)?;
 
-    let setup_results = run_commands(&setup_commands, worktree_path).await?;
+    let setup_results = run_commands(&setup_commands, worktree_path)
+        .await
+        .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
 
     let cached = cache_repo.get(project_id, commit_sha).await?.is_some();
     if cached {
@@ -48,7 +50,9 @@ pub async fn verify_commit(
         });
     }
 
-    let verification_results = run_commands(&verification_commands, worktree_path).await?;
+    let verification_results = run_commands(&verification_commands, worktree_path)
+        .await
+        .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
     let passed = verification_results
         .last()
         .map(|r| r.exit_code == 0)
@@ -82,7 +86,7 @@ pub async fn verify_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::CommandResult;
+    use djinn_core::commands::CommandResult;
     use crate::db::VerificationCacheRepository;
     use crate::db::connection::Database;
     use tempfile::tempdir;

@@ -692,6 +692,7 @@ dependencies = [
  "bytes",
  "clap",
  "dirs",
+ "djinn-agent",
  "djinn-core",
  "djinn-db",
  "djinn-git",

@@ -9,7 +9,7 @@ use crate::agent::message::{Conversation, Message};
 use crate::agent::prompts::TaskContext;
 use crate::agent::provider::create_provider;
 use crate::agent::roles::{AgentRole, role_for_task_dispatch};
-use crate::commands::run_commands;
+use djinn_agent::commands::run_commands;
 use crate::verification::settings::load_commands;
 use crate::db::SessionRepository;
 use crate::db::TaskRepository;
@@ -330,7 +330,7 @@ pub async fn run_task_lifecycle(
                             "setup_command_finished",
                             serde_json::json!({"name": spec.name, "status": "error", "error": e.to_string()}),
                         );
-                        setup_error = Some(e.into());
+                        setup_error = Some(e);
                         break;
                     }
                 }
