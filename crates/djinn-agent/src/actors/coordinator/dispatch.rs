@@ -254,6 +254,78 @@ impl CoordinatorActor {
         self.publish_status();
     }
 
+
+    pub(super) async fn enforce_non_worker_session_timeout(&mut self) {
+        let repo = djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let active = match repo.list_active().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: failed to list active sessions for timeout enforcement");
+                return;
+            }
+        };
+
+        let now = std::time::SystemTime::now();
+        let timeout = Duration::from_secs(5 * 60);
+
+        for session in active {
+            if session.agent_type == "worker" {
+                continue;
+            }
+
+            let Some(task_id) = session.task_id.as_deref() else {
+                continue;
+            };
+
+            let Ok(started_secs) = session.started_at.parse::<u64>() else {
+                tracing::warn!(session_id = %session.id, started_at = %session.started_at, "CoordinatorActor: failed to parse session started_at");
+                continue;
+            };
+            let started_at = std::time::UNIX_EPOCH + Duration::from_secs(started_secs);
+
+            let Ok(elapsed) = now.duration_since(started_at) else {
+                continue;
+            };
+            if elapsed <= timeout {
+                continue;
+            }
+
+            if let Err(e) = self.pool.kill_session(task_id).await {
+                tracing::warn!(task_id = %task_id, session_id = %session.id, error = %e, "CoordinatorActor: failed to kill timed-out non-worker session");
+                continue;
+            }
+
+            let task_repo = self.task_repo();
+            let payload = serde_json::json!({
+                "message": format!(
+                    "Coordinator timeout kill: {} session exceeded 5 minutes (started at {}). Session was cancelled for redispatch.",
+                    session.agent_type, session.started_at
+                )
+            })
+            .to_string();
+            let _ = task_repo
+                .log_activity(
+                    Some(task_id),
+                    "coordinator",
+                    "system",
+                    "comment",
+                    &payload,
+                )
+                .await;
+
+            tracing::warn!(
+                task_id = %task_id,
+                session_id = %session.id,
+                agent_type = %session.agent_type,
+                started_at = %session.started_at,
+                "CoordinatorActor: killed timed-out non-worker session"
+            );
+        }
+    }
+
     /// On each tick: find tasks in active execution states with no active session
     /// and release them back to a dispatch-ready state (AGENT-08).
     ///

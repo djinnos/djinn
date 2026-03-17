@@ -309,6 +309,7 @@ impl CoordinatorActor {
                 //    any tasks that missed an event (e.g. needs_pm_intervention
                 //    tasks surviving a server restart).
                 _ = self.tick.tick() => {
+                    self.enforce_non_worker_session_timeout().await;
                     self.detect_and_recover_stuck_filtered(None).await;
                     self.ensure_groomer_dispatch(None).await;
                 self.dispatch_ready_tasks(None).await;
