@@ -17,8 +17,8 @@ impl AgentRole for GroomerRole {
     }
 
     fn render_prompt(&self, _task: &Task, ctx: &TaskContext) -> String {
-        crate::prompts::render_project_prompt(
-            crate::AgentType::Groomer,
+        crate::prompts::render_project_prompt_for_role(
+            self.config(),
             &ctx.project_path,
             ctx.verification_commands.as_deref(),
         )

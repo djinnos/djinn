@@ -8,7 +8,6 @@ use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use super::AgentType;
 use super::sandbox;
 use djinn_db::EpicRepository;
 use djinn_db::NoteRepository;
@@ -41,7 +40,7 @@ async fn dispatch_tool_call<T>(
     state: &AgentContext,
     tool_call: &T,
     worktree_path: &Path,
-    agent_type: Option<AgentType>,
+    allowed_schemas: Option<&[serde_json::Value]>,
 ) -> Result<serde_json::Value, String>
 where
     T: Serialize,
@@ -57,12 +56,12 @@ where
         repo.resolve(&path_str).await.ok().flatten()
     };
 
-    if let Some(agent_type) = agent_type
-        && !is_tool_allowed_for_agent(agent_type, &call.name)
+    if let Some(schemas) = allowed_schemas
+        && !is_tool_allowed_for_schemas(schemas, &call.name)
     {
         return Err(format!(
-            "tool `{}` is not allowed for agent type {:?}",
-            call.name, agent_type
+            "tool `{}` is not in the allowed schema list",
+            call.name
         ));
     }
 
@@ -1646,11 +1645,16 @@ fn resolve_path(raw: &str, base: &std::path::Path) -> PathBuf {
     out
 }
 
-fn is_tool_allowed_for_agent(agent_type: AgentType, name: &str) -> bool {
-    let schemas = agent_type.tool_schemas();
+fn is_tool_allowed_for_schemas(schemas: &[serde_json::Value], name: &str) -> bool {
     schemas
         .iter()
         .any(|schema| schema.get("name").and_then(|n| n.as_str()) == Some(name))
+}
+
+#[cfg(test)]
+fn is_tool_allowed_for_agent(agent_type: super::AgentType, name: &str) -> bool {
+    let schemas = agent_type.tool_schemas();
+    is_tool_allowed_for_schemas(&schemas, name)
 }
 
 fn ensure_path_within_worktree(path: &Path, worktree_path: &Path) -> Result<(), String> {
@@ -2615,6 +2619,7 @@ pub(crate) async fn call_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AgentType;
     use crate::test_helpers::create_test_db;
     use tokio_util::sync::CancellationToken;
 

@@ -8,6 +8,7 @@
 use serde::Deserialize;
 
 use super::AgentType;
+use crate::roles::RoleConfig;
 use djinn_core::models::Task;
 
 /// Hard cap on rendered system prompt size (chars). Individual sections have
@@ -80,10 +81,19 @@ pub fn render_project_prompt(
     verification_commands: Option<&str>,
 ) -> String {
     let config = agent_type.role_config();
+    render_project_prompt_for_role(config, project_path, verification_commands)
+}
+
+/// Role-based variant of `render_project_prompt` — does not require `AgentType`.
+pub(crate) fn render_project_prompt_for_role(
+    config: &RoleConfig,
+    project_path: &str,
+    verification_commands: Option<&str>,
+) -> String {
     if !config.is_project_scoped {
         panic!(
-            "render_project_prompt called for task-scoped agent: {}",
-            agent_type.as_str()
+            "render_project_prompt_for_role called for task-scoped agent: {}",
+            config.name
         );
     }
     let template = config.initial_message;
@@ -108,6 +118,11 @@ pub fn render_project_prompt(
 /// Returns a plain `String` ready for `agent.set_system_prompt_override()`.
 pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> String {
     let config = agent_type.role_config();
+    render_prompt_for_role(config, task, ctx)
+}
+
+/// Role-based variant of `render_prompt` — does not require `AgentType`.
+pub(crate) fn render_prompt_for_role(config: &RoleConfig, task: &Task, ctx: &TaskContext) -> String {
     let (role_name, role_template) = (config.display_name, config.initial_message);
 
     let ac = format_acceptance_criteria(&task.acceptance_criteria);
@@ -195,7 +210,7 @@ pub fn render_prompt(agent_type: AgentType, task: &Task, ctx: &TaskContext) -> S
         out.truncate(end);
         out.push_str("\n\n… [system prompt truncated — use task_show and task_activity_list for full details]");
         tracing::warn!(
-            agent_type = %agent_type.as_str(),
+            agent_type = %config.name,
             original_len = out.len() + (MAX_SYSTEM_PROMPT_CHARS - end),
             truncated_to = out.len(),
             "system prompt exceeded hard cap and was truncated"

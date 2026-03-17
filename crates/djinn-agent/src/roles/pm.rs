@@ -18,7 +18,7 @@ impl AgentRole for PmRole {
     }
 
     fn render_prompt(&self, task: &Task, ctx: &TaskContext) -> String {
-        crate::prompts::render_prompt(crate::AgentType::PM, task, ctx)
+        crate::prompts::render_prompt_for_role(self.config(), task, ctx)
     }
 
     fn needs_epic_context(&self) -> bool {
