@@ -2738,6 +2738,69 @@ mod tests {
         assert!(groomer.iter().any(|n| n == "task_create"));
         assert!(groomer.iter().any(|n| n == "task_transition"));
     }
+
+    #[test]
+    fn ensure_path_within_worktree_accepts_in_tree_and_rejects_traversal() {
+        use tempfile::tempdir;
+
+        let worktree = tempdir().expect("temp worktree");
+        let nested = worktree.path().join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested");
+        let in_tree = nested.join("file.txt");
+        ensure_path_within_worktree(&in_tree, worktree.path()).expect("in-tree path should pass");
+
+        let traversal = worktree.path().join("..").join("..").join("escape.txt");
+        let err = ensure_path_within_worktree(&traversal, worktree.path())
+            .expect_err("traversal should be rejected");
+        assert!(err.contains("outside worktree"));
+    }
+
+    #[test]
+    fn ensure_path_within_worktree_rejects_symlink_escape() {
+        use tempfile::tempdir;
+
+        let worktree = tempdir().expect("temp worktree");
+        let outside = tempdir().expect("outside");
+        let link = worktree.path().join("escape-link");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &link).expect("create symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(outside.path(), &link).expect("create symlink");
+
+        let escaped = link.join("leak.txt");
+        let err = ensure_path_within_worktree(&escaped, worktree.path())
+            .expect_err("symlink escape should be rejected");
+        assert!(err.contains("outside worktree"));
+    }
+
+    #[test]
+    fn is_tool_allowed_for_schemas_handles_empty_and_invalid_entries() {
+        assert!(!is_tool_allowed_for_schemas(&[], "shell"));
+
+        let schemas = vec![
+            serde_json::json!({}),
+            serde_json::json!({"name": null}),
+            serde_json::json!({"name": 42}),
+            serde_json::json!({"name": "shell"}),
+        ];
+        assert!(is_tool_allowed_for_schemas(&schemas, "shell"));
+        assert!(!is_tool_allowed_for_schemas(&schemas, "read"));
+    }
+
+    #[test]
+    fn resolve_path_handles_relative_absolute_and_normalization() {
+        let base = Path::new("/tmp/worktree");
+
+        let relative = resolve_path("src/main.rs", base);
+        assert_eq!(relative, PathBuf::from("/tmp/worktree/src/main.rs"));
+
+        let absolute = resolve_path("/etc/hosts", base);
+        assert_eq!(absolute, PathBuf::from("/etc/hosts"));
+
+        let normalized = resolve_path("./src/../Cargo.toml", base);
+        assert_eq!(normalized, PathBuf::from("/tmp/worktree/Cargo.toml"));
+    }
 }
 
 fn tool_apply_patch() -> RmcpTool {
