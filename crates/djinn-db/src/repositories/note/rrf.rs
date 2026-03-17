@@ -1,12 +1,5 @@
 use std::collections::HashMap;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "RRF integration call-sites are added in follow-up task"
-    )
-)]
 pub fn rrf_fuse(
     signals: &[(Vec<(String, f64)>, f64)],
     confidence_map: &HashMap<String, f64>,
