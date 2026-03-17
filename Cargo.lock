@@ -586,9 +586,33 @@ name = "djinn-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
+ "base64",
+ "dirs",
  "djinn-core",
+ "djinn-db",
+ "djinn-git",
+ "djinn-provider",
+ "futures",
+ "git2",
+ "landlock",
+ "libc",
+ "regex",
+ "reqwest 0.13.2",
+ "ring",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
  "tokio",
+ "tokio-stream",
+ "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
