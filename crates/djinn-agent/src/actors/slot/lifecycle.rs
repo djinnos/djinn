@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::message::{Conversation, Message};
 use crate::prompts::TaskContext;
 use crate::provider::create_provider;
-use crate::roles::{AgentRole, role_for_task_dispatch, role_impl_for};
+use crate::roles::{AgentRole, role_impl_for};
 use crate::commands::run_commands;
 use crate::verification::settings::load_commands;
 use djinn_db::SessionRepository;
@@ -31,10 +31,11 @@ use crate::task_merge::interrupt_paused_worker_session;
 /// Sends `SlotEvent::Free` on normal completion and `SlotEvent::Killed` when
 /// cancelled via `cancel`.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_task_lifecycle(
+pub(crate) async fn run_task_lifecycle(
     task_id: String,
     project_path: String,
     model_id: String,
+    role: Arc<dyn AgentRole>,
     app_state: AgentContext,
     cancel: CancellationToken,
     pause: CancellationToken,
@@ -89,7 +90,6 @@ pub async fn run_task_lifecycle(
     };
     let conflict_ctx = conflict_context_for_dispatch(&task.id, &app_state).await;
     let merge_validation_ctx = merge_validation_context_for_dispatch(&task.id, &app_state).await;
-    let role: Arc<dyn AgentRole> = role_for_task_dispatch(&task, conflict_ctx.is_some());
 
     tracing::info!(
         task_id = %task.short_id,
