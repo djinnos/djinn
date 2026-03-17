@@ -98,7 +98,8 @@ impl NoteRepository {
         Ok(sqlx::query_as::<_, Note>(
             "SELECT id, project_id, permalink, title, file_path,
                         note_type, folder, tags, content,
-                        created_at, updated_at, last_accessed
+                        created_at, updated_at, last_accessed,
+                        access_count, confidence, abstract as abstract_, overview
                  FROM notes WHERE project_id = ?1 AND permalink = ?2",
         )
         .bind(project_id)
@@ -131,7 +132,8 @@ impl NoteRepository {
             Ok(sqlx::query_as::<_, Note>(
                 "SELECT id, project_id, permalink, title, file_path,
                             note_type, folder, tags, content,
-                            created_at, updated_at, last_accessed
+                            created_at, updated_at, last_accessed,
+                            access_count, confidence, abstract as abstract_, overview
                      FROM notes WHERE project_id = ?1 AND folder = ?2
                      ORDER BY folder, title",
             )
@@ -143,7 +145,8 @@ impl NoteRepository {
             Ok(sqlx::query_as::<_, Note>(
                 "SELECT id, project_id, permalink, title, file_path,
                             note_type, folder, tags, content,
-                            created_at, updated_at, last_accessed
+                            created_at, updated_at, last_accessed,
+                            access_count, confidence, abstract as abstract_, overview
                      FROM notes WHERE project_id = ?1
                      ORDER BY folder, title",
             )
@@ -243,7 +246,8 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
         sqlx::query(
             "UPDATE notes SET
-                last_accessed = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                last_accessed = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                access_count = access_count + 1
              WHERE id = ?1",
         )
         .bind(id)
