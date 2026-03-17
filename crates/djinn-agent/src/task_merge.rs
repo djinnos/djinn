@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use crate::context::AgentContext;
@@ -163,20 +163,26 @@ pub(crate) async fn merge_and_transition(
                 commit_sha = %result.commit_sha,
                 "Lifecycle: post-review squash merge succeeded"
             );
-            if let Err(e) = git.delete_branch(&base_branch).await {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    branch = %base_branch,
-                    error = %e,
-                    "failed to delete task branch after successful merge"
-                );
-            }
             if let Err(e) = repo.set_merge_commit_sha(task_id, &result.commit_sha).await {
                 return Some((
                     actions.release.clone(),
                     Some(format!("merged but failed to store merge SHA: {e}")),
                 ));
             }
+            // Tear down in correct order: LSP → worktree dir → branch (branch deletion
+            // always failed before because the worktree still held a ref to it).
+            let worktree_path = project_dir
+                .join(".djinn")
+                .join("worktrees")
+                .join(&task.short_id);
+            crate::actors::slot::teardown_worktree(
+                &task.short_id,
+                &worktree_path,
+                &project_dir,
+                app_state,
+                true,
+            )
+            .await;
             cleanup_paused_worker_session(task_id, app_state).await;
             Some((actions.approve.clone(), None))
         }
@@ -281,9 +287,37 @@ pub(crate) async fn cleanup_paused_worker_session(task_id: &str, app_state: &Age
         );
     }
 
-    if let Some(worktree_path) = paused.worktree_path.as_deref().map(PathBuf::from) {
-        let _ = tokio::fs::remove_dir_all(&worktree_path).await;
+    if let Some(worktree_str) = paused.worktree_path.as_deref() {
+        let worktree_path = PathBuf::from(worktree_str);
+        // Use teardown_worktree for correct ordering (LSP shutdown before dir removal).
+        // Look up task + project path for the full teardown; fall back to raw remove if
+        // the lookup fails.
+        if let Some(project_path_str) = resolve_project_path_for_task(task_id, app_state).await {
+            crate::actors::slot::teardown_worktree(
+                &project_path_str.0,
+                &worktree_path,
+                Path::new(&project_path_str.1),
+                app_state,
+                false,
+            )
+            .await;
+        } else {
+            let _ = tokio::fs::remove_dir_all(&worktree_path).await;
+        }
     }
+}
+
+/// Returns `(task_short_id, project_path_str)` for the given task UUID, or `None` if either
+/// lookup fails.  Used by `cleanup_paused_worker_session` to supply arguments to
+/// `teardown_worktree`.
+async fn resolve_project_path_for_task(
+    task_id: &str,
+    app_state: &AgentContext,
+) -> Option<(String, String)> {
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let task = task_repo.get(task_id).await.ok().flatten()?;
+    let project_path = resolve_project_path_for_id(&task.project_id, app_state).await?;
+    Some((task.short_id, project_path))
 }
 
 pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &AgentContext) {

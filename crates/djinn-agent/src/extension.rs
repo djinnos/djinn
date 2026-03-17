@@ -1931,28 +1931,30 @@ async fn call_task_delete_branch(
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
 
-    // Interrupt and clean up any paused worker session (handles worktree cleanup too).
+    // Interrupt the paused worker session record.
     crate::task_merge::interrupt_paused_worker_session(&task.id, state).await;
-    crate::task_merge::cleanup_paused_worker_session(&task.id, state).await;
 
-    // Delete the task branch from git.
+    // Resolve project dir — needed for teardown_worktree.
     let project_dir =
         match crate::task_merge::resolve_project_path_for_id(&task.project_id, state).await {
             Some(p) => std::path::PathBuf::from(p),
             None => return Ok(serde_json::json!({ "error": "project not found" })),
         };
+
+    // Tear down: LSP shutdown → worktree removal → branch deletion (correct order).
+    let worktree_path = project_dir
+        .join(".djinn")
+        .join("worktrees")
+        .join(&task.short_id);
     let base_branch = format!("task/{}", task.short_id);
-    match state.git_actor(&project_dir).await {
-        Ok(git) => {
-            if let Err(e) = git.delete_branch(&base_branch).await {
-                // Not fatal — branch may not exist
-                tracing::warn!(task_id = %task.short_id, branch = %base_branch, error = %e, "PM reset_branch: branch deletion failed (may not exist)");
-            }
-        }
-        Err(e) => {
-            return Ok(serde_json::json!({ "error": format!("git actor failed: {e}") }));
-        }
-    }
+    crate::actors::slot::teardown_worktree(
+        &task.short_id,
+        &worktree_path,
+        &project_dir,
+        state,
+        true,
+    )
+    .await;
 
     Ok(serde_json::json!({
         "ok": true,
@@ -2023,15 +2025,31 @@ async fn call_task_kill_session(
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
 
-    // Interrupt the paused session and delete saved conversation.
-    // This forces a fresh session on next dispatch without deleting the branch.
+    // Interrupt the paused session record; clean up the worktree without deleting the branch
+    // so the task can resume on the same branch next dispatch.
     crate::task_merge::interrupt_paused_worker_session(&task.id, state).await;
-    crate::task_merge::cleanup_paused_worker_session(&task.id, state).await;
+    if let Some(project_path_str) =
+        crate::task_merge::resolve_project_path_for_id(&task.project_id, state).await
+    {
+        let project_dir = std::path::PathBuf::from(&project_path_str);
+        let worktree_path = project_dir
+            .join(".djinn")
+            .join("worktrees")
+            .join(&task.short_id);
+        crate::actors::slot::teardown_worktree(
+            &task.short_id,
+            &worktree_path,
+            &project_dir,
+            state,
+            false,
+        )
+        .await;
+    }
 
     Ok(serde_json::json!({
         "ok": true,
         "task_id": task.short_id,
-        "message": "Paused session interrupted and conversation deleted. Next dispatch will start a fresh session."
+        "message": "Paused session interrupted and worktree cleaned up. Next dispatch will start a fresh session."
     }))
 }
 

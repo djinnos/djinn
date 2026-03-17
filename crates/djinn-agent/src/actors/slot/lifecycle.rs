@@ -384,7 +384,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                             None,
                         )
                         .await;
-                    cleanup_worktree(&task.id, &worktree_path, &app_state).await;
+                    teardown_worktree(&task.short_id, &worktree_path, &project_dir, &app_state, false).await;
                     return_free!();
                 }
                 None => {
@@ -422,7 +422,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                                 None,
                             )
                             .await;
-                        cleanup_worktree(&task.id, &worktree_path, &app_state).await;
+                        teardown_worktree(&task.short_id, &worktree_path, &project_dir, &app_state, false).await;
                         return_free!();
                     }
                     tracing::info!(
@@ -697,7 +697,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                             &app_state,
                         )
                         .await;
-                        cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+                        teardown_worktree(&task.short_id, &worktree_path, &project_dir, &app_state, false).await;
                         return_free!();
                     }
                 };
@@ -731,7 +731,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     &app_state,
                 )
                 .await;
-                cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+                teardown_worktree(&task.short_id, &worktree_path, &project_dir, &app_state, false).await;
                 return_free!();
             }
         };
@@ -813,8 +813,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             &app_state,
         )
         .await;
-        app_state.lsp.shutdown_for_worktree(&worktree_path).await;
-        cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+        teardown_worktree(&task.short_id, &worktree_path, &project_dir, &app_state, false).await;
         transition_interrupted(
             &task_id,
             role.config().release_action,
@@ -891,9 +890,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             &app_state,
         )
         .await;
-        // Shut down LSP clients before removing the worktree directory.
-        app_state.lsp.shutdown_for_worktree(&worktree_path).await;
-        cleanup_worktree(&task_id, &worktree_path, &app_state).await;
+        teardown_worktree(&task.short_id, &worktree_path, &project_dir, &app_state, false).await;
     }
 
     // Log reviewer feedback.
