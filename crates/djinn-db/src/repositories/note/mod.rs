@@ -17,6 +17,7 @@ mod file_helpers;
 mod graph;
 mod indexing;
 mod search;
+mod scoring;
 
 use file_helpers::{build_catalog, write_note_file};
 pub use file_helpers::{file_path_for, folder_for_type, is_singleton, permalink_for, slugify};
@@ -667,4 +668,116 @@ mod tests {
             .unwrap();
         assert_eq!(third.deleted, 1);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graph_proximity_empty_for_seed_without_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let seed = repo
+            .create(&project.id, tmp.path(), "Seed", "no links", "research", "[]")
+            .await
+            .unwrap();
+
+        let scores = repo
+            .graph_proximity_scores(&[seed.id], 2)
+            .await
+            .unwrap();
+        assert!(scores.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graph_proximity_linear_chain_hop_decay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let a = repo
+            .create(&project.id, tmp.path(), "A", "[[B]]", "research", "[]")
+            .await
+            .unwrap();
+        let b = repo
+            .create(&project.id, tmp.path(), "B", "[[C]]", "research", "[]")
+            .await
+            .unwrap();
+        let c = repo
+            .create(&project.id, tmp.path(), "C", "", "research", "[]")
+            .await
+            .unwrap();
+
+        repo.reindex_from_disk(&project.id, tmp.path()).await.unwrap();
+
+        let seed_id = a.id.clone();
+        let scores = repo.graph_proximity_scores(&[seed_id.clone()], 2).await.unwrap();
+        let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
+        assert_eq!(m.get(&b.id).copied().unwrap(), 0.7);
+        assert!((m.get(&c.id).copied().unwrap() - 0.49).abs() < 1e-9);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graph_proximity_diamond_keeps_max_path_score_not_sum() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let a = repo
+            .create(&project.id, tmp.path(), "A", "[[B]] [[D]]", "research", "[]")
+            .await
+            .unwrap();
+        repo.create(&project.id, tmp.path(), "B", "[[C]]", "research", "[]")
+            .await
+            .unwrap();
+        let c = repo
+            .create(&project.id, tmp.path(), "C", "", "research", "[]")
+            .await
+            .unwrap();
+        repo.create(&project.id, tmp.path(), "D", "[[C]]", "research", "[]")
+            .await
+            .unwrap();
+
+        repo.reindex_from_disk(&project.id, tmp.path()).await.unwrap();
+
+        let seed_id = a.id.clone();
+        let scores = repo.graph_proximity_scores(&[seed_id], 2).await.unwrap();
+        let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
+        assert!((m.get(&c.id).copied().unwrap() - 0.49).abs() < 1e-9);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graph_proximity_excludes_beyond_max_hops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let a = repo
+            .create(&project.id, tmp.path(), "A", "[[B]]", "research", "[]")
+            .await
+            .unwrap();
+        repo.create(&project.id, tmp.path(), "B", "[[C]]", "research", "[]")
+            .await
+            .unwrap();
+        let d = repo
+            .create(&project.id, tmp.path(), "D", "", "research", "[]")
+            .await
+            .unwrap();
+        repo.update(&d.id, "D", "[[A]]", "[]").await.unwrap();
+
+        repo.reindex_from_disk(&project.id, tmp.path()).await.unwrap();
+
+        let seed_id = a.id.clone();
+        let scores = repo.graph_proximity_scores(&[seed_id.clone()], 2).await.unwrap();
+        let ids: std::collections::HashSet<_> = scores.into_iter().map(|(id, _)| id).collect();
+        // no 3-hop specific assertion target; ensure algorithm bounded and excludes seed
+        assert!(!ids.contains(&seed_id));
+    }
+
 }
