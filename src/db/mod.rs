@@ -3,8 +3,8 @@ pub mod connection;
 pub mod migrations;
 pub mod repositories;
 
-pub use repositories::credential::CredentialRepository;
-pub use repositories::custom_provider::CustomProviderRepository;
+pub use djinn_provider::repos::CredentialRepository;
+pub use djinn_provider::repos::CustomProviderRepository;
 pub use repositories::epic::{EpicCountQuery, EpicListQuery, EpicRepository, EpicTaskCounts};
 pub use djinn_db::GitSettingsRepository;
 pub use repositories::note::{NoteRepository, is_singleton};
