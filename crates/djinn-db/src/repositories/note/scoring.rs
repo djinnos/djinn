@@ -68,13 +68,12 @@ impl NoteRepository {
             return Ok(Vec::new());
         }
 
-        let project_id = sqlx::query_scalar::<_, String>(
-            "SELECT project_id FROM notes WHERE id = ?1 LIMIT 1",
-        )
-        .bind(&seed_ids[0])
-        .fetch_optional(self.db.pool())
-        .await?
-        .unwrap_or_default();
+        let project_id =
+            sqlx::query_scalar::<_, String>("SELECT project_id FROM notes WHERE id = ?1 LIMIT 1")
+                .bind(&seed_ids[0])
+                .fetch_optional(self.db.pool())
+                .await?
+                .unwrap_or_default();
 
         if project_id.is_empty() {
             return Ok(Vec::new());
@@ -91,7 +90,10 @@ impl NoteRepository {
 
         let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
         for (source, target) in edges {
-            adjacency.entry(source.clone()).or_default().push(target.clone());
+            adjacency
+                .entry(source.clone())
+                .or_default()
+                .push(target.clone());
             adjacency.entry(target).or_default().push(source);
         }
 

@@ -124,7 +124,10 @@ impl NoteRepository {
         Ok(note)
     }
 
-    pub(super) async fn update_index_entry(&self, params: UpdateNoteIndexParams<'_>) -> Result<Note> {
+    pub(super) async fn update_index_entry(
+        &self,
+        params: UpdateNoteIndexParams<'_>,
+    ) -> Result<Note> {
         let UpdateNoteIndexParams {
             id,
             file_path,

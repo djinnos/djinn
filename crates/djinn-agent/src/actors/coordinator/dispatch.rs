@@ -254,7 +254,6 @@ impl CoordinatorActor {
         self.publish_status();
     }
 
-
     pub(super) async fn enforce_non_worker_session_timeout(&mut self) {
         let repo = djinn_db::SessionRepository::new(
             self.db.clone(),
@@ -307,13 +306,7 @@ impl CoordinatorActor {
             })
             .to_string();
             let _ = task_repo
-                .log_activity(
-                    Some(task_id),
-                    "coordinator",
-                    "system",
-                    "comment",
-                    &payload,
-                )
+                .log_activity(Some(task_id), "coordinator", "system", "comment", &payload)
                 .await;
 
             tracing::warn!(

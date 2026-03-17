@@ -1496,7 +1496,8 @@ mod tests {
         let (k, c) = spawn_fake_client("/tmp/other/proj").await;
         mgr.inner.lock().await.clients.insert(k, c);
 
-        mgr.shutdown_for_worktree(Path::new("/tmp/nonexistent")).await;
+        mgr.shutdown_for_worktree(Path::new("/tmp/nonexistent"))
+            .await;
 
         assert_eq!(mgr.inner.lock().await.clients.len(), 1);
     }
@@ -1543,7 +1544,11 @@ mod tests {
             remaining.iter().all(|k| !k.contains(worktree)),
             "no clients should remain for the ended session's worktree"
         );
-        assert_eq!(remaining.len(), 1, "clients for other worktrees must be untouched");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "clients for other worktrees must be untouched"
+        );
     }
 
     #[tokio::test]

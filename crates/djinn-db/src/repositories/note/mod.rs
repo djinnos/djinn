@@ -16,9 +16,9 @@ mod crud;
 mod file_helpers;
 mod graph;
 mod indexing;
-mod search;
-mod scoring;
 pub(crate) mod rrf;
+mod scoring;
+mod search;
 
 pub use indexing::UpdateNoteIndexParams;
 
@@ -751,19 +751,47 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
 
         let task_note = repo
-            .create(&project.id, tmp.path(), "Task Note", "body", "reference", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Task Note",
+                "body",
+                "reference",
+                "[]",
+            )
             .await
             .unwrap();
         let epic_note = repo
-            .create(&project.id, tmp.path(), "Epic Note", "body", "reference", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Epic Note",
+                "body",
+                "reference",
+                "[]",
+            )
             .await
             .unwrap();
         let blocker_note = repo
-            .create(&project.id, tmp.path(), "Blocker Note", "body", "reference", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Blocker Note",
+                "body",
+                "reference",
+                "[]",
+            )
             .await
             .unwrap();
         let overlap_note = repo
-            .create(&project.id, tmp.path(), "Overlap Note", "body", "reference", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Overlap Note",
+                "body",
+                "reference",
+                "[]",
+            )
             .await
             .unwrap();
 
@@ -861,14 +889,18 @@ mod tests {
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let seed = repo
-            .create(&project.id, tmp.path(), "Seed", "no links", "research", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Seed",
+                "no links",
+                "research",
+                "[]",
+            )
             .await
             .unwrap();
 
-        let scores = repo
-            .graph_proximity_scores(&[seed.id], 2)
-            .await
-            .unwrap();
+        let scores = repo.graph_proximity_scores(&[seed.id], 2).await.unwrap();
         assert!(scores.is_empty());
     }
 
@@ -893,10 +925,15 @@ mod tests {
             .await
             .unwrap();
 
-        repo.reindex_from_disk(&project.id, tmp.path()).await.unwrap();
+        repo.reindex_from_disk(&project.id, tmp.path())
+            .await
+            .unwrap();
 
         let seed_id = a.id.clone();
-        let scores = repo.graph_proximity_scores(&[seed_id.clone()], 2).await.unwrap();
+        let scores = repo
+            .graph_proximity_scores(&[seed_id.clone()], 2)
+            .await
+            .unwrap();
         let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
         assert_eq!(m.get(&b.id).copied().unwrap(), 0.7);
         assert!((m.get(&c.id).copied().unwrap() - 0.49).abs() < 1e-9);
@@ -911,7 +948,14 @@ mod tests {
         let repo = NoteRepository::new(db, event_bus_for(&tx));
 
         let a = repo
-            .create(&project.id, tmp.path(), "A", "[[B]] [[D]]", "research", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "A",
+                "[[B]] [[D]]",
+                "research",
+                "[]",
+            )
             .await
             .unwrap();
         repo.create(&project.id, tmp.path(), "B", "[[C]]", "research", "[]")
@@ -925,7 +969,9 @@ mod tests {
             .await
             .unwrap();
 
-        repo.reindex_from_disk(&project.id, tmp.path()).await.unwrap();
+        repo.reindex_from_disk(&project.id, tmp.path())
+            .await
+            .unwrap();
 
         let seed_id = a.id.clone();
         let scores = repo.graph_proximity_scores(&[seed_id], 2).await.unwrap();
@@ -954,10 +1000,15 @@ mod tests {
             .unwrap();
         repo.update(&d.id, "D", "[[A]]", "[]").await.unwrap();
 
-        repo.reindex_from_disk(&project.id, tmp.path()).await.unwrap();
+        repo.reindex_from_disk(&project.id, tmp.path())
+            .await
+            .unwrap();
 
         let seed_id = a.id.clone();
-        let scores = repo.graph_proximity_scores(&[seed_id.clone()], 2).await.unwrap();
+        let scores = repo
+            .graph_proximity_scores(&[seed_id.clone()], 2)
+            .await
+            .unwrap();
         let ids: std::collections::HashSet<_> = scores.into_iter().map(|(id, _)| id).collect();
         // no 3-hop specific assertion target; ensure algorithm bounded and excludes seed
         assert!(!ids.contains(&seed_id));
@@ -984,11 +1035,25 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
 
         let high = repo
-            .create(&project.id, tmp.path(), "High Access", "body", "reference", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "High Access",
+                "body",
+                "reference",
+                "[]",
+            )
             .await
             .unwrap();
         let low = repo
-            .create(&project.id, tmp.path(), "Low Access", "body", "reference", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Low Access",
+                "body",
+                "reference",
+                "[]",
+            )
             .await
             .unwrap();
 
@@ -1048,12 +1113,14 @@ mod tests {
             .await
             .unwrap();
 
-        sqlx::query("UPDATE notes SET created_at = datetime('now', '-30 day') WHERE id IN (?1, ?2)")
-            .bind(&recent.id)
-            .bind(&stale.id)
-            .execute(db.pool())
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE notes SET created_at = datetime('now', '-30 day') WHERE id IN (?1, ?2)",
+        )
+        .bind(&recent.id)
+        .bind(&stale.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
 
         sqlx::query("UPDATE notes SET updated_at = datetime('now') WHERE id = ?1")
             .bind(&recent.id)
@@ -1084,7 +1151,14 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
 
         let zero_age = repo
-            .create(&project.id, tmp.path(), "Zero Age", "body", "reference", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Zero Age",
+                "body",
+                "reference",
+                "[]",
+            )
             .await
             .unwrap();
         let old = repo
@@ -1126,5 +1200,4 @@ mod tests {
         assert!(m[&old.id].is_finite());
         assert!(m[&zero_age.id] > m[&old.id]);
     }
-
 }

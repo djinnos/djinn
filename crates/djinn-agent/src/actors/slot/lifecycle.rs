@@ -13,9 +13,9 @@ use crate::roles::AgentRole;
 use crate::verification::settings::load_commands;
 use djinn_core::models::SessionStatus;
 use djinn_core::models::TransitionAction;
-use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
+use djinn_db::repositories::session::CreateSessionParams;
 
 use super::reply_loop::{ReplyLoopContext, run_reply_loop};
 use super::*;
@@ -384,7 +384,14 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                             None,
                         )
                         .await;
-                    teardown_worktree(&task.short_id, &worktree_path, &project_dir, &app_state, false).await;
+                    teardown_worktree(
+                        &task.short_id,
+                        &worktree_path,
+                        &project_dir,
+                        &app_state,
+                        false,
+                    )
+                    .await;
                     return_free!();
                 }
                 None => {
@@ -422,7 +429,14 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                                 None,
                             )
                             .await;
-                        teardown_worktree(&task.short_id, &worktree_path, &project_dir, &app_state, false).await;
+                        teardown_worktree(
+                            &task.short_id,
+                            &worktree_path,
+                            &project_dir,
+                            &app_state,
+                            false,
+                        )
+                        .await;
                         return_free!();
                     }
                     tracing::info!(
@@ -697,7 +711,14 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                             &app_state,
                         )
                         .await;
-                        teardown_worktree(&task.short_id, &worktree_path, &project_dir, &app_state, false).await;
+                        teardown_worktree(
+                            &task.short_id,
+                            &worktree_path,
+                            &project_dir,
+                            &app_state,
+                            false,
+                        )
+                        .await;
                         return_free!();
                     }
                 };
@@ -731,7 +752,14 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     &app_state,
                 )
                 .await;
-                teardown_worktree(&task.short_id, &worktree_path, &project_dir, &app_state, false).await;
+                teardown_worktree(
+                    &task.short_id,
+                    &worktree_path,
+                    &project_dir,
+                    &app_state,
+                    false,
+                )
+                .await;
                 return_free!();
             }
         };
@@ -813,7 +841,14 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             &app_state,
         )
         .await;
-        teardown_worktree(&task.short_id, &worktree_path, &project_dir, &app_state, false).await;
+        teardown_worktree(
+            &task.short_id,
+            &worktree_path,
+            &project_dir,
+            &app_state,
+            false,
+        )
+        .await;
         transition_interrupted(
             &task_id,
             role.config().release_action,
@@ -890,7 +925,14 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             &app_state,
         )
         .await;
-        teardown_worktree(&task.short_id, &worktree_path, &project_dir, &app_state, false).await;
+        teardown_worktree(
+            &task.short_id,
+            &worktree_path,
+            &project_dir,
+            &app_state,
+            false,
+        )
+        .await;
     }
 
     // Log reviewer feedback.
