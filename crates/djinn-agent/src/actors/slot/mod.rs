@@ -112,3 +112,6 @@ pub use lifecycle::{ProjectLifecycleParams, run_project_lifecycle};
 pub(crate) use lifecycle::run_task_lifecycle;
 pub use pool::*;
 pub use worktree::*;
+
+#[cfg(test)]
+mod helpers_tests;
