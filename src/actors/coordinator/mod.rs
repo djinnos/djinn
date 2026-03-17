@@ -21,7 +21,6 @@ use tokio_util::sync::CancellationToken;
 use djinn_git::GitActorHandle;
 use crate::actors::slot::{PoolError, SlotPoolHandle};
 use crate::agent::roles::RoleRegistry;
-use crate::server::AppState;
 use crate::db::GitSettingsRepository;
 use crate::db::ProjectRepository;
 use crate::db::connection::Database;
@@ -864,7 +863,7 @@ mod tests {
 
     fn spawn_coordinator(db: &Database, tx: &broadcast::Sender<DjinnEventEnvelope>) -> CoordinatorHandle {
         let cancel = CancellationToken::new();
-        let app_state = AppState::new(db.clone(), cancel.clone());
+        let ctx = AppState::new(db.clone(), cancel.clone()).agent_context();
         let sessions_dir = std::env::temp_dir().join(format!(
             "djinn-test-sessions-{}",
             std::time::SystemTime::now()
@@ -874,7 +873,7 @@ mod tests {
         ));
         let _ = sessions_dir;
         let pool = SlotPoolHandle::spawn(
-            app_state,
+            ctx,
             cancel.clone(),
             SlotPoolConfig {
                 models: vec![ModelSlotConfig {

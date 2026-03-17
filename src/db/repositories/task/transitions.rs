@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use djinn_git::GitError;
 use crate::db::{ProjectRepository, SessionRepository, TaskRepository};
 use crate::models::{SessionStatus, TransitionAction};
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 
 const MERGE_CONFLICT_PREFIX: &str = "merge_conflict:";
 const MERGE_VALIDATION_PREFIX: &str = "merge_validation_failed:";
@@ -55,17 +55,17 @@ pub const PM_MERGE_ACTIONS: MergeActions = MergeActions {
 
 pub async fn merge_after_task_review(
     task_id: &str,
-    app_state: &AppState,
+    app_state: &AgentContext,
 ) -> Option<(TransitionAction, Option<String>)> {
     merge_and_transition(task_id, app_state, &REVIEWER_MERGE_ACTIONS).await
 }
 
 pub async fn merge_and_transition(
     task_id: &str,
-    app_state: &AppState,
+    app_state: &AgentContext,
     actions: &MergeActions,
 ) -> Option<(TransitionAction, Option<String>)> {
-    let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
+    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task = match repo.get(task_id).await {
         Ok(Some(task)) => task,
         Ok(None) => {
@@ -235,13 +235,13 @@ pub async fn merge_and_transition(
 async fn run_verification_gate(
     task_id: &str,
     project_path: &str,
-    app_state: &AppState,
+    app_state: &AgentContext,
 ) -> Result<(), String> {
     crate::actors::slot::verification::run_verification_gate(task_id, project_path, app_state).await
 }
 
-pub(crate) async fn cleanup_paused_worker_session(task_id: &str, app_state: &AppState) {
-    let repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
+pub(crate) async fn cleanup_paused_worker_session(task_id: &str, app_state: &AgentContext) {
+    let repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let Ok(Some(paused)) = repo.paused_for_task(task_id).await else {
         return;
     };
@@ -267,8 +267,8 @@ pub(crate) async fn cleanup_paused_worker_session(task_id: &str, app_state: &App
     }
 }
 
-pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &AppState) {
-    let repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
+pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &AgentContext) {
+    let repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let Ok(Some(paused)) = repo.paused_for_task(task_id).await else {
         return;
     };
@@ -292,21 +292,21 @@ pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &A
 }
 pub(crate) async fn resolve_project_path_for_id(
     project_id: &str,
-    app_state: &AppState,
+    app_state: &AgentContext,
 ) -> Option<String> {
-    let repo = ProjectRepository::new(app_state.db().clone(), app_state.event_bus());
+    let repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     repo.get_path(project_id).await.ok().flatten()
 }
 
-async fn default_target_branch(project_id: &str, app_state: &AppState) -> String {
-    let repo = ProjectRepository::new(app_state.db().clone(), app_state.event_bus());
+async fn default_target_branch(project_id: &str, app_state: &AgentContext) -> String {
+    let repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if let Ok(Some(config)) = repo.get_config(project_id).await {
         return config.target_branch;
     }
     "main".to_string()
 }
 
-async fn project_path_for_id(project_id: &str, app_state: &AppState) -> PathBuf {
+async fn project_path_for_id(project_id: &str, app_state: &AgentContext) -> PathBuf {
     let project_path = resolve_project_path_for_id(project_id, app_state)
         .await
         .unwrap_or_else(|| ".".to_string());

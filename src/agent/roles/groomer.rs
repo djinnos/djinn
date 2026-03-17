@@ -3,7 +3,7 @@ use crate::agent::extension;
 use crate::agent::output_parser::ParsedAgentOutput;
 use crate::agent::prompts::TaskContext;
 use crate::models::{Task, TransitionAction};
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 use futures::future::BoxFuture;
 
 use super::{AgentRole, CompactionPrompts, RoleConfig};
@@ -28,7 +28,7 @@ impl AgentRole for GroomerRole {
         &'a self,
         _task_id: &'a str,
         _output: &'a ParsedAgentOutput,
-        _app_state: &'a AppState,
+        _app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
         Box::pin(async { None })
     }

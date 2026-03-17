@@ -3,7 +3,7 @@ use tokio::sync::oneshot;
 
 use crate::commands::{CommandResult, CommandSpec};
 use crate::db::TaskRepository;
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 
 #[derive(Debug)]
 pub(crate) enum SlotCommand {
@@ -65,7 +65,7 @@ pub(crate) async fn log_commands_run_event(
     phase: &str,
     specs: &[CommandSpec],
     results: &[CommandResult],
-    app_state: &AppState,
+    app_state: &AgentContext,
 ) {
     let success = results.last().map(|r| r.exit_code == 0).unwrap_or(true);
     let commands = results
@@ -89,7 +89,7 @@ pub(crate) async fn log_commands_run_event(
         "commands": commands,
     });
 
-    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if let Err(e) = task_repo
         .log_activity(
             Some(task_id),

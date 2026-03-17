@@ -15,7 +15,7 @@ use crate::db::SessionRepository;
 use crate::db::TaskRepository;
 use crate::models::SessionStatus;
 use crate::models::TransitionAction;
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 
 use super::reply_loop::run_reply_loop;
 use super::*;
@@ -36,14 +36,14 @@ pub async fn run_task_lifecycle(
     task_id: String,
     project_path: String,
     model_id: String,
-    app_state: AppState,
+    app_state: AgentContext,
     cancel: CancellationToken,
     pause: CancellationToken,
     event_tx: mpsc::Sender<SlotEvent>,
 ) -> anyhow::Result<()> {
     let emit_step = |task_id: &str, step: &str, detail: serde_json::Value| {
-        let _ = app_state
-            .events()
+        app_state
+            .event_bus
             .send(crate::events::DjinnEventEnvelope::task_lifecycle_step(task_id, step, &detail));
     };
 
@@ -112,9 +112,7 @@ pub async fn run_task_lifecycle(
 
     // Notify the frontend immediately so it can show the agent avatar while
     // worktree/setup is still running.
-    let dispatched_receivers = app_state
-        .events()
-        .send(crate::events::DjinnEventEnvelope::session_dispatched(
+    app_state.event_bus.send(crate::events::DjinnEventEnvelope::session_dispatched(
             &task.project_id,
             &task.id,
             &model_id,
@@ -122,7 +120,6 @@ pub async fn run_task_lifecycle(
         ));
     tracing::info!(
         task_id = %task_id,
-        sse_receivers = ?dispatched_receivers.ok(),
         "Lifecycle: emitted session.dispatched SSE event"
     );
 
@@ -133,7 +130,7 @@ pub async fn run_task_lifecycle(
             // bare suffixes (e.g. "GLM-4.7" for internal "hf:zai-org/GLM-4.7").
             // Resolve to the actual model ID for the provider API.
             let resolved = app_state
-                .catalog()
+                .catalog
                 .list_models(&provider_id)
                 .iter()
                 .find(|m| {
@@ -204,7 +201,7 @@ pub async fn run_task_lifecycle(
                 }
             } else if !paused_worktree_path.exists() || !paused_worktree_path.is_dir() {
                 let session_repo =
-                    SessionRepository::new(app_state.db().clone(), app_state.event_bus());
+                    SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
                 let _ = session_repo
                     .update(
                         &paused.id,
@@ -344,7 +341,7 @@ pub async fn run_task_lifecycle(
                     let reason = format!("Setup commands error: {e}");
                     tracing::warn!(task_id = %task.short_id, error = %e, "Lifecycle: setup command error");
                     let task_repo =
-                        TaskRepository::new(app_state.db().clone(), app_state.event_bus());
+                        TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
                     let _ = task_repo
                         .transition(
                             &task.id,
@@ -382,7 +379,7 @@ pub async fn run_task_lifecycle(
                             "Lifecycle: setup command failed; releasing task"
                         );
                         let task_repo =
-                            TaskRepository::new(app_state.db().clone(), app_state.event_bus());
+                            TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
                         let _ = task_repo
                             .transition(
                                 &task.id,
@@ -417,7 +414,7 @@ pub async fn run_task_lifecycle(
 
     // Fetch activity log for the prompt: last 3 high-signal comments plus a
     // summary of total counts by role so the agent knows what to look up.
-    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let activity_text = match task_repo.list_activity(&task.id).await {
         Ok(entries) if !entries.is_empty() => {
             // Last 3 high-signal comments (PM, reviewer, verification)
@@ -458,8 +455,8 @@ pub async fn run_task_lifecycle(
     // ── Build epic context for roles that need it (e.g. PM) ─────────────────
     let epic_context = if role.needs_epic_context() {
         if let Some(ref epic_id) = task.epic_id {
-            let epic_repo = crate::db::EpicRepository::new(app_state.db().clone(), app_state.event_bus());
-            let task_repo_ctx = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
+            let epic_repo = crate::db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            let task_repo_ctx = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
             match epic_repo.get(epic_id).await {
                 Ok(Some(epic)) => {
                     let mut ctx_lines = vec![
@@ -513,12 +510,12 @@ pub async fn run_task_lifecycle(
     );
 
     let context_window = app_state
-        .catalog()
+        .catalog
         .find_model(&model_id)
         .map(|m| m.context_window)
         .unwrap_or(0);
 
-    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
+    let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
     // ── Build Djinn-native provider ───────────────────────────────────────────
     let telemetry_meta = build_telemetry_meta(role.config().name, &task_id);
@@ -538,7 +535,7 @@ pub async fn run_task_lifecycle(
             // "synthetic"); fall back to the hardcoded defaults for well-known
             // providers that may not carry a base_url in the catalog.
             let base_url = app_state
-                .catalog()
+                .catalog
                 .list_providers()
                 .iter()
                 .find(|p| p.id == catalog_provider_id)
@@ -712,8 +709,8 @@ pub async fn run_task_lifecycle(
     // (post-compaction turns, or the full conversation if no compaction occurred).
     if let Some(ref record_id) = current_record_id {
         let msg_repo = crate::db::SessionMessageRepository::new(
-            app_state.db().clone(),
-            app_state.event_bus(),
+            app_state.db.clone(),
+            app_state.event_bus.clone(),
         );
         if let Err(e) = msg_repo
             .insert_messages_batch(record_id, &task.id, &conversation.messages)
@@ -761,8 +758,8 @@ pub async fn run_task_lifecycle(
 
     // Health tracking.
     match &final_result {
-        Ok(()) => app_state.health_tracker().record_success(&model_id),
-        Err(_) => app_state.health_tracker().record_failure(&model_id),
+        Ok(()) => app_state.health_tracker.record_success(&model_id),
+        Err(_) => app_state.health_tracker.record_failure(&model_id),
     }
     app_state.persist_model_health_state().await;
 
@@ -820,7 +817,7 @@ pub async fn run_task_lifecycle(
     }
 
     // Log reviewer feedback.
-    let task_repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if let Some(feedback) = final_output.reviewer_feedback.as_deref() {
         let payload = serde_json::json!({ "body": feedback }).to_string();
         if let Err(e) = task_repo
@@ -949,7 +946,7 @@ pub struct ProjectLifecycleParams {
     pub project_path: String,
     pub agent_type: String,
     pub model_id: String,
-    pub app_state: AppState,
+    pub app_state: AgentContext,
     pub cancel: CancellationToken,
     pub pause: CancellationToken,
     pub event_tx: mpsc::Sender<SlotEvent>,
@@ -999,17 +996,14 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         return_free!();
     }
 
-    let cont_dispatched_receivers = app_state
-        .events()
-        .send(crate::events::DjinnEventEnvelope::session_dispatched(
-            &project_id,
-            &task_id,
-            &model_id,
-            agent_type.as_str(),
-        ));
+    app_state.event_bus.send(crate::events::DjinnEventEnvelope::session_dispatched(
+        &project_id,
+        &task_id,
+        &model_id,
+        agent_type.as_str(),
+    ));
     tracing::info!(
         task_id = %task_id,
-        sse_receivers = ?cont_dispatched_receivers.ok(),
         "Lifecycle(continuation): emitted session.dispatched SSE event"
     );
 
@@ -1025,7 +1019,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     let (catalog_provider_id, model_name) = match parse_model_id(&model_id) {
         Ok((provider_id, name)) => {
             let resolved = app_state
-                .catalog()
+                .catalog
                 .list_models(&provider_id)
                 .iter()
                 .find(|m| {
@@ -1065,12 +1059,12 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     );
 
     let context_window = app_state
-        .catalog()
+        .catalog
         .find_model(&model_id)
         .map(|m| m.context_window)
         .unwrap_or(0);
 
-    let session_repo = SessionRepository::new(app_state.db().clone(), app_state.event_bus());
+    let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
     // ── Build provider ────────────────────────────────────────────────────
     let telemetry_meta = build_telemetry_meta(agent_type.as_str(), &task_id);
@@ -1084,7 +1078,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         ProviderCredential::ApiKey(_key_name, api_key) => {
             let format_family = format_family_for_provider(&catalog_provider_id, &model_name);
             let base_url = app_state
-                .catalog()
+                .catalog
                 .list_providers()
                 .iter()
                 .find(|p| p.id == catalog_provider_id)
@@ -1158,8 +1152,8 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     // ── Persist messages ──────────────────────────────────────────────────
     if let Some(ref record_id) = current_record_id {
         let msg_repo = crate::db::SessionMessageRepository::new(
-            app_state.db().clone(),
-            app_state.event_bus(),
+            app_state.db.clone(),
+            app_state.event_bus.clone(),
         );
         let _ = msg_repo
             .insert_messages_batch(record_id, &task_id, &conversation.messages)
@@ -1191,8 +1185,8 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
 
     // ── Health tracking ───────────────────────────────────────────────────
     match &reply_result {
-        Ok(()) => app_state.health_tracker().record_success(&model_id),
-        Err(_) => app_state.health_tracker().record_failure(&model_id),
+        Ok(()) => app_state.health_tracker.record_success(&model_id),
+        Err(_) => app_state.health_tracker.record_failure(&model_id),
     }
     app_state.persist_model_health_state().await;
 

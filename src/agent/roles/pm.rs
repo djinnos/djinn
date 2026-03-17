@@ -4,7 +4,7 @@ use crate::agent::output_parser::ParsedAgentOutput;
 use crate::agent::prompts::TaskContext;
 use crate::db::TaskRepository;
 use crate::models::{Task, TransitionAction};
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 use futures::future::BoxFuture;
 
 use super::{AgentRole, CompactionPrompts, RoleConfig};
@@ -29,10 +29,10 @@ impl AgentRole for PmRole {
         &'a self,
         task_id: &'a str,
         _output: &'a ParsedAgentOutput,
-        app_state: &'a AppState,
+        app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
         Box::pin(async move {
-            let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
+            let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
             if let Ok(Some(task)) = repo.get(task_id).await
                 && task.status != "in_pm_intervention"
             {

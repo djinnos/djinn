@@ -100,7 +100,7 @@ impl CoordinatorActor {
             let events_tx = self.events_tx.clone();
             let project_id = project.id.clone();
             let path = project.path.clone();
-            let app_state = AppState::new(self.db.clone(), tokio_util::sync::CancellationToken::new());
+            let db = self.db.clone();
 
             tracing::info!(
                 project_id = %project_id,
@@ -113,7 +113,7 @@ impl CoordinatorActor {
                 let (healthy, error) = match run_project_health_check(
                     project_id.clone(),
                     path,
-                    app_state,
+                    db,
                     events_tx,
                 )
                 .await
@@ -140,13 +140,13 @@ impl CoordinatorActor {
 pub(super) async fn run_project_health_check(
     project_id: String,
     path: String,
-    app_state: AppState,
+    db: crate::db::connection::Database,
     events_tx: broadcast::Sender<DjinnEventEnvelope>,
 ) -> Result<(), String> {
     let project_path = std::path::PathBuf::from(&path);
 
     // Resolve target branch (falls back to "main").
-    let target_branch = GitSettingsRepository::new(app_state.db().clone(), crate::events::event_bus_for(&events_tx))
+    let target_branch = GitSettingsRepository::new(db.clone(), crate::events::event_bus_for(&events_tx))
         .get(&project_id)
         .await
         .map(|s| s.target_branch)
@@ -186,7 +186,7 @@ pub(super) async fn run_project_health_check(
             &project_id,
             &commit_sha,
             &wt_path,
-            &app_state,
+            &db,
         )
         .await
         .map_err(|e| format!("health-check verification error: {e}"))?;

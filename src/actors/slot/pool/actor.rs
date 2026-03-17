@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::actors::coordinator::CoordinatorHandle;
 use crate::db::TaskRepository;
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 
 use super::super::{ModelSlotConfig, SlotEvent, SlotHandle, SlotPoolConfig, SlotState};
 use super::types::{PoolError, PoolMessage, SlotFactory, now_unix_string};
@@ -27,7 +27,7 @@ pub(super) struct SlotPool {
     task_started: HashMap<String, Instant>,
     draining_slots: HashSet<usize>,
     retired_slots: HashSet<usize>,
-    app_state: AppState,
+    app_state: AgentContext,
     cancel: CancellationToken,
     slot_factory: SlotFactory,
 }
@@ -35,7 +35,7 @@ pub(super) struct SlotPool {
 impl SlotPool {
     pub(super) fn new(
         receiver: mpsc::Receiver<PoolMessage>,
-        app_state: AppState,
+        app_state: AgentContext,
         cancel: CancellationToken,
         config: SlotPoolConfig,
     ) -> Self {
@@ -47,7 +47,7 @@ impl SlotPool {
 
     pub(super) fn new_with_factory(
         receiver: mpsc::Receiver<PoolMessage>,
-        app_state: AppState,
+        app_state: AgentContext,
         cancel: CancellationToken,
         config: SlotPoolConfig,
         slot_factory: SlotFactory,
@@ -293,7 +293,7 @@ impl SlotPool {
 
     async fn project_id_for_task(&self, task_id: &str) -> Option<String> {
         let task_repo =
-            TaskRepository::new(self.app_state.db().clone(), self.app_state.event_bus());
+            TaskRepository::new(self.app_state.db.clone(), self.app_state.event_bus.clone());
         task_repo
             .get(task_id)
             .await

@@ -2,7 +2,7 @@ use super::AgentType;
 use crate::agent::output_parser::ParsedAgentOutput;
 use crate::agent::prompts::TaskContext;
 use crate::models::{Task, TransitionAction};
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -66,13 +66,13 @@ pub(crate) trait AgentRole: Send + Sync + 'static {
         &'a self,
         task_id: &'a str,
         output: &'a ParsedAgentOutput,
-        app_state: &'a AppState,
+        app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>>;
     fn prepare_worktree<'a>(
         &'a self,
         _worktree: &'a Path,
         _task: &'a Task,
-        _app_state: &'a AppState,
+        _app_state: &'a AgentContext,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
@@ -85,7 +85,7 @@ pub(crate) trait AgentRole: Send + Sync + 'static {
     fn initial_user_message<'a>(
         &'a self,
         _task_id: &'a str,
-        _app_state: &'a AppState,
+        _app_state: &'a AgentContext,
     ) -> BoxFuture<'a, String> {
         Box::pin(async {
             "Start by understanding the task context and execute it fully before stopping."

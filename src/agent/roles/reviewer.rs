@@ -8,7 +8,7 @@ use crate::agent::prompts::TaskContext;
 use crate::db::TaskRepository;
 use crate::db::repositories::task::transitions::merge_after_task_review;
 use crate::models::{Task, TransitionAction};
-use crate::server::AppState;
+use crate::agent::context::AgentContext;
 use futures::future::BoxFuture;
 
 use super::{AgentRole, CompactionPrompts, RoleConfig};
@@ -29,10 +29,10 @@ impl AgentRole for TaskReviewerRole {
         &'a self,
         task_id: &'a str,
         output: &'a ParsedAgentOutput,
-        app_state: &'a AppState,
+        app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
         Box::pin(async move {
-            let repo = TaskRepository::new(app_state.db().clone(), app_state.event_bus());
+            let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
             match repo.get(task_id).await {
                 Ok(Some(task)) => {
                     if all_acceptance_criteria_met(&task.acceptance_criteria) {
