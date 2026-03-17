@@ -296,7 +296,7 @@ pub(super) async fn completions_handler(
         });
     }
 
-    let mcp = DjinnMcpServer::new(state.clone());
+    let mcp = DjinnMcpServer::new(state.mcp_state());
     let tool_schemas = mcp.all_tool_schemas();
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
@@ -478,7 +478,7 @@ mod tests {
 
     fn test_mcp() -> DjinnMcpServer {
         let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
-        DjinnMcpServer::new(state)
+        DjinnMcpServer::new(state.mcp_state())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
