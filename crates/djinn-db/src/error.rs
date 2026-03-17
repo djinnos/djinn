@@ -28,7 +28,6 @@ impl std::error::Error for DbError {
         match self {
             Self::Sqlx(err) => Some(err),
             Self::Json(err) => Some(err),
-            Self::InvalidData(_) | Self::InvalidTransition(_) => None,
             Self::InvalidData(_) | Self::Internal(_) | Self::InvalidTransition(_) => None,
         }
     }
