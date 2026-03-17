@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use djinn_core::models::{Credential, Model, Pricing, Provider};
 
-use super::builtin::BuiltinProvider;
+use crate::catalog::builtin::BuiltinProvider;
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn inject_builtin_providers_adds_missing_entries() {
-        use super::builtin::BuiltinProvider;
+        use crate::catalog::builtin::BuiltinProvider;
 
         let catalog = CatalogService::new();
         let initial_count = catalog.list_providers().len();
@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn inject_builtin_providers_skips_existing() {
-        use super::builtin::BuiltinProvider;
+        use crate::catalog::builtin::BuiltinProvider;
 
         let catalog = CatalogService::new();
         let initial_count = catalog.list_providers().len();
