@@ -260,22 +260,24 @@ mod memory_tools {
     use crate::events::EventBus;
     use crate::test_helpers::{
         create_test_app, create_test_app_with_db, create_test_db, create_test_epic,
-        create_test_project, initialize_mcp_session, mcp_call_tool,
+        create_test_project, create_test_project_with_dir, initialize_mcp_session,
+        mcp_call_tool,
     };
 
     #[tokio::test]
     async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
         let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
         let app = create_test_app_with_db(db.clone());
         let session_id = initialize_mcp_session(&app).await;
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-write", "path": "/tmp/mcp-memory-write"})).await;
 
         let created = mcp_call_tool(
             &app,
             &session_id,
             "memory_write",
             json!({
-                "project": "/tmp/mcp-memory-write",
+                "project": project,
                 "title": "Write Contract Note",
                 "content": "body",
                 "type": "adr"
@@ -289,13 +291,13 @@ mod memory_tools {
         assert!(created.get("permalink").and_then(|v| v.as_str()).is_some());
 
         let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        let project: String = project_repo
-            .resolve_or_create("/tmp/mcp-memory-write")
+        let project_id: String = project_repo
+            .resolve_or_create(project)
             .await
             .unwrap();
         let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
         let note = note_repo
-            .get_by_permalink(&project, created["permalink"].as_str().unwrap())
+            .get_by_permalink(&project_id, created["permalink"].as_str().unwrap())
             .await
             .unwrap()
             .unwrap();
@@ -306,7 +308,7 @@ mod memory_tools {
             &session_id,
             "memory_write",
             json!({
-                "project": "/tmp/mcp-memory-write",
+                "project": project,
                 "title": "Write Contract Note",
                 "content": "body-2",
                 "type": "adr"
@@ -319,16 +321,18 @@ mod memory_tools {
 
     #[tokio::test]
     async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-read", "path": "/tmp/mcp-memory-read"})).await;
 
         let created = mcp_call_tool(
             &app,
             &session_id,
             "memory_write",
             json!({
-                "project": "/tmp/mcp-memory-read",
+                "project": project,
                 "title": "Read Contract Note",
                 "content": "read me",
                 "type": "reference"
@@ -340,7 +344,7 @@ mod memory_tools {
             &app,
             &session_id,
             "memory_read",
-            json!({ "project": "/tmp/mcp-memory-read", "identifier": created["permalink"] }),
+            json!({ "project": project, "identifier": created["permalink"] }),
         )
         .await;
         assert_eq!(by_permalink["title"], "Read Contract Note");
@@ -349,7 +353,7 @@ mod memory_tools {
             &app,
             &session_id,
             "memory_read",
-            json!({ "project": "/tmp/mcp-memory-read", "identifier": "Read Contract Note" }),
+            json!({ "project": project, "identifier": "Read Contract Note" }),
         )
         .await;
         assert_eq!(by_title["permalink"], created["permalink"]);
@@ -358,7 +362,7 @@ mod memory_tools {
             &app,
             &session_id,
             "memory_read",
-            json!({ "project": "/tmp/mcp-memory-read", "identifier": "does-not-exist" }),
+            json!({ "project": project, "identifier": "does-not-exist" }),
         )
         .await;
         assert!(missing.get("error").is_some());
@@ -366,10 +370,11 @@ mod memory_tools {
 
     #[tokio::test]
     async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let project = "/tmp/mcp-memory-search";
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-search", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Rust Alpha", "content": "rust rust rust memory", "type": "reference"})).await;
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Rust Beta", "content": "rust memory", "type": "reference"})).await;
@@ -411,10 +416,11 @@ mod memory_tools {
 
     #[tokio::test]
     async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let project = "/tmp/mcp-memory-edit";
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-edit", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Edit Note", "content": "middle", "type": "reference"})).await;
 
@@ -433,10 +439,11 @@ mod memory_tools {
 
     #[tokio::test]
     async fn mcp_memory_move_changes_folder_title_and_permalink() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let project = "/tmp/mcp-memory-move";
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-move", "path": project})).await;
 
         let created = mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Move Me", "content": "content", "type": "reference"})).await;
 
@@ -454,10 +461,11 @@ mod memory_tools {
 
     #[tokio::test]
     async fn mcp_memory_delete_success_and_missing_note_error() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let project = "/tmp/mcp-memory-delete";
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-delete", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Delete Me", "content": "bye", "type": "reference"})).await;
 
@@ -471,10 +479,11 @@ mod memory_tools {
 
     #[tokio::test]
     async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let project = "/tmp/mcp-memory-list";
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-list", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "A", "content": "x", "type": "adr"})).await;
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "B", "content": "x", "type": "reference"})).await;
@@ -495,10 +504,11 @@ mod memory_tools {
 
     #[tokio::test]
     async fn mcp_memory_graph_returns_wikilink_edges() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let project = "/tmp/mcp-memory-graph";
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-graph", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Node B", "content": "b", "type": "reference"})).await;
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Node A", "content": "links [[Node B]]", "type": "reference"})).await;
@@ -509,10 +519,11 @@ mod memory_tools {
 
     #[tokio::test]
     async fn mcp_memory_recent_orders_by_last_accessed() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let project = "/tmp/mcp-memory-recent";
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-recent", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Older", "content": "o", "type": "reference"})).await;
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Newer", "content": "n", "type": "reference"})).await;
@@ -525,10 +536,11 @@ mod memory_tools {
 
     #[tokio::test]
     async fn mcp_memory_catalog_returns_structured_catalog() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let project = "/tmp/mcp-memory-catalog";
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-catalog", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Catalog Item", "content": "c", "type": "reference"})).await;
         let catalog = mcp_call_tool(&app, &session_id, "memory_catalog", json!({"project": project})).await;
@@ -556,10 +568,11 @@ mod memory_tools {
 
     #[tokio::test]
     async fn mcp_memory_history_and_diff_round_trip() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let project = "/tmp/mcp-memory-history-diff";
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-history-diff", "path": project})).await;
 
         let created = mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "History Diff", "content": "line one", "type": "reference"})).await;
         let permalink = created["permalink"].as_str().unwrap().to_string();
@@ -592,10 +605,11 @@ mod memory_tools {
 
     #[tokio::test]
     async fn mcp_memory_reindex_returns_expected_contract_shape() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let project = "/tmp/mcp-memory-reindex";
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-reindex", "path": project})).await;
 
         mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Reindex Seed", "content": "seed", "type": "reference"})).await;
 
@@ -609,10 +623,11 @@ mod memory_tools {
 
     #[tokio::test]
     async fn mcp_memory_build_context_follows_wikilinks() {
-        let app = create_test_app();
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let project = "/tmp/mcp-memory-build-context";
-        mcp_call_tool(&app, &session_id, "project_add", json!({"name": "mcp-memory-build-context", "path": project})).await;
 
         let target = mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Context Target", "content": "target body", "type": "reference"})).await;
         let seed = mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Context Seed", "content": "see [[Context Target]]", "type": "reference"})).await;
