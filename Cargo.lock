@@ -624,6 +624,7 @@ dependencies = [
  "async-stream",
  "base64",
  "bytes",
+ "djinn-core",
  "futures",
  "opentelemetry",
  "opentelemetry-otlp",
