@@ -402,7 +402,7 @@ impl DjinnMcpServer {
             }
         };
         match repo
-            .create_for_project(&project_id, crate::db::repositories::epic::EpicCreateInput { title: &title, description, emoji, color, owner: &owner, memory_refs: memory_refs_json.as_deref() })
+            .create_for_project(&project_id, djinn_db::EpicCreateInput { title: &title, description, emoji, color, owner: &owner, memory_refs: memory_refs_json.as_deref() })
             .await
         {
             Ok(epic) => Json(EpicSingleResponse {
@@ -612,7 +612,7 @@ impl DjinnMcpServer {
         };
 
         match repo
-             .update(&epic.id, crate::db::repositories::epic::EpicUpdateInput { title: &title, description, emoji, color, owner: &owner, memory_refs: Some(&memory_refs_str) })
+             .update(&epic.id, djinn_db::EpicUpdateInput { title: &title, description, emoji, color, owner: &owner, memory_refs: Some(&memory_refs_str) })
             .await
         {
             Ok(updated) => Json(EpicSingleResponse {
@@ -932,7 +932,7 @@ impl DjinnMcpServer {
 mod tests {
     use serde_json::json;
 
-    use crate::db::repositories::epic::EpicRepository;
+    use djinn_db::EpicRepository;
     use crate::test_helpers::{
         create_test_app, create_test_app_with_db, create_test_db, create_test_epic,
         create_test_project, create_test_task, initialize_mcp_session, mcp_call_tool,
