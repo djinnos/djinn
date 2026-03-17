@@ -63,30 +63,34 @@ fn push_fragment(fragments: &mut Vec<String>, value: String) {
 /// Maximum reactive compaction attempts before giving up.
 const MAX_COMPACTION_RETRIES: u32 = 2;
 
+pub(crate) struct ReplyLoopContext<'a> {
+    pub provider: &'a dyn LlmProvider,
+    pub tools: &'a [serde_json::Value],
+    pub task_id: &'a str,
+    pub task_short_id: &'a str,
+    pub session_id: &'a str,
+    pub project_path: &'a str,
+    pub worktree_path: &'a Path,
+    pub role_name: &'a str,
+    pub context_window: i64,
+    pub model_id: &'a str,
+    pub cancel: &'a CancellationToken,
+    pub global_cancel: &'a CancellationToken,
+    pub app_state: &'a AgentContext,
+}
+
 /// Djinn-native reply loop. Drives an `LlmProvider` stream, dispatches tool
 /// calls via the extension layer, and continues until the assistant produces a
 /// text-only response or a termination condition is reached.
 ///
 /// Context-length-exceeded errors trigger reactive compaction and retry
 /// (up to `MAX_COMPACTION_RETRIES` times) before failing the session.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_reply_loop(
-    provider: &dyn LlmProvider,
+    ctx: ReplyLoopContext<'_>,
     conversation: &mut Conversation,
-    tools: &[serde_json::Value],
-    task_id: &str,
-    task_short_id: &str,
-    session_id: &str,
-    project_path: &str,
-    worktree_path: &Path,
-    role_name: &str,
-    cancel: &CancellationToken,
-    global_cancel: &CancellationToken,
-    app_state: &AgentContext,
-    context_window: i64,
-    model_id: &str,
     is_resumed_session: bool,
 ) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64) {
+    let ReplyLoopContext { provider, tools, task_id, task_short_id, session_id, project_path, worktree_path, role_name, context_window, model_id, cancel, global_cancel, app_state } = ctx;
     let mut output = ParsedAgentOutput::new(role_name == "task_reviewer");
 
     // Token counts and last assistant text are declared outside the async block
@@ -998,20 +1002,22 @@ mod tests {
         conv.push(Message::user("Do the task."));
 
         let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
-            &provider,
+            ReplyLoopContext {
+                provider: &provider,
+                tools: &[],
+                task_id: &task_id,
+                task_short_id: "t1",
+                session_id: &session_id,
+                project_path: &project_path,
+                worktree_path: &worktree_path,
+                role_name: "worker",
+                context_window,
+                model_id: "test/mock-model",
+                cancel: &cancel,
+                global_cancel: &cancel,
+                app_state: &app_state,
+            },
             &mut conv,
-            &[],
-            &task_id,
-            "t1",
-            &session_id,
-            &project_path,
-            &worktree_path,
-            "worker",
-            &cancel,
-            &cancel,
-            &app_state,
-            context_window,
-            "test/mock-model",
             false,
         )
         .await;
@@ -1076,20 +1082,22 @@ mod tests {
         conv.push(Message::user("Do the task."));
 
         let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
-            &provider,
+            ReplyLoopContext {
+                provider: &provider,
+                tools: &[],
+                task_id: &task_id,
+                task_short_id: "t1",
+                session_id: &session_id,
+                project_path: &project_path,
+                worktree_path: &worktree_path,
+                role_name: "worker",
+                context_window,
+                model_id: "test/mock-model",
+                cancel: &cancel,
+                global_cancel: &cancel,
+                app_state: &app_state,
+            },
             &mut conv,
-            &[],
-            &task_id,
-            "t1",
-            &session_id,
-            &project_path,
-            &worktree_path,
-            "worker",
-            &cancel,
-            &cancel,
-            &app_state,
-            context_window,
-            "test/mock-model",
             false,
         )
         .await;
@@ -1187,20 +1195,22 @@ mod tests {
         conv.push(Message::user("Do the task."));
 
         let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
-            &provider,
+            ReplyLoopContext {
+                provider: &provider,
+                tools: &[],
+                task_id: &task_id,
+                task_short_id: "t1",
+                session_id: &session_id,
+                project_path: &project_path,
+                worktree_path: &worktree_path,
+                role_name: "worker",
+                context_window,
+                model_id: "test/mock-model",
+                cancel: &cancel,
+                global_cancel: &cancel,
+                app_state: &app_state,
+            },
             &mut conv,
-            &[],
-            &task_id,
-            "t1",
-            &session_id,
-            &project_path,
-            &worktree_path,
-            "worker",
-            &cancel,
-            &cancel,
-            &app_state,
-            context_window,
-            "test/mock-model",
             false,
         )
         .await;

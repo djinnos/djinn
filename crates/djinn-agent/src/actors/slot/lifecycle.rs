@@ -16,7 +16,7 @@ use djinn_core::models::SessionStatus;
 use djinn_core::models::TransitionAction;
 use crate::context::AgentContext;
 
-use super::reply_loop::run_reply_loop;
+use super::reply_loop::{run_reply_loop, ReplyLoopContext};
 use super::*;
 use crate::task_merge::interrupt_paused_worker_session;
 
@@ -30,17 +30,19 @@ use crate::task_merge::interrupt_paused_worker_session;
 ///
 /// Sends `SlotEvent::Free` on normal completion and `SlotEvent::Killed` when
 /// cancelled via `cancel`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_task_lifecycle(
-    task_id: String,
-    project_path: String,
-    model_id: String,
-    role: Arc<dyn AgentRole>,
-    app_state: AgentContext,
-    cancel: CancellationToken,
-    pause: CancellationToken,
-    event_tx: mpsc::Sender<SlotEvent>,
-) -> anyhow::Result<()> {
+pub(crate) struct TaskLifecycleParams {
+    pub task_id: String,
+    pub project_path: String,
+    pub model_id: String,
+    pub role: Arc<dyn AgentRole>,
+    pub app_state: AgentContext,
+    pub cancel: CancellationToken,
+    pub pause: CancellationToken,
+    pub event_tx: mpsc::Sender<SlotEvent>,
+}
+
+pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::Result<()> {
+    let TaskLifecycleParams { task_id, project_path, model_id, role, app_state, cancel, pause, event_tx } = params;
     let emit_step = |task_id: &str, step: &str, detail: serde_json::Value| {
         app_state
             .event_bus
@@ -685,20 +687,22 @@ pub(crate) async fn run_task_lifecycle(
 
     // ── Run reply loop ────────────────────────────────────────────────────────
     let (reply_result, final_output, tokens_in_loop, tokens_out_loop) = run_reply_loop(
-        provider.as_ref(),
+        ReplyLoopContext {
+            provider: provider.as_ref(),
+            tools: &tools,
+            task_id: &task.id,
+            task_short_id: &task.short_id,
+            session_id: &current_session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: role.config().name,
+            context_window,
+            model_id: &model_id,
+            cancel: &cancel,
+            global_cancel: &pause,
+            app_state: &app_state,
+        },
         &mut conversation,
-        &tools,
-        &task.id,
-        &task.short_id,
-        &current_session_id,
-        &project_path,
-        &worktree_path,
-        role.config().name,
-        &cancel,
-        &pause,
-        &app_state,
-        context_window,
-        &model_id,
         resume_record_id.is_some(),
     )
     .await;
@@ -1130,20 +1134,22 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
 
     // ── Run reply loop ────────────────────────────────────────────────────
     let (reply_result, _final_output, tokens_in, tokens_out) = run_reply_loop(
-        provider.as_ref(),
+        ReplyLoopContext {
+            provider: provider.as_ref(),
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: &task_id, // short_id — use task_id for project-scoped
+            session_id: &current_session_id,
+            project_path: &project_path,
+            worktree_path: &project_dir, // worktree = project dir (no worktree for groomer)
+            role_name: role.config().name,
+            context_window,
+            model_id: &model_id,
+            cancel: &cancel,
+            global_cancel: &pause,
+            app_state: &app_state,
+        },
         &mut conversation,
-        &tools,
-        &task_id,
-        &task_id, // short_id — use task_id for project-scoped
-        &current_session_id,
-        &project_path,
-        &project_dir, // worktree = project dir (no worktree for groomer)
-        role.config().name,
-        &cancel,
-        &pause,
-        &app_state,
-        context_window,
-        &model_id,
         false, // not a resumed session
     )
     .await;

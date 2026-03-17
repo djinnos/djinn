@@ -240,16 +240,16 @@ impl SlotHandle {
                             crate::roles::role_impl_for(crate::AgentType::Worker)
                         }
                     };
-                    run_task_lifecycle(
+                    run_task_lifecycle(crate::actors::slot::lifecycle::TaskLifecycleParams {
                         task_id,
                         project_path,
                         model_id,
                         role,
                         app_state,
-                        kill,
+                        cancel: kill,
                         pause,
-                        sink,
-                    )
+                        event_tx: sink,
+                    })
                     .await
                 })
             });
