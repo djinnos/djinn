@@ -603,7 +603,9 @@ dependencies = [
  "ring",
  "serde_json",
  "sqlx",
+ "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
