@@ -37,6 +37,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
         lsp: LspManager::new(),
         catalog: CatalogService::new(),
         coordinator: Arc::new(tokio::sync::Mutex::new(None)),
+        active_tasks: crate::context::ActivityTracker::default(),
     }
 }
 

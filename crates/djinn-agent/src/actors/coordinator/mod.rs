@@ -312,7 +312,7 @@ impl CoordinatorActor {
                 //    any tasks that missed an event (e.g. needs_pm_intervention
                 //    tasks surviving a server restart).
                 _ = self.tick.tick() => {
-                    self.enforce_non_worker_session_timeout().await;
+                    self.enforce_session_stall_timeout().await;
                     self.detect_and_recover_stuck_filtered(None).await;
                     self.ensure_groomer_dispatch(None).await;
                     self.dispatch_ready_tasks(None).await;
@@ -328,6 +328,7 @@ impl CoordinatorActor {
                             lsp: crate::lsp::LspManager::new(),
                             catalog: self.catalog.clone(),
                             coordinator: Arc::new(tokio::sync::Mutex::new(None)),
+                            active_tasks: crate::context::ActivityTracker::default(),
                         };
                         health::sweep_stale_resources(&self.db, &app_state).await;
                         self.last_stale_sweep = StdInstant::now();

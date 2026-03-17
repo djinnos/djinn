@@ -57,6 +57,7 @@ struct Inner {
     /// Per-session file read timestamps used to enforce read-before-edit/write.
     pub file_time: Arc<FileTime>,
     pub lsp: LspManager,
+    pub active_tasks: djinn_agent::context::ActivityTracker,
 }
 
 impl AppState {
@@ -85,6 +86,7 @@ impl AppState {
                 verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 file_time: Arc::new(FileTime::new()),
                 lsp: LspManager::new(),
+                active_tasks: djinn_agent::context::ActivityTracker::default(),
             }),
         }
     }
@@ -170,6 +172,7 @@ impl AppState {
             lsp: self.inner.lsp.clone(),
             catalog: self.inner.catalog.clone(),
             coordinator: self.inner.coordinator.clone(),
+            active_tasks: self.inner.active_tasks.clone(),
         }
     }
 

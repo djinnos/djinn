@@ -254,7 +254,11 @@ impl CoordinatorActor {
         self.publish_status();
     }
 
-    pub(super) async fn enforce_non_worker_session_timeout(&mut self) {
+    /// Kill any session that has been idle (no stream events or tool activity)
+    /// for more than 5 minutes.  Unlike the old wall-clock timeout this applies
+    /// to **all** agent types including workers — a session that stops producing
+    /// tokens is stalled regardless of role.
+    pub(super) async fn enforce_session_stall_timeout(&mut self) {
         let repo = djinn_db::SessionRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
@@ -262,46 +266,50 @@ impl CoordinatorActor {
         let active = match repo.list_active().await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(error = %e, "CoordinatorActor: failed to list active sessions for timeout enforcement");
+                tracing::warn!(error = %e, "CoordinatorActor: failed to list active sessions for stall timeout");
                 return;
             }
         };
 
-        let now = std::time::SystemTime::now();
-        let timeout = Duration::from_secs(5 * 60);
+        const STALL_TIMEOUT_SECS: u64 = 5 * 60;
 
         for session in active {
-            if session.agent_type == "worker" {
-                continue;
-            }
-
             let Some(task_id) = session.task_id.as_deref() else {
                 continue;
             };
 
-            let Ok(started_secs) = session.started_at.parse::<u64>() else {
-                tracing::warn!(session_id = %session.id, started_at = %session.started_at, "CoordinatorActor: failed to parse session started_at");
-                continue;
+            // Query the activity tracker for idle time.  If the task has no
+            // activity entry (e.g. session predates this feature) fall back to
+            // wall-clock elapsed from started_at.
+            let idle = match self.pool.session_for_task(task_id).await {
+                Ok(Some(info)) => info.idle_seconds,
+                _ => {
+                    // Fallback: compute from started_at.
+                    let Ok(started_secs) = session.started_at.parse::<u64>() else {
+                        continue;
+                    };
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    now.saturating_sub(started_secs)
+                }
             };
-            let started_at = std::time::UNIX_EPOCH + Duration::from_secs(started_secs);
 
-            let Ok(elapsed) = now.duration_since(started_at) else {
-                continue;
-            };
-            if elapsed <= timeout {
+            if idle <= STALL_TIMEOUT_SECS {
                 continue;
             }
 
             if let Err(e) = self.pool.kill_session(task_id).await {
-                tracing::warn!(task_id = %task_id, session_id = %session.id, error = %e, "CoordinatorActor: failed to kill timed-out non-worker session");
+                tracing::warn!(task_id = %task_id, session_id = %session.id, error = %e, "CoordinatorActor: failed to kill stalled session");
                 continue;
             }
 
             let task_repo = self.task_repo();
             let payload = serde_json::json!({
                 "message": format!(
-                    "Coordinator timeout kill: {} session exceeded 5 minutes (started at {}). Session was cancelled for redispatch.",
-                    session.agent_type, session.started_at
+                    "Coordinator stall timeout: {} session idle for {}s (threshold {}s). Session was cancelled for redispatch.",
+                    session.agent_type, idle, STALL_TIMEOUT_SECS
                 )
             })
             .to_string();
@@ -313,8 +321,8 @@ impl CoordinatorActor {
                 task_id = %task_id,
                 session_id = %session.id,
                 agent_type = %session.agent_type,
-                started_at = %session.started_at,
-                "CoordinatorActor: killed timed-out non-worker session"
+                idle_seconds = idle,
+                "CoordinatorActor: killed stalled session"
             );
         }
     }

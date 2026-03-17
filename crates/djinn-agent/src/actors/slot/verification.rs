@@ -13,6 +13,9 @@ use super::*;
 /// After this many consecutive verification failures, escalate to PM.
 const VERIFICATION_ESCALATION_THRESHOLD: i64 = 3;
 
+/// Overall timeout for the verification pipeline.
+const VERIFICATION_PIPELINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 /// Spawn a background verification pipeline for a completed worker task.
 ///
 /// The task should already be in `verifying` status.  This function:
@@ -26,23 +29,55 @@ const VERIFICATION_ESCALATION_THRESHOLD: i64 = 3;
 pub(crate) fn spawn_verification(task_id: String, project_path: String, app_state: AgentContext) {
     app_state.register_verification(&task_id);
     tokio::spawn(async move {
-        if let Err(e) = run_verification_pipeline(&task_id, &project_path, &app_state).await {
-            tracing::error!(
-                task_id = %task_id,
-                error = %e,
-                "Verification pipeline crashed; releasing task"
-            );
-            let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-            let _ = repo
-                .transition(
-                    &task_id,
-                    TransitionAction::ReleaseVerification,
-                    "agent-supervisor",
-                    "system",
-                    Some(&format!("verification pipeline error: {e}")),
-                    None,
-                )
-                .await;
+        let result = tokio::time::timeout(
+            VERIFICATION_PIPELINE_TIMEOUT,
+            run_verification_pipeline(&task_id, &project_path, &app_state),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::error!(
+                    task_id = %task_id,
+                    error = %e,
+                    "Verification pipeline crashed; releasing task"
+                );
+                let repo =
+                    TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+                let _ = repo
+                    .transition(
+                        &task_id,
+                        TransitionAction::ReleaseVerification,
+                        "agent-supervisor",
+                        "system",
+                        Some(&format!("verification pipeline error: {e}")),
+                        None,
+                    )
+                    .await;
+            }
+            Err(_elapsed) => {
+                tracing::error!(
+                    task_id = %task_id,
+                    timeout_secs = VERIFICATION_PIPELINE_TIMEOUT.as_secs(),
+                    "Verification pipeline timed out; releasing task"
+                );
+                let repo =
+                    TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+                let _ = repo
+                    .transition(
+                        &task_id,
+                        TransitionAction::ReleaseVerification,
+                        "agent-supervisor",
+                        "system",
+                        Some(&format!(
+                            "verification pipeline timed out after {}s",
+                            VERIFICATION_PIPELINE_TIMEOUT.as_secs()
+                        )),
+                        None,
+                    )
+                    .await;
+            }
         }
 
         app_state.deregister_verification(&task_id);
