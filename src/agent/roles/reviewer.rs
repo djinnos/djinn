@@ -6,7 +6,7 @@ use crate::agent::extension;
 use crate::agent::output_parser::ParsedAgentOutput;
 use crate::agent::prompts::TaskContext;
 use crate::db::TaskRepository;
-use crate::db::repositories::task::transitions::{VerificationGateFn, merge_after_task_review};
+use crate::agent::task_merge::{VerificationGateFn, merge_after_task_review};
 use crate::models::{Task, TransitionAction};
 use crate::agent::context::AgentContext;
 use futures::future::BoxFuture;

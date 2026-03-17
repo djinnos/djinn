@@ -1807,7 +1807,7 @@ async fn call_task_transition(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    use crate::db::repositories::task::transitions::{PM_MERGE_ACTIONS, VerificationGateFn, merge_and_transition};
+    use crate::agent::task_merge::{PM_MERGE_ACTIONS, VerificationGateFn, merge_and_transition};
     use crate::models::{TaskStatus, TransitionAction};
     let p: TaskTransitionParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
@@ -1945,13 +1945,13 @@ async fn call_task_delete_branch(
     };
 
     // Interrupt and clean up any paused worker session (handles worktree cleanup too).
-    crate::db::repositories::task::transitions::interrupt_paused_worker_session(&task.id, state)
+    crate::agent::task_merge::interrupt_paused_worker_session(&task.id, state)
         .await;
-    crate::db::repositories::task::transitions::cleanup_paused_worker_session(&task.id, state)
+    crate::agent::task_merge::cleanup_paused_worker_session(&task.id, state)
         .await;
 
     // Delete the task branch from git.
-    let project_dir = match crate::db::repositories::task::transitions::resolve_project_path_for_id(
+    let project_dir = match crate::agent::task_merge::resolve_project_path_for_id(
         &task.project_id,
         state,
     )
@@ -2040,9 +2040,9 @@ async fn call_task_kill_session(
 
     // Interrupt the paused session and delete saved conversation.
     // This forces a fresh session on next dispatch without deleting the branch.
-    crate::db::repositories::task::transitions::interrupt_paused_worker_session(&task.id, state)
+    crate::agent::task_merge::interrupt_paused_worker_session(&task.id, state)
         .await;
-    crate::db::repositories::task::transitions::cleanup_paused_worker_session(&task.id, state)
+    crate::agent::task_merge::cleanup_paused_worker_session(&task.id, state)
         .await;
 
     Ok(serde_json::json!({

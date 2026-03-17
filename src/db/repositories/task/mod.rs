@@ -13,7 +13,6 @@ mod blockers;
 mod queries;
 mod reads;
 mod status;
-pub mod transitions;
 pub(crate) mod verification;
 mod writes;
 

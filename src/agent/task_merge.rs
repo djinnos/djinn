@@ -14,9 +14,9 @@ const MERGE_VALIDATION_PREFIX: &str = "merge_validation_failed:";
 ///
 /// Takes `(task_id, project_path)` and returns `Ok(())` if verification
 /// passes, or `Err(feedback)` with a human-readable failure description.
-/// Provided by the server layer so that `transitions.rs` has no dependency
+/// Provided by the server layer so that merge orchestration has no dependency
 /// on `crate::actors`.
-pub type VerificationGateFn = Box<
+pub(crate) type VerificationGateFn = Box<
     dyn Fn(String, String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
         + Send
         + Sync,
@@ -42,14 +42,14 @@ struct MergeValidationFailureMetadata {
 
 /// Transition actions to use for each merge outcome.
 /// Allows both the reviewer and PM approval paths to reuse the same merge logic.
-pub struct MergeActions {
-    pub approve: TransitionAction,
-    pub conflict: TransitionAction,
-    pub release: TransitionAction,
+pub(crate) struct MergeActions {
+    pub(crate) approve: TransitionAction,
+    pub(crate) conflict: TransitionAction,
+    pub(crate) release: TransitionAction,
 }
 
 /// Standard actions used by the task reviewer path.
-pub const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
+pub(crate) const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
     approve: TransitionAction::TaskReviewApprove,
     conflict: TransitionAction::TaskReviewRejectConflict,
     release: TransitionAction::ReleaseTaskReview,
@@ -61,13 +61,13 @@ pub const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
 /// `PmInterventionRelease` (→ NeedsPmIntervention) so that verification
 /// or git failures route the task back to a worker who can fix the code,
 /// rather than looping the PM in a re-dispatch cycle it cannot resolve.
-pub const PM_MERGE_ACTIONS: MergeActions = MergeActions {
+pub(crate) const PM_MERGE_ACTIONS: MergeActions = MergeActions {
     approve: TransitionAction::PmApprove,
     conflict: TransitionAction::PmApproveConflict,
     release: TransitionAction::PmInterventionComplete,
 };
 
-pub async fn merge_after_task_review(
+pub(crate) async fn merge_after_task_review(
     task_id: &str,
     app_state: &AgentContext,
     verification_gate: Option<VerificationGateFn>,
@@ -75,7 +75,7 @@ pub async fn merge_after_task_review(
     merge_and_transition(task_id, app_state, &REVIEWER_MERGE_ACTIONS, verification_gate).await
 }
 
-pub async fn merge_and_transition(
+pub(crate) async fn merge_and_transition(
     task_id: &str,
     app_state: &AgentContext,
     actions: &MergeActions,
@@ -252,6 +252,7 @@ pub async fn merge_and_transition(
         }
     }
 }
+
 pub(crate) async fn cleanup_paused_worker_session(task_id: &str, app_state: &AgentContext) {
     let repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let Ok(Some(paused)) = repo.paused_for_task(task_id).await else {
@@ -302,6 +303,7 @@ pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &A
         );
     }
 }
+
 pub(crate) async fn resolve_project_path_for_id(
     project_id: &str,
     app_state: &AgentContext,
