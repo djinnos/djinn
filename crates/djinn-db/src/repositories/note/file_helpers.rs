@@ -95,12 +95,12 @@ pub(super) fn write_note_file(
 ) -> Result<()> {
     if let Some(parent) = file_path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| Error::Internal(format!("create_dir_all {}: {e}", parent.display())))?;
+            .map_err(|e| Error::InvalidData(format!("create_dir_all {}: {e}", parent.display())))?;
     }
     let file_content =
         format!("---\ntitle: {title}\ntype: {note_type}\ntags: {tags}\n---\n\n{content}",);
     std::fs::write(file_path, file_content)
-        .map_err(|e| Error::Internal(format!("write note file {}: {e}", file_path.display())))?;
+        .map_err(|e| Error::InvalidData(format!("write note file {}: {e}", file_path.display())))?;
     Ok(())
 }
 

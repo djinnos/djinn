@@ -162,7 +162,7 @@ impl NoteRepository {
         let current = self
             .get(id)
             .await?
-            .ok_or_else(|| Error::Internal(format!("note not found: {id}")))?;
+            .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
 
         write_note_file(
             Path::new(&current.file_path),
@@ -219,7 +219,7 @@ impl NoteRepository {
         let current = self
             .get(id)
             .await?
-            .ok_or_else(|| Error::Internal(format!("note not found: {id}")))?;
+            .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
 
         let id_owned = id.to_owned();
         let id_for_event = id.to_owned();
@@ -270,7 +270,7 @@ impl NoteRepository {
         let current = self
             .get(id)
             .await?
-            .ok_or_else(|| Error::Internal(format!("note not found: {id}")))?;
+            .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
 
         let new_file_path = file_path_for(project_path, new_note_type, new_title);
         let new_permalink = permalink_for(new_note_type, new_title);
@@ -280,11 +280,11 @@ impl NoteRepository {
         // Create destination directory and rename the file.
         if let Some(parent) = new_file_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                Error::Internal(format!("create_dir_all {}: {e}", parent.display()))
+                Error::InvalidData(format!("create_dir_all {}: {e}", parent.display()))
             })?;
         }
         std::fs::rename(&current.file_path, &new_file_path).map_err(|e| {
-            Error::Internal(format!(
+            Error::InvalidData(format!(
                 "rename {} → {}: {e}",
                 current.file_path,
                 new_file_path.display()

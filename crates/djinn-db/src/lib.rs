@@ -10,5 +10,8 @@ pub use repositories::{
     events::EventsRepository,
     git_settings::GitSettingsRepository,
     models::ModelsRepository,
+    note::{
+        NoteRepository, file_path_for, folder_for_type, is_singleton, permalink_for, slugify,
+    },
     settings::SettingsRepository,
 };
