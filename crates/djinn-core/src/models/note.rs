@@ -131,8 +131,10 @@ pub struct StaleFolder {
 pub struct BuildContextResponse {
     /// Full-content notes at the seed.
     pub primary: Vec<Note>,
-    /// Summary-only notes reached by link traversal.
-    pub related: Vec<NoteCompact>,
+    /// L1 overview notes reached by first-hop link traversal.
+    pub related_l1: Vec<NoteOverview>,
+    /// L0 abstract notes reached by deeper link traversal.
+    pub related_l0: Vec<NoteAbstract>,
 }
 
 /// Result of a filesystem-to-index reconciliation pass.

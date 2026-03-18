@@ -163,7 +163,8 @@ impl DjinnMcpServer {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
             return Json(MemoryBuildContextResponse {
                 primary: vec![],
-                related: vec![],
+                related_l1: vec![],
+                related_l0: vec![],
                 error: Some(format!("project not found: {}", p.project)),
             });
         };
@@ -184,7 +185,8 @@ impl DjinnMcpServer {
                 .unwrap_or_default();
             return Json(MemoryBuildContextResponse {
                 primary: all.into_iter().map(|n| note_to_view(&n)).collect(),
-                related: vec![],
+                related_l1: vec![],
+                related_l0: vec![],
                 error: None,
             });
         }
@@ -193,7 +195,8 @@ impl DjinnMcpServer {
         let Some(seed) = repo.get_by_permalink(&project_id, url).await.ok().flatten() else {
             return Json(MemoryBuildContextResponse {
                 primary: vec![],
-                related: vec![],
+                related_l1: vec![],
+                related_l0: vec![],
                 error: None,
             });
         };
@@ -201,7 +204,8 @@ impl DjinnMcpServer {
         if depth == 0 {
             return Json(MemoryBuildContextResponse {
                 primary: vec![note_to_view(&seed)],
-                related: vec![],
+                related_l1: vec![],
+                related_l0: vec![],
                 error: None,
             });
         }
@@ -227,24 +231,38 @@ impl DjinnMcpServer {
             }
         }
 
-        let mut related = Vec::new();
-        for id in related_ids.into_iter().take(max_related) {
+        // Build tiered related lists using NoteOverview for L1 and NoteAbstract for L0
+        let mut related_l1: Vec<djinn_core::models::NoteOverview> = Vec::new();
+        let mut related_l0: Vec<djinn_core::models::NoteAbstract> = Vec::new();
+        for (idx, id) in related_ids.into_iter().take(max_related).enumerate() {
             if let Ok(Some(n)) = repo.get(&id).await {
-                use djinn_core::models::NoteCompact;
-                related.push(NoteCompact {
-                    id: n.id,
-                    permalink: n.permalink,
-                    title: n.title,
-                    note_type: n.note_type,
-                    folder: n.folder,
-                    updated_at: n.updated_at,
-                });
+                // First items go to L1 (NoteOverview), rest to L0 (NoteAbstract)
+                if idx < max_related / 2 {
+                    related_l1.push(djinn_core::models::NoteOverview {
+                        id: n.id,
+                        permalink: n.permalink,
+                        title: n.title,
+                        note_type: n.note_type,
+                        overview_text: n.overview.unwrap_or_default(),
+                        score: None,
+                    });
+                } else {
+                    related_l0.push(djinn_core::models::NoteAbstract {
+                        id: n.id,
+                        permalink: n.permalink,
+                        title: n.title,
+                        note_type: n.note_type,
+                        abstract_text: n.abstract_.unwrap_or_default(),
+                        score: None,
+                    });
+                }
             }
         }
 
         Json(MemoryBuildContextResponse {
             primary: vec![note_to_view(&seed)],
-            related,
+            related_l1,
+            related_l0,
             error: None,
         })
     }
