@@ -832,6 +832,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             project_path: &project_path,
             worktree_path: &worktree_path,
             role_name: role.config().name,
+            finalize_tool_name: role.config().finalize_tool_name,
             context_window,
             model_id: &model_id,
             cancel: &cancel,
@@ -1316,6 +1317,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
             project_path: &project_path,
             worktree_path: &project_dir, // worktree = project dir (no worktree for groomer)
             role_name: role.config().name,
+            finalize_tool_name: role.config().finalize_tool_name,
             context_window,
             model_id: &model_id,
             cancel: &cancel,
