@@ -13,8 +13,31 @@ use super::*;
 /// After this many consecutive verification failures, escalate to PM.
 const VERIFICATION_ESCALATION_THRESHOLD: i64 = 3;
 
-/// Overall timeout for the verification pipeline.
-const VERIFICATION_PIPELINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// Minimum pipeline timeout even when no commands are configured.
+const MIN_PIPELINE_TIMEOUT_SECS: u64 = 120;
+/// Extra headroom on top of the sum of per-command timeouts to account for
+/// worktree creation, cache lookup, and cleanup.
+const PIPELINE_TIMEOUT_OVERHEAD_SECS: u64 = 120;
+
+/// Compute the overall pipeline timeout from the per-command `timeout_secs`
+/// in `.djinn/settings.json`.  Falls back to a safe default when the
+/// settings file is missing or unreadable.
+fn compute_pipeline_timeout(project_path: &str) -> std::time::Duration {
+    let path = std::path::Path::new(project_path);
+    let sum = match crate::verification::settings::load_commands(path) {
+        Ok((setup, verification)) => {
+            let total: u64 = setup
+                .iter()
+                .chain(verification.iter())
+                .map(|c| c.timeout_secs.unwrap_or(300))
+                .sum();
+            total
+        }
+        Err(_) => 0,
+    };
+    let secs = (sum + PIPELINE_TIMEOUT_OVERHEAD_SECS).max(MIN_PIPELINE_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
 
 /// Spawn a background verification pipeline for a completed worker task.
 ///
@@ -27,10 +50,11 @@ const VERIFICATION_PIPELINE_TIMEOUT: std::time::Duration = std::time::Duration::
 /// 6. Cleans up the worktree
 /// 7. Triggers redispatch for the project
 pub(crate) fn spawn_verification(task_id: String, project_path: String, app_state: AgentContext) {
+    let pipeline_timeout = compute_pipeline_timeout(&project_path);
     app_state.register_verification(&task_id);
     tokio::spawn(async move {
         let result = tokio::time::timeout(
-            VERIFICATION_PIPELINE_TIMEOUT,
+            pipeline_timeout,
             run_verification_pipeline(&task_id, &project_path, &app_state),
         )
         .await;
@@ -59,7 +83,7 @@ pub(crate) fn spawn_verification(task_id: String, project_path: String, app_stat
             Err(_elapsed) => {
                 tracing::error!(
                     task_id = %task_id,
-                    timeout_secs = VERIFICATION_PIPELINE_TIMEOUT.as_secs(),
+                    timeout_secs = pipeline_timeout.as_secs(),
                     "Verification pipeline timed out; releasing task"
                 );
                 let repo =
@@ -72,7 +96,7 @@ pub(crate) fn spawn_verification(task_id: String, project_path: String, app_stat
                         "system",
                         Some(&format!(
                             "verification pipeline timed out after {}s",
-                            VERIFICATION_PIPELINE_TIMEOUT.as_secs()
+                            pipeline_timeout.as_secs()
                         )),
                         None,
                     )
