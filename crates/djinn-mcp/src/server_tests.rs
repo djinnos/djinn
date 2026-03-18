@@ -19,7 +19,14 @@ mod tests {
             .unwrap();
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
         let note_a = repo
-            .create(&project.id, tmp.path(), "Note A", "alpha", "reference", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Note A",
+                "alpha",
+                "reference",
+                "[]",
+            )
             .await
             .unwrap();
         let note_b = repo
@@ -33,7 +40,10 @@ mod tests {
         let server = manager.server_for_session(&session_id).await.unwrap();
         server.record_memory_read(&note_a.id).await;
         server.record_memory_read(&note_b.id).await;
-        assert_eq!(server.recorded_note_ids().await, vec![note_a.id.clone(), note_b.id.clone()]);
+        assert_eq!(
+            server.recorded_note_ids().await,
+            vec![note_a.id.clone(), note_b.id.clone()]
+        );
 
         manager.close_session(&session_id).await.unwrap();
 

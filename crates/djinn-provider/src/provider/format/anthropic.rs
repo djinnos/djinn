@@ -262,6 +262,7 @@ mod tests {
             model_id: "claude-3-5-sonnet".to_string(),
             context_window: 200_000,
             telemetry: None,
+            session_affinity_key: None,
             provider_headers: std::collections::HashMap::new(),
             capabilities: ProviderCapabilities {
                 streaming: true,

@@ -579,6 +579,49 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
 
     let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
+    // Create/reuse the DB session record before building the provider so the
+    // provider can use a stable per-session affinity key across all turns.
+    let current_record_id = if let Some(ref resume_id) = resume_record_id {
+        Some(resume_id.clone())
+    } else {
+        match session_repo
+            .create(CreateSessionParams {
+                project_id: &task.project_id,
+                task_id: Some(&task.id),
+                model: &model_id,
+                agent_type: role.config().name,
+                worktree_path: worktree_path.to_str(),
+                metadata_json: None,
+            })
+            .await
+        {
+            Ok(r) => Some(r.id),
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
+                transition_interrupted(
+                    &task_id,
+                    role.config().release_action,
+                    &e.to_string(),
+                    &app_state,
+                )
+                .await;
+                teardown_worktree(
+                    &task.short_id,
+                    &worktree_path,
+                    &project_dir,
+                    &app_state,
+                    false,
+                )
+                .await;
+                return_free!();
+            }
+        }
+    };
+
+    let current_session_id = current_record_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+
     // ── Build Djinn-native provider ───────────────────────────────────────────
     let telemetry_meta = build_telemetry_meta(role.config().name, &task_id);
 
@@ -589,7 +632,8 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             cfg.model_id = model_name.clone();
             cfg.context_window = context_window.max(0) as u32;
             cfg.telemetry = Some(telemetry_meta);
-            cfg
+            cfg.session_affinity_key = Some(current_session_id.clone());
+            *cfg
         }
         ProviderCredential::ApiKey(_key_name, api_key) => {
             let format_family = format_family_for_provider(&catalog_provider_id, &model_name);
@@ -611,6 +655,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                 model_id: model_name.clone(),
                 context_window: context_window.max(0) as u32,
                 telemetry: Some(telemetry_meta),
+                session_affinity_key: Some(current_session_id.clone()),
                 provider_headers: Default::default(),
                 capabilities: capabilities_for_provider(&catalog_provider_id),
             }
@@ -1189,41 +1234,6 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         .unwrap_or(0);
 
     let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
-    // ── Build provider ────────────────────────────────────────────────────
-    let telemetry_meta = build_telemetry_meta(role.config().name, &task_id);
-    let provider_config = match provider_credential {
-        ProviderCredential::OAuthConfig(mut cfg) => {
-            cfg.model_id = model_name.clone();
-            cfg.context_window = context_window.max(0) as u32;
-            cfg.telemetry = Some(telemetry_meta);
-            cfg
-        }
-        ProviderCredential::ApiKey(_key_name, api_key) => {
-            let format_family = format_family_for_provider(&catalog_provider_id, &model_name);
-            let base_url = app_state
-                .catalog
-                .list_providers()
-                .iter()
-                .find(|p| p.id == catalog_provider_id)
-                .map(|p| p.base_url.clone())
-                .filter(|u| !u.is_empty())
-                .unwrap_or_else(|| default_base_url(&catalog_provider_id));
-            crate::provider::ProviderConfig {
-                base_url,
-                auth: auth_method_for_provider(&catalog_provider_id, &api_key),
-                format_family,
-                model_id: model_name.clone(),
-                context_window: context_window.max(0) as u32,
-                telemetry: Some(telemetry_meta),
-                provider_headers: Default::default(),
-                capabilities: capabilities_for_provider(&catalog_provider_id),
-            }
-        }
-    };
-    let provider = create_provider(provider_config);
-
-    // ── Create session record (no task_id for project-scoped agents) ─────
     let current_record_id = match session_repo
         .create(CreateSessionParams {
             project_id: &project_id,
@@ -1244,6 +1254,43 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     let current_session_id = current_record_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+
+    // ── Build provider ────────────────────────────────────────────────────
+    let telemetry_meta = build_telemetry_meta(role.config().name, &task_id);
+    let provider_config = match provider_credential {
+        ProviderCredential::OAuthConfig(mut cfg) => {
+            cfg.model_id = model_name.clone();
+            cfg.context_window = context_window.max(0) as u32;
+            cfg.telemetry = Some(telemetry_meta);
+            cfg.session_affinity_key = Some(current_session_id.clone());
+            *cfg
+        }
+        ProviderCredential::ApiKey(_key_name, api_key) => {
+            let format_family = format_family_for_provider(&catalog_provider_id, &model_name);
+            let base_url = app_state
+                .catalog
+                .list_providers()
+                .iter()
+                .find(|p| p.id == catalog_provider_id)
+                .map(|p| p.base_url.clone())
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| default_base_url(&catalog_provider_id));
+            crate::provider::ProviderConfig {
+                base_url,
+                auth: auth_method_for_provider(&catalog_provider_id, &api_key),
+                format_family,
+                model_id: model_name.clone(),
+                context_window: context_window.max(0) as u32,
+                telemetry: Some(telemetry_meta),
+                session_affinity_key: Some(current_session_id.clone()),
+                provider_headers: Default::default(),
+                capabilities: capabilities_for_provider(&catalog_provider_id),
+            }
+        }
+    };
+    let provider = create_provider(provider_config);
+
+    // ── Create session record (no task_id for project-scoped agents) ─────
     let tools = (role.config().tool_schemas)();
     let mut conversation = Conversation::new();
     conversation.push(Message::system(system_prompt));

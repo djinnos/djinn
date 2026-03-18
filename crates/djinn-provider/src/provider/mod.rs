@@ -67,6 +67,8 @@ pub struct ProviderConfig {
     pub context_window: u32,
     /// Telemetry metadata for OTel span instrumentation.
     pub telemetry: Option<TelemetryMeta>,
+    /// Stable session identifier for provider-specific request affinity/caching.
+    pub session_affinity_key: Option<String>,
     /// Extra headers to include on every request (e.g. `chatgpt-account-id` for Codex).
     pub provider_headers: std::collections::HashMap<String, String>,
     /// Provider-level capabilities.

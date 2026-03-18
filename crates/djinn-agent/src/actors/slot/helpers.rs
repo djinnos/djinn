@@ -544,7 +544,7 @@ pub enum ProviderCredential {
     /// Traditional API-key credential (key_name, decrypted key).
     ApiKey(String, String),
     /// OAuth-derived full provider config (base_url, auth, model already set).
-    OAuthConfig(crate::provider::ProviderConfig),
+    OAuthConfig(Box<crate::provider::ProviderConfig>),
 }
 
 pub async fn load_provider_credential(
@@ -569,9 +569,9 @@ pub async fn load_provider_credential(
                     match crate::oauth::codex::refresh_cached_token(&tokens, &credential_repo).await
                     {
                         Ok(refreshed) => {
-                            return Ok(ProviderCredential::OAuthConfig(
+                            return Ok(ProviderCredential::OAuthConfig(Box::new(
                                 crate::oauth::codex_provider_config(&refreshed),
-                            ));
+                            )));
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -582,9 +582,9 @@ pub async fn load_provider_credential(
                         }
                     }
                 } else {
-                    return Ok(ProviderCredential::OAuthConfig(
+                    return Ok(ProviderCredential::OAuthConfig(Box::new(
                         crate::oauth::codex_provider_config(&tokens),
-                    ));
+                    )));
                 }
             }
         }
@@ -593,17 +593,17 @@ pub async fn load_provider_credential(
                 crate::oauth::copilot::CopilotTokens::load_from_db(&credential_repo).await
             {
                 if !tokens.is_expired() {
-                    return Ok(ProviderCredential::OAuthConfig(
+                    return Ok(ProviderCredential::OAuthConfig(Box::new(
                         crate::oauth::copilot_provider_config(&tokens),
-                    ));
+                    )));
                 }
                 // Copilot refresh requires the github_token → try exchange.
                 match crate::oauth::copilot::refresh_copilot_token(&tokens, &credential_repo).await
                 {
                     Ok(refreshed) => {
-                        return Ok(ProviderCredential::OAuthConfig(
+                        return Ok(ProviderCredential::OAuthConfig(Box::new(
                             crate::oauth::copilot_provider_config(&refreshed),
-                        ));
+                        )));
                     }
                     Err(e) => {
                         tracing::warn!(

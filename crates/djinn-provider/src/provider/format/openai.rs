@@ -142,6 +142,12 @@ impl OpenAIProvider {
             body["tools"] = json!(openai_tools);
         }
 
+        if let Some(session_affinity_key) = &self.config.session_affinity_key
+            && is_fireworks_base_url(&self.config.base_url)
+        {
+            body["user"] = json!(session_affinity_key);
+        }
+
         body
     }
 
@@ -153,8 +159,19 @@ impl OpenAIProvider {
     }
 
     fn extra_headers(&self) -> HeaderMap {
-        HeaderMap::new()
+        let mut headers = HeaderMap::new();
+        if let Some(session_affinity_key) = &self.config.session_affinity_key
+            && is_fireworks_base_url(&self.config.base_url)
+            && let Ok(value) = reqwest::header::HeaderValue::from_str(session_affinity_key)
+        {
+            headers.insert("x-session-affinity", value);
+        }
+        headers
     }
+}
+
+fn is_fireworks_base_url(base_url: &str) -> bool {
+    base_url.contains("fireworks.ai")
 }
 
 // ─── Tool conversion ─────────────────────────────────────────────────────────
@@ -413,19 +430,75 @@ impl LlmProvider for OpenAIProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::Message;
     use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
 
     fn test_openai_config() -> ProviderConfig {
         ProviderConfig {
-            base_url: "https://example.com".to_string(),
-            auth: AuthMethod::NoAuth,
+            base_url: "https://api.openai.com".to_string(),
+            auth: AuthMethod::BearerToken("test".to_string()),
             format_family: FormatFamily::OpenAI,
             model_id: "gpt-4o-mini".to_string(),
             context_window: 128_000,
             telemetry: None,
+            session_affinity_key: None,
             provider_headers: std::collections::HashMap::new(),
             capabilities: ProviderCapabilities::default(),
         }
+    }
+
+    #[test]
+    fn test_build_request_sets_fireworks_user_field() {
+        let provider = OpenAIProvider::new(ProviderConfig {
+            base_url: "https://api.fireworks.ai/inference/v1".to_string(),
+            auth: AuthMethod::BearerToken("test".to_string()),
+            format_family: FormatFamily::OpenAI,
+            model_id: "accounts/fireworks/models/deepseek-v3p2".to_string(),
+            context_window: 128_000,
+            telemetry: None,
+            session_affinity_key: Some("session-123".to_string()),
+            provider_headers: Default::default(),
+            capabilities: ProviderCapabilities::default(),
+        });
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let req = provider.build_request(&conv, &[]);
+        assert_eq!(req["user"], "session-123");
+    }
+
+    #[test]
+    fn test_extra_headers_sets_fireworks_session_affinity() {
+        let provider = OpenAIProvider::new(ProviderConfig {
+            base_url: "https://api.fireworks.ai/inference/v1".to_string(),
+            auth: AuthMethod::BearerToken("test".to_string()),
+            format_family: FormatFamily::OpenAI,
+            model_id: "accounts/fireworks/models/deepseek-v3p2".to_string(),
+            context_window: 128_000,
+            telemetry: None,
+            session_affinity_key: Some("session-123".to_string()),
+            provider_headers: Default::default(),
+            capabilities: ProviderCapabilities::default(),
+        });
+
+        let headers = provider.extra_headers();
+        assert_eq!(
+            headers
+                .get("x-session-affinity")
+                .and_then(|v| v.to_str().ok()),
+            Some("session-123")
+        );
+    }
+
+    #[test]
+    fn test_non_fireworks_provider_omits_session_affinity() {
+        let provider = OpenAIProvider::new(test_openai_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let req = provider.build_request(&conv, &[]);
+        assert!(req.get("user").is_none());
+        assert!(provider.extra_headers().get("x-session-affinity").is_none());
     }
 
     #[test]
@@ -517,7 +590,6 @@ mod tests {
             _ => panic!("expected usage"),
         }
     }
-
     #[test]
     fn test_parse_done_sentinel_ignored() {
         let mut acc = None;

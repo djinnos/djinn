@@ -33,6 +33,7 @@ pub fn codex_provider_config(tokens: &codex::CodexTokens) -> ProviderConfig {
         model_id: codex::CODEX_DEFAULT_MODEL.to_string(),
         context_window: 128_000,
         telemetry: None,
+        session_affinity_key: None,
         provider_headers,
         capabilities: ProviderCapabilities::default(),
     }
@@ -47,6 +48,7 @@ pub fn copilot_provider_config(tokens: &copilot::CopilotTokens) -> ProviderConfi
         model_id: copilot::COPILOT_DEFAULT_MODEL.to_string(),
         context_window: 128_000,
         telemetry: None,
+        session_affinity_key: None,
         provider_headers: Default::default(),
         capabilities: ProviderCapabilities::default(),
     }
