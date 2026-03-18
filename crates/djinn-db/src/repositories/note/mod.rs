@@ -1122,6 +1122,83 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graph_proximity_association_applies_weighted_decay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let a = repo
+            .create(&project.id, tmp.path(), "A", "", "research", "[]")
+            .await
+            .unwrap();
+        let b = repo
+            .create(&project.id, tmp.path(), "B", "", "research", "[]")
+            .await
+            .unwrap();
+
+        let (note_a_id, note_b_id) = if a.id < b.id {
+            (a.id.clone(), b.id.clone())
+        } else {
+            (b.id.clone(), a.id.clone())
+        };
+
+        sqlx::query(
+            "INSERT INTO note_associations (note_a_id, note_b_id, weight, co_access_count, last_co_access)
+             VALUES (?1, ?2, ?3, 1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        )
+        .bind(&note_a_id)
+        .bind(&note_b_id)
+        .bind(0.5_f64)
+        .execute(repo.db.pool())
+        .await
+        .unwrap();
+
+        let scores = repo.graph_proximity_scores(&[a.id.clone()], 2).await.unwrap();
+        let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
+        assert!((m.get(&b.id).copied().unwrap() - 0.35).abs() < 1e-9);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graph_proximity_ignores_low_weight_association_noise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let a = repo
+            .create(&project.id, tmp.path(), "A", "", "research", "[]")
+            .await
+            .unwrap();
+        let b = repo
+            .create(&project.id, tmp.path(), "B", "", "research", "[]")
+            .await
+            .unwrap();
+
+        let (note_a_id, note_b_id) = if a.id < b.id {
+            (a.id.clone(), b.id.clone())
+        } else {
+            (b.id.clone(), a.id.clone())
+        };
+
+        sqlx::query(
+            "INSERT INTO note_associations (note_a_id, note_b_id, weight, co_access_count, last_co_access)
+             VALUES (?1, ?2, ?3, 1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        )
+        .bind(&note_a_id)
+        .bind(&note_b_id)
+        .bind(0.01_f64)
+        .execute(repo.db.pool())
+        .await
+        .unwrap();
+
+        let scores = repo.graph_proximity_scores(&[a.id], 2).await.unwrap();
+        assert!(scores.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn temporal_scores_empty_candidates_returns_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
