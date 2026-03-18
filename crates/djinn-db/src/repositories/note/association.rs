@@ -2,6 +2,16 @@ use super::*;
 use crate::repositories::note::NoteRepository;
 use djinn_core::models::{NoteAssociation, canonical_pair};
 
+/// A resolved association entry: the "other" note's identity plus the link weight.
+#[derive(Clone, Debug, sqlx::FromRow, serde::Serialize)]
+pub struct NoteAssociationEntry {
+    pub note_permalink: String,
+    pub note_title: String,
+    pub weight: f64,
+    pub co_access_count: i64,
+    pub last_co_access: String,
+}
+
 impl NoteRepository {
     /// Upsert a co-access association between two notes.
     ///
@@ -73,6 +83,44 @@ impl NoteRepository {
         .await?;
 
         Ok(associations)
+    }
+
+    /// List associations for a note, joining the opposite note to return resolved
+    /// permalink and title. Covers both directions (note_a_id = id OR note_b_id = id).
+    ///
+    /// * `note_id`    – the note whose associations to fetch.
+    /// * `min_weight` – include only associations with weight >= this value.
+    /// * `limit`      – cap result count (0 = unlimited).
+    pub async fn list_associations_for_note(
+        &self,
+        note_id: &str,
+        min_weight: f64,
+        limit: i64,
+    ) -> Result<Vec<NoteAssociationEntry>> {
+        self.db.ensure_initialized().await?;
+
+        let entries: Vec<NoteAssociationEntry> = sqlx::query_as(
+            "SELECT
+                 CASE WHEN na.note_a_id = ?1 THEN nb.permalink ELSE na_.permalink END AS note_permalink,
+                 CASE WHEN na.note_a_id = ?1 THEN nb.title    ELSE na_.title    END AS note_title,
+                 na.weight,
+                 na.co_access_count,
+                 na.last_co_access
+             FROM note_associations na
+             JOIN notes na_ ON na_.id = na.note_a_id
+             JOIN notes nb  ON nb.id  = na.note_b_id
+             WHERE (na.note_a_id = ?1 OR na.note_b_id = ?1)
+               AND na.weight >= ?2
+             ORDER BY na.weight DESC
+             LIMIT CASE WHEN ?3 <= 0 THEN -1 ELSE ?3 END",
+        )
+        .bind(note_id)
+        .bind(min_weight)
+        .bind(limit)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        Ok(entries)
     }
 
     /// List all associations with weight above a threshold.

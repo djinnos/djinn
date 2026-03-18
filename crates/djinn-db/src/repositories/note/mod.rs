@@ -22,6 +22,7 @@ pub(crate) mod rrf;
 mod scoring;
 mod search;
 
+pub use association::NoteAssociationEntry;
 pub use context::BuildContextResponse;
 
 pub use indexing::UpdateNoteIndexParams;
