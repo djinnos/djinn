@@ -17,6 +17,7 @@ pub(crate) mod task_merge;
 pub use djinn_provider::message;
 pub mod oauth;
 pub(crate) mod output_parser;
+pub(crate) mod output_stash;
 pub(crate) mod patch;
 pub mod prompts;
 pub use djinn_provider::provider;

@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -8,6 +9,7 @@ use crate::context::AgentContext;
 use crate::extension;
 use crate::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use crate::output_parser::ParsedAgentOutput;
+use crate::output_stash::OutputStash;
 use crate::provider::telemetry;
 use crate::provider::{LlmProvider, StreamEvent, ToolChoice};
 use djinn_core::events::DjinnEventEnvelope;
@@ -125,6 +127,10 @@ pub(super) async fn run_reply_loop(
 
     // Register activity tracker — stall detection uses this to kill idle sessions.
     let activity_ts = app_state.register_activity(task_id);
+
+    // Session-scoped stash for full tool outputs that exceed truncation limits.
+    // The agent can navigate stashed outputs via `output_view` and `output_grep`.
+    let output_stash = Arc::new(Mutex::new(OutputStash::new()));
 
     let mut output = ParsedAgentOutput::new(role_name == "task_reviewer");
 
@@ -270,6 +276,7 @@ pub(super) async fn run_reply_loop(
                         total_tokens_out = 0;
                         current_context_tokens = 0;
                         compaction_attempts += 1;
+                        output_stash.lock().unwrap().clear();
                         conversation.push(crate::message::Message::user(
                             "Continue with the task.",
                         ));
@@ -440,6 +447,7 @@ pub(super) async fn run_reply_loop(
                     total_tokens_out = 0;
                     current_context_tokens = 0;
                     compaction_attempts += 1;
+                    output_stash.lock().unwrap().clear();
                     conversation.push(crate::message::Message::user(
                         "Continue with the task.",
                     ));
@@ -554,6 +562,7 @@ pub(super) async fn run_reply_loop(
                     total_tokens_in = 0;
                     total_tokens_out = 0;
                     current_context_tokens = 0;
+                    output_stash.lock().unwrap().clear();
 
                     // After compaction the conversation was replaced — the
                     // assistant message containing this turn's ToolUse blocks
@@ -673,7 +682,68 @@ pub(super) async fn run_reply_loop(
                         ts
                     });
 
+                    let stash = Arc::clone(&output_stash);
                     Some(async move {
+                        // ── Intercept stash-navigation tools (no extension dispatch needed) ──
+                        if name == "output_view" || name == "output_grep" {
+                            let result = {
+                                let guard = stash.lock().unwrap();
+                                let args_map = args.as_ref();
+                                if name == "output_view" {
+                                    let tid = args_map
+                                        .and_then(|m| m.get("tool_use_id"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let offset = args_map
+                                        .and_then(|m| m.get("offset"))
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0) as usize;
+                                    let limit = args_map
+                                        .and_then(|m| m.get("limit"))
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(200) as usize;
+                                    guard.view(tid, offset, limit)
+                                } else {
+                                    let tid = args_map
+                                        .and_then(|m| m.get("tool_use_id"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let pattern = args_map
+                                        .and_then(|m| m.get("pattern"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let ctx_lines = args_map
+                                        .and_then(|m| m.get("context_lines"))
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(3) as usize;
+                                    guard.grep(tid, pattern, ctx_lines)
+                                }
+                            };
+                            let (content, is_error) = match result {
+                                Ok(text) => {
+                                    if let Some(ts) = &tool_span {
+                                        ts.record_output(&text, false);
+                                    }
+                                    (vec![ContentBlock::Text { text }], false)
+                                }
+                                Err(err) => {
+                                    if let Some(ts) = &tool_span {
+                                        ts.record_output(&err, true);
+                                    }
+                                    (vec![ContentBlock::Text { text: format!("error: {err}") }], true)
+                                }
+                            };
+                            if let Some(ts) = tool_span {
+                                if is_error { ts.end_error("tool returned error"); } else { ts.end_ok(); }
+                            }
+                            return ContentBlock::ToolResult {
+                                tool_use_id: id,
+                                content,
+                                is_error,
+                            };
+                        }
+
+                        // ── Normal tool dispatch ────────────────────────────────
                         // Retry logic for SQLite BUSY errors (concurrent tool
                         // calls from the same generation can contend on the
                         // write lock).
@@ -718,10 +788,23 @@ pub(super) async fn run_reply_loop(
                                         value.to_string()
                                     };
                                     if text.len() > MAX_TOOL_RESULT_CHARS {
+                                        // Stash full output before truncating.
+                                        stash.lock().unwrap().insert(
+                                            id.clone(),
+                                            name.clone(),
+                                            text.clone(),
+                                        );
+                                        let full_bytes = text.len();
                                         text = crate::truncate::smart_truncate(
                                             &text,
                                             MAX_TOOL_RESULT_CHARS,
                                         );
+                                        // Append navigation hint so the agent knows it can browse.
+                                        text.push_str(&format!(
+                                            "\n\n[Full output stashed ({full_bytes} bytes). \
+                                             Use output_view(tool_use_id=\"{id}\") to paginate \
+                                             or output_grep(tool_use_id=\"{id}\", pattern=\"...\") to search.]"
+                                        ));
                                     }
                                     if let Some(ts) = &tool_span {
                                         ts.record_output(&text, false);
