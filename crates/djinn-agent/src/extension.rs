@@ -782,7 +782,7 @@ async fn call_task_comment_add(
     };
 
     let payload = serde_json::json!({ "body": p.body }).to_string();
-    let actor_id = p.actor_id.as_deref().unwrap_or("goose-agent");
+    let actor_id = p.actor_id.as_deref().unwrap_or("agent");
     let actor_role = p.actor_role.as_deref().unwrap_or("system");
 
     let entry = repo
