@@ -1,4 +1,5 @@
 use super::*;
+use crate::repositories::note::NoteRepository;
 use djinn_core::models::{NoteAssociation, canonical_pair};
 
 impl NoteRepository {
@@ -23,69 +24,35 @@ impl NoteRepository {
         // Canonical ordering to satisfy CHECK constraint
         let (a_id, b_id) = canonical_pair(note_a_id, note_b_id);
 
-        // Try to fetch existing association
-        let existing: Option<NoteAssociation> = sqlx::query_as(
-            "SELECT note_a_id, note_b_id, weight, co_access_count, last_co_access
-             FROM note_associations
-             WHERE note_a_id = ?1 AND note_b_id = ?2",
+        let growth_factor = (0..n_co_accesses).fold(1.0_f64, |acc, _| acc * 1.01);
+        let new_co_accesses = i64::from(n_co_accesses);
+        sqlx::query(
+            "INSERT INTO note_associations
+             (note_a_id, note_b_id, weight, co_access_count, last_co_access)
+             VALUES (?1, ?2, 0.01, ?3, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+             ON CONFLICT (note_a_id, note_b_id) DO UPDATE SET
+                 weight = MIN(1.0, note_associations.weight * ?4),
+                 co_access_count = note_associations.co_access_count + excluded.co_access_count,
+                 last_co_access = excluded.last_co_access",
         )
         .bind(a_id)
         .bind(b_id)
-        .fetch_optional(self.db.pool())
+        .bind(new_co_accesses)
+        .bind(growth_factor)
+        .execute(self.db.pool())
         .await?;
 
-        let _is_existing = existing.is_some();
-
-        let association = match existing {
-            Some(mut assoc) => {
-                // Update existing association
-                assoc.update_hebbian(n_co_accesses);
-
-                sqlx::query(
-                    "UPDATE note_associations
-                     SET weight = ?1,
-                         co_access_count = ?2,
-                         last_co_access = ?3
-                     WHERE note_a_id = ?4 AND note_b_id = ?5",
-                )
-                .bind(assoc.weight)
-                .bind(assoc.co_access_count)
-                .bind(&assoc.last_co_access)
-                .bind(a_id)
-                .bind(b_id)
-                .execute(self.db.pool())
-                .await?;
-
-                assoc
-            }
-            None => {
-                // Create new association
-                // For new associations, we start with count = 1 and then apply additional if needed
-                let mut assoc = NoteAssociation::new(a_id.to_string(), b_id.to_string());
-
-                // If n_co_accesses > 1, we need to apply the additional co-accesses
-                if n_co_accesses > 1 {
-                    assoc.update_hebbian(n_co_accesses - 1);
-                }
-
-                sqlx::query(
-                    "INSERT INTO note_associations
-                     (note_a_id, note_b_id, weight, co_access_count, last_co_access)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                )
-                .bind(&assoc.note_a_id)
-                .bind(&assoc.note_b_id)
-                .bind(assoc.weight)
-                .bind(assoc.co_access_count)
-                .bind(&assoc.last_co_access)
-                .execute(self.db.pool())
-                .await?;
-
-                assoc
-            }
-        };
-
-        Ok(association)
+        Ok::<NoteAssociation, crate::error::DbError>(
+            sqlx::query_as(
+                "SELECT note_a_id, note_b_id, weight, co_access_count, last_co_access
+                 FROM note_associations
+                 WHERE note_a_id = ?1 AND note_b_id = ?2",
+            )
+            .bind(a_id)
+            .bind(b_id)
+            .fetch_one(self.db.pool())
+            .await?,
+        )
     }
 
     /// Get all associations for a given note.
@@ -277,11 +244,52 @@ mod tests {
         // Create initial association
         let _ = repo.upsert_association(&note1, &note2, 1).await.unwrap();
 
-        // Update with 5 more co-accesses
-        let assoc = repo.upsert_association(&note1, &note2, 5).await.unwrap();
+        let assoc = repo.upsert_association(&note1, &note2, 1).await.unwrap();
 
-        assert_eq!(assoc.co_access_count, 6); // 1 initial + 5 more
-        assert!(assoc.weight > 0.01); // Weight should have grown
+        assert_eq!(assoc.co_access_count, 2);
+        assert!((assoc.weight - 0.0101).abs() < 1e-12);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upsert_association_many_individual_updates_approaches_one_without_exceeding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let note1 = make_note(&repo, &project, &tmp, "Note One").await;
+        let note2 = make_note(&repo, &project, &tmp, "Note Two").await;
+
+        let mut assoc = repo.upsert_association(&note1, &note2, 1).await.unwrap();
+        for _ in 0..499 {
+            assoc = repo.upsert_association(&note1, &note2, 1).await.unwrap();
+        }
+
+        assert_eq!(assoc.co_access_count, 500);
+        assert!(assoc.weight >= 0.99);
+        assert!(assoc.weight <= 1.0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upsert_association_bulk_update_caps_weight_at_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let note1 = make_note(&repo, &project, &tmp, "Note One").await;
+        let note2 = make_note(&repo, &project, &tmp, "Note Two").await;
+
+        let assoc = repo.upsert_association(&note1, &note2, 10_000).await.unwrap();
+
+        assert_eq!(assoc.co_access_count, 10_000);
+        assert_eq!(assoc.weight, 0.01);
+
+        let assoc = repo.upsert_association(&note1, &note2, 10_000).await.unwrap();
+        assert_eq!(assoc.co_access_count, 20_000);
+        assert_eq!(assoc.weight, 1.0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -352,12 +360,12 @@ mod tests {
         let note2 = make_note(&repo, &project, &tmp, "Note Two").await;
         let note3 = make_note(&repo, &project, &tmp, "Note Three").await;
 
-        // Create associations with different co-access counts (affects weight)
-        // Weight formula: w * 1.01^n, starting at 0.01
-        // After 400 co-accesses: 0.01 * 1.01^400 ≈ 0.53 (high weight)
-        // After 1 co-access: 0.01 (low weight)
-        repo.upsert_association(&note1, &note2, 400).await.unwrap(); // High weight
-        repo.upsert_association(&note1, &note3, 1).await.unwrap(); // Low weight
+        // Create associations with different effective weights.
+        // New pairs start at 0.01, so to cross 0.5 we need repeated individual co-accesses.
+        for _ in 0..401 {
+            repo.upsert_association(&note1, &note2, 1).await.unwrap();
+        }
+        repo.upsert_association(&note1, &note3, 1).await.unwrap();
 
         let high_weight = repo.list_associations_above_weight(0.5).await.unwrap();
         assert_eq!(high_weight.len(), 1);
@@ -468,8 +476,10 @@ mod tests {
         .await
         .unwrap();
 
-        // Pair 3: weight=0.8, last_co_access 100 days ago (should survive - high weight)
-        repo.upsert_association(&note5, &note6, 400).await.unwrap(); // High co-access count for high weight
+        // Pair 3: weight > 0.05, last_co_access 100 days ago (should survive - high weight)
+        for _ in 0..164 {
+            repo.upsert_association(&note5, &note6, 1).await.unwrap();
+        }
         sqlx::query(
             "UPDATE note_associations SET last_co_access = datetime('now', '-100 days') WHERE note_a_id = ?1 AND note_b_id = ?2"
         )
