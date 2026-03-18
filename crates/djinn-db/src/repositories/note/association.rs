@@ -282,12 +282,18 @@ mod tests {
         let note1 = make_note(&repo, &project, &tmp, "Note One").await;
         let note2 = make_note(&repo, &project, &tmp, "Note Two").await;
 
-        let assoc = repo.upsert_association(&note1, &note2, 10_000).await.unwrap();
+        let assoc = repo
+            .upsert_association(&note1, &note2, 10_000)
+            .await
+            .unwrap();
 
         assert_eq!(assoc.co_access_count, 10_000);
         assert_eq!(assoc.weight, 0.01);
 
-        let assoc = repo.upsert_association(&note1, &note2, 10_000).await.unwrap();
+        let assoc = repo
+            .upsert_association(&note1, &note2, 10_000)
+            .await
+            .unwrap();
         assert_eq!(assoc.co_access_count, 20_000);
         assert_eq!(assoc.weight, 1.0);
     }

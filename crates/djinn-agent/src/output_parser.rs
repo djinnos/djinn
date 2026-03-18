@@ -106,8 +106,14 @@ mod tests {
 
     #[test]
     fn marker_payload_rejects_partial_marker_names() {
-        assert_eq!(marker_payload("FEEDBACK_LOOP: hidden marker", "FEEDBACK"), None);
-        assert_eq!(marker_payload("PREFIX FEEDBACK_LOOP: hidden marker", "FEEDBACK"), None);
+        assert_eq!(
+            marker_payload("FEEDBACK_LOOP: hidden marker", "FEEDBACK"),
+            None
+        );
+        assert_eq!(
+            marker_payload("PREFIX FEEDBACK_LOOP: hidden marker", "FEEDBACK"),
+            None
+        );
     }
 
     #[test]
@@ -117,8 +123,14 @@ mod tests {
 
     #[test]
     fn sanitize_line_trims_wrappers_without_removing_interior_text() {
-        assert_eq!(sanitize_line("\"quoted, marker text\","), "quoted, marker text");
-        assert_eq!(sanitize_line("`quoted, marker text`"), "quoted, marker text");
+        assert_eq!(
+            sanitize_line("\"quoted, marker text\","),
+            "quoted, marker text"
+        );
+        assert_eq!(
+            sanitize_line("`quoted, marker text`"),
+            "quoted, marker text"
+        );
     }
 
     #[test]

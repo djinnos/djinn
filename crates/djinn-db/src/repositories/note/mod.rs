@@ -1155,7 +1155,10 @@ mod tests {
         .await
         .unwrap();
 
-        let scores = repo.graph_proximity_scores(&[a.id.clone()], 2).await.unwrap();
+        let scores = repo
+            .graph_proximity_scores(&[a.id.clone()], 2)
+            .await
+            .unwrap();
         let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
         assert!((m.get(&b.id).copied().unwrap() - 0.35).abs() < 1e-9);
     }

@@ -330,7 +330,14 @@ pub(super) async fn completions_handler(
                 break;
             }
 
-            let stream = match provider.stream(&conversation, &tool_schemas, Some(djinn_provider::provider::ToolChoice::Required)).await {
+            let stream = match provider
+                .stream(
+                    &conversation,
+                    &tool_schemas,
+                    Some(djinn_provider::provider::ToolChoice::Required),
+                )
+                .await
+            {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(error=%e, "provider stream init failed");
