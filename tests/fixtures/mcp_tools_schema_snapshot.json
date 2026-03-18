@@ -1409,7 +1409,7 @@
             "additionalProperties": {
               "type": "string"
             },
-            "description": "Per-project health issues blocking execution (project_id → error message).",
+            "description": "Per-project health issues blocking execution (project_id -> error message).",
             "nullable": true,
             "type": "object"
           },
@@ -3366,6 +3366,9 @@
               "base_url": {
                 "type": "string"
               },
+              "builtin_id": {
+                "type": "string"
+              },
               "connected": {
                 "type": "boolean"
               },
@@ -3383,6 +3386,9 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "goose_provider_id": {
+                "type": "string"
               },
               "id": {
                 "type": "string"
@@ -3408,6 +3414,8 @@
             },
             "required": [
               "id",
+              "builtin_id",
+              "goose_provider_id",
               "name",
               "npm",
               "env_vars",
@@ -3456,6 +3464,9 @@
               "base_url": {
                 "type": "string"
               },
+              "builtin_id": {
+                "type": "string"
+              },
               "connected": {
                 "type": "boolean"
               },
@@ -3473,6 +3484,9 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "goose_provider_id": {
+                "type": "string"
               },
               "id": {
                 "type": "string"
@@ -3498,6 +3512,8 @@
             },
             "required": [
               "id",
+              "builtin_id",
+              "goose_provider_id",
               "name",
               "npm",
               "env_vars",
@@ -3882,6 +3898,10 @@
       "output_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "builtin_id": {
+            "nullable": true,
+            "type": "string"
+          },
           "configured_keys": {
             "items": {
               "type": "string"
@@ -4758,7 +4778,7 @@
             "type": "string"
           },
           "id": {
-            "description": "Task UUID or short_id (optional — omit to query all tasks).",
+            "description": "Task UUID or short_id (optional - omit to query all tasks).",
             "nullable": true,
             "type": "string"
           },
@@ -4805,7 +4825,7 @@
             "type": "string"
           },
           "project": {
-            "description": "Absolute project path. Optional — task IDs are globally unique.",
+            "description": "Absolute project path. Optional - task IDs are globally unique.",
             "nullable": true,
             "type": "string"
           }
@@ -5041,7 +5061,7 @@
             "type": "string"
           },
           "epic_id": {
-            "description": "Parent epic ID — UUID or short_id (required).",
+            "description": "Parent epic ID - UUID or short_id (required).",
             "nullable": true,
             "type": "string"
           },
@@ -5445,7 +5465,7 @@
             "type": "string"
           },
           "project": {
-            "description": "Absolute project path. Optional — task IDs are globally unique.",
+            "description": "Absolute project path. Optional - task IDs are globally unique.",
             "nullable": true,
             "type": "string"
           }
