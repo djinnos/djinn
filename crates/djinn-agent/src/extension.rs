@@ -2750,11 +2750,11 @@ mod tests {
 
     #[test]
     fn worker_cannot_use_pm_only_tool() {
-        assert!(!is_tool_allowed_for_agent(
-            AgentType::Worker,
-            "task_transition"
-        ));
-        assert!(is_tool_allowed_for_agent(AgentType::PM, "task_transition"));
+        // submit_decision is PM-only (ADR-036: finalize tools are role-specific).
+        assert!(!is_tool_allowed_for_agent(AgentType::Worker, "submit_decision"));
+        assert!(is_tool_allowed_for_agent(AgentType::PM, "submit_decision"));
+        // task_transition is not in the PM tool set (removed by ADR-036).
+        assert!(!is_tool_allowed_for_agent(AgentType::PM, "task_transition"));
     }
 
     #[test]
