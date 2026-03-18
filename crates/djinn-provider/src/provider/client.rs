@@ -94,10 +94,9 @@ impl ApiClient {
                                 break 'retry resp;
                             }
 
-                            let is_retryable = status.as_u16() == 429
-                                || status.is_server_error();
+                            let is_retryable = is_retryable_status(status);
 
-                            if is_retryable && attempt < MAX_RETRIES {
+                            if should_retry(attempt, is_retryable) {
                                 // Check for Retry-After header.
                                 let retry_after_ms = resp
                                     .headers()
@@ -130,7 +129,7 @@ impl ApiClient {
                                 || e.is_timeout()
                                 || e.is_request();
 
-                            if is_retryable && attempt < MAX_RETRIES {
+                            if should_retry(attempt, is_retryable) {
                                 attempt += 1;
                                 let delay_ms = backoff_delay_ms(attempt);
                                 tracing::warn!(
@@ -226,8 +225,8 @@ impl ApiClient {
                             .map_err(|e| anyhow!("failed to read response body: {e}"));
                     }
 
-                    let is_retryable = status.as_u16() == 429 || status.is_server_error();
-                    if is_retryable && attempt < MAX_RETRIES {
+                    let is_retryable = is_retryable_status(status);
+                    if should_retry(attempt, is_retryable) {
                         let retry_after_ms = resp
                             .headers()
                             .get("retry-after")
@@ -249,7 +248,7 @@ impl ApiClient {
                 }
                 Err(e) => {
                     let is_retryable = e.is_connect() || e.is_timeout() || e.is_request();
-                    if is_retryable && attempt < MAX_RETRIES {
+                    if should_retry(attempt, is_retryable) {
                         attempt += 1;
                         let delay_ms = backoff_delay_ms(attempt);
                         tracing::warn!(attempt, error = %e, delay_ms, "POST request failed; retrying");
@@ -274,6 +273,15 @@ fn backoff_delay_ms(attempt: u32) -> u64 {
     // Jitter: 0.8x to 1.2x
     let jitter = 0.8 + (pseudo_random_f64() * 0.4);
     (capped * jitter) as u64
+}
+
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status.as_u16() == 429 || status.is_server_error()
+}
+
+fn should_retry(attempt: u32, is_retryable: bool) -> bool {
+    is_retryable && attempt < MAX_RETRIES
 }
 
 /// Simple pseudo-random f64 in [0, 1) using system time nanoseconds.
@@ -314,10 +322,42 @@ mod tests {
     }
 
     #[test]
+    fn backoff_delay_representative_attempts_stay_within_jitter_window() {
+        for attempt in [2, 3, 5] {
+            let delay = backoff_delay_ms(attempt);
+            let base = (INITIAL_BACKOFF_MS as f64 * BACKOFF_MULTIPLIER.powi(attempt as i32 - 1)) as u64;
+            let min = (base as f64 * 0.8) as u64;
+            let max = (base as f64 * 1.2) as u64;
+            assert!((min..=max).contains(&delay), "attempt {attempt} delay was {delay}");
+        }
+    }
+
+    #[test]
     fn backoff_delay_capped_at_max() {
         let delay = backoff_delay_ms(100);
         // Should be capped at MAX_BACKOFF_MS (30s) * 1.2x jitter max
-        assert!(delay <= 36_000, "delay was {delay}");
+        assert!(delay <= ((MAX_BACKOFF_MS as f64 * 1.2) as u64), "delay was {delay}");
+    }
+
+    #[test]
+    fn retryable_status_policy_matches_expectations() {
+        assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_retryable_status(reqwest::StatusCode::SERVICE_UNAVAILABLE));
+
+        assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
+        assert!(!is_retryable_status(reqwest::StatusCode::UNAUTHORIZED));
+        assert!(!is_retryable_status(reqwest::StatusCode::NOT_FOUND));
+    }
+
+    #[test]
+    fn retry_budget_allows_only_max_retries_after_initial_attempt() {
+        assert!(should_retry(0, true));
+        assert!(should_retry(1, true));
+        assert!(should_retry(2, true));
+        assert!(!should_retry(MAX_RETRIES, true));
+        assert!(!should_retry(MAX_RETRIES + 1, true));
+        assert!(!should_retry(0, false));
     }
 
     #[test]
