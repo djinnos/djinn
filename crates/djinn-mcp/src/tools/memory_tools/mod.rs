@@ -18,6 +18,9 @@ mod reads;
 mod search;
 mod writes;
 
+#[cfg(test)]
+mod build_context_tests;
+
 // ── Router composition ────────────────────────────────────────────────────────
 
 impl DjinnMcpServer {
