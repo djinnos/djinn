@@ -41,11 +41,6 @@ fn compaction_prompt(ctx: &CompactionContext) -> &'static str {
         {
             REVIEWER_PROMPT
         }
-        CompactionContext::MidSession(role) | CompactionContext::PreResume(role)
-            if role == "conflict_resolver" =>
-        {
-            CONFLICT_RESOLVER_PROMPT
-        }
         _ => GENERIC_PROMPT,
     }
 }
@@ -63,11 +58,6 @@ fn summariser_system(ctx: &CompactionContext) -> &'static str {
             if role == "task_reviewer" =>
         {
             SUMMARISER_SYSTEM_TASK_REVIEWER
-        }
-        CompactionContext::MidSession(role) | CompactionContext::PreResume(role)
-            if role == "conflict_resolver" =>
-        {
-            SUMMARISER_SYSTEM_CONFLICT_RESOLVER
         }
         _ => SUMMARISER_SYSTEM_GENERIC,
     }
@@ -135,23 +125,6 @@ Wrap reasoning in `<analysis>` tags.
 
 > Preserve exact file paths, line numbers, error messages, and acceptance criteria text"#;
 
-pub(crate) const CONFLICT_RESOLVER_PROMPT: &str = r#"## Compaction Context
-A merge conflict resolution agent's session needs compaction.
-
-**Conversation History:**
-{messages}
-
-Wrap reasoning in `<analysis>` tags.
-
-### Include These Sections:
-1. **Conflict Context** – What branches are being merged and why conflicts arose
-2. **Files With Conflicts** – Every conflicted file and the nature of the conflict
-3. **Resolution Decisions** – How each conflict was resolved and why
-4. **Remaining Conflicts** – Any unresolved conflicts
-5. **Build/Test Status** – Whether the resolution compiles and passes tests
-
-> Preserve exact file paths, branch names, and conflict markers"#;
-
 pub(crate) const GENERIC_PROMPT: &str = r#"## Task Context
 - An llm context limit was reached when a user was in a working session with an agent (you)
 - Generate a version of the below messages with only the most verbose parts removed
@@ -181,8 +154,6 @@ Wrap reasoning in `<analysis>` tags:
 pub(crate) const SUMMARISER_SYSTEM_WORKER_PRE_RESUME: &str = "You are summarising a coding agent's work session that is about to receive reviewer feedback. Produce a dense, faithful summary focused on what was implemented, what files were changed, and what the current state of the code is. Do NOT include any statements about work being complete or done — the reviewer has determined it is not.";
 pub(crate) const SUMMARISER_SYSTEM_WORKER_MID_SESSION: &str = "You are summarising a coding agent's in-progress work session. Produce a dense, faithful summary that preserves all implementation context so the agent can continue working without re-reading files.";
 pub(crate) const SUMMARISER_SYSTEM_TASK_REVIEWER: &str = "You are summarising a code review session. Produce a dense, faithful summary that preserves the review findings, issues identified, and assessment progress.";
-pub(crate) const SUMMARISER_SYSTEM_CONFLICT_RESOLVER: &str =
-    "You are a conversation summariser. Produce a dense, faithful summary.";
 pub(crate) const SUMMARISER_SYSTEM_GENERIC: &str =
     "You are a conversation summariser. Produce a dense, faithful summary.";
 

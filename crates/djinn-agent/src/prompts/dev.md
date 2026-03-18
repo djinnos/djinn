@@ -20,6 +20,16 @@ Your sole job is to write working code that satisfies the acceptance criteria. I
 
 {{merge_failure_context}}
 
+### Merge Conflict Context
+
+When resolving merge conflicts, you will see conflict information populated in this section:
+
+- **Task branch:** {{merge_base_branch}}
+- **Merge target:** {{merge_target_branch}}
+- **Conflicting files:**
+
+{{conflict_files}}
+
 ## Instructions
 
 1. **Check for prior feedback** — read the Activity Log section above carefully. If there is PM guidance or reviewer feedback, your previous attempt was rejected for specific reasons. Fix exactly what was asked for before proceeding. Use `task_activity_list(id="{{task_id}}", actor_role="pm")` or `task_activity_list(id="{{task_id}}", actor_role="task_reviewer")` if you need full details.

@@ -791,9 +791,7 @@ pub(super) async fn run_reply_loop(
                 ));
             } else {
                 let reason = match role_name {
-                    "worker" | "conflict_resolver" => {
-                        "worker ended without any tool use (provider error?)"
-                    }
+                    "worker" => "worker ended without any tool use (provider error?)",
                     "task_reviewer" => {
                         "task reviewer ended without any tool use (provider error?)"
                     }
