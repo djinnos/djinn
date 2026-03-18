@@ -50,6 +50,14 @@ fn apply_policy(worktree: &Path, git_meta: Option<&Path>) -> anyhow::Result<()> 
     // Read-only subset: allow read and execute, deny all write operations.
     let read_exec = AccessFs::Execute | AccessFs::ReadFile | AccessFs::ReadDir;
 
+    // Cargo shared build cache: {CARGO_HOME}/build/ (default ~/.cargo/build/).
+    // Agents need write access so `cargo test`/`cargo clippy` can use the shared
+    // build-dir configured in .cargo/config.toml.
+    let cargo_build_dir = std::env::var("CARGO_HOME")
+        .or_else(|_| std::env::var("HOME").map(|h| format!("{h}/.cargo")))
+        .ok()
+        .map(|base| std::path::PathBuf::from(base).join("build"));
+
     let mut ruleset = Ruleset::default()
         .handle_access(full_access)?
         .create()?
@@ -63,6 +71,11 @@ fn apply_policy(worktree: &Path, git_meta: Option<&Path>) -> anyhow::Result<()> 
         .add_rule(PathBeneath::new(PathFd::new("/dev/null")?, full_access))?
         .add_rule(PathBeneath::new(PathFd::new("/dev/zero")?, full_access))?
         .add_rule(PathBeneath::new(PathFd::new("/dev/urandom")?, full_access))?;
+
+    // Cargo shared build cache directory.
+    if let Some(ref dir) = cargo_build_dir.filter(|d| d.is_dir()) {
+        ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(dir)?, full_access))?;
+    }
 
     // Full .git/ dir needs write access for merge operations: object writes
     // (.git/objects/), ref updates (.git/refs/, .git/packed-refs), and
