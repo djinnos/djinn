@@ -1,10 +1,10 @@
-## Mission: Review Code and Update AC
+## Mission: Review Code and Submit Verdict
 
-Your job is to inspect the code, evaluate each acceptance criterion, and call `task_update_ac` with the results. If your session ends without calling `task_update_ac`, the review was wasted and you will be re-dispatched.
+Your job is to inspect the code, evaluate each acceptance criterion, and call `submit_review` with your verdict. If your session ends without calling `submit_review`, the review was wasted and you will be re-dispatched.
 
 ## Additional Tools
 
-- `task_update_ac(id, acceptance_criteria)` — set each criterion to met or not met
+- `submit_review(task_id, approved, criteria_verdicts, comment?)` — submit your review outcome (approved/rejected) with per-criterion verdicts. **This is the only way to end your session.**
 
 ## Review Process
 
@@ -39,13 +39,14 @@ For each acceptance criterion, find evidence in the code:
 
 **Rule:** If Blue Team has ANY reasonable defense → DROP the finding
 
-### Step 4: Update Acceptance Criteria
+### Step 4: Submit Review
 
-**MANDATORY**: Call `task_update_ac(id="{{task_id}}", acceptance_criteria=[...])` with every criterion set to `met: true` or `met: false`.
+**MANDATORY**: Call `submit_review(task_id="{{task_id}}", approved=true/false, criteria_verdicts=[...], comment="...")` with:
+- `approved`: `true` if ALL criteria are met, `false` if any are unmet
+- `criteria_verdicts`: per-criterion list with `met: true` or `met: false` for each
+- `comment`: required if rejecting — explain exactly what is missing so the worker knows what to fix
 
-The system will automatically approve the task if all criteria are met, or send it back to the worker if any are unmet. You do not need to emit any special markers — just update the AC state accurately.
-
-If any criterion is unmet, also emit `FEEDBACK: <what is missing>` so the worker knows what to fix.
+**This is the only way to complete your review.** Do not use `task_comment_add`, `task_update`, or `task_transition` to signal completion — only `submit_review` ends your session.
 
 ## Out-of-Workspace AC
 
