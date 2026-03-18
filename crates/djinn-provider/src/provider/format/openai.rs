@@ -478,4 +478,35 @@ mod tests {
             _ => panic!("expected usage"),
         }
     }
+
+    #[test]
+    fn test_parse_invalid_json_ignored() {
+        let mut acc = None;
+        let events = parse_openai_line("{not-json", &mut acc);
+        assert!(events.is_empty());
+        assert!(acc.is_none());
+    }
+
+    #[test]
+    fn test_parse_missing_choices_with_usage_only() {
+        let line = r#"{"usage":{"prompt_tokens":7}}"#;
+        let mut acc = None;
+        let events = parse_openai_line(line, &mut acc);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            StreamEvent::Usage(u) => {
+                assert_eq!(u.input, 7);
+                assert_eq!(u.output, 0);
+            }
+            _ => panic!("expected usage"),
+        }
+    }
+
+    #[test]
+    fn test_parse_done_sentinel_ignored() {
+        let mut acc = None;
+        let events = parse_openai_line("[DONE]", &mut acc);
+        assert!(events.is_empty());
+        assert!(acc.is_none());
+    }
 }

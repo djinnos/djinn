@@ -512,6 +512,68 @@ mod tests {
     }
 
     #[test]
+    fn test_output_item_done_accumulates_until_completed() {
+        let item_done = r#"{"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_acc","name":"bash","arguments":"{\"cmd\":\"pwd\"}"}}"#;
+        let completed = r#"{"type":"response.completed","response":{"output":[],"usage":{"input_tokens":3,"output_tokens":4}}}"#;
+        let mut acc = Vec::new();
+
+        let ParsedLine::Events(events) = parse_responses_line(item_done, &mut acc) else {
+            panic!("expected events");
+        };
+        assert!(events.is_empty());
+        assert_eq!(acc.len(), 1);
+
+        let ParsedLine::Events(events) = parse_responses_line(completed, &mut acc) else {
+            panic!("expected events");
+        };
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }) => {
+                assert_eq!(id, "call_acc");
+                assert_eq!(name, "bash");
+                assert_eq!(input["cmd"], "pwd");
+            }
+            _ => panic!("expected tool use"),
+        }
+        match &events[1] {
+            StreamEvent::Usage(u) => {
+                assert_eq!(u.input, 3);
+                assert_eq!(u.output, 4);
+            }
+            _ => panic!("expected usage"),
+        }
+    }
+
+    #[test]
+    fn test_output_item_done_non_function_call_ignored_on_completion() {
+        let item_done = r#"{"type":"response.output_item.done","item":{"type":"message"}}"#;
+        let completed = r#"{"type":"response.completed","response":{"output":[],"usage":{"input_tokens":1,"output_tokens":2}}}"#;
+        let mut acc = Vec::new();
+
+        let ParsedLine::Events(events) = parse_responses_line(item_done, &mut acc) else {
+            panic!("expected events");
+        };
+        assert!(events.is_empty());
+
+        let ParsedLine::Events(events) = parse_responses_line(completed, &mut acc) else {
+            panic!("expected events");
+        };
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], StreamEvent::Usage(_)));
+    }
+
+    #[test]
+    fn test_incomplete_function_call_item_is_ignored() {
+        let line = r#"{"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_abc","name":"bash"}}"#;
+        let mut acc = Vec::new();
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+            panic!("expected events");
+        };
+        assert!(events.is_empty());
+        assert!(acc.is_empty());
+    }
+
+    #[test]
     fn test_parse_keepalive_ignored() {
         let line = r#"{"type":"keepalive"}"#;
         let mut acc = Vec::new();

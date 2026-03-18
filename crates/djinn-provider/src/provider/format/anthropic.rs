@@ -335,4 +335,44 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], StreamEvent::Done));
     }
+
+    #[test]
+    fn test_content_block_delta_input_json_without_active_tool_is_ignored() {
+        let data = r#"{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{}"}}"#;
+        let mut acc = None;
+        let mut input_tokens = 0u32;
+        let events =
+            parse_anthropic_event("content_block_delta", data, &mut acc, &mut input_tokens);
+        assert!(events.is_empty());
+        assert!(acc.is_none());
+    }
+
+    #[test]
+    fn test_content_block_delta_unknown_variant_ignored() {
+        let data = r#"{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}"#;
+        let mut acc = None;
+        let mut input_tokens = 0u32;
+        let events =
+            parse_anthropic_event("content_block_delta", data, &mut acc, &mut input_tokens);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_empty_text_delta_ignored() {
+        let data = r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":""}}"#;
+        let mut acc = None;
+        let mut input_tokens = 0u32;
+        let events =
+            parse_anthropic_event("content_block_delta", data, &mut acc, &mut input_tokens);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_content_block_stop_without_active_tool_emits_nothing() {
+        let data = r#"{"type":"content_block_stop","index":0}"#;
+        let mut acc = None;
+        let mut input_tokens = 0u32;
+        let events = parse_anthropic_event("content_block_stop", data, &mut acc, &mut input_tokens);
+        assert!(events.is_empty());
+    }
 }
