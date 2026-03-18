@@ -17,6 +17,9 @@ use super::*;
 const MAX_TURNS: u32 = 1000;
 /// Maximum retries for empty assistant turns before treating as a hard failure.
 const MAX_EMPTY_TURN_RETRIES: u32 = 2;
+/// Maximum consecutive text-only turns before treating as a session failure.
+/// Each text-only turn without a finalize tool call triggers a nudge message.
+const MAX_NUDGE_ATTEMPTS: u32 = 3;
 
 fn is_context_length_error(e: &anyhow::Error) -> bool {
     let msg = e.to_string().to_lowercase();
@@ -83,6 +86,8 @@ pub(crate) struct ReplyLoopContext<'a> {
     pub project_path: &'a str,
     pub worktree_path: &'a Path,
     pub role_name: &'a str,
+    /// Tool name used by this role to signal session completion (ADR-036).
+    pub finalize_tool_name: &'a str,
     pub context_window: i64,
     pub model_id: &'a str,
     pub cancel: &'a CancellationToken,
@@ -110,6 +115,7 @@ pub(super) async fn run_reply_loop(
         project_path,
         worktree_path,
         role_name,
+        finalize_tool_name,
         context_window,
         model_id,
         cancel,
@@ -189,11 +195,12 @@ pub(super) async fn run_reply_loop(
 
     let run_result: anyhow::Result<()> = async {
         let mut saw_any_event = false;
-        let mut saw_any_tool_use = false;
         let mut assistant_message_count: usize = 0;
         let mut assistant_fragments: Vec<String> = Vec::new();
         let mut compaction_attempts: u32 = 0;
         let mut empty_turn_retries: u32 = 0;
+        // Consecutive text-only turns without a finalize or tool call (for nudge loop).
+        let mut consecutive_nudge_count: u32 = 0;
 
         // Track the last assistant text for output parsing.
         let mut last_assistant_text = String::new();
@@ -472,7 +479,6 @@ pub(super) async fn run_reply_loop(
                 if let ContentBlock::ToolUse { id, .. } = tool_call {
                     push_fragment(&mut assistant_fragments, format!("tool_use:{}", id));
                 }
-                saw_any_tool_use = true;
                 assistant_content.push(tool_call.clone());
             }
 
@@ -571,18 +577,68 @@ pub(super) async fn run_reply_loop(
                 // the reviewer will validate and resume if needed.
             }
 
-            // ── Dispatch tool calls, if any ──────────────────────────────────
-            if turn_tool_calls.is_empty() {
-                // No tool calls → text-only response → session complete.
+            // ── Finalize-tool detection (ADR-036) ────────────────────────────
+            if let Some(finalize_call) = turn_tool_calls
+                .iter()
+                .find(|tc| matches!(tc, ContentBlock::ToolUse { name, .. } if name == finalize_tool_name))
+            {
+                let payload = if let ContentBlock::ToolUse { input, .. } = finalize_call {
+                    input.clone()
+                } else {
+                    serde_json::Value::Null
+                };
                 tracing::info!(
                     task_id = %task_id,
                     agent_type = %role_name,
+                    finalize_tool = %finalize_tool_name,
                     turns,
                     assistant_message_count,
-                    "ReplyLoop: text-only turn — session complete"
+                    "ReplyLoop: finalize tool called — session complete"
                 );
+                output.finalize_payload = Some(payload);
                 break;
             }
+
+            // ── Nudge loop: text-only without finalize ────────────────────────
+            if turn_tool_calls.is_empty() {
+                if tools.is_empty() {
+                    // No tools registered at all → text-only is a valid session end.
+                    tracing::info!(
+                        task_id = %task_id,
+                        agent_type = %role_name,
+                        turns,
+                        assistant_message_count,
+                        "ReplyLoop: text-only turn (no tools) — session complete"
+                    );
+                    break;
+                }
+                consecutive_nudge_count += 1;
+                if consecutive_nudge_count >= MAX_NUDGE_ATTEMPTS {
+                    return Err(anyhow::anyhow!(
+                        "session failed: {} consecutive text-only responses without calling {}",
+                        consecutive_nudge_count,
+                        finalize_tool_name
+                    ));
+                }
+                tracing::warn!(
+                    task_id = %task_id,
+                    agent_type = %role_name,
+                    nudge = consecutive_nudge_count,
+                    finalize_tool = %finalize_tool_name,
+                    "ReplyLoop: text-only turn without finalize — injecting nudge"
+                );
+                conversation.push(Message::user(format!(
+                    "You have not completed your session. You MUST call `{finalize_tool_name}` \
+                     when you are done. If you still have work to do, use the appropriate tools \
+                     to continue. If you are done, call `{finalize_tool_name}` now."
+                )));
+                continue;
+            }
+
+            // Non-finalize tool calls: reset nudge counter and dispatch normally.
+            consecutive_nudge_count = 0;
+
+            // ── Dispatch tool calls ──────────────────────────────────────────
 
             // Maximum characters per tool result to prevent context overflow.
             // ~30k chars ≈ 7.5k tokens — enough for diagnosis, safe with multiple calls.
@@ -750,52 +806,13 @@ pub(super) async fn run_reply_loop(
             output.ingest_text(&last_assistant_text);
         }
 
-        if !saw_any_tool_use {
-            if is_resumed_session {
-                // A resumed worker that responds text-only with zero tool calls
-                // is NOT making progress — it saw its own prior "done" message
-                // and short-circuited.  Treat this as an error so the lifecycle
-                // does NOT send it to verification (which would create a review
-                // doom loop: verify→review→reject→resume→text-only→verify…).
-                tracing::warn!(
-                    task_id = %task_id,
-                    agent_type = %role_name,
-                    "ReplyLoop: resumed session ended text-only (no tool calls = no progress)"
-                );
-                return Err(anyhow::anyhow!(
-                    "resumed worker ended without any tool use (no progress made on reviewer feedback)"
-                ));
-            } else {
-                let reason = match role_name {
-                    "worker" => "worker ended without any tool use (provider error?)",
-                    "task_reviewer" => {
-                        "task reviewer ended without any tool use (provider error?)"
-                    }
-                    "pm" => "PM agent ended without any tool use (provider error?)",
-                    "groomer" => {
-                        "groomer agent ended without any tool use (provider error?)"
-                    }
-                    _ => "agent ended without any tool use (provider error?)",
-                };
-                tracing::warn!(
-                    task_id = %task_id,
-                    agent_type = %role_name,
-                    saw_any_event,
-                    assistant_message_count,
-                    runtime_error = ?output.runtime_error,
-                    assistant_fragments = ?assistant_fragments,
-                    "ReplyLoop: session ended without any tool use"
-                );
-                return Err(anyhow::anyhow!(reason));
-            }
-        }
-
         tracing::info!(
             task_id = %task_id,
             agent_type = %role_name,
             saw_any_event,
             assistant_message_count,
             turns,
+            finalize_called = output.finalize_payload.is_some(),
             "ReplyLoop: session completed normally"
         );
 
@@ -1028,6 +1045,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
+                finalize_tool_name: "submit_work",
                 context_window,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1112,6 +1130,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
+                finalize_tool_name: "submit_work",
                 context_window,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1228,6 +1247,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
+                finalize_tool_name: "submit_work",
                 context_window,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1304,5 +1324,293 @@ mod tests {
         assert_eq!(messages[4]["tool_call_id"], "tool_1");
         assert_eq!(messages[5]["role"], "user");
         assert_eq!(messages[5]["content"], "Second request");
+    }
+
+    // ── Finalize tool + nudge loop tests ──────────────────────────────────────
+
+    fn dummy_tool_schema(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": { "name": name, "description": "test", "parameters": {"type": "object"} }
+        })
+    }
+
+    /// Session ends immediately when the finalize tool is called.
+    /// The payload is captured on the output.
+    #[tokio::test]
+    async fn finalize_tool_call_ends_session_and_captures_payload() {
+        let tools = vec![dummy_tool_schema("submit_work")];
+
+        let provider = MockProvider::new(vec![
+            MockResponse {
+                text: None,
+                tool_calls: vec![ContentBlock::ToolUse {
+                    id: "fin1".to_string(),
+                    name: "submit_work".to_string(),
+                    input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+                }],
+                input_tokens: 100,
+                output_tokens: 10,
+            },
+        ]);
+
+        let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let worktree_path = std::path::PathBuf::from("/tmp");
+        let mut conv = Conversation::new();
+        conv.push(Message::system("You are a worker."));
+        conv.push(Message::user("Do the task."));
+
+        let (result, output, _tokens_in, _tokens_out) = run_reply_loop(
+            ReplyLoopContext {
+                provider: &provider,
+                tools: &tools,
+                task_id: &task_id,
+                task_short_id: "t1",
+                session_id: &session_id,
+                project_path: &project_path,
+                worktree_path: &worktree_path,
+                role_name: "worker",
+                finalize_tool_name: "submit_work",
+                context_window: 10_000,
+                model_id: "test/mock-model",
+                cancel: &cancel,
+                global_cancel: &cancel,
+                app_state: &app_state,
+            },
+            &mut conv,
+            false,
+        )
+        .await;
+
+        assert!(result.is_ok(), "expected ok, got: {:?}", result);
+        assert_eq!(provider.remaining(), 0, "finalize response consumed");
+        assert!(
+            output.finalize_payload.is_some(),
+            "finalize payload should be captured"
+        );
+        assert_eq!(
+            output.finalize_payload.unwrap()["summary"],
+            "done",
+            "payload should contain summary"
+        );
+    }
+
+    /// A text-only response without a finalize call injects a nudge and continues.
+    /// After 3 consecutive nudges the session fails.
+    #[tokio::test]
+    async fn text_only_without_finalize_triggers_nudge_then_fails() {
+        let tools = vec![dummy_tool_schema("submit_work")];
+
+        // 3 text-only responses → MAX_NUDGE_ATTEMPTS exceeded → error.
+        let provider = MockProvider::new(vec![
+            MockResponse::text_only("I think I'm done.", 100),
+            MockResponse::text_only("Still think I'm done.", 110),
+            MockResponse::text_only("Yes, definitely done.", 120),
+            // The 4th turn is never reached because we fail after 3 nudges.
+        ]);
+
+        let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let worktree_path = std::path::PathBuf::from("/tmp");
+        let mut conv = Conversation::new();
+        conv.push(Message::system("You are a worker."));
+        conv.push(Message::user("Do the task."));
+
+        let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
+            ReplyLoopContext {
+                provider: &provider,
+                tools: &tools,
+                task_id: &task_id,
+                task_short_id: "t1",
+                session_id: &session_id,
+                project_path: &project_path,
+                worktree_path: &worktree_path,
+                role_name: "worker",
+                finalize_tool_name: "submit_work",
+                context_window: 10_000,
+                model_id: "test/mock-model",
+                cancel: &cancel,
+                global_cancel: &cancel,
+                app_state: &app_state,
+            },
+            &mut conv,
+            false,
+        )
+        .await;
+
+        assert!(result.is_err(), "expected error after nudge exhaustion");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("consecutive text-only"),
+            "error should mention consecutive text-only responses"
+        );
+    }
+
+    /// A nudge resets after a successful tool call.
+    /// Pattern: text-only (nudge 1) → tool call (resets) → text-only (nudge 1) → finalize (ok).
+    #[tokio::test]
+    async fn nudge_count_resets_after_tool_call() {
+        let tools = vec![
+            dummy_tool_schema("some_tool"),
+            dummy_tool_schema("submit_work"),
+        ];
+
+        let provider = MockProvider::new(vec![
+            // Turn 1: text-only → nudge 1
+            MockResponse::text_only("hmm", 100),
+            // Turn 2: real tool call → resets nudge count
+            MockResponse::tool_call("tc1", "some_tool", 110),
+            // Turn 3: text-only → nudge 1 again (not 2)
+            MockResponse::text_only("ok", 120),
+            // Turn 4: finalize → session complete
+            MockResponse {
+                text: None,
+                tool_calls: vec![ContentBlock::ToolUse {
+                    id: "fin1".to_string(),
+                    name: "submit_work".to_string(),
+                    input: serde_json::json!({"task_id": "t1", "summary": "all done"}),
+                }],
+                input_tokens: 130,
+                output_tokens: 10,
+            },
+        ]);
+
+        let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let worktree_path = std::path::PathBuf::from("/tmp");
+        let mut conv = Conversation::new();
+        conv.push(Message::system("You are a worker."));
+        conv.push(Message::user("Do the task."));
+
+        let (result, output, _tokens_in, _tokens_out) = run_reply_loop(
+            ReplyLoopContext {
+                provider: &provider,
+                tools: &tools,
+                task_id: &task_id,
+                task_short_id: "t1",
+                session_id: &session_id,
+                project_path: &project_path,
+                worktree_path: &worktree_path,
+                role_name: "worker",
+                finalize_tool_name: "submit_work",
+                context_window: 10_000,
+                model_id: "test/mock-model",
+                cancel: &cancel,
+                global_cancel: &cancel,
+                app_state: &app_state,
+            },
+            &mut conv,
+            false,
+        )
+        .await;
+
+        assert!(result.is_ok(), "expected ok, got: {:?}", result);
+        assert_eq!(provider.remaining(), 0, "all responses consumed");
+        assert!(output.finalize_payload.is_some(), "finalize payload set");
+    }
+
+    /// ToolChoice::Required is passed on every turn that has tools.
+    /// Verified by recording the tool_choice values received by the mock provider.
+    #[tokio::test]
+    async fn tool_choice_required_passed_on_every_turn_with_tools() {
+        use std::sync::Mutex;
+
+        let tools = vec![dummy_tool_schema("submit_work")];
+
+        struct RecordingProvider {
+            recorded_choices: Arc<Mutex<Vec<Option<ToolChoice>>>>,
+            inner: MockProvider,
+        }
+
+        impl LlmProvider for RecordingProvider {
+            fn name(&self) -> &str {
+                "recording"
+            }
+            fn stream<'a>(
+                &'a self,
+                conversation: &'a Conversation,
+                tools: &'a [serde_json::Value],
+                tool_choice: Option<ToolChoice>,
+            ) -> Pin<
+                Box<
+                    dyn futures::Future<
+                            Output = anyhow::Result<
+                                Pin<
+                                    Box<
+                                        dyn futures::Stream<Item = anyhow::Result<StreamEvent>>
+                                            + Send,
+                                    >,
+                                >,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                self.recorded_choices
+                    .lock()
+                    .unwrap()
+                    .push(tool_choice.clone());
+                self.inner.stream(conversation, tools, tool_choice)
+            }
+        }
+
+        let inner = MockProvider::new(vec![
+            MockResponse::tool_call("tc1", "nonexistent_tool", 100),
+            MockResponse {
+                text: None,
+                tool_calls: vec![ContentBlock::ToolUse {
+                    id: "fin1".to_string(),
+                    name: "submit_work".to_string(),
+                    input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+                }],
+                input_tokens: 110,
+                output_tokens: 10,
+            },
+        ]);
+        let recorded = Arc::new(Mutex::new(Vec::<Option<ToolChoice>>::new()));
+        let provider = RecordingProvider {
+            recorded_choices: Arc::clone(&recorded),
+            inner,
+        };
+
+        let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let worktree_path = std::path::PathBuf::from("/tmp");
+        let mut conv = Conversation::new();
+        conv.push(Message::system("You are a worker."));
+        conv.push(Message::user("Do the task."));
+
+        let (result, _output, _, _) = run_reply_loop(
+            ReplyLoopContext {
+                provider: &provider,
+                tools: &tools,
+                task_id: &task_id,
+                task_short_id: "t1",
+                session_id: &session_id,
+                project_path: &project_path,
+                worktree_path: &worktree_path,
+                role_name: "worker",
+                finalize_tool_name: "submit_work",
+                context_window: 10_000,
+                model_id: "test/mock-model",
+                cancel: &cancel,
+                global_cancel: &cancel,
+                app_state: &app_state,
+            },
+            &mut conv,
+            false,
+        )
+        .await;
+
+        assert!(result.is_ok(), "expected ok, got: {:?}", result);
+
+        let choices = recorded.lock().unwrap();
+        assert_eq!(choices.len(), 2, "two turns recorded");
+        for (i, choice) in choices.iter().enumerate() {
+            assert!(
+                matches!(choice, Some(ToolChoice::Required)),
+                "turn {i}: expected ToolChoice::Required, got {:?}",
+                choice
+            );
+        }
     }
 }
