@@ -39,8 +39,8 @@ pub enum SlotError {
     SetupFailed(String),
     #[error("worktree failed: {0}")]
     WorktreeFailed(String),
-    #[error("goose error: {0}")]
-    GooseError(String),
+    #[error("agent error: {0}")]
+    AgentError(String),
     #[error("task not found: {0}")]
     TaskNotFound(String),
     #[error("cancelled")]
