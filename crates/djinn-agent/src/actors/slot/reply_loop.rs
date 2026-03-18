@@ -48,6 +48,13 @@ fn serialize_message(msg: &Message) -> serde_json::Value {
     })
 }
 
+fn serialize_llm_input(conversation: &Conversation, tools: &[serde_json::Value]) -> serde_json::Value {
+    serde_json::json!({
+        "messages": conversation.to_openai_messages(),
+        "tools": tools,
+    })
+}
+
 fn push_fragment(fragments: &mut Vec<String>, value: String) {
     const MAX_FRAGMENTS: usize = 12;
     let normalized = value.replace('\n', "\\n").trim().to_string();
@@ -217,47 +224,8 @@ pub(super) async fn run_reply_loop(
                     model_id,
                     turns,
                 );
-                // Build a JSON messages array for the generation input.
-                // On the first turn include the system prompt; on subsequent
-                // turns only the last user/tool-result message.
-                {
-                    let mut msgs = Vec::new();
-                    if turns == 1
-                        && let Some(sys) = conversation
-                            .messages
-                            .iter()
-                            .find(|m| m.role == Role::System)
-                    {
-                        let text: String = sys
-                            .content
-                            .iter()
-                            .filter_map(|b| b.as_text())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        if !text.is_empty() {
-                            msgs.push(serde_json::json!({"role": "system", "content": text}));
-                        }
-                    }
-                    if let Some(last_user) = conversation
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|m| m.role == Role::User)
-                    {
-                        let text: String = last_user
-                            .content
-                            .iter()
-                            .filter_map(|b| b.as_text())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        if !text.is_empty() {
-                            msgs.push(serde_json::json!({"role": "user", "content": text}));
-                        }
-                    }
-                    if !msgs.is_empty() {
-                        llm.record_input(&serde_json::to_string(&msgs).unwrap());
-                    }
-                }
+                let input = serialize_llm_input(conversation, tools);
+                llm.record_input(&serde_json::to_string(&input).unwrap());
                 llm
             });
 
@@ -860,6 +828,7 @@ mod tests {
     use crate::message::{ContentBlock, Conversation, Message};
     use crate::provider::{LlmProvider, StreamEvent, TokenUsage};
     use crate::test_helpers;
+    use djinn_core::message::Role;
     use djinn_db::repositories::session::CreateSessionParams;
     use djinn_db::{SessionMessageRepository, SessionRepository};
     use futures::stream;
@@ -1273,5 +1242,58 @@ mod tests {
             persisted > 0,
             "expected session messages persisted by reactive compaction"
         );
+    }
+
+    #[test]
+    fn serialize_llm_input_preserves_system_tools_and_full_history_order() {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::system("You are a worker."));
+        conversation.push(Message::user("First request"));
+        conversation.push(Message::assistant("First reply"));
+        conversation.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tool_1".into(),
+                name: "shell".into(),
+                input: serde_json::json!({"command": "pwd"}),
+            }],
+            metadata: None,
+        });
+        conversation.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_1".into(),
+                content: vec![ContentBlock::text("/tmp")],
+                is_error: false,
+            }],
+            metadata: None,
+        });
+        conversation.push(Message::user("Second request"));
+
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "shell",
+                "description": "Run shell commands",
+                "parameters": {"type": "object"}
+            }
+        })];
+
+        let input = serialize_llm_input(&conversation, &tools);
+
+        assert_eq!(input["tools"], serde_json::json!(tools));
+        let messages = input["messages"].as_array().expect("messages array");
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "You are a worker.");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "First request");
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[2]["content"], "First reply");
+        assert_eq!(messages[3]["role"], "assistant");
+        assert_eq!(messages[3]["tool_calls"][0]["id"], "tool_1");
+        assert_eq!(messages[4]["role"], "tool");
+        assert_eq!(messages[4]["tool_call_id"], "tool_1");
+        assert_eq!(messages[5]["role"], "user");
+        assert_eq!(messages[5]["content"], "Second request");
     }
 }

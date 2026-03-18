@@ -252,6 +252,23 @@ impl LlmProvider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
+
+    fn test_anthropic_config() -> ProviderConfig {
+        ProviderConfig {
+            base_url: "https://example.com".to_string(),
+            auth: AuthMethod::NoAuth,
+            format_family: FormatFamily::Anthropic,
+            model_id: "claude-3-5-sonnet".to_string(),
+            context_window: 200_000,
+            telemetry: None,
+            provider_headers: std::collections::HashMap::new(),
+            capabilities: ProviderCapabilities {
+                streaming: true,
+                max_tokens_default: Some(8192),
+            },
+        }
+    }
 
     #[test]
     fn test_message_start_extracts_input_tokens() {
@@ -301,9 +318,9 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }) => {
-                assert_eq!(id, "toolu_01");
-                assert_eq!(name, "shell");
-                assert_eq!(input["cmd"], "ls");
+                assert_eq!(id.as_str(), "toolu_01");
+                assert_eq!(name.as_str(), "shell");
+                assert_eq!(input["cmd"].as_str(), Some("ls"));
             }
             _ => panic!("expected tool use"),
         }
@@ -334,6 +351,22 @@ mod tests {
         let events = parse_anthropic_event("message_stop", data, &mut acc, &mut input_tokens);
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], StreamEvent::Done));
+    }
+
+    #[test]
+    fn test_build_request_always_populates_system_field() {
+        let provider = AnthropicProvider::new(test_anthropic_config());
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::system("system prompt"));
+        conv.push(crate::message::Message::user("first user"));
+        conv.push(crate::message::Message::assistant("first assistant"));
+        conv.push(crate::message::Message::user("second user"));
+
+        let req = provider.build_request(&conv, &[]);
+        assert_eq!(req["system"], "system prompt");
+        let messages = req["messages"].as_array().expect("messages array");
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"][0]["text"], "first user");
     }
 
     #[test]
