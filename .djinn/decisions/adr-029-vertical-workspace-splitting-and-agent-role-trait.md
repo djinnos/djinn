@@ -7,11 +7,11 @@ tags: ["adr","architecture","workspace","cargo","agent","trait","vertical-slice"
 
 # ADR-029: Vertical Workspace Splitting and Agent Role Trait
 
-## Status: In Progress
+## Status: Complete
 
 Date: 2026-03-13
 
-## Implementation Status (updated 2026-03-17)
+## Implementation Status (updated 2026-03-18)
 
 ### Part 1: Vertical Workspace Split — Complete
 
@@ -36,26 +36,17 @@ Date: 2026-03-13
 
 **Decision: sync/ and watchers/ stay in server** — they depend on repositories which remain in the server crate.
 
-### Part 2: Agent Role Trait — Foundation in djinn-agent, dispatch sites not yet migrated
+### Part 2: Agent Role Trait — Complete
 
-**Completed (in djinn-agent crate):**
-- `AgentRole` trait defined in `crates/djinn-agent/src/roles/mod.rs` (config, render_prompt, on_complete, prepare_worktree)
+All 4 tasks in epic `53sw` completed:
+- `AgentRole` trait defined in `crates/djinn-agent/src/roles/mod.rs` (config, render_prompt, on_complete, prepare_worktree, finalize_tool_name)
 - RoleConfig struct with all fields
 - 5 role implementations: Worker, TaskReviewer, PM, Groomer, ConflictResolver (in `roles/`)
 - CompactionPrompts struct
 - RoleRegistry with dispatch rules, wired into CoordinatorActor
-- AgentType delegates to role_config() for dispatch_role, tool_schemas, etc.
+- Lifecycle + slot pool fully role-generic via `Arc<dyn AgentRole>`
+- Zero remaining AgentType behavioral dispatch in production code (AgentType retained only for serialization)
 - Equivalence tests proving role configs match AgentType behavior
-
-**Remaining (epic `53sw`, 4 tasks):**
-1. Define AgentRole trait (config, render_prompt, on_complete, prepare_worktree) — task `qw07` *(trait is defined in roles/mod.rs; this task may need re-scoping)*
-2. Implement trait for all 5 roles — task `1wfy`
-3. Make lifecycle/slot pool role-generic via `&dyn AgentRole` — task `lyku`
-4. Strip remaining AgentType behavioral dispatch sites — task `w8fo`
-
-**Still dispatch via AgentType (not yet migrated):**
-- `crates/djinn-agent/src/prompts.rs` — render_prompt dispatches via AgentType match
-- `crates/djinn-agent/src/extension.rs` — tool_schemas dispatches via AgentType match
 
 ## Context
 
