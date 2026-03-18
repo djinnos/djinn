@@ -66,4 +66,5 @@ pub(crate) const PM_CONFIG: RoleConfig = RoleConfig {
     initial_message: crate::prompts::PM_TEMPLATE,
     preserves_session: false,
     is_project_scoped: false,
+    finalize_tool_name: "submit_decision",
 };
