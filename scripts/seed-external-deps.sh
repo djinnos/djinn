@@ -88,7 +88,9 @@ for dir in "${SEED_DIRS[@]}"; do
 done
 
 # Seed top-level debug metadata.
-for f in "${MAIN_TARGET}/debug/"*.d "${MAIN_TARGET}/debug/.cargo-lock"; do
+# Intentionally do not seed .cargo-lock to avoid cross-worktree lock contention
+# with the main worktree target dir.
+for f in "${MAIN_TARGET}/debug/"*.d; do
     if [ -f "$f" ]; then
         ln -f "$f" "${LOCAL_TARGET}/debug/" 2>/dev/null || true
     fi
