@@ -1,6 +1,6 @@
 //! Codex OAuth — Authorization Code + PKCE flow.
 //!
-//! Ported from Goose's `chatgpt_codex.rs`. Handles the full PKCE browser-redirect
+//! Handles the full PKCE browser-redirect
 //! flow, token caching, and silent refresh for the ChatGPT Codex provider.
 //!
 //! Tokens are stored encrypted in the credentials DB table. Filesystem cache
@@ -18,7 +18,7 @@ use crate::repos::CredentialRepository;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/// OAuth client ID for ChatGPT Codex (matches Goose's chatgpt_codex.rs).
+/// OAuth client ID for ChatGPT Codex.
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 /// OpenAI auth issuer base URL.

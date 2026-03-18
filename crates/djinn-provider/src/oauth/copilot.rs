@@ -1,6 +1,6 @@
 //! GitHub Copilot OAuth — Device Code flow.
 //!
-//! Ported from Goose's `githubcopilot.rs`. Implements the two-phase flow:
+//! Implements the two-phase flow:
 //!  1. `start_copilot_flow()` — request a device code, return it for display.
 //!  2. `poll_copilot_flow()` — poll until the user authorizes, then exchange
 //!     the GitHub token for a short-lived Copilot API token.
@@ -17,7 +17,7 @@ use crate::repos::CredentialRepository;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/// OAuth client ID used by the VS Code Copilot extension (same as Goose).
+/// OAuth client ID used by the VS Code Copilot extension.
 const GITHUB_COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 
 /// GitHub device-code endpoint.

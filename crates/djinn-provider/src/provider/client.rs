@@ -21,7 +21,7 @@ const BACKOFF_MULTIPLIER: f64 = 2.0;
 const MAX_BACKOFF_MS: u64 = 30_000;
 
 /// Overall HTTP request timeout (covers connect + full response).
-/// Goose uses 600s; OpenCode uses 300s. We use 600s since LLM generations
+/// OpenCode uses 300s; we use 600s since LLM generations
 /// with tool use can legitimately take minutes.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
