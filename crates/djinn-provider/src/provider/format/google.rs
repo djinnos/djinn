@@ -25,7 +25,7 @@ impl GoogleProvider {
         &self,
         conversation: &Conversation,
         tools: &[Value],
-        _tool_choice: Option<ToolChoice>,
+        tool_choice: Option<ToolChoice>,
     ) -> Value {
         let (system, contents) = conversation.to_google_contents();
 
@@ -39,6 +39,18 @@ impl GoogleProvider {
 
         if !tools.is_empty() {
             body["tools"] = json!([{"functionDeclarations": tools}]);
+
+            match tool_choice.unwrap_or(ToolChoice::Auto) {
+                ToolChoice::Auto => {}
+                ToolChoice::Required => {
+                    body["toolConfig"] =
+                        json!({"functionCallingConfig": {"mode": "ANY"}})
+                }
+                ToolChoice::None => {
+                    body["toolConfig"] =
+                        json!({"functionCallingConfig": {"mode": "NONE"}})
+                }
+            }
         }
 
         body
@@ -200,6 +212,22 @@ impl LlmProvider for GoogleProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::{Conversation, Message};
+    use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
+
+    fn test_google_config() -> ProviderConfig {
+        ProviderConfig {
+            base_url: "https://generativelanguage.googleapis.com".to_string(),
+            auth: AuthMethod::NoAuth,
+            format_family: FormatFamily::Google,
+            model_id: "gemini-2.5-pro".to_string(),
+            context_window: 1_048_000,
+            telemetry: None,
+            session_affinity_key: None,
+            provider_headers: Default::default(),
+            capabilities: ProviderCapabilities::default(),
+        }
+    }
 
     #[test]
     fn test_parse_text_part() {
@@ -289,5 +317,30 @@ mod tests {
             }
             _ => panic!("expected tool use"),
         }
+    }
+
+    #[test]
+    fn test_build_request_sets_required_tool_config_when_tools_present() {
+        let provider = GoogleProvider::new(test_google_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "parameters": {"type": "object"}
+        })];
+
+        let req = provider.build_request(&conv, &tools, Some(ToolChoice::Required));
+        assert_eq!(req["toolConfig"]["functionCallingConfig"]["mode"], "ANY");
+    }
+
+    #[test]
+    fn test_build_request_omits_tool_config_when_tools_empty() {
+        let provider = GoogleProvider::new(test_google_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let req = provider.build_request(&conv, &[], Some(ToolChoice::Required));
+        assert!(req.get("toolConfig").is_none());
     }
 }

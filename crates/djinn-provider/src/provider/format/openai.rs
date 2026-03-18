@@ -26,7 +26,7 @@ impl OpenAIProvider {
         &self,
         conversation: &Conversation,
         tools: &[Value],
-        _tool_choice: Option<ToolChoice>,
+        tool_choice: Option<ToolChoice>,
     ) -> Value {
         // Convert messages — OpenAI Chat Completions format requires:
         // - Assistant tool calls in a separate `tool_calls` field (NOT in content)
@@ -145,6 +145,12 @@ impl OpenAIProvider {
                 })
                 .collect();
             body["tools"] = json!(openai_tools);
+
+            match tool_choice.unwrap_or(ToolChoice::Auto) {
+                ToolChoice::Auto => {}
+                ToolChoice::Required => body["tool_choice"] = json!("required"),
+                ToolChoice::None => body["tool_choice"] = json!("none"),
+            }
         }
 
         if let Some(session_affinity_key) = &self.config.session_affinity_key
@@ -505,6 +511,31 @@ mod tests {
         let req = provider.build_request(&conv, &[], None);
         assert!(req.get("user").is_none());
         assert!(provider.extra_headers().get("x-session-affinity").is_none());
+    }
+
+    #[test]
+    fn test_build_request_sets_required_tool_choice_when_tools_present() {
+        let provider = OpenAIProvider::new(test_openai_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "inputSchema": {"type": "object"}
+        })];
+
+        let req = provider.build_request(&conv, &tools, Some(ToolChoice::Required));
+        assert_eq!(req["tool_choice"], "required");
+    }
+
+    #[test]
+    fn test_build_request_omits_tool_choice_when_tools_empty() {
+        let provider = OpenAIProvider::new(test_openai_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let req = provider.build_request(&conv, &[], Some(ToolChoice::Required));
+        assert!(req.get("tool_choice").is_none());
     }
 
     #[test]
