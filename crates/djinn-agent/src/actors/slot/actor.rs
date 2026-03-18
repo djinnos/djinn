@@ -140,7 +140,10 @@ impl SlotActor {
                             }) => {
                                 let kill = CancellationToken::new();
                                 let pause = CancellationToken::new();
-                                let event_tx = self.event_tx.clone();
+                                // Use a dummy sink — the real SlotEvent is emitted
+                                // by SlotActor::emit_completion_event after the
+                                // lifecycle future completes (same pattern as RunTask).
+                                let (event_tx, _rx) = mpsc::channel::<SlotEvent>(1);
                                 let app_state = self.app_state.clone();
                                 let project_task_id = format!("project:{project_id}:{agent_type}");
                                 let role = role_impl_for(agent_type.parse().unwrap_or(crate::AgentType::Groomer));

@@ -61,7 +61,10 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             ));
     };
 
-    // Helper macros for emitting slot events on exit.
+    // Helper macros for early-exit slot events. These send to a dummy channel
+    // (slot_id 0 is never a real slot). The authoritative SlotEvent::Free /
+    // SlotEvent::Killed is emitted by SlotActor::emit_completion_event after
+    // the lifecycle future resolves.
     macro_rules! return_free {
         () => {{
             let _ = event_tx
@@ -1130,6 +1133,8 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
 
     let role = params.role;
 
+    // These macros send to a dummy channel (slot_id 0 is intentional).
+    // The real SlotEvent is emitted by SlotActor::emit_completion_event.
     macro_rules! return_free {
         () => {{
             let _ = event_tx
