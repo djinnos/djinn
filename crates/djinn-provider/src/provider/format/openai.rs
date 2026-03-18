@@ -7,7 +7,7 @@ use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation, Role};
 use crate::provider::client::ApiClient;
-use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
+use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
 
 pub struct OpenAIProvider {
     config: ProviderConfig,
@@ -22,7 +22,12 @@ impl OpenAIProvider {
         }
     }
 
-    fn build_request(&self, conversation: &Conversation, tools: &[Value]) -> Value {
+    fn build_request(
+        &self,
+        conversation: &Conversation,
+        tools: &[Value],
+        _tool_choice: Option<ToolChoice>,
+    ) -> Value {
         // Convert messages — OpenAI Chat Completions format requires:
         // - Assistant tool calls in a separate `tool_calls` field (NOT in content)
         // - Tool results as standalone messages with role "tool"
@@ -387,6 +392,7 @@ impl LlmProvider for OpenAIProvider {
         &'a self,
         conversation: &'a Conversation,
         tools: &'a [Value],
+        tool_choice: Option<ToolChoice>,
     ) -> Pin<
         Box<
             dyn futures::Future<
@@ -397,7 +403,7 @@ impl LlmProvider for OpenAIProvider {
                 + 'a,
         >,
     > {
-        let body = self.build_request(conversation, tools);
+        let body = self.build_request(conversation, tools, tool_choice);
         let url = self.effective_url();
         let auth = self.config.auth.clone();
         let extra_headers = self.extra_headers();
@@ -463,7 +469,7 @@ mod tests {
         let mut conv = Conversation::new();
         conv.push(Message::user("Hello"));
 
-        let req = provider.build_request(&conv, &[]);
+        let req = provider.build_request(&conv, &[], None);
         assert_eq!(req["user"], "session-123");
     }
 
@@ -496,7 +502,7 @@ mod tests {
         let mut conv = Conversation::new();
         conv.push(Message::user("Hello"));
 
-        let req = provider.build_request(&conv, &[]);
+        let req = provider.build_request(&conv, &[], None);
         assert!(req.get("user").is_none());
         assert!(provider.extra_headers().get("x-session-affinity").is_none());
     }
@@ -560,7 +566,7 @@ mod tests {
         conv.push(crate::message::Message::assistant("first assistant"));
         conv.push(crate::message::Message::user("second user"));
 
-        let req = provider.build_request(&conv, &[]);
+        let req = provider.build_request(&conv, &[], None);
         let messages = req["messages"].as_array().expect("messages array");
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[0]["content"], "system prompt");

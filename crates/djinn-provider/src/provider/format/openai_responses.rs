@@ -7,7 +7,7 @@ use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
 use crate::provider::client::ApiClient;
-use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
+use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
@@ -24,7 +24,12 @@ impl OpenAIResponsesProvider {
         }
     }
 
-    fn build_request(&self, conversation: &Conversation, tools: &[Value]) -> Value {
+    fn build_request(
+        &self,
+        conversation: &Conversation,
+        tools: &[Value],
+        _tool_choice: Option<ToolChoice>,
+    ) -> Value {
         let (instructions, input_items) = conversation.to_openai_responses_input();
 
         let mut body = json!({
@@ -308,6 +313,7 @@ impl LlmProvider for OpenAIResponsesProvider {
         &'a self,
         conversation: &'a Conversation,
         tools: &'a [Value],
+        tool_choice: Option<ToolChoice>,
     ) -> Pin<
         Box<
             dyn futures::Future<
@@ -318,7 +324,7 @@ impl LlmProvider for OpenAIResponsesProvider {
                 + 'a,
         >,
     > {
-        let body = self.build_request(conversation, tools);
+        let body = self.build_request(conversation, tools, tool_choice);
         let url = self.effective_url();
         let auth = self.config.auth.clone();
         let extra_headers = self.extra_headers();
@@ -383,7 +389,7 @@ mod tests {
         conv.push(Message::system("You are helpful."));
         conv.push(Message::user("Hello"));
 
-        let req = provider.build_request(&conv, &[]);
+        let req = provider.build_request(&conv, &[], None);
         assert_eq!(req["model"], "gpt-5.1-codex");
         assert_eq!(req["store"], false);
         assert_eq!(req["stream"], true);
@@ -427,7 +433,7 @@ mod tests {
             metadata: None,
         });
 
-        let req = provider.build_request(&conv, &[]);
+        let req = provider.build_request(&conv, &[], None);
         let input = req["input"].as_array().unwrap();
 
         // Should be: assistant text, function_call, function_call_output
@@ -467,7 +473,7 @@ mod tests {
             metadata: None,
         });
 
-        let req = provider.build_request(&conv, &[]);
+        let req = provider.build_request(&conv, &[], None);
         let input = req["input"].as_array().unwrap();
         assert_eq!(input[0]["output"], "Error: not found");
     }
@@ -637,7 +643,7 @@ mod tests {
             "inputSchema": {"type": "object", "properties": {"cmd": {"type": "string"}}}
         })];
 
-        let req = provider.build_request(&conv, &tools);
+        let req = provider.build_request(&conv, &tools, None);
         let tools_arr = req["tools"].as_array().unwrap();
         assert_eq!(tools_arr.len(), 1);
         assert_eq!(tools_arr[0]["type"], "function");
@@ -662,7 +668,7 @@ mod tests {
             }
         })];
 
-        let req = provider.build_request(&conv, &tools);
+        let req = provider.build_request(&conv, &tools, None);
         let tools_arr = req["tools"].as_array().unwrap();
         assert_eq!(tools_arr.len(), 1);
         assert_eq!(tools_arr[0]["type"], "function");

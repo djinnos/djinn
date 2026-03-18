@@ -369,7 +369,7 @@ async fn call_llm_for_summary(
     provider: &dyn LlmProvider,
     conv: &Conversation,
 ) -> anyhow::Result<String> {
-    let mut stream = provider.stream(conv, &[]).await?;
+    let mut stream = provider.stream(conv, &[], None).await?;
     let mut summary = String::new();
 
     while let Some(evt) = stream.next().await {

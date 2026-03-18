@@ -110,6 +110,13 @@ pub enum FormatFamily {
     Google,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToolChoice {
+    Auto,
+    Required,
+    None,
+}
+
 // ─── Provider trait ───────────────────────────────────────────────────────────
 
 /// Abstraction over a single LLM provider endpoint.
@@ -125,6 +132,7 @@ pub trait LlmProvider: Send + Sync {
         &'a self,
         conversation: &'a Conversation,
         tools: &'a [Value],
+        tool_choice: Option<ToolChoice>,
     ) -> Pin<
         Box<
             dyn futures::Future<

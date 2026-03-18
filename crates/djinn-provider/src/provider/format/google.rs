@@ -6,7 +6,7 @@ use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
 use crate::provider::client::ApiClient;
-use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
+use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
 
 pub struct GoogleProvider {
     config: ProviderConfig,
@@ -21,7 +21,12 @@ impl GoogleProvider {
         }
     }
 
-    fn build_request(&self, conversation: &Conversation, tools: &[Value]) -> Value {
+    fn build_request(
+        &self,
+        conversation: &Conversation,
+        tools: &[Value],
+        _tool_choice: Option<ToolChoice>,
+    ) -> Value {
         let (system, contents) = conversation.to_google_contents();
 
         let mut body = json!({"contents": contents});
@@ -145,6 +150,7 @@ impl LlmProvider for GoogleProvider {
         &'a self,
         conversation: &'a Conversation,
         tools: &'a [Value],
+        tool_choice: Option<ToolChoice>,
     ) -> Pin<
         Box<
             dyn futures::Future<
@@ -155,7 +161,7 @@ impl LlmProvider for GoogleProvider {
                 + 'a,
         >,
     > {
-        let body = self.build_request(conversation, tools);
+        let body = self.build_request(conversation, tools, tool_choice);
         let url = self.effective_url();
         let auth = self.config.auth.clone();
         let extra_headers = self.extra_headers();
