@@ -146,7 +146,7 @@ impl NoteRepository {
         confidence_ids.sort();
         confidence_ids.dedup();
 
-        let confidence_map = self.confidence_map(&confidence_ids).await?;
+        let confidence_map = self.note_confidence_map(&confidence_ids).await?;
 
         // Prepare signals for RRF
         let signals = vec![
