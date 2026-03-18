@@ -172,6 +172,30 @@ impl NoteRepository {
 
         Ok(result.rows_affected())
     }
+
+    /// Prune low-weight, stale associations for a specific project.
+    ///
+    /// Deletes associations where:
+    /// - weight < 0.05 (low weight threshold)
+    /// - last_co_access is older than 90 days
+    /// - note_a_id belongs to a note in the specified project
+    ///
+    /// Returns the number of associations deleted.
+    pub async fn prune_associations(&self, project_id: &str) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+
+        let result = sqlx::query(
+            "DELETE FROM note_associations
+             WHERE weight < 0.05
+               AND last_co_access < datetime('now', '-90 days')
+               AND note_a_id IN (SELECT id FROM notes WHERE project_id = ?1)",
+        )
+        .bind(project_id)
+        .execute(self.db.pool())
+        .await?;
+
+        Ok(result.rows_affected())
+    }
 }
 
 #[cfg(test)]
@@ -405,5 +429,173 @@ mod tests {
         let (a, b) = canonical_pair(&note2, &note1);
         assert_eq!(a, note1);
         assert_eq!(b, note2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prune_associations_removes_stale_low_weight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        // Create three pairs of notes
+        let note1 = make_note(&repo, &project, &tmp, "Note One").await;
+        let note2 = make_note(&repo, &project, &tmp, "Note Two").await;
+        let note3 = make_note(&repo, &project, &tmp, "Note Three").await;
+        let note4 = make_note(&repo, &project, &tmp, "Note Four").await;
+        let note5 = make_note(&repo, &project, &tmp, "Note Five").await;
+        let note6 = make_note(&repo, &project, &tmp, "Note Six").await;
+
+        // Create associations with different weights and co-access dates
+        // Pair 1: weight=0.01, last_co_access 100 days ago (should be pruned)
+        repo.upsert_association(&note1, &note2, 1).await.unwrap();
+        sqlx::query(
+            "UPDATE note_associations SET last_co_access = datetime('now', '-100 days') WHERE note_a_id = ?1 AND note_b_id = ?2"
+        )
+        .bind(&note1)
+        .bind(&note2)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // Pair 2: weight=0.01, last_co_access yesterday (should survive - recent)
+        repo.upsert_association(&note3, &note4, 1).await.unwrap();
+        sqlx::query(
+            "UPDATE note_associations SET last_co_access = datetime('now', '-1 days') WHERE note_a_id = ?1 AND note_b_id = ?2"
+        )
+        .bind(&note3)
+        .bind(&note4)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // Pair 3: weight=0.8, last_co_access 100 days ago (should survive - high weight)
+        repo.upsert_association(&note5, &note6, 400).await.unwrap(); // High co-access count for high weight
+        sqlx::query(
+            "UPDATE note_associations SET last_co_access = datetime('now', '-100 days') WHERE note_a_id = ?1 AND note_b_id = ?2"
+        )
+        .bind(&note5)
+        .bind(&note6)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // Verify all three associations exist
+        let before_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM note_associations WHERE note_a_id IN (?1, ?2, ?3) OR note_b_id IN (?1, ?2, ?3)"
+        )
+        .bind(&note1)
+        .bind(&note3)
+        .bind(&note5)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(before_count, 3);
+
+        // Run prune
+        let deleted = repo.prune_associations(&project.id).await.unwrap();
+        assert_eq!(deleted, 1);
+
+        // Verify only the first pair was deleted
+        let remaining: Vec<(String, String)> = sqlx::query_as(
+            "SELECT note_a_id, note_b_id FROM note_associations WHERE note_a_id IN (?1, ?2, ?3) OR note_b_id IN (?1, ?2, ?3) ORDER BY note_a_id"
+        )
+        .bind(&note1)
+        .bind(&note3)
+        .bind(&note5)
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+
+        assert_eq!(remaining.len(), 2);
+        // note3-note4 should survive (recent)
+        assert!(remaining.iter().any(|(a, b)| (a == &note3 && b == &note4) || (a == &note4 && b == &note3)));
+        // note5-note6 should survive (high weight)
+        assert!(remaining.iter().any(|(a, b)| (a == &note5 && b == &note6) || (a == &note6 && b == &note5)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prune_associations_scoped_to_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+
+        // Create two projects
+        let project1 = make_project(&db, tmp.path()).await;
+        let project2_path = tmp.path().join("project2");
+        std::fs::create_dir_all(&project2_path).unwrap();
+        let project2 = {
+            db.ensure_initialized().await.unwrap();
+            let id = uuid::Uuid::now_v7().to_string();
+            sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
+                .bind(&id)
+                .bind("test-project-2")
+                .bind(project2_path.to_str().unwrap())
+                .execute(db.pool())
+                .await
+                .unwrap();
+            sqlx::query_as::<_, Project>(
+                "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote \
+                 FROM projects WHERE id = ?1",
+            )
+            .bind(&id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap()
+        };
+
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        // Create notes in both projects
+        let p1_note1 = make_note(&repo, &project1, &tmp, "P1 Note One").await;
+        let p1_note2 = make_note(&repo, &project1, &tmp, "P1 Note Two").await;
+        let p2_note1 = repo.create(&project2.id, &project2_path, "P2 Note One", "content", "reference", "[]").await.unwrap();
+        let p2_note2 = repo.create(&project2.id, &project2_path, "P2 Note Two", "content", "reference", "[]").await.unwrap();
+
+        // Create old, low-weight associations in both projects
+        repo.upsert_association(&p1_note1, &p1_note2, 1).await.unwrap();
+        sqlx::query(
+            "UPDATE note_associations SET last_co_access = datetime('now', '-100 days') WHERE note_a_id = ?1 AND note_b_id = ?2"
+        )
+        .bind(&p1_note1)
+        .bind(&p1_note2)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        repo.upsert_association(&p2_note1.id, &p2_note2.id, 1).await.unwrap();
+        sqlx::query(
+            "UPDATE note_associations SET last_co_access = datetime('now', '-100 days') WHERE note_a_id = ?1 AND note_b_id = ?2"
+        )
+        .bind(&p2_note1.id)
+        .bind(&p2_note2.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // Prune only project1
+        let deleted = repo.prune_associations(&project1.id).await.unwrap();
+        assert_eq!(deleted, 1);
+
+        // Verify project2 association still exists
+        let p2_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ?1 OR note_b_id = ?1"
+        )
+        .bind(&p2_note1.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(p2_count, 1);
+
+        // Verify project1 association is gone
+        let p1_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ?1 OR note_b_id = ?1"
+        )
+        .bind(&p1_note1)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(p1_count, 0);
     }
 }
