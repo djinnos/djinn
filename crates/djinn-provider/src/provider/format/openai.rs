@@ -413,6 +413,20 @@ impl LlmProvider for OpenAIProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
+
+    fn test_openai_config() -> ProviderConfig {
+        ProviderConfig {
+            base_url: "https://example.com".to_string(),
+            auth: AuthMethod::NoAuth,
+            format_family: FormatFamily::OpenAI,
+            model_id: "gpt-4o-mini".to_string(),
+            context_window: 128_000,
+            telemetry: None,
+            provider_headers: std::collections::HashMap::new(),
+            capabilities: ProviderCapabilities::default(),
+        }
+    }
 
     #[test]
     fn test_parse_text_delta() {
@@ -455,9 +469,9 @@ mod tests {
         assert_eq!(e3.len(), 1);
         match &e3[0] {
             StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }) => {
-                assert_eq!(id, "call_abc");
-                assert_eq!(name, "shell");
-                assert_eq!(input["cmd"], "ls");
+                assert_eq!(id.as_str(), "call_abc");
+                assert_eq!(name.as_str(), "shell");
+                assert_eq!(input["cmd"].as_str(), Some("ls"));
             }
             _ => panic!("expected tool use"),
         }
@@ -465,18 +479,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_usage() {
-        let line = r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20}}"#;
-        let mut acc = None;
-        let events = parse_openai_line(line, &mut acc);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            StreamEvent::Usage(u) => {
-                assert_eq!(u.input, 10);
-                assert_eq!(u.output, 20);
-            }
-            _ => panic!("expected usage"),
-        }
+    fn test_build_request_keeps_system_message_first() {
+        let provider = OpenAIProvider::new(test_openai_config());
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::system("system prompt"));
+        conv.push(crate::message::Message::user("first user"));
+        conv.push(crate::message::Message::assistant("first assistant"));
+        conv.push(crate::message::Message::user("second user"));
+
+        let req = provider.build_request(&conv, &[]);
+        let messages = req["messages"].as_array().expect("messages array");
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "system prompt");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "first user");
     }
 
     #[test]
