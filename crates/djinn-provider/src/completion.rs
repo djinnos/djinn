@@ -1,13 +1,13 @@
 use anyhow::{Context, Result, anyhow};
 use djinn_core::events::EventBus;
 use djinn_core::message::{ContentBlock, Conversation, Message};
-use djinn_core::models::Model;
+use djinn_core::models::{Credential, Model};
 use djinn_db::{Database, SettingsRepository};
 use futures::StreamExt;
 use tokio::time::{Duration, timeout};
 
 use crate::catalog::{CatalogService, builtin};
-use crate::oauth::{codex, codex_provider_config, copilot, copilot_provider_config};
+use crate::oauth::{self, codex::CodexTokens, copilot::CopilotTokens};
 use crate::provider::{
     AuthMethod, FormatFamily, LlmProvider, ProviderCapabilities, ProviderConfig, StreamEvent,
     TokenUsage, create_provider,
@@ -29,6 +29,87 @@ pub struct CompletionResponse {
     pub text: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct MemoryModelSelection {
+    pub(crate) selected_model_id: Option<String>,
+}
+
+impl MemoryModelSelection {
+    pub(crate) fn from_settings_raw(raw: &str) -> Self {
+        let value = match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(value) => value,
+            Err(_) => return Self::default(),
+        };
+
+        let selected_model_id = value
+            .get("memory")
+            .and_then(|memory| memory.get("llm_model"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+
+        Self { selected_model_id }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedMemoryModel {
+    pub(crate) model: Model,
+    pub(crate) effective_provider_id: String,
+}
+
+pub(crate) fn parse_memory_model_selection(raw: &str) -> Option<String> {
+    MemoryModelSelection::from_settings_raw(raw).selected_model_id
+}
+
+pub(crate) fn select_memory_model(
+    catalog: &CatalogService,
+    credentials: &[Credential],
+    selected_model_id: Option<&str>,
+) -> Result<ResolvedMemoryModel> {
+    let connected = catalog.connected_provider_ids(credentials);
+
+    if let Some(model_id) = selected_model_id.map(str::trim).filter(|value| !value.is_empty()) {
+        let model = catalog.find_model(model_id).ok_or_else(|| {
+            anyhow!(
+                "memory.llm_model '{}' is not available in the provider catalog",
+                model_id
+            )
+        })?;
+        let effective_provider_id = effective_provider_for_model(&model, credentials)?;
+        return Ok(ResolvedMemoryModel {
+            model,
+            effective_provider_id,
+        });
+    }
+
+    let mut candidates = builtin::BUILTIN_PROVIDERS
+        .iter()
+        .flat_map(|provider| catalog.list_models(provider.id).into_iter())
+        .filter(|model| connected.contains(&model.provider_id))
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|left, right| {
+        total_price(left)
+            .partial_cmp(&total_price(right))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.provider_id.cmp(&right.provider_id))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let model = candidates.into_iter().next().ok_or_else(|| {
+        anyhow!(
+            "no connected builtin provider models are available for memory.llm_model fallback"
+        )
+    })?;
+    let effective_provider_id = effective_provider_for_model(&model, credentials)?;
+    Ok(ResolvedMemoryModel {
+        model,
+        effective_provider_id,
+    })
 }
 
 pub async fn complete(
@@ -113,214 +194,210 @@ pub async fn resolve_memory_provider(db: &Database) -> Result<Box<dyn LlmProvide
         .map(|setting| setting.value)
         .filter(|value| !value.trim().is_empty());
 
+    let settings_raw = match configured_model {
+        Some(model_id) => format!(r#"{{"memory":{{"llm_model":"{}"}}}}"#, model_id),
+        None => "{}".to_string(),
+    };
+
     let catalog = CatalogService::new();
     catalog.inject_builtin_providers(builtin::BUILTIN_PROVIDERS);
 
     let credential_repo = CredentialRepository::new(db.clone(), event_bus);
-    let provider_config = if let Some(model_id) = configured_model {
-        resolve_provider_config_for_model(&catalog, &credential_repo, &model_id).await?
-    } else {
-        resolve_cheapest_available_provider(&catalog, &credential_repo).await?
-    };
+    let credentials = credential_repo.list().await?;
+    let provider_config = resolve_memory_provider_config(
+        &catalog,
+        &credentials,
+        &credential_repo,
+        &settings_raw,
+    )
+    .await?;
 
     Ok(create_provider(provider_config))
 }
 
-async fn resolve_provider_config_for_model(
+pub async fn resolve_memory_provider_config(
     catalog: &CatalogService,
+    credentials: &[Credential],
     credential_repo: &CredentialRepository,
-    model_id: &str,
+    settings_raw: &str,
 ) -> Result<ProviderConfig> {
-    let (provider_id, requested_model_name) = parse_model_id(model_id)?;
-    let provider = catalog
-        .list_providers()
-        .into_iter()
-        .find(|provider| provider.id == provider_id)
-        .ok_or_else(|| anyhow!("provider unavailable for model '{model_id}'"))?;
-
-    let resolved_model = catalog
-        .list_models(&provider_id)
-        .into_iter()
-        .find(|model| model_matches(model, &requested_model_name))
-        .ok_or_else(|| anyhow!("model unavailable: {model_id}"))?;
-
-    provider_config_from_parts(catalog, credential_repo, &provider.id, &resolved_model).await
+    let selected = parse_memory_model_selection(settings_raw);
+    let resolved = select_memory_model(catalog, credentials, selected.as_deref())?;
+    provider_config_for_model(&resolved, credential_repo).await
 }
 
-async fn resolve_cheapest_available_provider(
-    catalog: &CatalogService,
+pub(crate) async fn provider_config_for_model(
+    resolved: &ResolvedMemoryModel,
     credential_repo: &CredentialRepository,
 ) -> Result<ProviderConfig> {
-    let mut models: Vec<Model> = catalog
-        .list_providers()
-        .into_iter()
-        .flat_map(|provider| catalog.list_models(&provider.id))
-        .collect();
-
-    models.sort_by(|left, right| total_price(left).total_cmp(&total_price(right)));
-
-    let mut last_error = None;
-    for model in models {
-        match provider_config_from_parts(catalog, credential_repo, &model.provider_id, &model).await {
-            Ok(config) => return Ok(config),
-            Err(error) => last_error = Some(error),
-        }
-    }
-
-    Err(last_error.unwrap_or_else(|| anyhow!("no available provider/model found")))
-}
-
-async fn provider_config_from_parts(
-    catalog: &CatalogService,
-    credential_repo: &CredentialRepository,
-    provider_id: &str,
-    model: &Model,
-) -> Result<ProviderConfig> {
-    if let Some(config) = load_oauth_provider_config(provider_id, credential_repo).await? {
-        return Ok(ProviderConfig {
-            model_id: model.id.clone(),
-            context_window: model.context_window.max(0) as u32,
-            ..config
-        });
-    }
-
-    let provider = catalog
-        .list_providers()
-        .into_iter()
-        .find(|provider| provider.id == provider_id)
-        .ok_or_else(|| anyhow!("provider unavailable: {provider_id}"))?;
-
-    let key_name = provider
-        .env_vars
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| format!("{}_API_KEY", provider_id.to_ascii_uppercase()));
-
-    let api_key = credential_repo
-        .get_decrypted(&key_name)
-        .await
-        .map_err(|error| anyhow!("credential lookup failed: {error}"))?
-        .ok_or_else(|| anyhow!("missing credentials for provider {provider_id} (expected key {key_name})"))?;
-
-    Ok(ProviderConfig {
-        base_url: provider
-            .base_url
-            .clone()
-            .if_empty_then(|| default_base_url(provider_id)),
-        auth: auth_method_for_provider(provider_id, &api_key),
-        format_family: format_family_for_provider(provider_id, &model.id),
-        model_id: model.id.clone(),
-        context_window: model.context_window.max(0) as u32,
-        telemetry: None,
-        session_affinity_key: None,
-        provider_headers: Default::default(),
-        capabilities: capabilities_for_provider(provider_id),
-    })
-}
-
-async fn load_oauth_provider_config(
-    provider_id: &str,
-    credential_repo: &CredentialRepository,
-) -> Result<Option<ProviderConfig>> {
-    let effective_oauth_id = match provider_id {
-        "chatgpt_codex" | "githubcopilot" => provider_id,
-        other => builtin::resolve_oauth_provider(other).unwrap_or(other),
-    };
-
-    match effective_oauth_id {
+    match resolved.effective_provider_id.as_str() {
         "chatgpt_codex" => {
-            if let Some(tokens) = codex::CodexTokens::load_from_db(credential_repo).await {
-                let refreshed = if tokens.is_expired() {
-                    codex::refresh_cached_token(&tokens, credential_repo).await?
-                } else {
-                    tokens
-                };
-                return Ok(Some(codex_provider_config(&refreshed)));
-            }
+            let tokens = CodexTokens::load_from_db(credential_repo).await.ok_or_else(|| {
+                anyhow!(
+                    "provider '{}' for memory model '{}' is missing OAuth tokens",
+                    resolved.effective_provider_id,
+                    resolved.model.id
+                )
+            })?;
+            Ok(provider_config_with_model(
+                oauth::codex_provider_config(&tokens),
+                &resolved.model,
+            ))
         }
         "githubcopilot" => {
-            if let Some(tokens) = copilot::CopilotTokens::load_from_db(credential_repo).await {
-                let refreshed = if tokens.is_expired() {
-                    copilot::refresh_copilot_token(&tokens, credential_repo).await?
-                } else {
-                    tokens
-                };
-                return Ok(Some(copilot_provider_config(&refreshed)));
-            }
+            let tokens = CopilotTokens::load_from_db(credential_repo).await.ok_or_else(|| {
+                anyhow!(
+                    "provider '{}' for memory model '{}' is missing OAuth tokens",
+                    resolved.effective_provider_id,
+                    resolved.model.id
+                )
+            })?;
+            Ok(provider_config_with_model(
+                oauth::copilot_provider_config(&tokens),
+                &resolved.model,
+            ))
         }
-        _ => {}
+        provider_id => api_key_provider_config(provider_id, &resolved.model, credential_repo).await,
     }
-
-    Ok(None)
-}
-
-fn parse_model_id(model_id: &str) -> Result<(String, String)> {
-    let Some((provider_id, model_name)) = model_id.split_once('/') else {
-        return Err(anyhow!(
-            "invalid model id '{model_id}', expected provider/model"
-        ));
-    };
-    Ok((provider_id.to_owned(), model_name.to_owned()))
-}
-
-fn model_matches(model: &Model, requested: &str) -> bool {
-    let bare = model.id.rsplit('/').next().unwrap_or(&model.id);
-    model.id == requested || model.name == requested || bare == requested
 }
 
 fn total_price(model: &Model) -> f64 {
     model.pricing.input_per_million + model.pricing.output_per_million
 }
 
-fn format_family_for_provider(provider_id: &str, model_id: &str) -> FormatFamily {
-    let lower = provider_id.to_lowercase();
-    if lower.contains("anthropic") {
-        FormatFamily::Anthropic
-    } else if lower.contains("google") || lower.contains("gemini") || lower.contains("vertex") {
-        FormatFamily::Google
-    } else if lower.contains("codex") || model_id.contains("codex") {
-        FormatFamily::OpenAIResponses
-    } else {
-        FormatFamily::OpenAI
+fn effective_provider_for_model(model: &Model, credentials: &[Credential]) -> Result<String> {
+    let oauth_provider = builtin::resolve_oauth_provider(&model.provider_id);
+    let credential_key_names = credentials
+        .iter()
+        .map(|credential| credential.key_name.clone())
+        .collect::<std::collections::HashSet<_>>();
+
+    if let Some(provider_id) = oauth_provider {
+        let oauth_keys = builtin::oauth_keys_for_provider(provider_id);
+        if builtin::is_oauth_key_present(&oauth_keys, &credential_key_names) {
+            return Ok(provider_id.to_string());
+        }
+    }
+
+    let builtin_provider = builtin::find_builtin_provider(&model.provider_id).ok_or_else(|| {
+        anyhow!(
+            "provider '{}' for memory model '{}' is not supported by djinn-provider",
+            model.provider_id,
+            model.id
+        )
+    })?;
+
+    if builtin_provider.required_env_vars.is_empty() {
+        return Err(anyhow!(
+            "provider '{}' for memory model '{}' is unavailable because no OAuth credentials are connected",
+            model.provider_id,
+            model.id
+        ));
+    }
+
+    if let Some(key_name) = builtin_provider.required_env_vars.first() {
+        if credentials.iter().any(|credential| {
+            credential.provider_id == builtin_provider.id && credential.key_name == *key_name
+        }) {
+            return Ok(builtin_provider.id.to_string());
+        }
+
+        return Err(anyhow!(
+            "provider '{}' for memory model '{}' is missing credential '{}'",
+            builtin_provider.id,
+            model.id,
+            key_name
+        ));
+    }
+
+    Err(anyhow!(
+        "provider '{}' for memory model '{}' has no supported authentication path",
+        builtin_provider.id,
+        model.id
+    ))
+}
+
+fn provider_config_with_model(mut config: ProviderConfig, model: &Model) -> ProviderConfig {
+    config.model_id = model.id.clone();
+    config.context_window = model.context_window.max(0) as u32;
+    config
+}
+
+async fn api_key_provider_config(
+    provider_id: &str,
+    model: &Model,
+    credential_repo: &CredentialRepository,
+) -> Result<ProviderConfig> {
+    let builtin_provider = builtin::find_builtin_provider(provider_id)
+        .ok_or_else(|| anyhow!("provider '{}' is not supported by djinn-provider", provider_id))?;
+    let key_name = builtin_provider.required_env_vars.first().ok_or_else(|| {
+        anyhow!(
+            "provider '{}' for memory model '{}' does not support API-key auth",
+            provider_id,
+            model.id
+        )
+    })?;
+    let api_key = credential_repo.get_decrypted(key_name).await?.ok_or_else(|| {
+        anyhow!(
+            "provider '{}' for memory model '{}' is missing credential '{}'",
+            provider_id,
+            model.id,
+            key_name
+        )
+    })?;
+
+    Ok(ProviderConfig {
+        base_url: provider_base_url(provider_id),
+        auth: provider_auth(provider_id, api_key),
+        format_family: provider_format_family(provider_id),
+        model_id: model.id.clone(),
+        context_window: model.context_window.max(0) as u32,
+        telemetry: None,
+        session_affinity_key: None,
+        provider_headers: Default::default(),
+        capabilities: provider_capabilities(provider_id),
+    })
+}
+
+fn provider_base_url(provider_id: &str) -> String {
+    match provider_id {
+        "anthropic" => "https://api.anthropic.com".to_string(),
+        "openai" => "https://api.openai.com".to_string(),
+        "google" => "https://generativelanguage.googleapis.com".to_string(),
+        _ => "https://api.openai.com".to_string(),
     }
 }
 
-fn capabilities_for_provider(provider_id: &str) -> ProviderCapabilities {
-    let lower = provider_id.to_lowercase();
-    if lower.contains("synthetic") || lower.contains("local") {
-        ProviderCapabilities {
-            streaming: false,
-            max_tokens_default: None,
-        }
-    } else if lower.contains("anthropic") {
-        ProviderCapabilities {
+fn provider_auth(provider_id: &str, api_key: String) -> AuthMethod {
+    match provider_id {
+        "anthropic" => AuthMethod::ApiKeyHeader {
+            header: "x-api-key".to_string(),
+            key: api_key,
+        },
+        "google" => AuthMethod::ApiKeyHeader {
+            header: "x-goog-api-key".to_string(),
+            key: api_key,
+        },
+        _ => AuthMethod::BearerToken(api_key),
+    }
+}
+
+fn provider_format_family(provider_id: &str) -> FormatFamily {
+    match provider_id {
+        "anthropic" => FormatFamily::Anthropic,
+        "google" => FormatFamily::Google,
+        "chatgpt_codex" => FormatFamily::OpenAIResponses,
+        _ => FormatFamily::OpenAI,
+    }
+}
+
+fn provider_capabilities(provider_id: &str) -> ProviderCapabilities {
+    match provider_id {
+        "anthropic" => ProviderCapabilities {
             streaming: true,
             max_tokens_default: Some(8192),
-        }
-    } else {
-        ProviderCapabilities::default()
-    }
-}
-
-fn auth_method_for_provider(provider_id: &str, api_key: &str) -> AuthMethod {
-    if provider_id.to_lowercase().contains("anthropic") {
-        AuthMethod::ApiKeyHeader {
-            header: "x-api-key".to_string(),
-            key: api_key.to_string(),
-        }
-    } else {
-        AuthMethod::BearerToken(api_key.to_string())
-    }
-}
-
-fn default_base_url(provider_id: &str) -> String {
-    let lower = provider_id.to_lowercase();
-    if lower.contains("anthropic") {
-        "https://api.anthropic.com".to_string()
-    } else if lower.contains("google") || lower.contains("gemini") {
-        "https://generativelanguage.googleapis.com".to_string()
-    } else {
-        "https://api.openai.com".to_string()
+        },
+        _ => ProviderCapabilities::default(),
     }
 }
 
@@ -336,20 +413,13 @@ fn is_transient_error(error: &anyhow::Error) -> bool {
     })
 }
 
-trait StringExt {
-    fn if_empty_then<F: FnOnce() -> String>(self, fallback: F) -> String;
-}
-
-impl StringExt for String {
-    fn if_empty_then<F: FnOnce() -> String>(self, fallback: F) -> String {
-        if self.is_empty() { fallback() } else { self }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
-    use std::sync::{Mutex, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use anyhow::anyhow;
     use futures::{Stream, stream};
@@ -357,6 +427,27 @@ mod tests {
 
     use super::*;
     use crate::provider::ToolChoice;
+
+    fn setup_catalog() -> CatalogService {
+        let catalog = CatalogService::new();
+        catalog.inject_builtin_providers(builtin::BUILTIN_PROVIDERS);
+        catalog
+    }
+
+    fn credential(provider_id: &str, key_name: &str) -> Credential {
+        Credential {
+            id: "cred".to_string(),
+            provider_id: provider_id.to_string(),
+            key_name: key_name.to_string(),
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        }
+    }
+
+    fn repo() -> CredentialRepository {
+        let db = Database::open_in_memory().expect("test db");
+        CredentialRepository::new(db, EventBus::noop())
+    }
 
     enum ProviderBehavior {
         Stream(Vec<anyhow::Result<StreamEvent>>),
@@ -404,7 +495,7 @@ mod tests {
             >,
         > {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let behavior = self.behaviors.lock().unwrap().remove(0);
+            let behavior = self.behaviors.lock().expect("mock behaviors lock").remove(0);
             Box::pin(async move {
                 match behavior {
                     ProviderBehavior::Stream(events) => {
@@ -416,6 +507,88 @@ mod tests {
                 }
             })
         }
+    }
+
+    #[test]
+    fn parses_memory_llm_model_from_settings_raw() {
+        let raw = r#"{"memory":{"llm_model":"openai/gpt-4.1-mini"}}"#;
+        assert_eq!(
+            parse_memory_model_selection(raw).as_deref(),
+            Some("openai/gpt-4.1-mini")
+        );
+    }
+
+    #[test]
+    fn fallback_picks_cheapest_connected_builtin_model() {
+        let catalog = setup_catalog();
+        let credentials = vec![credential("openai", "OPENAI_API_KEY")];
+
+        let resolved = select_memory_model(&catalog, &credentials, None).expect("select model");
+
+        assert_eq!(resolved.effective_provider_id, "openai");
+        assert_eq!(resolved.model.provider_id, "openai");
+    }
+
+    #[test]
+    fn unavailable_model_returns_descriptive_error() {
+        let catalog = setup_catalog();
+        let credentials = vec![credential("openai", "OPENAI_API_KEY")];
+
+        let error = select_memory_model(&catalog, &credentials, Some("openai/does-not-exist"))
+            .expect_err("missing model should error");
+
+        assert!(
+            error
+                .to_string()
+                .contains("memory.llm_model 'openai/does-not-exist' is not available")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn missing_credential_returns_descriptive_error() {
+        let catalog = setup_catalog();
+        let repo = repo();
+        let resolved = select_memory_model(
+            &catalog,
+            &[credential("openai", "OPENAI_API_KEY")],
+            Some("openai/gpt-4.1-mini"),
+        )
+        .expect("model should exist");
+
+        let error = match provider_config_for_model(&resolved, &repo).await {
+            Ok(_) => panic!("missing secret should error"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("missing credential 'OPENAI_API_KEY'"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn oauth_provider_config_uses_stored_tokens() {
+        let catalog = setup_catalog();
+        let repo = repo();
+        let tokens = CodexTokens {
+            access_token: "access_test".to_string(),
+            refresh_token: "refresh_test".to_string(),
+            id_token: None,
+            expires_at: i64::MAX,
+            account_id: None,
+        };
+        tokens.save_to_db(&repo).await.expect("save oauth tokens");
+
+        let resolved = select_memory_model(
+            &catalog,
+            &[credential("openai", "__OAUTH_CHATGPT_CODEX")],
+            Some("openai/codex-mini-latest"),
+        )
+        .expect("oauth model should resolve");
+
+        let config = provider_config_for_model(&resolved, &repo)
+            .await
+            .expect("oauth config should resolve");
+
+        assert_eq!(config.model_id, resolved.model.id);
+        assert!(matches!(config.auth, AuthMethod::BearerToken(_)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -489,7 +662,10 @@ mod tests {
     async fn complete_retries_transient_error_once() {
         let provider = MockProvider::new(vec![
             ProviderBehavior::Error("429 rate limit".into()),
-            ProviderBehavior::Stream(vec![Ok(StreamEvent::Delta(ContentBlock::text("retry ok"))), Ok(StreamEvent::Done)]),
+            ProviderBehavior::Stream(vec![
+                Ok(StreamEvent::Delta(ContentBlock::text("retry ok"))),
+                Ok(StreamEvent::Done),
+            ]),
         ]);
 
         let response = complete(
@@ -551,6 +727,10 @@ mod tests {
             Ok(_) => panic!("expected memory provider resolution to fail"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("model unavailable") || error.to_string().contains("missing credentials") || error.to_string().contains("provider unavailable"));
+        assert!(
+            error
+                .to_string()
+                .contains("memory.llm_model 'openai/nonexistent-model' is not available")
+        );
     }
 }
