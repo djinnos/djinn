@@ -115,3 +115,6 @@ pub use worktree::*;
 
 #[cfg(test)]
 mod helpers_tests;
+
+#[cfg(test)]
+mod worktree_tests;
