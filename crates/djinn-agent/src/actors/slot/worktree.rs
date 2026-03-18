@@ -162,13 +162,22 @@ pub(crate) async fn prepare_worktree(
         .join(".djinn")
         .join("worktrees")
         .join(&task.short_id);
+    let resumed_worktree_exists = stale_worktree_path.exists() && stale_worktree_path.join(".git").exists();
 
     // Reuse existing worktree if it's still valid.  This preserves the
     // branch's own target/ build cache across worker → verify → review
     // cycles, avoiding full rebuilds on every session.  The worktree is
     // only nuked on task close/merge or when the PM calls
     // `task_delete_branch` (which invokes `teardown_worktree`).
-    if stale_worktree_path.exists() && stale_worktree_path.join(".git").exists() {
+    if resumed_worktree_exists {
+        try_rebase_existing_task_branch(
+            project_dir,
+            &branch,
+            &target_branch,
+            Some(&stale_worktree_path),
+            app_state,
+        )
+        .await;
         tracing::info!(
             task_id = %task.short_id,
             worktree = %stale_worktree_path.display(),
@@ -202,7 +211,7 @@ pub(crate) async fn prepare_worktree(
             .await
             .map_err(|e| anyhow::anyhow!("create branch: {e}"))?;
     } else {
-        try_rebase_existing_task_branch(project_dir, &branch, &target_branch, app_state).await;
+        try_rebase_existing_task_branch(project_dir, &branch, &target_branch, None, app_state).await;
     }
 
     git.create_worktree(&task.short_id, &branch, false)
@@ -210,10 +219,19 @@ pub(crate) async fn prepare_worktree(
         .map_err(|e| anyhow::anyhow!("create worktree: {e}"))
 }
 
+/// Sync an existing task branch against the latest target branch.
+///
+/// When `resumed_worktree_path` is provided (resumed task), the sync is performed
+/// directly in that worktree so conflicts are surfaced to the worker. On conflict,
+/// the rebase is aborted but conflict markers are left in place for the worker.
+///
+/// When `resumed_worktree_path` is None (fresh task), a temporary sync worktree
+/// is used and discarded after the sync.
 pub(crate) async fn try_rebase_existing_task_branch(
     project_dir: &Path,
     branch: &str,
     target_branch: &str,
+    resumed_worktree_path: Option<&Path>,
     app_state: &AgentContext,
 ) {
     let git = match app_state.git_actor(project_dir).await {
@@ -254,6 +272,21 @@ pub(crate) async fn try_rebase_existing_task_branch(
         }
     };
 
+    // If we're resuming a task with an existing worktree, sync directly in that
+    // worktree so conflicts can be left in place for the worker to resolve.
+    if let Some(resumed_path) = resumed_worktree_path {
+        sync_in_resumed_worktree(
+            project_dir,
+            branch,
+            &upstream,
+            resumed_path,
+            app_state,
+        )
+        .await;
+        return;
+    }
+
+    // Fresh task: use a temporary sync worktree approach.
     let sync_name = format!(".sync-{}", branch.replace('/', "-"));
     let sync_worktree_path = project_dir.join(".djinn").join("worktrees").join(sync_name);
     let _ = git.remove_worktree(&sync_worktree_path).await;
@@ -312,6 +345,130 @@ pub(crate) async fn try_rebase_existing_task_branch(
     let _ = git.remove_worktree(&sync_worktree_path).await;
     if sync_worktree_path.exists() {
         let _ = std::fs::remove_dir_all(&sync_worktree_path);
+    }
+}
+
+/// Sync a resumed task's worktree against the latest target branch.
+/// Performs the sync directly in the resumed worktree so conflicts are
+/// surfaced to the worker. On conflict, aborts the rebase but leaves
+/// conflict markers in place.
+async fn sync_in_resumed_worktree(
+    _project_dir: &Path,
+    branch: &str,
+    upstream: &str,
+    resumed_worktree_path: &Path,
+    app_state: &AgentContext,
+) {
+    // We only need the worktree git actor for resumed worktree sync
+    let worktree_git = match app_state.git_actor(resumed_worktree_path).await {
+        Ok(git) => git,
+        Err(e) => {
+            tracing::warn!(
+                branch = %branch,
+                error = %e,
+                "failed to open resumed worktree git actor for sync"
+            );
+            return;
+        }
+    };
+
+    // Ensure the branch is checked out in the resumed worktree
+    if let Err(e) = worktree_git
+        .run_command(vec!["checkout".into(), branch.to_string()])
+        .await
+    {
+        tracing::warn!(
+            branch = %branch,
+            error = %e,
+            "failed to checkout branch in resumed worktree"
+        );
+    }
+
+    // Check if there are uncommitted changes before sync
+    let has_uncommitted = match worktree_git
+        .run_command(vec!["status".into(), "--porcelain".into()])
+        .await
+    {
+        Ok(out) => !out.stdout.trim().is_empty(),
+        Err(e) => {
+            tracing::warn!(
+                branch = %branch,
+                error = %e,
+                "failed to check worktree status before sync"
+            );
+            false
+        }
+    };
+
+    if has_uncommitted {
+        // Commit any uncommitted changes as WIP before sync
+        let _ = worktree_git.run_command(vec!["add".into(), "-A".into()]).await;
+        let _ = worktree_git
+            .run_command(vec![
+                "commit".into(),
+                "--no-verify".into(),
+                "-m".into(),
+                "WIP: pre-sync save".into(),
+            ])
+            .await;
+        tracing::info!(
+            branch = %branch,
+            "staged uncommitted changes before sync"
+        );
+    }
+
+    // Attempt the rebase in the resumed worktree
+    match worktree_git.rebase_with_retry(upstream).await {
+        Ok(_) => {
+            tracing::info!(
+                branch = %branch,
+                upstream = %upstream,
+                "rebased resumed task branch in worktree"
+            );
+        }
+        Err(GitError::CommandFailed { .. }) => {
+            // Rebase failed with conflicts - abort but leave conflict markers
+            // This surfaces the conflicts directly in the worker worktree
+            tracing::warn!(
+                branch = %branch,
+                upstream = %upstream,
+                worktree = %resumed_worktree_path.display(),
+                "sync conflict in resumed task worktree - aborting rebase and leaving conflict markers"
+            );
+
+            // Abort the rebase to clean up git state but leave the conflict markers
+            // (they're already in the working directory from the failed rebase)
+            let _ = worktree_git
+                .run_command(vec!["rebase".into(), "--abort".into()])
+                .await;
+
+            // After abort, we need to bring the target changes into the worktree
+            // with merge markers. Use a merge approach instead.
+            if let Err(e) = worktree_git
+                .run_command(vec![
+                    "merge".into(),
+                    "--no-commit".into(),
+                    "--no-ff".into(),
+                    upstream.to_string(),
+                ])
+                .await
+            {
+                tracing::info!(
+                    branch = %branch,
+                    upstream = %upstream,
+                    error = %e,
+                    "merge with conflict markers applied in resumed worktree"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                branch = %branch,
+                upstream = %upstream,
+                error = %e,
+                "failed to rebase resumed task branch"
+            );
+        }
     }
 }
 
