@@ -2476,6 +2476,42 @@ where
     serde_json::from_value(value)
 }
 
+fn tool_output_view() -> RmcpTool {
+    RmcpTool::new(
+        "output_view".to_string(),
+        "Paginated view of a truncated tool output. When a tool result was truncated, \
+         the full output is stashed and can be browsed here by tool_use_id."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["tool_use_id"],
+            "properties": {
+                "tool_use_id": {"type": "string", "description": "The tool_use_id from the truncated result"},
+                "offset": {"type": "integer", "minimum": 0, "description": "Line offset (0-based, default 0)"},
+                "limit": {"type": "integer", "minimum": 1, "description": "Number of lines to return (default 200)"}
+            }
+        }),
+    )
+}
+
+fn tool_output_grep() -> RmcpTool {
+    RmcpTool::new(
+        "output_grep".to_string(),
+        "Regex search within a truncated tool output. Returns matching lines with \
+         context from the full stashed output."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["tool_use_id", "pattern"],
+            "properties": {
+                "tool_use_id": {"type": "string", "description": "The tool_use_id from the truncated result"},
+                "pattern": {"type": "string", "description": "Regex pattern to search for"},
+                "context_lines": {"type": "integer", "minimum": 0, "description": "Lines of context around each match (default 3)"}
+            }
+        }),
+    )
+}
+
 fn base_tool_schemas() -> Vec<serde_json::Value> {
     let mut tool_values = vec![
         serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
@@ -2488,6 +2524,8 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
     tool_values.push(serde_json::to_value(tool_read()).expect("serialize tool_read"));
     tool_values.push(serde_json::to_value(tool_lsp()).expect("serialize tool_lsp"));
+    tool_values.push(serde_json::to_value(tool_output_view()).expect("serialize tool_output_view"));
+    tool_values.push(serde_json::to_value(tool_output_grep()).expect("serialize tool_output_grep"));
     tool_values
 }
 
