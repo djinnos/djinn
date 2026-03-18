@@ -97,7 +97,7 @@ impl NoteRepository {
         Ok(posterior)
     }
 
-    pub async fn confidence_map(&self, note_ids: &[String]) -> Result<HashMap<String, f64>> {
+    pub async fn note_confidence_map(&self, note_ids: &[String]) -> Result<HashMap<String, f64>> {
         if note_ids.is_empty() {
             return Ok(HashMap::new());
         }

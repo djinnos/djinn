@@ -84,7 +84,7 @@ impl NoteRepository {
         let graph_scores = self.graph_proximity_scores(&candidate_ids, 2).await?;
         let task_scores = self.task_affinity_scores(project_id, task_id).await?;
 
-        let confidence_map = self.confidence_map(&candidate_ids).await?;
+        let confidence_map = self.note_confidence_map(&candidate_ids).await?;
 
         let signals = vec![
             (lexical_scores, 60.0),
