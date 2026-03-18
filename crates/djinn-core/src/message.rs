@@ -703,6 +703,56 @@ mod tests {
         assert_eq!(c.messages, back.messages);
     }
 
+    fn mixed_provider_conversation() -> Conversation {
+        Conversation {
+            messages: vec![
+                Message::system("Follow policy."),
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        ContentBlock::text("Need weather"),
+                        ContentBlock::ToolResult {
+                            tool_use_id: "orphan".into(),
+                            content: vec![ContentBlock::text("cached")],
+                            is_error: true,
+                        },
+                        ContentBlock::text(" now"),
+                    ],
+                    metadata: None,
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::text("Checking."),
+                        ContentBlock::ToolUse {
+                            id: "call_1".into(),
+                            name: "weather".into(),
+                            input: json!({"city": "Paris"}),
+                        },
+                        ContentBlock::text("Done."),
+                    ],
+                    metadata: None,
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        ContentBlock::ToolResult {
+                            tool_use_id: "call_1".into(),
+                            content: vec![ContentBlock::text("72F"), ContentBlock::text(" sunny")],
+                            is_error: false,
+                        },
+                        ContentBlock::text("Thanks"),
+                        ContentBlock::Text {
+                            text: String::new(),
+                        },
+                    ],
+                    metadata: None,
+                },
+                Message::assistant("It is 72F and sunny."),
+            ],
+        }
+    }
+
     // ── OpenAI serialization ──────────────────────────────────────────────────
 
     #[test]
@@ -745,14 +795,46 @@ mod tests {
         });
 
         let msgs = c.to_openai_messages();
-        // assistant with tool_calls
         assert_eq!(msgs[0]["role"], "assistant");
         assert!(msgs[0]["tool_calls"].is_array());
         assert_eq!(msgs[0]["tool_calls"][0]["id"], "tc_1");
-        // tool result
         assert_eq!(msgs[1]["role"], "tool");
         assert_eq!(msgs[1]["tool_call_id"], "tc_1");
         assert_eq!(msgs[1]["content"], "hi");
+    }
+
+    #[test]
+    fn to_openai_messages_preserves_current_tool_result_ordering_and_empty_text_behavior() {
+        let msgs = mixed_provider_conversation().to_openai_messages();
+
+        assert_eq!(msgs.len(), 7);
+        assert_eq!(msgs[0], json!({"role": "system", "content": "Follow policy."}));
+        assert_eq!(
+            msgs[1],
+            json!({
+                "role": "tool",
+                "tool_call_id": "orphan",
+                "content": "cached",
+                "is_error": true,
+            })
+        );
+        assert_eq!(msgs[2], json!({"role": "user", "content": "Need weather now"}));
+        assert_eq!(msgs[3]["role"], "assistant");
+        assert_eq!(msgs[3]["content"], "Checking.Done.");
+        assert_eq!(msgs[3]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(msgs[3]["tool_calls"][0]["function"]["name"], "weather");
+        assert_eq!(msgs[3]["tool_calls"][0]["function"]["arguments"], "{\"city\":\"Paris\"}");
+        assert_eq!(
+            msgs[4],
+            json!({
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "72F sunny",
+                "is_error": false,
+            })
+        );
+        assert_eq!(msgs[5], json!({"role": "user", "content": "Thanks"}));
+        assert_eq!(msgs[6], json!({"role": "assistant", "content": "It is 72F and sunny."}));
     }
 
     // ── Anthropic serialization ───────────────────────────────────────────────
@@ -779,7 +861,6 @@ mod tests {
         let (sys, msgs) = c.to_anthropic_messages();
         assert!(sys.is_none());
         assert_eq!(msgs.len(), 1);
-        // Content must be an array.
         assert!(msgs[0]["content"].is_array());
         assert_eq!(msgs[0]["content"][0]["type"], "text");
         assert_eq!(msgs[0]["content"][0]["text"], "explain recursion");
@@ -814,7 +895,188 @@ mod tests {
         assert_eq!(msgs[1]["content"][0]["tool_use_id"], "tu_1");
     }
 
+    #[test]
+    fn to_anthropic_messages_preserve_roles_and_block_order() {
+        let (system, msgs) = mixed_provider_conversation().to_anthropic_messages();
+
+        assert_eq!(system, Some("Follow policy.".to_string()));
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"][0], json!({"type": "text", "text": "Need weather"}));
+        assert_eq!(msgs[0]["content"][1]["type"], "tool_result");
+        assert_eq!(msgs[0]["content"][1]["tool_use_id"], "orphan");
+        assert_eq!(msgs[0]["content"][2], json!({"type": "text", "text": " now"}));
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"][0], json!({"type": "text", "text": "Checking."}));
+        assert_eq!(msgs[1]["content"][1]["type"], "tool_use");
+        assert_eq!(msgs[1]["content"][1]["name"], "weather");
+        assert_eq!(msgs[1]["content"][2], json!({"type": "text", "text": "Done."}));
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
+        assert_eq!(msgs[2]["content"][1], json!({"type": "text", "text": "Thanks"}));
+        assert_eq!(msgs[2]["content"][2], json!({"type": "text", "text": ""}));
+        assert_eq!(msgs[3]["role"], "assistant");
+        assert_eq!(msgs[3]["content"][0], json!({"type": "text", "text": "It is 72F and sunny."}));
+    }
+
+    // ── Google serialization ──────────────────────────────────────────────────
+
+    #[test]
+    fn to_google_contents_maps_roles_and_parts() {
+        let (system, contents) = mixed_provider_conversation().to_google_contents();
+
+        assert_eq!(system, Some("Follow policy.".to_string()));
+        assert_eq!(contents.len(), 4);
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[0]["parts"], json!([
+            {"text": "Need weather"},
+            {"text": "cached"},
+            {"text": " now"}
+        ]));
+        assert_eq!(contents[1]["role"], "model");
+        assert_eq!(contents[1]["parts"], json!([
+            {"text": "Checking."},
+            {"functionCall": {"name": "weather", "args": {"city": "Paris"}}},
+            {"text": "Done."}
+        ]));
+        assert_eq!(contents[2]["role"], "user");
+        assert_eq!(contents[2]["parts"], json!([
+            {"text": "72F"},
+            {"text": " sunny"},
+            {"text": "Thanks"},
+            {"text": ""}
+        ]));
+        assert_eq!(contents[3]["role"], "model");
+        assert_eq!(contents[3]["parts"], json!([{"text": "It is 72F and sunny."}]));
+    }
+
+    // ── OpenAI Responses serialization ────────────────────────────────────────
+
+    #[test]
+    fn to_openai_responses_input_maps_mixed_conversation() {
+        let (instructions, input) = mixed_provider_conversation().to_openai_responses_input();
+
+        assert_eq!(instructions, Some("Follow policy.".to_string()));
+        assert_eq!(input.len(), 9);
+        assert_eq!(
+            input[0],
+            json!({
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Need weather"}]
+            })
+        );
+        assert_eq!(
+            input[1],
+            json!({
+                "type": "function_call_output",
+                "call_id": "orphan",
+                "output": "Error: cached"
+            })
+        );
+        assert_eq!(
+            input[2],
+            json!({
+                "role": "user",
+                "content": [{"type": "input_text", "text": " now"}]
+            })
+        );
+        assert_eq!(
+            input[3],
+            json!({
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Checking."}]
+            })
+        );
+        assert_eq!(
+            input[4],
+            json!({
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "weather",
+                "arguments": "{\"city\":\"Paris\"}"
+            })
+        );
+        assert_eq!(
+            input[5],
+            json!({
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Done."}]
+            })
+        );
+        assert_eq!(
+            input[6],
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "72F
+ sunny"
+            })
+        );
+    }
+
+    #[test]
+    fn to_openai_responses_input_merges_multiple_system_messages() {
+        let conversation = Conversation {
+            messages: vec![
+                Message::system("First rule."),
+                Message::system("Second rule."),
+                Message::user("Hello"),
+            ],
+        };
+
+        let (instructions, input) = conversation.to_openai_responses_input();
+
+        assert_eq!(instructions, Some("First rule.
+
+Second rule.".to_string()));
+        assert_eq!(
+            input,
+            vec![json!({
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Hello"}]
+            })]
+        );
+    }
+
     // ── token_estimate ────────────────────────────────────────────────────────
+
+    #[test]
+    fn token_estimate_counts_text_tool_inputs_and_results() {
+        let conversation = Conversation {
+            messages: vec![
+                Message::system("skip role but count text"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::text("abcd"),
+                        ContentBlock::ToolUse {
+                            id: "call_1".into(),
+                            name: "weather".into(),
+                            input: json!({"city": "Paris"}),
+                        },
+                    ],
+                    metadata: None,
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call_1".into(),
+                        content: vec![ContentBlock::text("1234"), ContentBlock::text("5678")],
+                        is_error: false,
+                    }],
+                    metadata: None,
+                },
+            ],
+        };
+
+        let expected_chars = "skip role but count text".len()
+            + "abcd".len()
+            + "weather".len()
+            + json!({"city": "Paris"}).to_string().len()
+            + "1234".len()
+            + "5678".len();
+        assert_eq!(conversation.token_estimate(), expected_chars / 4);
+    }
 
     #[test]
     fn token_estimate_nonzero_for_nonempty() {
