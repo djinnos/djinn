@@ -93,19 +93,6 @@ pub(crate) fn log_snippet(text: &str, max_chars: usize) -> String {
     }
 }
 
-pub(crate) fn format_command_names(specs: &[djinn_core::commands::CommandSpec]) -> Option<String> {
-    if specs.is_empty() {
-        return None;
-    }
-    Some(
-        specs
-            .iter()
-            .map(|s| format!("- `{}`", s.name))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
-}
-
 /// Format command specs as `- **name**: \`command\`` for display in prompts.
 pub(crate) fn format_command_details(
     specs: &[djinn_core::commands::CommandSpec],
