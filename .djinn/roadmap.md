@@ -9,13 +9,14 @@ tags: []
 
 
 
+
 # Roadmap — Djinn Server Rust Rewrite
 
 Phased delivery plan for v1 requirements. Each phase builds on the previous and has testable success criteria. Phases are sequenced by real dependencies — later phases require earlier foundations.
 
 ## Progress Overview
 
-_Updated: 2026-03-17_
+_Updated: 2026-03-18_
 
 | Phase | Status | Remaining |
 |-------|--------|-----------|
@@ -34,31 +35,22 @@ _Updated: 2026-03-17_
 | Phase 13: Chat Experience | Complete | -- |
 | Phase 14: Desktop SSE Completeness | Complete | -- |
 | Phase 15: Deep Module Architecture | Complete | -- |
-| Phase 16: Operational Reliability | Not started | ADR-022 remaining items |
+| Phase 16: Operational Reliability | Not started | ~~ADR-022~~ superseded by ADR-036 |
 | Phase 17: Cognitive Memory | In progress | 17a (`9x3j`, 8 tasks) + 17b (`iuni`, 6 tasks) active; 17c/17d planned |
 | Phase 18: Test Coverage & CI | Not started | ADR-026 Phases 2-3 |
 | Phase 19: Agent Role Hierarchy | Not started | ADR-034: Architect patrol, task types, escalation |
+| **Phase 20: Structured Session Finalization** | **Not started** | **ADR-036: Finalize tools, forced tool choice, nudge loop** |
 
 **V1 server phases 1-9 complete (55/55 items, 100%).**
 **Post-V1 phases 10-15 complete: slot architecture, agent loop, grooming, chat, SSE, deep modules.**
 **Phase 17 (Cognitive Memory) active: 17a retrieval pipeline + 17b association learning on the board.**
+**Phase 20 (Structured Session Finalization) planned: eliminates 67% session waste via finalize tools + tool_choice: required.**
 **Phases 16, 18-19 planned: operational reliability, test/CI pipeline, agent role hierarchy (ADR-034).**
 
-**ADR-008:** Goose library replaced summon — then itself replaced by own agent loop (ADR-027). MCP-connect bridge (`1tst`) and scaffold system (`1nby`) dropped. See [[ADR-008: Agent Harness -- Goose Library over Summon Subprocess Spawning]].
+**ADR-022:** Outcome-based session validation. **SUPERSEDED by ADR-036** — text-only completion replaced by finalize tools + forced tool choice.
 
-**ADR-009:** Phases eliminated. No dispatch grouping -- tasks dispatch when open + unblocked. Simplified execution tools (6 instead of 26). See [[ADR-009: Simplified Execution -- No Phases, Direct Task Dispatch]].
+**ADR-036:** Structured session finalization. Finalize tools per role, `tool_choice: required` on every turn, nudge loop fallback. Eliminates 67% text-only session waste. See [[ADR-036: Structured Session Finalization — Finalize Tools and Forced Tool Choice]].
 
-**ADR-010:** Session cost tracking. Per-task session history with token metrics for desktop visibility. See [[ADR-010: Session Cost Tracking -- Per-Task Token Metrics]].
-
-**ADR-012:** Epic review batches. Tasks close immediately after merge; epic review runs as persisted batch orchestration. Structured output nudging with retry budget. See [[ADR-012 Epic Review Batches and Structured Output Nudging]].
-
-**ADR-013:** OS-level shell sandboxing. Landlock (Linux) + Seatbelt (macOS) for kernel-enforced filesystem isolation. Supersedes ADR-011. See [[ADR-013: OS-Level Shell Sandboxing -- Landlock + Seatbelt]].
-
-**ADR-022:** Outcome-based session validation. Git diff replaces worker DONE marker; AC met state replaces reviewer text markers; circuit breakers prevent infinite loops. See [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]].
-
-**ADR-027:** Own the agent loop. Goose fully replaced with Djinn-owned provider abstraction, reply loop, compaction, OAuth, session messages, and Langfuse telemetry. See [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]].
-
-**ADR-028:** Deep module architecture. `#![warn(unreachable_pub)]` enforced, facade re-exports, pub(crate) sweep, cross-coupling extraction. See [[ADR-028: Module Visibility Enforcement and Deep Module Architecture]].
 
 ## Phase 1: Foundation — Database, Schema, and Core Server ✅
 
