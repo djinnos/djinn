@@ -9,8 +9,8 @@ use rmcp::{
     ServerHandler,
     handler::server::router::tool::ToolRouter,
     model::{
-        ClientJsonRpcMessage, Implementation, ProtocolVersion, ServerCapabilities,
-        ServerInfo, ServerJsonRpcMessage,
+        ClientJsonRpcMessage, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+        ServerJsonRpcMessage,
     },
     tool_handler,
     transport::{
@@ -19,8 +19,7 @@ use rmcp::{
         streamable_http_server::{
             SessionId, SessionManager, StreamableHttpServerConfig, StreamableHttpService,
             session::local::{
-                LocalSessionManager, LocalSessionManagerError, SessionConfig,
-                create_local_session,
+                LocalSessionManager, LocalSessionManagerError, SessionConfig, create_local_session,
             },
         },
     },
@@ -140,7 +139,11 @@ impl DjinnMcpServer {
 
     #[cfg(test)]
     pub(crate) async fn recorded_note_ids(&self) -> Vec<String> {
-        self.co_access_batch.read().await.recorded_note_ids().to_vec()
+        self.co_access_batch
+            .read()
+            .await
+            .recorded_note_ids()
+            .to_vec()
     }
 }
 
@@ -171,15 +174,23 @@ impl SessionEndHookSessionManager {
     }
 
     fn state(&self) -> &McpState {
-        self.state.as_ref().expect("session manager state is configured")
+        self.state
+            .as_ref()
+            .expect("session manager state is configured")
     }
 
     async fn insert_session_server(&self, session_id: SessionId, server: DjinnMcpServer) {
-        self.session_servers.write().await.insert(session_id, server);
+        self.session_servers
+            .write()
+            .await
+            .insert(session_id, server);
     }
 
     #[cfg(test)]
-    pub(crate) async fn server_for_session(&self, session_id: &SessionId) -> Option<DjinnMcpServer> {
+    pub(crate) async fn server_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<DjinnMcpServer> {
         self.session_servers.read().await.get(session_id).cloned()
     }
 

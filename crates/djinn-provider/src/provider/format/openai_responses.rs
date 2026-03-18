@@ -82,8 +82,18 @@ impl OpenAIResponsesProvider {
                 headers.insert(n, v);
             }
         }
+        if let Some(session_affinity_key) = &self.config.session_affinity_key
+            && is_fireworks_base_url(&self.config.base_url)
+            && let Ok(value) = reqwest::header::HeaderValue::from_str(session_affinity_key)
+        {
+            headers.insert("x-session-affinity", value);
+        }
         headers
     }
+}
+
+fn is_fireworks_base_url(base_url: &str) -> bool {
+    base_url.contains("fireworks.ai")
 }
 
 // ─── SSE parsing ──────────────────────────────────────────────────────────────
@@ -360,6 +370,7 @@ mod tests {
             model_id: "gpt-5.1-codex".to_string(),
             context_window: 128000,
             telemetry: None,
+            session_affinity_key: None,
             provider_headers: Default::default(),
             capabilities: ProviderCapabilities::default(),
         })

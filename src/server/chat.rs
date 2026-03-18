@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use axum::Json;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -168,6 +169,7 @@ fn sse_json_event<T: Serialize>(event: &str, payload: &T) -> Event {
 
 pub(super) async fn completions_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<
     Sse<impl futures::Stream<Item = Result<Event, Infallible>>>,
@@ -230,12 +232,20 @@ pub(super) async fn completions_handler(
             (axum::http::StatusCode::BAD_REQUEST, format!("provider credential resolution failed: {e}"))
         })?;
 
+    let session_id = headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+
     let provider_config = match provider_credential {
         ProviderCredential::OAuthConfig(mut cfg) => {
             cfg.model_id = resolved_model.clone();
             cfg.context_window = context_window.max(0) as u32;
             cfg.telemetry = None;
-            cfg
+            cfg.session_affinity_key = Some(session_id.clone());
+            *cfg
         }
         ProviderCredential::ApiKey(_name, api_key) => {
             let base_url = state
@@ -253,6 +263,7 @@ pub(super) async fn completions_handler(
                 model_id: resolved_model,
                 context_window: context_window.max(0) as u32,
                 telemetry: None,
+                session_affinity_key: Some(session_id.clone()),
                 provider_headers: Default::default(),
                 capabilities: capabilities_for_provider(&provider_id),
             }
