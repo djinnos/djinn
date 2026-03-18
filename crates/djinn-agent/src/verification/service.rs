@@ -155,6 +155,7 @@ mod tests {
         let repo = VerificationCacheRepository::new(state.clone());
         let serialized = serde_json::to_string(&vec![CommandResult {
             name: "verify".into(),
+            command: "echo ok".into(),
             exit_code: 0,
             stdout: "ok".into(),
             stderr: String::new(),

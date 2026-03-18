@@ -395,8 +395,8 @@ fn format_verification_failure_feedback(
         let stdout = truncate_output(&cmd.stdout, MAX_OUTPUT_CHARS);
         let stderr = truncate_output(&cmd.stderr, MAX_OUTPUT_CHARS);
         let mut msg = format!(
-            "Verification command '{}' failed with exit code {}.\n\nstdout:\n{stdout}\nstderr:\n{stderr}",
-            cmd.name, cmd.exit_code,
+            "Verification command '{}' (`{}`) failed with exit code {}.\n\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            cmd.name, cmd.command, cmd.exit_code,
         );
         if cmd.stdout.len() > MAX_OUTPUT_CHARS || cmd.stderr.len() > MAX_OUTPUT_CHARS {
             msg.push_str("\n\n… [output truncated]");
@@ -426,7 +426,8 @@ mod tests {
             cached: false,
             setup_results: vec![],
             verification_results: vec![CommandResult {
-                name: "cargo clippy".into(),
+                name: "clippy".into(),
+                command: "cargo clippy --workspace -- -D warnings".into(),
                 exit_code: 101,
                 stdout: stdout.into(),
                 stderr: stderr.into(),
@@ -448,7 +449,8 @@ mod tests {
             feedback.len()
         );
         assert!(feedback.contains("[output truncated]"));
-        assert!(feedback.contains("cargo clippy"));
+        assert!(feedback.contains("clippy"));
+        assert!(feedback.contains("cargo clippy --workspace -- -D warnings"));
         assert!(feedback.contains("exit code 101"));
     }
 
