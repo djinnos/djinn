@@ -12,6 +12,7 @@ use djinn_core::models::{
 use crate::database::Database;
 use crate::error::{DbError as Error, DbResult as Result};
 
+mod association;
 mod context;
 mod crud;
 mod file_helpers;

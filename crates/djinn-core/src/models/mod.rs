@@ -2,6 +2,7 @@ pub mod credential;
 pub mod epic;
 pub mod git_settings;
 pub mod note;
+pub mod note_association;
 pub mod project;
 pub mod provider;
 pub mod session;
@@ -17,6 +18,7 @@ pub use note::{
     HealthReport, Note, NoteAbstract, NoteCompact, NoteOverview, NoteSearchResult, OrphanNote,
     ReindexSummary, StaleFolder,
 };
+pub use note_association::{NoteAssociation, canonical_pair};
 pub use project::Project;
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
 pub use session::{SessionRecord, SessionStatus};
