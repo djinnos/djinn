@@ -97,6 +97,7 @@ impl MergeValidationFailureMetadata {
 mod actor;
 mod commands;
 mod conversation_store;
+pub(crate) mod finalize_handlers;
 pub mod helpers;
 mod lifecycle;
 mod pool;

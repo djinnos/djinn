@@ -982,9 +982,13 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         .await;
     }
 
-    // Log reviewer feedback.
+    // Log reviewer feedback from text markers — only when no finalize payload is
+    // present. With ADR-036, reviewer feedback comes via submit_review.feedback
+    // and is logged by process_finalize_payload below.
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    if let Some(feedback) = final_output.reviewer_feedback.as_deref() {
+    if final_output.finalize_payload.is_none()
+        && let Some(feedback) = final_output.reviewer_feedback.as_deref()
+    {
         let payload = serde_json::json!({ "body": feedback }).to_string();
         if let Err(e) = task_repo
             .log_activity(
@@ -998,6 +1002,18 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         {
             tracing::warn!(task_id = %task_id, error = %e, "failed to store reviewer feedback comment");
         }
+    }
+
+    // Process finalize tool payload (ADR-036): log structured activity and apply
+    // side effects (e.g. AC updates for submit_review) before on_complete runs.
+    if final_result.is_ok() {
+        super::finalize_handlers::process_finalize_payload(
+            &final_output.finalize_payload,
+            role.config().finalize_tool_name,
+            &task_id,
+            &app_state,
+        )
+        .await;
     }
 
     // Log session errors.

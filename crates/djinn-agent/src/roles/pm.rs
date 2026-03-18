@@ -2,6 +2,7 @@ use crate::context::AgentContext;
 use crate::extension;
 use crate::output_parser::ParsedAgentOutput;
 use crate::prompts::TaskContext;
+use crate::roles::finalize::SubmitDecision;
 use djinn_core::models::{Task, TransitionAction};
 use djinn_db::TaskRepository;
 use futures::future::BoxFuture;
@@ -26,10 +27,39 @@ impl AgentRole for PmRole {
     fn on_complete<'a>(
         &'a self,
         task_id: &'a str,
-        _output: &'a ParsedAgentOutput,
+        output: &'a ParsedAgentOutput,
         app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
         Box::pin(async move {
+            // ADR-036: use the decision from the finalize payload when present.
+            if let Some(payload) = &output.finalize_payload
+                && let Ok(decision) = serde_json::from_value::<SubmitDecision>(payload.clone())
+            {
+                let action = match decision.decision.as_str() {
+                    // reopen / decompose: complete the intervention and send back to worker.
+                    "reopen" | "decompose" => TransitionAction::PmInterventionComplete,
+                    // force_close: hard-close the task.
+                    "force_close" => TransitionAction::ForceClose,
+                    // escalate: release back to the PM queue (needs_pm_intervention).
+                    "escalate" => TransitionAction::PmInterventionRelease,
+                    other => {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            decision = %other,
+                            "PM agent: unrecognized decision value; defaulting to complete"
+                        );
+                        TransitionAction::PmInterventionComplete
+                    }
+                };
+                tracing::info!(
+                    task_id = %task_id,
+                    decision = %decision.decision,
+                    "PM agent: submit_decision → applying transition"
+                );
+                return Some((action, decision.rationale));
+            }
+
+            // Fallback: check if the task already transitioned (pre-ADR-036 PM tools).
             let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
             if let Ok(Some(task)) = repo.get(task_id).await
                 && task.status != "in_pm_intervention"
