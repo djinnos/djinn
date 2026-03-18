@@ -673,6 +673,185 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_contract_task_and_epic_snapshot_shapes() {
+        use insta::assert_json_snapshot;
+
+        let app = test_helpers::create_test_app();
+        let session_id = test_helpers::initialize_mcp_session(&app).await;
+
+        let _ = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            serde_json::json!({
+                "name": "contract-task-epic-snapshots",
+                "path": CONTRACT_PROJECT_PATH,
+            }),
+        )
+        .await;
+
+        let epic = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_create",
+            serde_json::json!({
+                "project": CONTRACT_PROJECT_PATH,
+                "title": "Snapshot Epic",
+                "description": "Epic used for MCP snapshot contract testing"
+            }),
+        )
+        .await;
+
+        let task = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "task_create",
+            serde_json::json!({
+                "project": CONTRACT_PROJECT_PATH,
+                "epic_id": epic["id"],
+                "title": "Snapshot Task",
+                "description": "Task used for MCP snapshot contract testing"
+            }),
+        )
+        .await;
+
+        let task_show = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "task_show",
+            serde_json::json!({
+                "project": CONTRACT_PROJECT_PATH,
+                "id": task["id"],
+            }),
+        )
+        .await;
+        assert_json_snapshot!("task_show_response", task_show, {
+            ".id" => "[UUID]",
+            ".epic_id" => "[UUID]",
+            ".project_id" => "[UUID]",
+            ".short_id" => "[SHORT_ID]",
+            ".created_at" => "[TIMESTAMP]",
+            ".updated_at" => "[TIMESTAMP]"
+        });
+
+        let task_list = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "task_list",
+            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "limit": 10, "offset": 0 }),
+        )
+        .await;
+        assert_json_snapshot!("task_list_response", task_list, {
+            ".tasks.**.id" => "[UUID]",
+            ".tasks.**.epic_id" => "[UUID]",
+            ".tasks.**.project_id" => "[UUID]",
+            ".tasks.**.short_id" => "[SHORT_ID]",
+            ".tasks.**.created_at" => "[TIMESTAMP]",
+            ".tasks.**.updated_at" => "[TIMESTAMP]"
+        });
+
+        let task_count_plain = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "task_count",
+            serde_json::json!({ "project": CONTRACT_PROJECT_PATH }),
+        )
+        .await;
+        assert_json_snapshot!("task_count_plain_response", task_count_plain);
+
+        let task_count_status = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "task_count",
+            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "group_by": "status" }),
+        )
+        .await;
+        assert_json_snapshot!("task_count_grouped_by_status_response", task_count_status);
+
+        let task_count_priority = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "task_count",
+            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "group_by": "priority" }),
+        )
+        .await;
+        assert_json_snapshot!("task_count_grouped_by_priority_response", task_count_priority);
+
+        let _comment = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "task_comment_add",
+            serde_json::json!({
+                "project": CONTRACT_PROJECT_PATH,
+                "id": task["id"],
+                "actor_id": "u1",
+                "actor_role": "user",
+                "body": "snapshot comment"
+            }),
+        )
+        .await;
+
+        let task_activity = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "task_activity_list",
+            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "id": task["id"] }),
+        )
+        .await;
+        assert_json_snapshot!("task_activity_list_response", task_activity, {
+            ".entries.**.id" => "[UUID]",
+            ".entries.**.task_id" => "[UUID]",
+            ".entries.**.actor_id" => "[UUID]",
+            ".entries.**.created_at" => "[TIMESTAMP]",
+            ".entries.**.timestamp" => "[TIMESTAMP]"
+        });
+
+        let epic_show = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_show",
+            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "id": epic["id"] }),
+        )
+        .await;
+        assert_json_snapshot!("epic_show_response", epic_show, {
+            ".id" => "[UUID]",
+            ".project_id" => "[UUID]",
+            ".short_id" => "[SHORT_ID]",
+            ".created_at" => "[TIMESTAMP]",
+            ".updated_at" => "[TIMESTAMP]"
+        });
+
+        let epic_list = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "epic_list",
+            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "limit": 10, "offset": 0 }),
+        )
+        .await;
+        assert_json_snapshot!("epic_list_response", epic_list, {
+            ".epics.**.id" => "[UUID]",
+            ".epics.**.project_id" => "[UUID]",
+            ".epics.**.created_at" => "[TIMESTAMP]",
+            ".epics.**.updated_at" => "[TIMESTAMP]"
+        });
+
+        let blockers = test_helpers::mcp_call_tool(
+            &app,
+            &session_id,
+            "task_blockers_list",
+            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "id": task["id"] }),
+        )
+        .await;
+        assert_json_snapshot!("task_blockers_list_response", blockers, {
+            ".blockers.**.id" => "[UUID]",
+            ".blockers.**.epic_id" => "[UUID]",
+            ".blockers.**.project_id" => "[UUID]",
+            ".blockers.**.created_at" => "[TIMESTAMP]",
+            ".blockers.**.updated_at" => "[TIMESTAMP]"
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_contract_not_found_shapes_include_error_field() {
         let app = test_helpers::create_test_app();
         let session_id = test_helpers::initialize_mcp_session(&app).await;

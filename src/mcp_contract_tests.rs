@@ -1456,6 +1456,7 @@ mod system_tools {
 // ── task_tools ────────────────────────────────────────────────────────────────
 
 mod task_tools {
+    use insta::assert_json_snapshot;
     use serde_json::json;
 
     use crate::events::EventBus;
@@ -1464,6 +1465,7 @@ mod task_tools {
         create_test_task, initialize_mcp_session, mcp_call_tool,
     };
     use djinn_db::TaskRepository;
+
 
     #[tokio::test]
     async fn task_create_success_shape() {
@@ -1525,6 +1527,14 @@ mod task_tools {
         .await;
         assert!(ok["id"].as_str().is_some());
         assert!(ok["title"].as_str().is_some());
+        assert_json_snapshot!("task_show_response", ok, {
+            ".id" => "[UUID]",
+            ".epic_id" => "[UUID]",
+            ".project_id" => "[UUID]",
+            ".short_id" => "[SHORT_ID]",
+            ".created_at" => "[TIMESTAMP]",
+            ".updated_at" => "[TIMESTAMP]"
+        });
 
         let err = mcp_call_tool(
             &app,
@@ -1649,6 +1659,14 @@ mod task_tools {
         .await;
         assert_eq!(paged["limit"], 1);
         assert_eq!(paged["offset"], 0);
+        assert_json_snapshot!("task_list_response", paged, {
+            ".tasks.**.id" => "[UUID]",
+            ".tasks.**.epic_id" => "[UUID]",
+            ".tasks.**.project_id" => "[UUID]",
+            ".tasks.**.short_id" => "[SHORT_ID]",
+            ".tasks.**.created_at" => "[TIMESTAMP]",
+            ".tasks.**.updated_at" => "[TIMESTAMP]"
+        });
     }
 
     #[tokio::test]
@@ -1735,6 +1753,7 @@ mod task_tools {
 
         let plain = mcp_call_tool(&app, &sid, "task_count", json!({"project": project.path})).await;
         assert!(plain["total_count"].as_i64().unwrap() >= 2);
+        assert_json_snapshot!("task_count_plain_response", plain);
 
         let grouped = mcp_call_tool(
             &app,
@@ -1744,6 +1763,17 @@ mod task_tools {
         )
         .await;
         assert!(grouped["groups"].as_array().is_some());
+        assert_json_snapshot!("task_count_grouped_by_status_response", grouped);
+
+        let priority_grouped = mcp_call_tool(
+            &app,
+            &sid,
+            "task_count",
+            json!({"project": project.path, "group_by": "priority"}),
+        )
+        .await;
+        assert!(priority_grouped["groups"].as_array().is_some());
+        assert_json_snapshot!("task_count_grouped_by_priority_response", priority_grouped);
     }
 
     #[tokio::test]
@@ -1814,6 +1844,13 @@ mod task_tools {
         )
         .await;
         assert!(activity["entries"].as_array().is_some());
+        assert_json_snapshot!("task_activity_list_response", activity, {
+            ".entries.**.id" => "[UUID]",
+            ".entries.**.task_id" => "[UUID]",
+            ".entries.**.actor_id" => "[UUID]",
+            ".entries.**.created_at" => "[TIMESTAMP]",
+            ".entries.**.timestamp" => "[TIMESTAMP]"
+        });
 
         let blockers = mcp_call_tool(
             &app,
@@ -1823,6 +1860,13 @@ mod task_tools {
         )
         .await;
         assert!(blockers["blockers"].as_array().is_some());
+        assert_json_snapshot!("task_blockers_list_response", blockers, {
+            ".blockers.**.id" => "[UUID]",
+            ".blockers.**.epic_id" => "[UUID]",
+            ".blockers.**.project_id" => "[UUID]",
+            ".blockers.**.created_at" => "[TIMESTAMP]",
+            ".blockers.**.updated_at" => "[TIMESTAMP]"
+        });
 
         let blocked_list = mcp_call_tool(
             &app,

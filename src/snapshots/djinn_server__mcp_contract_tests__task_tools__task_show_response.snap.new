@@ -1,0 +1,32 @@
+---
+source: src/mcp_contract_tests.rs
+assertion_line: 1473
+expression: ok
+---
+{
+  "acceptance_criteria": [
+    "{\"description\":\"default test criterion\",\"met\":false}"
+  ],
+  "active_session": null,
+  "close_reason": null,
+  "closed_at": null,
+  "continuation_count": 0,
+  "created_at": "[TIMESTAMP]",
+  "description": "test task description",
+  "design": "test task design",
+  "epic_id": "[UUID]",
+  "id": "[UUID]",
+  "issue_type": "task",
+  "labels": [],
+  "memory_refs": [],
+  "merge_commit_sha": null,
+  "owner": "test-owner",
+  "priority": 2,
+  "reopen_count": 0,
+  "session_count": 0,
+  "short_id": "[SHORT_ID]",
+  "status": "backlog",
+  "title": "test-task",
+  "updated_at": "[TIMESTAMP]",
+  "verification_failure_count": 0
+}
