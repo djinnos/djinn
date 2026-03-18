@@ -28,7 +28,7 @@ impl OpenAIResponsesProvider {
         &self,
         conversation: &Conversation,
         tools: &[Value],
-        _tool_choice: Option<ToolChoice>,
+        tool_choice: Option<ToolChoice>,
     ) -> Value {
         let (instructions, input_items) = conversation.to_openai_responses_input();
 
@@ -68,6 +68,12 @@ impl OpenAIResponsesProvider {
                 })
                 .collect();
             body["tools"] = json!(tools_spec);
+
+            match tool_choice.unwrap_or(ToolChoice::Auto) {
+                ToolChoice::Auto => {}
+                ToolChoice::Required => body["tool_choice"] = json!("required"),
+                ToolChoice::None => body["tool_choice"] = json!("none"),
+            }
         }
 
         body
@@ -674,6 +680,31 @@ mod tests {
         assert_eq!(tools_arr[0]["type"], "function");
         assert_eq!(tools_arr[0]["name"], "bash");
         assert_eq!(tools_arr[0]["description"], "Run a shell command");
+    }
+
+    #[test]
+    fn test_build_request_sets_required_tool_choice_when_tools_present() {
+        let provider = test_provider();
+        let mut conv = Conversation::new();
+        conv.push(Message::user("list files"));
+        let tools = vec![json!({
+            "name": "bash",
+            "description": "Run a shell command",
+            "inputSchema": {"type": "object"}
+        })];
+
+        let req = provider.build_request(&conv, &tools, Some(ToolChoice::Required));
+        assert_eq!(req["tool_choice"], "required");
+    }
+
+    #[test]
+    fn test_build_request_omits_tool_choice_when_tools_empty() {
+        let provider = test_provider();
+        let mut conv = Conversation::new();
+        conv.push(Message::user("list files"));
+
+        let req = provider.build_request(&conv, &[], Some(ToolChoice::Required));
+        assert!(req.get("tool_choice").is_none());
     }
 
     #[test]

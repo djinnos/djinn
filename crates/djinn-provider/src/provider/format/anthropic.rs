@@ -25,7 +25,7 @@ impl AnthropicProvider {
         &self,
         conversation: &Conversation,
         tools: &[Value],
-        _tool_choice: Option<ToolChoice>,
+        tool_choice: Option<ToolChoice>,
     ) -> Value {
         let (system, messages) = conversation.to_anthropic_messages();
 
@@ -44,6 +44,20 @@ impl AnthropicProvider {
 
         if !tools.is_empty() {
             body["tools"] = json!(tools);
+
+            let thinking_enabled = body
+                .get("thinking")
+                .and_then(|thinking| thinking.get("type"))
+                .and_then(Value::as_str)
+                == Some("enabled");
+
+            if !thinking_enabled {
+                match tool_choice.unwrap_or(ToolChoice::Auto) {
+                    ToolChoice::Auto => {}
+                    ToolChoice::Required => body["tool_choice"] = json!({"type": "any"}),
+                    ToolChoice::None => body["tool_choice"] = json!({"type": "none"}),
+                }
+            }
         }
 
         body
@@ -415,5 +429,30 @@ mod tests {
         let mut input_tokens = 0u32;
         let events = parse_anthropic_event("content_block_stop", data, &mut acc, &mut input_tokens);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_build_request_sets_required_tool_choice_when_tools_present() {
+        let provider = AnthropicProvider::new(test_anthropic_config());
+        let mut conv = Conversation::new();
+        conv.push(crate::message::Message::user("Hello"));
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "input_schema": {"type": "object"}
+        })];
+
+        let req = provider.build_request(&conv, &tools, Some(ToolChoice::Required));
+        assert_eq!(req["tool_choice"]["type"], "any");
+    }
+
+    #[test]
+    fn test_build_request_omits_tool_choice_when_tools_empty() {
+        let provider = AnthropicProvider::new(test_anthropic_config());
+        let mut conv = Conversation::new();
+        conv.push(crate::message::Message::user("Hello"));
+
+        let req = provider.build_request(&conv, &[], Some(ToolChoice::Required));
+        assert!(req.get("tool_choice").is_none());
     }
 }
