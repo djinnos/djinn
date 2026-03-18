@@ -206,6 +206,8 @@ struct CoordinatorActor {
     /// Projects with an active groomer session.
     active_groomer_sessions: HashSet<String>,
     last_stale_sweep: StdInstant,
+    /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
+    prune_tick_counter: u32,
     // Metrics
     dispatched: u64,
     recovered: u64,
@@ -257,6 +259,7 @@ impl CoordinatorActor {
             backlog_debounce: HashMap::new(),
             active_groomer_sessions: HashSet::new(),
             last_stale_sweep: StdInstant::now(),
+            prune_tick_counter: 0,
             dispatched: 0,
             recovered: 0,
         }
@@ -332,6 +335,12 @@ impl CoordinatorActor {
                         };
                         health::sweep_stale_resources(&self.db, &app_state).await;
                         self.last_stale_sweep = StdInstant::now();
+                    }
+                    // Run association pruning once per ~hour (120 ticks at 30s intervals)
+                    self.prune_tick_counter += 1;
+                    if self.prune_tick_counter >= 120 {
+                        self.prune_tick_counter = 0;
+                        self.prune_note_associations().await;
                     }
                 }
             }

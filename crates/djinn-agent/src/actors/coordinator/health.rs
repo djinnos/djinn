@@ -433,3 +433,50 @@ pub(super) async fn sweep_stale_resources(
         }
     }
 }
+
+// ─── Note association pruning ────────────────────────────────────────────────
+
+impl CoordinatorActor {
+    /// Prune stale, low-weight note associations for all projects.
+    /// Called once per hour from the background tick.
+    pub(super) async fn prune_note_associations(&self) {
+        let project_repo = ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+
+        let projects = match project_repo.list().await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: failed to list projects for association pruning");
+                return;
+            }
+        };
+
+        let note_repo = djinn_db::NoteRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+
+        for project in projects {
+            match note_repo.prune_associations(&project.id).await {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!(
+                            project_id = %project.id,
+                            deleted = count,
+                            "CoordinatorActor: pruned stale note associations"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        project_id = %project.id,
+                        error = %e,
+                        "CoordinatorActor: failed to prune note associations"
+                    );
+                }
+            }
+        }
+    }
+}
