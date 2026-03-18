@@ -42,4 +42,5 @@ pub(crate) const GROOMER_CONFIG: RoleConfig = RoleConfig {
     initial_message: crate::prompts::GROOMER_TEMPLATE,
     preserves_session: false,
     is_project_scoped: true,
+    finalize_tool_name: "submit_grooming",
 };
