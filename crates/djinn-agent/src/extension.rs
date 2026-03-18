@@ -2219,38 +2219,6 @@ fn tool_task_show() -> RmcpTool {
     )
 }
 
-fn tool_task_update_ac() -> RmcpTool {
-    RmcpTool::new(
-        "task_update_ac".to_string(),
-        "Update acceptance criteria met/unmet state on a task. Each criterion must include 'met: true' or 'met: false'.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["id", "acceptance_criteria"],
-            "properties": {
-                "id": {"type": "string", "description": "Task UUID or short ID"},
-                "acceptance_criteria": {"type": "array", "items": {"type": "object"}, "description": "Full acceptance criteria array with met state updated"}
-            }
-        }),
-    )
-}
-
-fn tool_task_comment_add() -> RmcpTool {
-    RmcpTool::new(
-        "task_comment_add".to_string(),
-        "Add a comment to a work item.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["id", "body"],
-            "properties": {
-                "id": {"type": "string"},
-                "body": {"type": "string"},
-                "actor_id": {"type": "string"},
-                "actor_role": {"type": "string"}
-            }
-        }),
-    )
-}
-
 fn tool_request_pm() -> RmcpTool {
     RmcpTool::new(
         "request_pm".to_string(),
@@ -2553,7 +2521,6 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
         serde_json::to_value(tool_task_list()).expect("serialize tool_task_list"),
         serde_json::to_value(tool_task_activity_list()).expect("serialize tool_task_activity_list"),
-        serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
         serde_json::to_value(tool_memory_read()).expect("serialize tool_memory_read"),
         serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
         serde_json::to_value(tool_memory_list()).expect("serialize tool_memory_list"),
@@ -2578,11 +2545,10 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     tool_values
 }
 
-/// Tool schemas for TaskReviewer: base + acceptance-criteria update tool.
+/// Tool schemas for TaskReviewer: base + submit_review finalize tool.
+/// task_update_ac is excluded — submit_review sets AC atomically.
 pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    tool_values
-        .push(serde_json::to_value(tool_task_update_ac()).expect("serialize tool_task_update_ac"));
     tool_values.push(
         serde_json::to_value(crate::roles::finalize::tool_submit_review())
             .expect("serialize tool_submit_review"),
@@ -2590,8 +2556,34 @@ pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     tool_values
 }
 
-/// Tool schemas for PM and Groomer: base + task/epic management tools.
-pub(crate) fn tool_schemas_pm_groomer() -> Vec<serde_json::Value> {
+/// Tool schemas for PM: base + task/epic management tools + submit_decision finalize tool.
+/// task_comment_add and task_transition are excluded — submit_decision drives transitions.
+pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    for value in [
+        serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
+        serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
+        serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
+        serde_json::to_value(tool_task_archive_activity())
+            .expect("serialize tool_task_archive_activity"),
+        serde_json::to_value(tool_task_reset_counters())
+            .expect("serialize tool_task_reset_counters"),
+        serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
+        serde_json::to_value(tool_task_blocked_list()).expect("serialize tool_task_blocked_list"),
+        serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
+        serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
+        serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
+        serde_json::to_value(crate::roles::finalize::tool_submit_decision())
+            .expect("serialize tool_submit_decision"),
+    ] {
+        tool_values.push(value);
+    }
+    tool_values
+}
+
+/// Tool schemas for Groomer: base + task/epic management tools + submit_grooming finalize tool.
+/// task_comment_add is excluded — submit_grooming captures session output.
+pub(crate) fn tool_schemas_groomer() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     for value in [
         serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
@@ -2607,8 +2599,6 @@ pub(crate) fn tool_schemas_pm_groomer() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
         serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
         serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
-        serde_json::to_value(crate::roles::finalize::tool_submit_decision())
-            .expect("serialize tool_submit_decision"),
         serde_json::to_value(crate::roles::finalize::tool_submit_grooming())
             .expect("serialize tool_submit_grooming"),
     ] {
@@ -2790,25 +2780,28 @@ mod tests {
         }
 
         let worker = schema_names(tool_schemas_worker());
-        assert!(worker.len() > 1);
         assert!(worker.iter().any(|n| n == "shell"));
         assert!(worker.iter().any(|n| n == "write"));
         assert!(worker.iter().any(|n| n == "edit"));
+        assert!(worker.iter().any(|n| n == "submit_work"));
+        assert!(!worker.iter().any(|n| n == "task_comment_add"));
 
         let reviewer = schema_names(tool_schemas_reviewer());
-        assert!(reviewer.len() > 1);
-        assert!(reviewer.iter().any(|n| n == "task_update_ac"));
+        assert!(reviewer.iter().any(|n| n == "submit_review"));
+        assert!(!reviewer.iter().any(|n| n == "task_update_ac"));
+        assert!(!reviewer.iter().any(|n| n == "task_comment_add"));
 
-        let pm = schema_names(tool_schemas_pm_groomer());
-        assert!(pm.len() > 1);
+        let pm = schema_names(tool_schemas_pm());
         assert!(pm.iter().any(|n| n == "task_create"));
-        assert!(pm.iter().any(|n| n == "task_transition"));
+        assert!(pm.iter().any(|n| n == "submit_decision"));
+        assert!(!pm.iter().any(|n| n == "task_transition"));
+        assert!(!pm.iter().any(|n| n == "task_comment_add"));
 
-        // groomer shares the pm schema set
-        let groomer = schema_names(tool_schemas_pm_groomer());
-        assert!(groomer.len() > 1);
+        let groomer = schema_names(tool_schemas_groomer());
         assert!(groomer.iter().any(|n| n == "task_create"));
         assert!(groomer.iter().any(|n| n == "task_transition"));
+        assert!(groomer.iter().any(|n| n == "submit_grooming"));
+        assert!(!groomer.iter().any(|n| n == "task_comment_add"));
     }
 
     #[test]

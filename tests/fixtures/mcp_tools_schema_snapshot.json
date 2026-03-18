@@ -3968,7 +3968,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "provider_id": {
-            "description": "Provider ID to start OAuth for (accepts catalog/goose aliases, e.g. 'github-copilot').",
+            "description": "Provider ID to start OAuth for (accepts catalog aliases, e.g. 'github-copilot').",
             "type": "string"
           }
         },
