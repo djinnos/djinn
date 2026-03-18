@@ -57,7 +57,7 @@ pub(crate) const PM_CONFIG: RoleConfig = RoleConfig {
     name: "pm",
     display_name: "PM Intervention",
     dispatch_role: "pm",
-    tool_schemas: extension::tool_schemas_pm_groomer,
+    tool_schemas: extension::tool_schemas_pm,
     start_action: |status| match status {
         "needs_pm_intervention" => Some(TransitionAction::PmInterventionStart),
         _ => None,

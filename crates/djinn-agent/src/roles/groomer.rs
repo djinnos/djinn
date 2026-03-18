@@ -36,7 +36,7 @@ pub(crate) const GROOMER_CONFIG: RoleConfig = RoleConfig {
     name: "groomer",
     display_name: "Groomer",
     dispatch_role: "groomer",
-    tool_schemas: extension::tool_schemas_pm_groomer,
+    tool_schemas: extension::tool_schemas_groomer,
     start_action: |_status| None,
     release_action: || TransitionAction::Release,
     initial_message: crate::prompts::GROOMER_TEMPLATE,
