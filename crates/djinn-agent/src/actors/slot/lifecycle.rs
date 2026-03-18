@@ -696,7 +696,6 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                         model: &model_id,
                         agent_type: role.config().name,
                         worktree_path: worktree_path.to_str(),
-                        goose_session_id: None,
                         metadata_json: None,
                     })
                     .await
@@ -737,7 +736,6 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                 model: &model_id,
                 agent_type: role.config().name,
                 worktree_path: worktree_path.to_str(),
-                goose_session_id: None,
                 metadata_json: None,
             })
             .await
@@ -1233,7 +1231,6 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
             model: &model_id,
             agent_type: role.config().name,
             worktree_path: Some(&project_path),
-            goose_session_id: None,
             metadata_json: None,
         })
         .await

@@ -36,7 +36,7 @@ flowchart TD
     RESUME --> R1[Reuse existing worktree]
     R1 --> R2[resume_context_for_task]
     R2 --> R3[session_repo.set_running - mark session running again]
-    R3 --> R4[Use existing goose_session_id + resume kickoff]
+    R3 --> R4[Use existing legacy Goose session ID + resume kickoff]
 
     subgraph Resume Context Priority
         direction TB

@@ -233,7 +233,6 @@ mod tests {
                 model: "test-model",
                 agent_type: "worker",
                 worktree_path: None,
-                goose_session_id: None,
                 metadata_json: None,
             })
             .await

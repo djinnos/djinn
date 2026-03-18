@@ -6,7 +6,7 @@ use crate::database::Database;
 
 /// Column list shared by all session SELECT queries.
 const SESSION_COLS: &str = "id, project_id, task_id, model_id, agent_type, started_at, ended_at, \
-     status, tokens_in, tokens_out, worktree_path, goose_session_id";
+     status, tokens_in, tokens_out, worktree_path";
 
 pub struct SessionRepository {
     db: Database,
@@ -19,7 +19,6 @@ pub struct CreateSessionParams<'a> {
     pub model: &'a str,
     pub agent_type: &'a str,
     pub worktree_path: Option<&'a str>,
-    pub goose_session_id: Option<&'a str>,
     pub metadata_json: Option<&'a str>,
 }
 
@@ -35,8 +34,8 @@ impl SessionRepository {
 
         sqlx::query(
             "INSERT INTO sessions
-                (id, project_id, task_id, model_id, agent_type, status, worktree_path, goose_session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7)",
+                (id, project_id, task_id, model_id, agent_type, status, worktree_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
         )
         .bind(&id)
         .bind(params.project_id)
@@ -44,7 +43,6 @@ impl SessionRepository {
         .bind(params.model)
         .bind(params.agent_type)
         .bind(params.worktree_path)
-        .bind(params.goose_session_id)
         .execute(self.db.pool())
         .await?;
 
@@ -394,7 +392,6 @@ mod tests {
                 model: "openai/gpt-5",
                 agent_type: "worker",
                 worktree_path: Some("/tmp/djinn-worktree-task"),
-                goose_session_id: Some("goose-session-abc123"),
                 metadata_json: None,
             })
             .await

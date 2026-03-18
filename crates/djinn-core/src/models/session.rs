@@ -37,5 +37,4 @@ pub struct SessionRecord {
     pub tokens_in: i64,
     pub tokens_out: i64,
     pub worktree_path: Option<String>,
-    pub goose_session_id: Option<String>,
 }

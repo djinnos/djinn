@@ -11,7 +11,7 @@ The desktop session viewer (see desktop [[ADR-007: Session Viewer — Unified Ch
 - Djinn's `sessions` table stores **metadata only** (id, task_id, model_id, agent_type, status, tokens, timestamps, continuation_of)
 - Actual conversation history lives in **Goose's SQLite database** (`~/.djinn/sessions/`), accessed via Goose's `SessionManager` library
 - No MCP tool or API endpoint exposes session messages — `session_show` returns only metadata
-- The `goose_session_id` field on each session record is the key to look up messages in Goose's DB
+- The `legacy Goose session ID` field on each session record is the key to look up messages in Goose's DB
 
 **SSE infrastructure already exists but is underutilized:**
 - Server already emits `session.started`, `session.completed`, `session.token_update`, `session.compacted` SSE events
@@ -38,7 +38,7 @@ session_messages(id: String, project: String) -> SessionMessagesOutput
 ```json
 {
   "session_id": "...",
-  "goose_session_id": "...",
+  "legacy Goose session ID": "...",
   "agent_type": "worker",
   "messages": [
     {
@@ -55,8 +55,8 @@ session_messages(id: String, project: String) -> SessionMessagesOutput
 ```
 
 **Implementation:**
-1. Look up Djinn session record by `id` to get `goose_session_id`
-2. Use `SessionManager::get_session(goose_session_id)` to load the Goose session
+1. Look up Djinn session record by `id` to get `legacy Goose session ID`
+2. Use `SessionManager::get_session(legacy Goose session ID)` to load the Goose session
 3. Access `session.conversation.messages()` to get the message list
 4. Serialize messages to JSON, preserving content block structure
 5. Return with session metadata (agent_type) so the UI knows who's talking

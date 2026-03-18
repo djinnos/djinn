@@ -23,7 +23,7 @@ flowchart TD
     G -->|Yes, matching model+type+worktree| H[Resume Path]
     G -->|No or mismatch| I[Fresh Path]
 
-    H --> J[Reuse worktree + goose_session_id]
+    H --> J[Reuse worktree + legacy Goose session ID]
     I --> K[prepare_worktree]
     K --> L[Run Setup Commands]
 

@@ -359,7 +359,6 @@ pub struct SessionRecordResponse {
     pub tokens_in: i64,
     pub tokens_out: i64,
     pub worktree_path: Option<String>,
-    pub goose_session_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]

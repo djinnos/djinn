@@ -176,7 +176,6 @@ CREATE TABLE sessions (
     summary TEXT,
     prompt TEXT,
     response TEXT,
-    goose_session_id TEXT,
     paused INTEGER NOT NULL DEFAULT 0,
     compacted INTEGER NOT NULL DEFAULT 0
 );
