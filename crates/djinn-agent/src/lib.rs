@@ -22,6 +22,7 @@ pub mod prompts;
 pub use djinn_provider::provider;
 pub mod roles;
 pub mod sandbox;
+pub(crate) mod truncate;
 
 // ─── Verification (was src/verification/) ────────────────────────────────────
 

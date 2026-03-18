@@ -370,17 +370,6 @@ async fn emit_verification_steps(
 /// Keeps the activity log entry and downstream prompts reasonable.
 const MAX_OUTPUT_CHARS: usize = 3000;
 
-fn truncate_output(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 fn format_verification_failure_feedback(
     result: &crate::verification::service::VerificationResult,
 ) -> String {
@@ -390,16 +379,12 @@ fn format_verification_failure_feedback(
         .chain(result.verification_results.iter())
         .find(|r| r.exit_code != 0);
     if let Some(cmd) = failed {
-        let stdout = truncate_output(&cmd.stdout, MAX_OUTPUT_CHARS);
-        let stderr = truncate_output(&cmd.stderr, MAX_OUTPUT_CHARS);
-        let mut msg = format!(
+        let stdout = crate::truncate::smart_truncate(&cmd.stdout, MAX_OUTPUT_CHARS);
+        let stderr = crate::truncate::smart_truncate(&cmd.stderr, MAX_OUTPUT_CHARS);
+        format!(
             "Verification command '{}' (`{}`) failed with exit code {}.\n\nstdout:\n{stdout}\nstderr:\n{stderr}",
             cmd.name, cmd.command, cmd.exit_code,
-        );
-        if cmd.stdout.len() > MAX_OUTPUT_CHARS || cmd.stderr.len() > MAX_OUTPUT_CHARS {
-            msg.push_str("\n\n… [output truncated]");
-        }
-        msg
+        )
     } else {
         "Verification failed".to_string()
     }
@@ -446,7 +431,7 @@ mod tests {
             "feedback should be under 7k chars, got {}",
             feedback.len()
         );
-        assert!(feedback.contains("[output truncated]"));
+        assert!(feedback.contains("bytes omitted") || feedback.contains("truncated"));
         assert!(feedback.contains("clippy"));
         assert!(feedback.contains("cargo clippy --workspace -- -D warnings"));
         assert!(feedback.contains("exit code 101"));
@@ -457,7 +442,7 @@ mod tests {
         let result = make_result("ok", "error[E0599]: something");
         let feedback = format_verification_failure_feedback(&result);
 
-        assert!(!feedback.contains("[output truncated]"));
+        assert!(!feedback.contains("omitted"));
         assert!(feedback.contains("error[E0599]: something"));
     }
 
@@ -467,18 +452,8 @@ mod tests {
         let result = make_result(&huge_stdout, "small error");
         let feedback = format_verification_failure_feedback(&result);
 
-        assert!(feedback.contains("[output truncated]"));
+        assert!(feedback.contains("bytes omitted") || feedback.contains("truncated"));
         assert!(feedback.len() < 7_000);
-    }
-
-    #[test]
-    fn truncate_output_edge_cases() {
-        assert_eq!(truncate_output("", 10), "");
-        let exact = "abcde";
-        assert_eq!(truncate_output(exact, exact.len()), exact);
-        let unicode = "a😀b";
-        assert_eq!(truncate_output(unicode, 2), "a");
-        assert_eq!(truncate_output(unicode, 5), "a😀");
     }
 
     async fn setup_verifying_task_with_count(count: i64) -> (TaskRepository, String, AgentContext) {

@@ -25,15 +25,9 @@ struct IncomingToolCall {
 }
 
 /// Find the largest byte index <= `idx` that is a valid UTF-8 char boundary.
+#[cfg(test)]
 fn floor_char_boundary(s: &str, idx: usize) -> usize {
-    if idx >= s.len() {
-        return s.len();
-    }
-    let mut i = idx;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
+    crate::truncate::floor_char_boundary(s, idx)
 }
 
 async fn dispatch_tool_call<T>(
@@ -335,13 +329,9 @@ async fn call_task_show(
                                 if let Some(s) = value.as_str()
                                     && s.len() > MAX_PAYLOAD_CHARS
                                 {
-                                    let end = floor_char_boundary(s, MAX_PAYLOAD_CHARS);
-                                    let truncated = format!(
-                                        "{}… [truncated, {} total chars]",
-                                        &s[..end],
-                                        s.len()
+                                    *value = serde_json::json!(
+                                        crate::truncate::smart_truncate(s, MAX_PAYLOAD_CHARS)
                                     );
-                                    *value = serde_json::json!(truncated);
                                 }
                             }
                         }
@@ -402,10 +392,9 @@ async fn call_task_activity_list(
                     if let Some(s) = value.as_str()
                         && s.len() > MAX_PAYLOAD_CHARS
                     {
-                        let end = floor_char_boundary(s, MAX_PAYLOAD_CHARS);
-                        let truncated =
-                            format!("{}… [truncated, {} total chars]", &s[..end], s.len());
-                        *value = serde_json::json!(truncated);
+                        *value = serde_json::json!(
+                            crate::truncate::smart_truncate(s, MAX_PAYLOAD_CHARS)
+                        );
                     }
                 }
             }
@@ -2471,42 +2460,13 @@ fn tool_task_kill_session() -> RmcpTool {
 }
 
 /// Truncate shell output to prevent blowing the context window.
-/// Hard cap at 50 KB — both line count and byte size are enforced.
+/// Hard cap at 50 KB / 2000 lines — uses 60/40 head+tail split to preserve
+/// both initial context and final errors/results.
 fn truncate_shell_output(raw: &str) -> String {
     const MAX_LINES: usize = 2000;
     const MAX_BYTES: usize = 50_000;
 
-    if raw.len() <= MAX_BYTES && raw.split('\n').count() <= MAX_LINES {
-        return raw.to_string();
-    }
-
-    let total_lines = raw.split('\n').count();
-    let total_bytes = raw.len();
-
-    // Take last lines that fit within MAX_BYTES
-    let mut preview_bytes = 0;
-    let mut preview_lines: Vec<&str> = Vec::new();
-    for line in raw.rsplit('\n') {
-        let line_bytes = line.len() + 1; // +1 for newline
-        if preview_bytes + line_bytes > MAX_BYTES && !preview_lines.is_empty() {
-            break;
-        }
-        preview_bytes += line_bytes;
-        preview_lines.push(line);
-    }
-    preview_lines.reverse();
-    let preview = preview_lines.join("\n");
-
-    let reason = format!(
-        "Output truncated to {} KB ({} lines / {} bytes total).",
-        MAX_BYTES / 1000,
-        total_lines,
-        total_bytes
-    );
-
-    format!(
-        "{preview}\n\n[{reason} Use shell commands like `head`, `tail`, or `sed -n '100,200p'` to read sections.]"
-    )
+    crate::truncate::smart_truncate_lines(raw, MAX_BYTES, MAX_LINES)
 }
 
 fn from_value<T>(value: serde_json::Value) -> Result<T, serde_json::Error>
