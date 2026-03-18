@@ -60,20 +60,9 @@ pub(crate) fn recent_feedback(
 
 // ─── Utility functions ────────────────────────────────────────────────────────
 
-/// Truncate feedback text to `max` characters, appending a notice if trimmed.
+/// Truncate feedback text using 60/40 head+tail split.
 fn truncate_feedback(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_string();
-    }
-    // Find a safe UTF-8 boundary
-    let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!(
-        "{}\n\n… [truncated — use `task_activity_list` for full output]",
-        &text[..end]
-    )
+    crate::truncate::smart_truncate(text, max)
 }
 
 #[cfg(test)]

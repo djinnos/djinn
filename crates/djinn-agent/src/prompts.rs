@@ -208,15 +208,11 @@ pub(crate) fn render_prompt_for_role(
     // Hard cap: truncate the rendered system prompt to prevent context window
     // blowout when individual sections escape their soft limits.
     if out.len() > MAX_SYSTEM_PROMPT_CHARS {
-        let mut end = MAX_SYSTEM_PROMPT_CHARS;
-        while end > 0 && !out.is_char_boundary(end) {
-            end -= 1;
-        }
-        out.truncate(end);
-        out.push_str("\n\n… [system prompt truncated — use task_show and task_activity_list for full details]");
+        let original_len = out.len();
+        out = crate::truncate::smart_truncate(&out, MAX_SYSTEM_PROMPT_CHARS);
         tracing::warn!(
             agent_type = %config.name,
-            original_len = out.len() + (MAX_SYSTEM_PROMPT_CHARS - end),
+            original_len,
             truncated_to = out.len(),
             "system prompt exceeded hard cap and was truncated"
         );
@@ -437,7 +433,8 @@ mod tests {
             "prompt should be truncated to ~30k chars, got {}",
             prompt.len()
         );
-        assert!(prompt.contains("[system prompt truncated"));
+        // smart_truncate uses "bytes omitted" or "truncated" markers
+        assert!(prompt.contains("omitted") || prompt.contains("truncated"));
     }
 
     #[test]
@@ -446,7 +443,7 @@ mod tests {
         let ctx = make_ctx();
         let prompt = render_prompt(AgentType::Worker, &task, &ctx);
 
-        assert!(!prompt.contains("[system prompt truncated"));
+        assert!(!prompt.contains("omitted"));
     }
 
     #[test]

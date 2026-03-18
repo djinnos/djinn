@@ -48,16 +48,8 @@ pub enum SlotError {
 }
 
 fn truncate_output(s: &str) -> String {
-    let lines: Vec<&str> = s.trim().lines().collect();
-    if lines.len() > 50 {
-        format!(
-            "... ({} lines truncated) ...\n{}",
-            lines.len() - 50,
-            lines[lines.len() - 50..].join("\n")
-        )
-    } else {
-        lines.join("\n")
-    }
+    // 10KB / 100 lines — enough for diagnosis of setup/verification command failures.
+    crate::truncate::smart_truncate_lines(s, 10_000, 100)
 }
 
 pub(crate) async fn log_commands_run_event(
