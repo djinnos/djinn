@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useStore } from "zustand";
 import { Card, CardContent } from "@/components/ui/card";
 import { Alert02Icon, Cancel01Icon } from "@hugeicons/core-free-icons";
@@ -22,20 +22,25 @@ interface BoardHealthData {
   failedRun: VerificationRun | null;
 }
 
-function useBoardHealth(projectPath: string | null): BoardHealthData | null {
+function useBoardHealth(projectPaths: string[]): BoardHealthData | null {
   const [lspWarnings, setLspWarnings] = useState<LspWarning[]>([]);
   const [projectIssues, setProjectIssues] = useState<Record<string, string>>(
     {}
   );
 
+  // Stabilize the paths array so deps don't fire on every render
+  const pathsKey = projectPaths.slice().sort().join("\0");
+  const stablePaths = useMemo(() => projectPaths, [pathsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pathSet = useMemo(() => new Set(stablePaths), [stablePaths]);
+
   const failedRun = useStore(
     verificationStore,
     useCallback(
       (state) => {
-        if (!projectPath) return null;
+        if (pathSet.size === 0) return null;
         let latest: VerificationRun | null = null;
         for (const run of state.runs.values()) {
-          if (run.projectId !== projectPath) continue;
+          if (!pathSet.has(run.projectId)) continue;
           if (
             !latest ||
             new Date(run.startedAt).getTime() >
@@ -46,30 +51,37 @@ function useBoardHealth(projectPath: string | null): BoardHealthData | null {
         }
         return latest?.status === "failed" ? latest : null;
       },
-      [projectPath]
+      [pathSet]
     )
   );
 
   const failedSteps = failedRun?.steps.filter((s) => s.status === "failed") ?? [];
 
   useEffect(() => {
-    if (!projectPath) return;
+    if (stablePaths.length === 0) return;
 
     let active = true;
     const fetch = () => {
-      callMcpTool("board_health", { project: projectPath })
-        .then((result: Record<string, unknown>) => {
-          if (!active) return;
-          setLspWarnings(
-            (result.lsp_warnings as LspWarning[] | undefined) ?? []
-          );
-          setProjectIssues(
-            (result.project_issues as Record<string, string> | undefined) ?? {}
-          );
-        })
-        .catch(() => {
-          // Silently ignore — board_health is optional enrichment
-        });
+      Promise.all(
+        stablePaths.map((path) =>
+          callMcpTool("board_health", { project: path }).catch(
+            () => null as Record<string, unknown> | null
+          )
+        )
+      ).then((results) => {
+        if (!active) return;
+        const allWarnings: LspWarning[] = [];
+        const allIssues: Record<string, string> = {};
+        for (const result of results) {
+          if (!result) continue;
+          const w = result.lsp_warnings as LspWarning[] | undefined;
+          if (w) allWarnings.push(...w);
+          const i = result.project_issues as Record<string, string> | undefined;
+          if (i) Object.assign(allIssues, i);
+        }
+        setLspWarnings(allWarnings);
+        setProjectIssues(allIssues);
+      });
     };
 
     fetch();
@@ -78,7 +90,7 @@ function useBoardHealth(projectPath: string | null): BoardHealthData | null {
       active = false;
       clearInterval(interval);
     };
-  }, [projectPath]);
+  }, [stablePaths]);
 
   const hasIssues =
     lspWarnings.length > 0 ||
@@ -91,15 +103,16 @@ function useBoardHealth(projectPath: string | null): BoardHealthData | null {
 }
 
 interface BoardHealthBannerProps {
-  projectPath: string;
+  projectPaths: string[];
 }
 
-export function BoardHealthBanner({ projectPath }: BoardHealthBannerProps) {
-  const health = useBoardHealth(projectPath);
+export function BoardHealthBanner({ projectPaths }: BoardHealthBannerProps) {
+  const health = useBoardHealth(projectPaths);
   const [dismissed, setDismissed] = useState(false);
 
-  // Reset dismissed when project changes
-  useEffect(() => setDismissed(false), [projectPath]);
+  // Reset dismissed when project selection changes
+  const pathsKey = projectPaths.slice().sort().join("\0");
+  useEffect(() => setDismissed(false), [pathsKey]);
 
   if (!health || dismissed) return null;
 

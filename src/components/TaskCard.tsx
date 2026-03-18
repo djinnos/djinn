@@ -349,7 +349,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
       )}
       onClick={onClick}
     >
-      <CardContent className="flex flex-col gap-1.5">
+      <CardContent className="flex min-h-[3.5rem] flex-col gap-1.5">
         {/* Row 1: ID, priority, badges, pipeline */}
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
           <TaskIdLabel taskId={task.id} shortId={task.short_id} />

@@ -391,9 +391,13 @@ export function KanbanBoard({
         </InputGroup>
       </div>
 
-      {selectedProject?.path && (
-        <BoardHealthBanner projectPath={selectedProject.path} />
-      )}
+      <BoardHealthBanner
+        projectPaths={
+          selectedProject?.path
+            ? [selectedProject.path]
+            : projects.map((p) => p.path)
+        }
+      />
 
       {hasRemote === false && selectedProject?.path && (
         <GitRemoteSetupBanner
