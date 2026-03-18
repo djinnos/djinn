@@ -8,4 +8,7 @@ pub mod server;
 pub mod state;
 pub mod tools;
 
+#[cfg(test)]
+mod server_tests;
+
 pub use state::McpState;

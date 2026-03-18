@@ -670,6 +670,7 @@ dependencies = [
  "djinn-db",
  "djinn-git",
  "djinn-provider",
+ "futures",
  "http",
  "rmcp",
  "schemars",
