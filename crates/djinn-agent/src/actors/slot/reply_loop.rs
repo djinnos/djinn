@@ -9,7 +9,7 @@ use crate::extension;
 use crate::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use crate::output_parser::ParsedAgentOutput;
 use crate::provider::telemetry;
-use crate::provider::{LlmProvider, StreamEvent};
+use crate::provider::{LlmProvider, StreamEvent, ToolChoice};
 use djinn_core::events::DjinnEventEnvelope;
 
 use super::*;
@@ -233,7 +233,12 @@ pub(super) async fn run_reply_loop(
             });
 
             // ── Start streaming from the provider ────────────────────────────
-            let stream_result = provider.stream(conversation, tools).await;
+            let tool_choice = if tools.is_empty() {
+                None
+            } else {
+                Some(ToolChoice::Required)
+            };
+            let stream_result = provider.stream(conversation, tools, tool_choice).await;
             let mut stream = match stream_result {
                 Ok(s) => s,
                 Err(e) if (is_context_length_error(&e) || is_orphaned_tool_call_error(&e)) && compaction_attempts < MAX_COMPACTION_RETRIES => {
@@ -902,6 +907,7 @@ mod tests {
             &'a self,
             _conversation: &'a Conversation,
             _tools: &'a [serde_json::Value],
+            _tool_choice: Option<ToolChoice>,
         ) -> Pin<
             Box<
                 dyn futures::Future<
@@ -1160,6 +1166,7 @@ mod tests {
                 &'a self,
                 conversation: &'a Conversation,
                 tools: &'a [serde_json::Value],
+                tool_choice: Option<ToolChoice>,
             ) -> Pin<
                 Box<
                     dyn futures::Future<
@@ -1186,7 +1193,7 @@ mod tests {
                     // Simulate a context-length-exceeded error on stream init.
                     Box::pin(async move { Err(anyhow::anyhow!("context_length exceeded")) })
                 } else {
-                    inner.stream(conversation, tools)
+                    inner.stream(conversation, tools, tool_choice)
                 }
             }
         }

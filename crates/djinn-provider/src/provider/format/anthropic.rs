@@ -6,7 +6,7 @@ use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
 use crate::provider::client::ApiClient;
-use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage};
+use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
 
 pub struct AnthropicProvider {
     config: ProviderConfig,
@@ -21,7 +21,12 @@ impl AnthropicProvider {
         }
     }
 
-    fn build_request(&self, conversation: &Conversation, tools: &[Value]) -> Value {
+    fn build_request(
+        &self,
+        conversation: &Conversation,
+        tools: &[Value],
+        _tool_choice: Option<ToolChoice>,
+    ) -> Value {
         let (system, messages) = conversation.to_anthropic_messages();
 
         let max_tokens = self.config.capabilities.max_tokens_default.unwrap_or(8192);
@@ -195,6 +200,7 @@ impl LlmProvider for AnthropicProvider {
         &'a self,
         conversation: &'a Conversation,
         tools: &'a [Value],
+        tool_choice: Option<ToolChoice>,
     ) -> Pin<
         Box<
             dyn futures::Future<
@@ -205,7 +211,7 @@ impl LlmProvider for AnthropicProvider {
                 + 'a,
         >,
     > {
-        let body = self.build_request(conversation, tools);
+        let body = self.build_request(conversation, tools, tool_choice);
         let url = self.effective_url();
         let extra_headers = self.extra_headers();
 
@@ -363,7 +369,7 @@ mod tests {
         conv.push(crate::message::Message::assistant("first assistant"));
         conv.push(crate::message::Message::user("second user"));
 
-        let req = provider.build_request(&conv, &[]);
+        let req = provider.build_request(&conv, &[], None);
         assert_eq!(req["system"], "system prompt");
         let messages = req["messages"].as_array().expect("messages array");
         assert_eq!(messages[0]["role"], "user");
