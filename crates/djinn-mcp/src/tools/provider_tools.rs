@@ -203,7 +203,7 @@ pub struct ProviderModelsConnectedResponse {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ProviderOauthStartInput {
-    /// Provider ID to start OAuth for (accepts catalog/goose aliases, e.g. 'github-copilot').
+    /// Provider ID to start OAuth for (accepts catalog aliases, e.g. 'github-copilot').
     pub provider_id: String,
 }
 

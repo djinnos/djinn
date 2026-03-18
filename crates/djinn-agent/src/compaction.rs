@@ -388,7 +388,7 @@ async fn call_llm_for_summary(
 }
 
 /// Remove a percentage of `ToolResult` messages from the middle outward
-/// ("middle-out" strategy mirrors Goose's approach).
+/// ("middle-out" strategy: drop from the centre outward).
 fn filter_tool_responses_middle_out(messages: &[Message], remove_percent: u32) -> Vec<Message> {
     if remove_percent == 0 {
         return messages.to_vec();

@@ -1,9 +1,8 @@
 //! Djinn-native message and conversation types.
 //!
 //! These are the core data structures the reply loop, compaction, session
-//! storage, and SSE streaming all operate on. They replace Goose's
-//! `Message`/`MessageContent` types with a provider-agnostic model that can be
-//! serialized into OpenAI or Anthropic wire formats as needed.
+//! storage, and SSE streaming all operate on. The provider-agnostic model can
+//! be serialized into OpenAI or Anthropic wire formats as needed.
 
 use serde::{Deserialize, Serialize};
 

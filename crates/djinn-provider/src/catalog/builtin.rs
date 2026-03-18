@@ -1,7 +1,7 @@
 //! Static registry of built-in LLM providers that Djinn knows how to use.
 //!
-//! Replaces the runtime `goose::providers::providers()` call with a
-//! compile-time list.  Each entry carries the metadata the catalog and
+//! Compile-time list of built-in LLM providers. Each entry carries the
+//! metadata the catalog and
 //! provider-tools layers need: required env vars, OAuth key names, and
 //! documentation links.
 
