@@ -1861,11 +1861,8 @@ mod task_tools {
         .await;
         assert!(blockers["blockers"].as_array().is_some());
         assert_json_snapshot!("task_blockers_list_response", blockers, {
-            ".blockers.**.id" => "[UUID]",
-            ".blockers.**.epic_id" => "[UUID]",
-            ".blockers.**.project_id" => "[UUID]",
-            ".blockers.**.created_at" => "[TIMESTAMP]",
-            ".blockers.**.updated_at" => "[TIMESTAMP]"
+            ".blockers.**.blocking_task_id" => "[UUID]",
+            ".blockers.**.blocking_task_short_id" => "[SHORT_ID]"
         });
 
         let blocked_list = mcp_call_tool(

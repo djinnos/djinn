@@ -1,0 +1,21 @@
+---
+source: src/mcp_contract_tests.rs
+assertion_line: 1790
+expression: activity
+---
+{
+  "count": 1,
+  "entries": [
+    {
+      "actor_id": "[UUID]",
+      "actor_role": "user",
+      "created_at": "[TIMESTAMP]",
+      "event_type": "comment",
+      "id": "[UUID]",
+      "payload": {
+        "body": "hello"
+      },
+      "task_id": "[UUID]"
+    }
+  ]
+}
