@@ -18,7 +18,9 @@ mod tests {
 
     use crate::server::DjinnMcpServer;
     use crate::state::McpState;
-    use crate::state::stubs::{StubCoordinatorOps, StubGitOps, StubLspOps, StubRuntimeOps, StubSlotPoolOps, StubSyncOps};
+    use crate::state::stubs::{
+        StubCoordinatorOps, StubGitOps, StubLspOps, StubRuntimeOps, StubSlotPoolOps, StubSyncOps,
+    };
     use crate::tools::memory_tools::BuildContextParams;
 
     fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {
@@ -137,26 +139,30 @@ mod tests {
 
         // Call with tight budget (500)
         let tight_result = server
-            .memory_build_context(rmcp::handler::server::wrapper::Parameters(BuildContextParams {
-                project: tmp.path().to_str().unwrap().to_string(),
-                url: seed_permalink.clone(),
-                depth: None,
-                max_related: Some(20),
-                budget: Some(500),
-                task_id: None,
-            }))
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: tmp.path().to_str().unwrap().to_string(),
+                    url: seed_permalink.clone(),
+                    depth: None,
+                    max_related: Some(20),
+                    budget: Some(500),
+                    task_id: None,
+                },
+            ))
             .await;
 
         // Call with loose budget (4096)
         let loose_result = server
-            .memory_build_context(rmcp::handler::server::wrapper::Parameters(BuildContextParams {
-                project: tmp.path().to_str().unwrap().to_string(),
-                url: seed_permalink,
-                depth: None,
-                max_related: Some(20),
-                budget: Some(4096),
-                task_id: None,
-            }))
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: tmp.path().to_str().unwrap().to_string(),
+                    url: seed_permalink,
+                    depth: None,
+                    max_related: Some(20),
+                    budget: Some(4096),
+                    task_id: None,
+                },
+            ))
             .await;
 
         let tight = tight_result.0;
@@ -200,26 +206,30 @@ mod tests {
 
         // Test with extremely tight budget (100)
         let tight_result = server
-            .memory_build_context(rmcp::handler::server::wrapper::Parameters(BuildContextParams {
-                project: tmp.path().to_str().unwrap().to_string(),
-                url: seed_permalink.clone(),
-                depth: None,
-                max_related: Some(20),
-                budget: Some(100),
-                task_id: None,
-            }))
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: tmp.path().to_str().unwrap().to_string(),
+                    url: seed_permalink.clone(),
+                    depth: None,
+                    max_related: Some(20),
+                    budget: Some(100),
+                    task_id: None,
+                },
+            ))
             .await;
 
         // Test with loose budget (4096)
         let loose_result = server
-            .memory_build_context(rmcp::handler::server::wrapper::Parameters(BuildContextParams {
-                project: tmp.path().to_str().unwrap().to_string(),
-                url: seed_permalink,
-                depth: None,
-                max_related: Some(20),
-                budget: Some(4096),
-                task_id: None,
-            }))
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: tmp.path().to_str().unwrap().to_string(),
+                    url: seed_permalink,
+                    depth: None,
+                    max_related: Some(20),
+                    budget: Some(4096),
+                    task_id: None,
+                },
+            ))
             .await;
 
         let tight = tight_result.0;
@@ -242,8 +252,16 @@ mod tests {
         );
 
         // Both should have exactly one primary (the seed)
-        assert_eq!(tight.primary.len(), 1, "tight budget should have exactly 1 primary");
-        assert_eq!(loose.primary.len(), 1, "loose budget should have exactly 1 primary");
+        assert_eq!(
+            tight.primary.len(),
+            1,
+            "tight budget should have exactly 1 primary"
+        );
+        assert_eq!(
+            loose.primary.len(),
+            1,
+            "loose budget should have exactly 1 primary"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -259,38 +277,44 @@ mod tests {
 
         // Call with loose budget to get "ground truth" ranking
         let loose_result = server
-            .memory_build_context(rmcp::handler::server::wrapper::Parameters(BuildContextParams {
-                project: tmp.path().to_str().unwrap().to_string(),
-                url: seed_permalink.clone(),
-                depth: None,
-                max_related: Some(20),
-                budget: Some(4096),
-                task_id: None,
-            }))
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: tmp.path().to_str().unwrap().to_string(),
+                    url: seed_permalink.clone(),
+                    depth: None,
+                    max_related: Some(20),
+                    budget: Some(4096),
+                    task_id: None,
+                },
+            ))
             .await;
 
         // Call with medium budget
         let medium_result = server
-            .memory_build_context(rmcp::handler::server::wrapper::Parameters(BuildContextParams {
-                project: tmp.path().to_str().unwrap().to_string(),
-                url: seed_permalink.clone(),
-                depth: None,
-                max_related: Some(20),
-                budget: Some(1500),
-                task_id: None,
-            }))
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: tmp.path().to_str().unwrap().to_string(),
+                    url: seed_permalink.clone(),
+                    depth: None,
+                    max_related: Some(20),
+                    budget: Some(1500),
+                    task_id: None,
+                },
+            ))
             .await;
 
         // Call with tight budget
         let tight_result = server
-            .memory_build_context(rmcp::handler::server::wrapper::Parameters(BuildContextParams {
-                project: tmp.path().to_str().unwrap().to_string(),
-                url: seed_permalink,
-                depth: None,
-                max_related: Some(20),
-                budget: Some(500),
-                task_id: None,
-            }))
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: tmp.path().to_str().unwrap().to_string(),
+                    url: seed_permalink,
+                    depth: None,
+                    max_related: Some(20),
+                    budget: Some(500),
+                    task_id: None,
+                },
+            ))
             .await;
 
         let loose = loose_result.0;
@@ -351,26 +375,30 @@ mod tests {
 
         // Call without specifying budget (should default to 4096)
         let default_result = server
-            .memory_build_context(rmcp::handler::server::wrapper::Parameters(BuildContextParams {
-                project: tmp.path().to_str().unwrap().to_string(),
-                url: seed_permalink.clone(),
-                depth: None,
-                max_related: Some(20),
-                budget: None,
-                task_id: None,
-            }))
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: tmp.path().to_str().unwrap().to_string(),
+                    url: seed_permalink.clone(),
+                    depth: None,
+                    max_related: Some(20),
+                    budget: None,
+                    task_id: None,
+                },
+            ))
             .await;
 
         // Call with explicit 4096 budget
         let explicit_result = server
-            .memory_build_context(rmcp::handler::server::wrapper::Parameters(BuildContextParams {
-                project: tmp.path().to_str().unwrap().to_string(),
-                url: seed_permalink,
-                depth: None,
-                max_related: Some(20),
-                budget: Some(4096),
-                task_id: None,
-            }))
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: tmp.path().to_str().unwrap().to_string(),
+                    url: seed_permalink,
+                    depth: None,
+                    max_related: Some(20),
+                    budget: Some(4096),
+                    task_id: None,
+                },
+            ))
             .await;
 
         let default = default_result.0;
@@ -399,14 +427,16 @@ mod tests {
 
         // Call with task_id parameter
         let result = server
-            .memory_build_context(rmcp::handler::server::wrapper::Parameters(BuildContextParams {
-                project: tmp.path().to_str().unwrap().to_string(),
-                url: seed_permalink,
-                depth: None,
-                max_related: Some(10),
-                budget: Some(4096),
-                task_id: Some("test-task-123".to_string()),
-            }))
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: tmp.path().to_str().unwrap().to_string(),
+                    url: seed_permalink,
+                    depth: None,
+                    max_related: Some(10),
+                    budget: Some(4096),
+                    task_id: Some("test-task-123".to_string()),
+                },
+            ))
             .await;
 
         let response = result.0;

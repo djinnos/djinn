@@ -129,14 +129,16 @@ impl NoteRepository {
             .filter_map(|id| {
                 by_id
                     .get(&id)
-                    .map(|(permalink, title, folder, note_type, abstract_text)| NoteSearchResult {
-                        id,
-                        permalink: permalink.clone(),
-                        title: title.clone(),
-                        folder: folder.clone(),
-                        note_type: note_type.clone(),
-                        snippet: abstract_text.clone(),
-                    })
+                    .map(
+                        |(permalink, title, folder, note_type, abstract_text)| NoteSearchResult {
+                            id,
+                            permalink: permalink.clone(),
+                            title: title.clone(),
+                            folder: folder.clone(),
+                            note_type: note_type.clone(),
+                            snippet: abstract_text.clone(),
+                        },
+                    )
             })
             .collect())
     }

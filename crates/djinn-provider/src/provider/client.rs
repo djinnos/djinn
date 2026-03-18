@@ -275,7 +275,6 @@ fn backoff_delay_ms(attempt: u32) -> u64 {
     (capped * jitter) as u64
 }
 
-
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     status.as_u16() == 429 || status.is_server_error()
 }
@@ -325,10 +324,14 @@ mod tests {
     fn backoff_delay_representative_attempts_stay_within_jitter_window() {
         for attempt in [2, 3, 5] {
             let delay = backoff_delay_ms(attempt);
-            let base = (INITIAL_BACKOFF_MS as f64 * BACKOFF_MULTIPLIER.powi(attempt as i32 - 1)) as u64;
+            let base =
+                (INITIAL_BACKOFF_MS as f64 * BACKOFF_MULTIPLIER.powi(attempt as i32 - 1)) as u64;
             let min = (base as f64 * 0.8) as u64;
             let max = (base as f64 * 1.2) as u64;
-            assert!((min..=max).contains(&delay), "attempt {attempt} delay was {delay}");
+            assert!(
+                (min..=max).contains(&delay),
+                "attempt {attempt} delay was {delay}"
+            );
         }
     }
 
@@ -336,14 +339,21 @@ mod tests {
     fn backoff_delay_capped_at_max() {
         let delay = backoff_delay_ms(100);
         // Should be capped at MAX_BACKOFF_MS (30s) * 1.2x jitter max
-        assert!(delay <= ((MAX_BACKOFF_MS as f64 * 1.2) as u64), "delay was {delay}");
+        assert!(
+            delay <= ((MAX_BACKOFF_MS as f64 * 1.2) as u64),
+            "delay was {delay}"
+        );
     }
 
     #[test]
     fn retryable_status_policy_matches_expectations() {
         assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
-        assert!(is_retryable_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
-        assert!(is_retryable_status(reqwest::StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_retryable_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(is_retryable_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
 
         assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
         assert!(!is_retryable_status(reqwest::StatusCode::UNAUTHORIZED));

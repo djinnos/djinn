@@ -1,6 +1,19 @@
 use super::*;
 
 impl NoteRepository {
+    fn note_file_path(&self, project_path: &Path, note_type: &str, title: &str) -> PathBuf {
+        let root = self.worktree_root.as_deref().unwrap_or(project_path);
+        file_path_for(root, note_type, title)
+    }
+
+    fn existing_note_file_path(&self, current: &Note) -> PathBuf {
+        if let Some(worktree_root) = self.worktree_root.as_deref() {
+            file_path_for(worktree_root, &current.note_type, &current.title)
+        } else {
+            PathBuf::from(&current.file_path)
+        }
+    }
+
     /// Create a new note. Writes the markdown file then inserts the index row.
     ///
     /// `project_path` is the root directory of the project (the `.djinn/`
@@ -24,8 +37,10 @@ impl NoteRepository {
 
         let id = uuid::Uuid::now_v7().to_string();
         let permalink = permalink_for(note_type, title);
-        let file_path = file_path_for(project_path, note_type, title);
-        let file_path_str = file_path.to_string_lossy().to_string();
+        let file_path = self.note_file_path(project_path, note_type, title);
+        let file_path_str = file_path_for(project_path, note_type, title)
+            .to_string_lossy()
+            .to_string();
 
         let project_id = project_id.to_owned();
         let title = title.to_owned();
@@ -118,7 +133,9 @@ impl NoteRepository {
             return Ok(Some(n));
         }
         // Fallback: title search, take best match.
-        let results = self.search(project_id, identifier, None, None, None, 1).await?;
+        let results = self
+            .search(project_id, identifier, None, None, None, 1)
+            .await?;
         if let Some(r) = results.into_iter().next() {
             return self.get(&r.id).await;
         }
@@ -167,13 +184,8 @@ impl NoteRepository {
             .await?
             .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
 
-        write_note_file(
-            Path::new(&current.file_path),
-            title,
-            &current.note_type,
-            tags,
-            content,
-        )?;
+        let file_path = self.existing_note_file_path(&current);
+        write_note_file(&file_path, title, &current.note_type, tags, content)?;
 
         let id = id.to_owned();
         let title = title.to_owned();
@@ -233,7 +245,8 @@ impl NoteRepository {
             .await?;
 
         // Best-effort file removal — don't fail if file is already gone.
-        let _ = std::fs::remove_file(&current.file_path);
+        let file_path = self.existing_note_file_path(&current);
+        let _ = std::fs::remove_file(file_path);
 
         self.events
             .send(DjinnEventEnvelope::note_deleted(&id_for_event));
@@ -275,10 +288,13 @@ impl NoteRepository {
             .await?
             .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
 
-        let new_file_path = file_path_for(project_path, new_note_type, new_title);
+        let current_file_path = self.existing_note_file_path(&current);
+        let new_file_path = self.note_file_path(project_path, new_note_type, new_title);
         let new_permalink = permalink_for(new_note_type, new_title);
         let new_folder = folder_for_type(new_note_type).to_owned();
-        let new_file_path_str = new_file_path.to_string_lossy().to_string();
+        let new_file_path_str = file_path_for(project_path, new_note_type, new_title)
+            .to_string_lossy()
+            .to_string();
 
         // Create destination directory and rename the file.
         if let Some(parent) = new_file_path.parent() {
@@ -286,10 +302,10 @@ impl NoteRepository {
                 Error::InvalidData(format!("create_dir_all {}: {e}", parent.display()))
             })?;
         }
-        std::fs::rename(&current.file_path, &new_file_path).map_err(|e| {
+        std::fs::rename(&current_file_path, &new_file_path).map_err(|e| {
             Error::InvalidData(format!(
                 "rename {} → {}: {e}",
-                current.file_path,
+                current_file_path.display(),
                 new_file_path.display()
             ))
         })?;

@@ -248,7 +248,8 @@ mod memory_tools {
     use crate::events::EventBus;
     use crate::test_helpers::{
         create_test_app, create_test_app_with_db, create_test_db, create_test_epic,
-        create_test_project, create_test_project_with_dir, initialize_mcp_session, mcp_call_tool,
+        create_test_project, create_test_project_with_dir, initialize_mcp_session,
+        initialize_mcp_session_with_headers, mcp_call_tool, mcp_call_tool_with_headers,
     };
     use djinn_db::NoteRepository;
 
@@ -286,7 +287,11 @@ mod memory_tools {
             .await
             .unwrap()
             .unwrap();
-        assert!(Path::new(&note.file_path).exists());
+        assert!(
+            Path::new(&note.file_path).exists(),
+            "canonical DB path is stored at {} even though writes may target worktrees",
+            note.file_path
+        );
 
         let duplicate = mcp_call_tool(
             &app,
@@ -472,6 +477,82 @@ mod memory_tools {
         .await;
         assert_eq!(missing["ok"], false);
         assert!(missing.get("error").is_some());
+    }
+
+    #[tokio::test]
+    async fn mcp_memory_write_edit_delete_use_worktree_root_header_for_file_ops() {
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let worktree = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(worktree.path().join(".git")).expect("create synthetic .git dir");
+        let app = create_test_app_with_db(db.clone());
+        let worktree_header = worktree.path().to_string_lossy().to_string();
+        let session_id = initialize_mcp_session_with_headers(
+            &app,
+            &[("x-djinn-worktree-root", &worktree_header)],
+        )
+        .await;
+
+        let created = mcp_call_tool_with_headers(
+            &app,
+            &session_id,
+            "memory_write",
+            json!({"project": project, "title": "Worktree Note", "content": "alpha", "type": "reference"}),
+            &[("x-djinn-worktree-root", &worktree_header)],
+        )
+        .await;
+
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project_id: String = project_repo.resolve_or_create(project).await.unwrap();
+        let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+        let note = note_repo
+            .get_by_permalink(&project_id, created["permalink"].as_str().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let canonical_path = Path::new(&note.file_path).to_path_buf();
+        let worktree_path = worktree.path().join(".djinn/reference/worktree-note.md");
+        assert_eq!(
+            canonical_path,
+            Path::new(project).join(".djinn/reference/worktree-note.md")
+        );
+        assert!(
+            worktree_path.exists(),
+            "note file should be created in worktree .djinn"
+        );
+        assert!(
+            !canonical_path.exists(),
+            "canonical .djinn path should remain untouched during worktree session writes"
+        );
+
+        let edited = mcp_call_tool_with_headers(
+            &app,
+            &session_id,
+            "memory_edit",
+            json!({"project": project, "identifier": created["permalink"], "operation": "append", "content": "beta"}),
+            &[("x-djinn-worktree-root", &worktree_header)],
+        )
+        .await;
+        assert!(edited["content"].as_str().unwrap().contains("beta"));
+        let worktree_contents =
+            std::fs::read_to_string(&worktree_path).expect("read worktree note");
+        assert!(worktree_contents.contains("beta"));
+
+        let deleted = mcp_call_tool_with_headers(
+            &app,
+            &session_id,
+            "memory_delete",
+            json!({"project": project, "identifier": created["permalink"]}),
+            &[("x-djinn-worktree-root", &worktree_header)],
+        )
+        .await;
+        assert_eq!(deleted["ok"], true);
+        assert!(
+            !worktree_path.exists(),
+            "delete should remove worktree note file"
+        );
     }
 
     #[tokio::test]
@@ -771,9 +852,16 @@ mod memory_tools {
         let related_l0 = built["related_l0"].as_array().unwrap();
         assert_eq!(primary[0]["permalink"], seed["permalink"]);
         // Check both L1 and L0 tiered fields for the target note
-        let in_l1 = related_l1.iter().any(|n| n["permalink"] == target["permalink"]);
-        let in_l0 = related_l0.iter().any(|n| n["permalink"] == target["permalink"]);
-        assert!(in_l1 || in_l0, "target permalink should be in related_l1 or related_l0");
+        let in_l1 = related_l1
+            .iter()
+            .any(|n| n["permalink"] == target["permalink"]);
+        let in_l0 = related_l0
+            .iter()
+            .any(|n| n["permalink"] == target["permalink"]);
+        assert!(
+            in_l1 || in_l0,
+            "target permalink should be in related_l1 or related_l0"
+        );
     }
 
     #[tokio::test]

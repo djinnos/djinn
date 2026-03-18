@@ -60,6 +60,41 @@ fn map_json<T: Serialize>(tool: &str, out: Json<T>) -> Result<Value, String> {
 }
 
 impl DjinnMcpServer {
+    pub async fn dispatch_tool_with_worktree(
+        &self,
+        name: &str,
+        args: Value,
+        worktree_root: Option<std::path::PathBuf>,
+    ) -> Result<Value, String> {
+        match name {
+            "memory_write" => map_json(
+                name,
+                self.memory_write_with_worktree(
+                    Parameters(decode_args::<WriteParams>(name, args)?),
+                    worktree_root,
+                )
+                .await,
+            ),
+            "memory_edit" => map_json(
+                name,
+                self.memory_edit_with_worktree(
+                    Parameters(decode_args::<EditParams>(name, args)?),
+                    worktree_root,
+                )
+                .await,
+            ),
+            "memory_delete" => map_json(
+                name,
+                self.memory_delete_with_worktree(
+                    Parameters(decode_args::<DeleteParams>(name, args)?),
+                    worktree_root,
+                )
+                .await,
+            ),
+            _ => self.dispatch_tool(name, args).await,
+        }
+    }
+
     pub async fn dispatch_tool(&self, name: &str, args: Value) -> Result<Value, String> {
         match name {
             "credential_set" => map_json(

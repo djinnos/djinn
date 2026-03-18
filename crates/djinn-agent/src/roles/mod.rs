@@ -94,10 +94,7 @@ pub(crate) fn role_for_task_dispatch(
     task: &Task,
     _has_conflict_context: bool,
 ) -> Arc<dyn AgentRole> {
-    role_impl_for(AgentType::for_task_status(
-        task.status.as_str(),
-        false,
-    ))
+    role_impl_for(AgentType::for_task_status(task.status.as_str(), false))
 }
 
 #[derive(Default)]
@@ -258,22 +255,26 @@ mod tests {
     fn open_task_with_conflict_context_dispatches_to_worker() {
         let registry = RoleRegistry::new();
         let ctx = DispatchContext;
-        
+
         // Test that open tasks dispatch to worker regardless of conflict context
         let task = make_task("open");
         let role = registry.role_for_task(&task, &ctx);
         assert_eq!(role, Some("worker"), "open task should dispatch to worker");
-        
+
         // Verify the dispatch_role is "worker"
         let dispatch_role = registry.dispatch_role_for_task(&task, &ctx);
-        assert_eq!(dispatch_role, Some("worker"), "open task should have worker dispatch role");
+        assert_eq!(
+            dispatch_role,
+            Some("worker"),
+            "open task should have worker dispatch role"
+        );
     }
 
     #[test]
     fn in_progress_task_dispatches_to_worker() {
         let registry = RoleRegistry::new();
         let ctx = DispatchContext;
-        
+
         let task = make_task("in_progress");
         let role = registry.role_for_task(&task, &ctx);
         assert_eq!(role, Some("worker"));
@@ -283,11 +284,15 @@ mod tests {
     fn task_reviewer_statuses_dispatches_to_task_reviewer() {
         let registry = RoleRegistry::new();
         let ctx = DispatchContext;
-        
+
         for status in ["needs_task_review", "in_task_review"] {
             let task = make_task(status);
             let role = registry.role_for_task(&task, &ctx);
-            assert_eq!(role, Some("task_reviewer"), "{status} should dispatch to task_reviewer");
+            assert_eq!(
+                role,
+                Some("task_reviewer"),
+                "{status} should dispatch to task_reviewer"
+            );
         }
     }
 
@@ -295,7 +300,7 @@ mod tests {
     fn pm_intervention_statuses_dispatches_to_pm() {
         let registry = RoleRegistry::new();
         let ctx = DispatchContext;
-        
+
         for status in ["needs_pm_intervention", "in_pm_intervention"] {
             let task = make_task(status);
             let role = registry.role_for_task(&task, &ctx);
@@ -308,8 +313,12 @@ mod tests {
         let task = make_task("open");
         // Test that conflict-context tasks route to Worker (not a dedicated conflict_resolver)
         let role = role_for_task_dispatch(&task, true);
-        assert_eq!(role.config().name, "worker", "conflict context task should dispatch to worker role");
-        
+        assert_eq!(
+            role.config().name,
+            "worker",
+            "conflict context task should dispatch to worker role"
+        );
+
         // Also test without conflict context
         let role_no_conflict = role_for_task_dispatch(&task, false);
         assert_eq!(role_no_conflict.config().name, "worker");

@@ -92,10 +92,7 @@ impl NoteRepository {
     ///
     /// Returns associations where the note is either note_a_id or note_b_id,
     /// ordered by weight descending.
-    pub async fn get_associations_for_note(
-        &self,
-        note_id: &str,
-    ) -> Result<Vec<NoteAssociation>> {
+    pub async fn get_associations_for_note(&self, note_id: &str) -> Result<Vec<NoteAssociation>> {
         self.db.ensure_initialized().await?;
 
         let associations: Vec<NoteAssociation> = sqlx::query_as(
@@ -232,7 +229,12 @@ mod tests {
         .unwrap()
     }
 
-    async fn make_note(repo: &NoteRepository, project: &Project, tmp: &tempfile::TempDir, title: &str) -> String {
+    async fn make_note(
+        repo: &NoteRepository,
+        project: &Project,
+        tmp: &tempfile::TempDir,
+        title: &str,
+    ) -> String {
         let note = repo
             .create(&project.id, tmp.path(), title, "content", "reference", "[]")
             .await
@@ -251,10 +253,7 @@ mod tests {
         let note1 = make_note(&repo, &project, &tmp, "Note One").await;
         let note2 = make_note(&repo, &project, &tmp, "Note Two").await;
 
-        let assoc = repo
-            .upsert_association(&note1, &note2, 1)
-            .await
-            .unwrap();
+        let assoc = repo.upsert_association(&note1, &note2, 1).await.unwrap();
 
         // Verify canonical ordering
         let (expected_a, expected_b) = canonical_pair(&note1, &note2);
@@ -358,7 +357,7 @@ mod tests {
         // After 400 co-accesses: 0.01 * 1.01^400 ≈ 0.53 (high weight)
         // After 1 co-access: 0.01 (low weight)
         repo.upsert_association(&note1, &note2, 400).await.unwrap(); // High weight
-        repo.upsert_association(&note1, &note3, 1).await.unwrap();   // Low weight
+        repo.upsert_association(&note1, &note3, 1).await.unwrap(); // Low weight
 
         let high_weight = repo.list_associations_above_weight(0.5).await.unwrap();
         assert_eq!(high_weight.len(), 1);
@@ -391,7 +390,7 @@ mod tests {
 
         // Association should be gone
         let after = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ?1 OR note_b_id = ?1"
+            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ?1 OR note_b_id = ?1",
         )
         .bind(&note1)
         .fetch_one(db.pool())
@@ -412,13 +411,12 @@ mod tests {
         let note2 = make_note(&repo, &project, &tmp, "Note Two").await;
 
         // Insert via raw SQL to bypass canonicalization - should fail
-        let _result = sqlx::query(
-            "INSERT INTO note_associations (note_a_id, note_b_id) VALUES (?1, ?2)"
-        )
-        .bind(&note2) // note2 > note1
-        .bind(&note1)
-        .execute(db.pool())
-        .await;
+        let _result =
+            sqlx::query("INSERT INTO note_associations (note_a_id, note_b_id) VALUES (?1, ?2)")
+                .bind(&note2) // note2 > note1
+                .bind(&note1)
+                .execute(db.pool())
+                .await;
 
         // This should fail the CHECK constraint since note_a_id > note_b_id
         // But SQLite doesn't enforce CHECK on virtual tables or some edge cases...
@@ -510,9 +508,17 @@ mod tests {
 
         assert_eq!(remaining.len(), 2);
         // note3-note4 should survive (recent)
-        assert!(remaining.iter().any(|(a, b)| (a == &note3 && b == &note4) || (a == &note4 && b == &note3)));
+        assert!(
+            remaining
+                .iter()
+                .any(|(a, b)| (a == &note3 && b == &note4) || (a == &note4 && b == &note3))
+        );
         // note5-note6 should survive (high weight)
-        assert!(remaining.iter().any(|(a, b)| (a == &note5 && b == &note6) || (a == &note6 && b == &note5)));
+        assert!(
+            remaining
+                .iter()
+                .any(|(a, b)| (a == &note5 && b == &note6) || (a == &note6 && b == &note5))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -550,11 +556,33 @@ mod tests {
         // Create notes in both projects
         let p1_note1 = make_note(&repo, &project1, &tmp, "P1 Note One").await;
         let p1_note2 = make_note(&repo, &project1, &tmp, "P1 Note Two").await;
-        let p2_note1 = repo.create(&project2.id, &project2_path, "P2 Note One", "content", "reference", "[]").await.unwrap();
-        let p2_note2 = repo.create(&project2.id, &project2_path, "P2 Note Two", "content", "reference", "[]").await.unwrap();
+        let p2_note1 = repo
+            .create(
+                &project2.id,
+                &project2_path,
+                "P2 Note One",
+                "content",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let p2_note2 = repo
+            .create(
+                &project2.id,
+                &project2_path,
+                "P2 Note Two",
+                "content",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
 
         // Create old, low-weight associations in both projects
-        repo.upsert_association(&p1_note1, &p1_note2, 1).await.unwrap();
+        repo.upsert_association(&p1_note1, &p1_note2, 1)
+            .await
+            .unwrap();
         sqlx::query(
             "UPDATE note_associations SET last_co_access = datetime('now', '-100 days') WHERE note_a_id = ?1 AND note_b_id = ?2"
         )
@@ -564,7 +592,9 @@ mod tests {
         .await
         .unwrap();
 
-        repo.upsert_association(&p2_note1.id, &p2_note2.id, 1).await.unwrap();
+        repo.upsert_association(&p2_note1.id, &p2_note2.id, 1)
+            .await
+            .unwrap();
         sqlx::query(
             "UPDATE note_associations SET last_co_access = datetime('now', '-100 days') WHERE note_a_id = ?1 AND note_b_id = ?2"
         )
@@ -580,7 +610,7 @@ mod tests {
 
         // Verify project2 association still exists
         let p2_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ?1 OR note_b_id = ?1"
+            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ?1 OR note_b_id = ?1",
         )
         .bind(&p2_note1.id)
         .fetch_one(db.pool())
@@ -590,7 +620,7 @@ mod tests {
 
         // Verify project1 association is gone
         let p1_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ?1 OR note_b_id = ?1"
+            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ?1 OR note_b_id = ?1",
         )
         .bind(&p1_note1)
         .fetch_one(db.pool())

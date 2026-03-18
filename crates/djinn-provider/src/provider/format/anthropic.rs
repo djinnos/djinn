@@ -382,7 +382,8 @@ mod tests {
 
     #[test]
     fn test_content_block_delta_unknown_variant_ignored() {
-        let data = r#"{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}"#;
+        let data =
+            r#"{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}"#;
         let mut acc = None;
         let mut input_tokens = 0u32;
         let events =

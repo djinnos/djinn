@@ -194,7 +194,10 @@ impl DjinnMcpServer {
         }
 
         // Use the new build_context method from repository
-        match repo.build_context(&project_id, url, budget, task_id, max_related).await {
+        match repo
+            .build_context(&project_id, url, budget, task_id, max_related)
+            .await
+        {
             Ok(response) => Json(MemoryBuildContextResponse {
                 primary: response.primary.iter().map(note_to_view).collect(),
                 related_l1: response.related_l1,
