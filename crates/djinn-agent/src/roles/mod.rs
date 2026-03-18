@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+pub mod finalize;
 mod groomer;
 mod pm;
 mod reviewer;
@@ -29,6 +30,8 @@ pub(crate) struct RoleConfig {
     pub(crate) initial_message: &'static str,
     pub(crate) preserves_session: bool,
     pub(crate) is_project_scoped: bool,
+    /// Tool name the agent must call to signal completion for this role.
+    pub(crate) finalize_tool_name: &'static str,
 }
 
 pub(crate) fn config_for(agent_type: AgentType) -> &'static RoleConfig {
@@ -60,6 +63,10 @@ pub(crate) trait AgentRole: Send + Sync + 'static {
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
+    /// The MCP tool name this role uses to signal session completion.
+    fn finalize_tool_name(&self) -> &'static str {
+        self.config().finalize_tool_name
+    }
     /// Whether this role should build epic context for the prompt.
     fn needs_epic_context(&self) -> bool {
         false
@@ -76,6 +83,14 @@ pub(crate) trait AgentRole: Send + Sync + 'static {
                 .to_string()
         })
     }
+}
+
+/// Return the finalize tool name for the given agent type.
+///
+/// This is the tool name the agent must call to signal session completion.
+/// Convenience wrapper over `role_impl_for(agent_type).finalize_tool_name()`.
+pub fn finalize_tool_name_for(agent_type: AgentType) -> &'static str {
+    role_impl_for(agent_type).finalize_tool_name()
 }
 
 /// Resolve the concrete `AgentRole` implementation for an `AgentType`.
