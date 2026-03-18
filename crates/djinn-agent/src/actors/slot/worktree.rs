@@ -186,6 +186,25 @@ pub(crate) async fn prepare_worktree(
         return Ok(stale_worktree_path);
     }
 
+    // Clean up broken worktree remnants (dir exists but no .git file).
+    // This can happen when a session is killed mid-cleanup (e.g. provider
+    // outage, system crash).  Without this guard, `git worktree add` fails
+    // with exit 128 and the task enters a dispatch → fail → stuck loop.
+    if stale_worktree_path.exists() && !stale_worktree_path.join(".git").exists() {
+        tracing::warn!(
+            task_id = %task.short_id,
+            worktree = %stale_worktree_path.display(),
+            "Lifecycle: removing broken worktree remnant (no .git)"
+        );
+        let _ = git.remove_worktree(&stale_worktree_path).await;
+        if stale_worktree_path.exists() {
+            let _ = std::fs::remove_dir_all(&stale_worktree_path);
+        }
+        let _ = git
+            .run_command(vec!["worktree".into(), "prune".into()])
+            .await;
+    }
+
     // Ensure the target branch has at least one commit — a bare `git init`
     // creates a branch ref with no commits, which makes `git branch task/x main`
     // fail with "not a valid object name".  Bootstrap with an empty initial
@@ -629,6 +648,69 @@ pub async fn teardown_worktree(
         let _ = git
             .run_command(vec!["worktree".into(), "prune".into()])
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prepare_worktree_cleans_broken_remnant() {
+        // Set up a real git repo in a temp directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(project_dir)
+            .output()
+            .unwrap();
+
+        // Create .djinn/.gitignore so the bootstrap commit has something to stage.
+        let djinn_dir = project_dir.join(".djinn");
+        std::fs::create_dir_all(&djinn_dir).unwrap();
+        std::fs::write(djinn_dir.join(".gitignore"), "worktrees/\n").unwrap();
+
+        std::process::Command::new("git")
+            .args(["add", ".djinn/.gitignore"])
+            .current_dir(project_dir)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "--no-verify", "-m", "init"])
+            .current_dir(project_dir)
+            .output()
+            .unwrap();
+
+        // Register the project in the DB so prepare_worktree can find it.
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+        let project_path = project_dir.to_str().unwrap();
+        let project_repo =
+            djinn_db::ProjectRepository::new(db.clone(), test_helpers::test_events());
+        let project = project_repo.create("test", project_path).await.unwrap();
+
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+
+        // Create a broken worktree remnant: directory exists with target/ but no .git.
+        let worktree_path = project_dir
+            .join(".djinn")
+            .join("worktrees")
+            .join(&task.short_id);
+        std::fs::create_dir_all(worktree_path.join("target")).unwrap();
+        assert!(worktree_path.exists());
+        assert!(!worktree_path.join(".git").exists());
+
+        // prepare_worktree should clean the remnant and create a valid worktree.
+        let result = prepare_worktree(project_dir, &task, &ctx).await;
+        assert!(result.is_ok(), "prepare_worktree should succeed: {result:?}");
+
+        let wt = result.unwrap();
+        assert!(wt.join(".git").exists(), "worktree should have .git file");
     }
 }
 
