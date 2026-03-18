@@ -28,7 +28,7 @@ fi
 
 # Skip if local target already has a populated fingerprint dir (already seeded
 # or previously built).
-EXISTING=$(find "${LOCAL_TARGET}/debug/.fingerprint" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+EXISTING=$( (find "${LOCAL_TARGET}/debug/.fingerprint" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true) | wc -l)
 if [ "$EXISTING" -gt 10 ]; then
     echo "seed-external-deps: target already populated (${EXISTING} fingerprints), skipping"
     exit 0
@@ -94,5 +94,5 @@ for f in "${MAIN_TARGET}/debug/"*.d "${MAIN_TARGET}/debug/.cargo-lock"; do
     fi
 done
 
-SEEDED=$(find "${LOCAL_TARGET}/debug/.fingerprint" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+SEEDED=$( (find "${LOCAL_TARGET}/debug/.fingerprint" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true) | wc -l)
 echo "seed-external-deps: seeded ${SEEDED} fingerprints"
