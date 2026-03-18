@@ -104,14 +104,12 @@ fn text_helpers_cover_limits_and_empty() {
 
 #[test]
 fn command_formatters() {
-    assert_eq!(format_command_names(&[]), None);
     assert_eq!(format_command_details(&[]), None);
     let specs = vec![CommandSpec {
         name: "lint".into(),
         command: "cargo clippy".into(),
         timeout_secs: None,
     }];
-    assert_eq!(format_command_names(&specs), Some("- `lint`".to_string()));
     assert_eq!(
         format_command_details(&specs),
         Some("- **lint**: `cargo clippy`".to_string())

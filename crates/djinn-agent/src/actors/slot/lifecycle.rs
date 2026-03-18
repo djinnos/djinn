@@ -324,8 +324,8 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             tracing::warn!(error = %e, "failed to load project commands, using empty");
             (Vec::new(), Vec::new())
         });
-        let prompt_setup_commands = format_command_names(&setup_specs);
-        let prompt_verification_commands = format_command_names(&verification_specs);
+        let prompt_setup_commands = format_command_details(&setup_specs);
+        let prompt_verification_commands = format_command_details(&verification_specs);
         if !setup_specs.is_empty() {
             let setup_start = std::time::Instant::now();
             tracing::info!(
