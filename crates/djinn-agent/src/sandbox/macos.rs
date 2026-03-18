@@ -33,6 +33,15 @@ impl Sandbox for SeatbeltSandbox {
             .map(|m| format!("(allow file-write* (subpath \"{m}\"))"))
             .unwrap_or_default();
 
+        // Cargo shared build cache: {CARGO_HOME}/build/ (default ~/.cargo/build/).
+        let cargo_build_rule = std::env::var("CARGO_HOME")
+            .or_else(|_| std::env::var("HOME").map(|h| format!("{h}/.cargo")))
+            .ok()
+            .map(|base| format!("{base}/build"))
+            .filter(|p| std::path::Path::new(p).is_dir())
+            .map(|p| format!("(allow file-write* (subpath \"{p}\"))"))
+            .unwrap_or_default();
+
         let policy = format!(
             "(version 1)\
              (allow default)\
@@ -40,6 +49,7 @@ impl Sandbox for SeatbeltSandbox {
              (deny file-write*)\
              (allow file-write* (subpath \"{worktree}\"))\
              {git_meta_rule}\
+             {cargo_build_rule}\
              (allow file-write* (subpath \"/tmp\"))\
              (allow file-write* (literal \"/dev/null\"))\
              (allow file-write* (literal \"/dev/zero\"))\

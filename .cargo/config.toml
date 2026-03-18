@@ -1,5 +1,5 @@
 [build]
-build-dir = "target/build"
+build-dir = "{cargo-cache-home}/build/djinn-server"
 
 [unstable]
 fine-grain-locking = true
