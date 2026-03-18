@@ -12,6 +12,7 @@ use djinn_core::models::{
 use crate::database::Database;
 use crate::error::{DbError as Error, DbResult as Result};
 
+mod context;
 mod crud;
 mod file_helpers;
 mod graph;
@@ -19,6 +20,8 @@ mod indexing;
 pub(crate) mod rrf;
 mod scoring;
 mod search;
+
+pub use context::BuildContextResponse;
 
 pub use indexing::UpdateNoteIndexParams;
 

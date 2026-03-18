@@ -151,10 +151,11 @@ impl DjinnMcpServer {
         })
     }
 
-    /// Build context from a seed note by traversing links. Returns full content
-    /// for primary notes and summaries for related notes.
+    /// Build context from a seed note with progressive disclosure and token budget
+    /// awareness. Returns full content for primary notes, overview for direct (L1)
+    /// linked notes, and abstract for discovered (L0) related notes.
     #[tool(
-        description = "Build context from a seed note by traversing links. Returns full content for primary notes and summaries for related notes."
+        description = "Build context from a seed note with progressive disclosure. Returns full content for primary notes, overview for direct linked notes, and abstract for discovered related notes. Seed notes are never dropped by budget constraints."
     )]
     pub async fn memory_build_context(
         &self,
@@ -170,8 +171,9 @@ impl DjinnMcpServer {
         };
 
         let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
-        let depth = p.depth.unwrap_or(1).max(0);
         let max_related = p.max_related.unwrap_or(10).clamp(1, 50) as usize;
+        let budget = p.budget.map(|b| b as usize);
+        let task_id = p.task_id.as_deref();
 
         // Strip memory:// prefix.
         let url = p.url.strip_prefix("memory://").unwrap_or(&p.url);
@@ -191,79 +193,20 @@ impl DjinnMcpServer {
             });
         }
 
-        // Single note lookup.
-        let Some(seed) = repo.get_by_permalink(&project_id, url).await.ok().flatten() else {
-            return Json(MemoryBuildContextResponse {
+        // Use the new build_context method from repository
+        match repo.build_context(&project_id, url, budget, task_id, max_related).await {
+            Ok(response) => Json(MemoryBuildContextResponse {
+                primary: response.primary.iter().map(note_to_view).collect(),
+                related_l1: response.related_l1,
+                related_l0: response.related_l0,
+                error: None,
+            }),
+            Err(e) => Json(MemoryBuildContextResponse {
                 primary: vec![],
                 related_l1: vec![],
                 related_l0: vec![],
-                error: None,
-            });
-        };
-
-        if depth == 0 {
-            return Json(MemoryBuildContextResponse {
-                primary: vec![note_to_view(&seed)],
-                related_l1: vec![],
-                related_l0: vec![],
-                error: None,
-            });
+                error: Some(format!("build_context failed: {e}")),
+            }),
         }
-
-        // Traverse outbound wikilinks up to `depth` levels.
-        let graph = repo.graph(&project_id).await.unwrap_or_default();
-        let mut related_ids = std::collections::HashSet::new();
-        let mut frontier = vec![seed.id.clone()];
-
-        for _ in 0..depth {
-            let mut next_frontier = vec![];
-            for src_id in &frontier {
-                for edge in graph.edges.iter().filter(|e| &e.source_id == src_id) {
-                    if edge.target_id != seed.id && !related_ids.contains(&edge.target_id) {
-                        related_ids.insert(edge.target_id.clone());
-                        next_frontier.push(edge.target_id.clone());
-                    }
-                }
-            }
-            frontier = next_frontier;
-            if frontier.is_empty() {
-                break;
-            }
-        }
-
-        // Build tiered related lists using NoteOverview for L1 and NoteAbstract for L0
-        let mut related_l1: Vec<djinn_core::models::NoteOverview> = Vec::new();
-        let mut related_l0: Vec<djinn_core::models::NoteAbstract> = Vec::new();
-        for (idx, id) in related_ids.into_iter().take(max_related).enumerate() {
-            if let Ok(Some(n)) = repo.get(&id).await {
-                // First items go to L1 (NoteOverview), rest to L0 (NoteAbstract)
-                if idx < max_related / 2 {
-                    related_l1.push(djinn_core::models::NoteOverview {
-                        id: n.id,
-                        permalink: n.permalink,
-                        title: n.title,
-                        note_type: n.note_type,
-                        overview_text: n.overview.unwrap_or_default(),
-                        score: None,
-                    });
-                } else {
-                    related_l0.push(djinn_core::models::NoteAbstract {
-                        id: n.id,
-                        permalink: n.permalink,
-                        title: n.title,
-                        note_type: n.note_type,
-                        abstract_text: n.abstract_.unwrap_or_default(),
-                        score: None,
-                    });
-                }
-            }
-        }
-
-        Json(MemoryBuildContextResponse {
-            primary: vec![note_to_view(&seed)],
-            related_l1,
-            related_l0,
-            error: None,
-        })
     }
 }

@@ -1512,6 +1512,11 @@
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "budget": {
+            "description": "Token budget for context (default 4096). Seed notes are uncapped.",
+            "format": "int64",
+            "type": "integer"
+          },
           "depth": {
             "description": "Link traversal depth (default 1).",
             "format": "int64",
@@ -1527,6 +1532,11 @@
           "project": {
             "type": "string"
           },
+          "task_id": {
+            "description": "Optional task ID for task-affinity scoring in RRF retrieval.",
+            "nullable": true,
+            "type": "string"
+          },
           "url": {
             "description": "Memory URI: \"memory://folder/note\", \"folder/note\", or \"folder/*\" for all\nnotes in a folder.",
             "type": "string"
@@ -1534,7 +1544,8 @@
         },
         "required": [
           "project",
-          "url"
+          "url",
+          "budget"
         ],
         "title": "BuildContextParams",
         "type": "object"
