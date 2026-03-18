@@ -4,11 +4,14 @@
 /// tracks runtime errors and reviewer feedback extracted from agent text.
 /// Worker completion is determined by session end (agent stops calling tools).
 /// Reviewer verdict is determined by acceptance criteria state on the task.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ParsedAgentOutput {
     captures_feedback: bool,
     pub runtime_error: Option<String>,
     pub reviewer_feedback: Option<String>,
+    /// Payload from the finalize tool call (e.g. `submit_work`, `submit_review`).
+    /// Set when the reply loop exits via finalize-tool detection (ADR-036).
+    pub finalize_payload: Option<serde_json::Value>,
 }
 
 impl Default for ParsedAgentOutput {
@@ -23,6 +26,7 @@ impl ParsedAgentOutput {
             captures_feedback,
             runtime_error: None,
             reviewer_feedback: None,
+            finalize_payload: None,
         }
     }
 
