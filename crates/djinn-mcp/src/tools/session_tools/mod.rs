@@ -71,7 +71,6 @@ pub struct SessionToolSession {
     pub tokens_in: i64,
     pub tokens_out: i64,
     pub worktree_path: Option<String>,
-    pub goose_session_id: Option<String>,
 }
 
 impl From<SessionRecord> for SessionToolSession {
@@ -88,7 +87,6 @@ impl From<SessionRecord> for SessionToolSession {
             tokens_in: value.tokens_in,
             tokens_out: value.tokens_out,
             worktree_path: value.worktree_path,
-            goose_session_id: value.goose_session_id,
         }
     }
 }

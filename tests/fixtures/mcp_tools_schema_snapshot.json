@@ -4062,10 +4062,6 @@
                 "nullable": true,
                 "type": "string"
               },
-              "goose_session_id": {
-                "nullable": true,
-                "type": "string"
-              },
               "id": {
                 "type": "string"
               },
@@ -4233,10 +4229,6 @@
                 "type": "string"
               },
               "ended_at": {
-                "nullable": true,
-                "type": "string"
-              },
-              "goose_session_id": {
                 "nullable": true,
                 "type": "string"
               },
@@ -4412,10 +4404,6 @@
             "type": "string"
           },
           "error": {
-            "nullable": true,
-            "type": "string"
-          },
-          "goose_session_id": {
             "nullable": true,
             "type": "string"
           },
@@ -5799,10 +5787,6 @@
                 "type": "string"
               },
               "ended_at": {
-                "nullable": true,
-                "type": "string"
-              },
-              "goose_session_id": {
                 "nullable": true,
                 "type": "string"
               },

@@ -142,7 +142,6 @@ pub async fn create_test_session(db: &Database, project_id: &str, task_id: &str)
         model: "test-model",
         agent_type: "worker",
         worktree_path: Some("/tmp/djinn-test-worktree"),
-        goose_session_id: None,
         metadata_json: None,
     })
     .await
@@ -286,16 +285,17 @@ pub async fn mcp_call_tool_with_headers(
         |builder, (name, value)| builder.header(*name, *value),
     );
 
-    let req = req.body(Body::from(
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 999,
-            "method": "tools/call",
-            "params": payload,
-        })
-        .to_string(),
-    ))
-    .unwrap();
+    let req = req
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 999,
+                "method": "tools/call",
+                "params": payload,
+            })
+            .to_string(),
+        ))
+        .unwrap();
 
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), 200);
