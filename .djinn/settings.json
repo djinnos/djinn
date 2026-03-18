@@ -1,11 +1,5 @@
 {
-  "setup": [
-    {
-      "name": "seed-build-cache",
-      "command": "bash scripts/seed-build-cache.sh",
-      "timeout_secs": 60
-    }
-  ],
+  "setup": [],
   "verification": [
     {
       "name": "clippy",
