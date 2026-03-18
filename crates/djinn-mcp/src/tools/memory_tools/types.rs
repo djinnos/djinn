@@ -240,7 +240,8 @@ pub struct MemoryDiffResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryBuildContextResponse {
     pub primary: Vec<MemoryNoteView>,
-    pub related: Vec<djinn_core::models::NoteCompact>,
+    pub related_l1: Vec<djinn_core::models::NoteOverview>,
+    pub related_l0: Vec<djinn_core::models::NoteAbstract>,
     pub error: Option<String>,
 }
 

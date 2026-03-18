@@ -767,13 +767,13 @@ mod memory_tools {
         .await;
         assert!(built.get("error").is_none() || built["error"].is_null());
         let primary = built["primary"].as_array().unwrap();
-        let related = built["related"].as_array().unwrap();
+        let related_l1 = built["related_l1"].as_array().unwrap();
+        let related_l0 = built["related_l0"].as_array().unwrap();
         assert_eq!(primary[0]["permalink"], seed["permalink"]);
-        assert!(
-            related
-                .iter()
-                .any(|n| n["permalink"] == target["permalink"])
-        );
+        // Check both L1 and L0 tiered fields for the target note
+        let in_l1 = related_l1.iter().any(|n| n["permalink"] == target["permalink"]);
+        let in_l0 = related_l0.iter().any(|n| n["permalink"] == target["permalink"]);
+        assert!(in_l1 || in_l0, "target permalink should be in related_l1 or related_l0");
     }
 
     #[tokio::test]

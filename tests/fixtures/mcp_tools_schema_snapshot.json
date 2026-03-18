@@ -1600,10 +1600,10 @@
             ],
             "type": "object"
           },
-          "NoteCompact": {
-            "description": "Compact note summary (no full content) for list and recent queries.",
+          "NoteAbstract": {
+            "description": "L0 note abstract payload used in tiered context responses.",
             "properties": {
-              "folder": {
+              "abstract_text": {
                 "type": "string"
               },
               "id": {
@@ -1615,10 +1615,12 @@
               "permalink": {
                 "type": "string"
               },
-              "title": {
-                "type": "string"
+              "score": {
+                "format": "float",
+                "nullable": true,
+                "type": "number"
               },
-              "updated_at": {
+              "title": {
                 "type": "string"
               }
             },
@@ -1627,8 +1629,40 @@
               "permalink",
               "title",
               "note_type",
-              "folder",
-              "updated_at"
+              "abstract_text"
+            ],
+            "type": "object"
+          },
+          "NoteOverview": {
+            "description": "L1 note overview payload used in tiered context responses.",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "note_type": {
+                "type": "string"
+              },
+              "overview_text": {
+                "type": "string"
+              },
+              "permalink": {
+                "type": "string"
+              },
+              "score": {
+                "format": "float",
+                "nullable": true,
+                "type": "number"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "permalink",
+              "title",
+              "note_type",
+              "overview_text"
             ],
             "type": "object"
           }
@@ -1645,16 +1679,23 @@
             },
             "type": "array"
           },
-          "related": {
+          "related_l0": {
             "items": {
-              "$ref": "#/$defs/NoteCompact"
+              "$ref": "#/$defs/NoteAbstract"
+            },
+            "type": "array"
+          },
+          "related_l1": {
+            "items": {
+              "$ref": "#/$defs/NoteOverview"
             },
             "type": "array"
           }
         },
         "required": [
           "primary",
-          "related"
+          "related_l1",
+          "related_l0"
         ],
         "title": "MemoryBuildContextResponse",
         "type": "object"
