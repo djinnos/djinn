@@ -2571,6 +2571,10 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
     tool_values.push(serde_json::to_value(tool_apply_patch()).expect("serialize tool_apply_patch"));
     tool_values.push(serde_json::to_value(tool_request_pm()).expect("serialize tool_request_pm"));
+    tool_values.push(
+        serde_json::to_value(crate::roles::finalize::tool_submit_work())
+            .expect("serialize tool_submit_work"),
+    );
     tool_values
 }
 
@@ -2579,6 +2583,10 @@ pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     tool_values
         .push(serde_json::to_value(tool_task_update_ac()).expect("serialize tool_task_update_ac"));
+    tool_values.push(
+        serde_json::to_value(crate::roles::finalize::tool_submit_review())
+            .expect("serialize tool_submit_review"),
+    );
     tool_values
 }
 
@@ -2599,6 +2607,10 @@ pub(crate) fn tool_schemas_pm_groomer() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
         serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
         serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
+        serde_json::to_value(crate::roles::finalize::tool_submit_decision())
+            .expect("serialize tool_submit_decision"),
+        serde_json::to_value(crate::roles::finalize::tool_submit_grooming())
+            .expect("serialize tool_submit_grooming"),
     ] {
         tool_values.push(value);
     }
