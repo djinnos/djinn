@@ -139,8 +139,14 @@ impl NoteRepository {
         // Get task-affinity scores
         let task_scores = self.task_affinity_scores(project_id, task_id).await?;
 
-        // Build confidence map (could be extended with note quality metrics)
-        let confidence_map: HashMap<String, f64> = HashMap::new();
+        let mut confidence_ids: Vec<String> = fts_candidates.iter().map(|(id, _)| id.clone()).collect();
+        confidence_ids.extend(temporal_scores.iter().map(|(id, _)| id.clone()));
+        confidence_ids.extend(graph_scores.iter().map(|(id, _)| id.clone()));
+        confidence_ids.extend(task_scores.iter().map(|(id, _)| id.clone()));
+        confidence_ids.sort();
+        confidence_ids.dedup();
+
+        let confidence_map = self.confidence_map(&confidence_ids).await?;
 
         // Prepare signals for RRF
         let signals = vec![

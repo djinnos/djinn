@@ -3,13 +3,16 @@
 use super::worktree::try_rebase_existing_task_branch;
 use crate::test_helpers::{agent_context_from_db, create_test_db};
 use std::path::PathBuf;
-use tempfile::TempDir;
+use tempfile::{Builder, TempDir};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 /// Create a temporary git repository with a main branch and initial commit.
 async fn create_test_repo() -> TempDir {
-    let temp_dir = TempDir::new().unwrap();
+    let temp_dir = Builder::new()
+        .prefix("djinn-worktree-")
+        .tempdir_in("/tmp")
+        .unwrap();
     let path = temp_dir.path();
 
     // Initialize repo

@@ -502,6 +502,13 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn tempdir_in_tmp() -> TempDir {
+        tempfile::Builder::new()
+            .prefix("djinn-patch-")
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
     #[test]
     fn test_parse_basic_patch() {
         let input = r#"*** Begin Patch
@@ -688,7 +695,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_apply_patch_add_file() {
-        let dir = TempDir::new().unwrap();
+        let dir = tempdir_in_tmp();
         let patch = Patch {
             operations: vec![FileOp::Add {
                 path: "new_file.txt".to_string(),
@@ -708,7 +715,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_apply_patch_delete_file() {
-        let dir = TempDir::new().unwrap();
+        let dir = tempdir_in_tmp();
         let file_path = dir.path().join("to_delete.txt");
         tokio::fs::write(&file_path, "content").await.unwrap();
 
@@ -726,7 +733,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_apply_patch_update_file() {
-        let dir = TempDir::new().unwrap();
+        let dir = tempdir_in_tmp();
         let file_path = dir.path().join("update_me.rs");
         tokio::fs::write(&file_path, "fn main() {\n    println!(\"old\");\n}\n")
             .await

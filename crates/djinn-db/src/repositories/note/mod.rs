@@ -502,6 +502,88 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_confidence_reads_updates_and_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let note = repo
+            .create(&project.id, tmp.path(), "Confidence Note", "body", "research", "[]")
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE notes SET confidence = 0.5 WHERE id = ?1")
+            .bind(&note.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let updated = repo.update_confidence(&note.id, scoring::TASK_SUCCESS).await.unwrap();
+        assert!(updated > 0.5);
+
+        let stored: f64 = sqlx::query_scalar("SELECT confidence FROM notes WHERE id = ?1")
+            .bind(&note.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert!((stored - updated).abs() < 1e-9);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn search_rrf_confidence_lowers_equivalent_match_ranking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let high = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "sharedconfidence alpha",
+                "same content",
+                "research",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let low = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "sharedconfidence beta",
+                "same content",
+                "research",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE notes SET access_count = 0, confidence = 1.0 WHERE id = ?1")
+            .bind(&high.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE notes SET access_count = 0, confidence = 0.5 WHERE id = ?1")
+            .bind(&low.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let results = repo
+            .search(&project.id, "sharedconfidence", None, None, None, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, high.id);
+        assert_eq!(results[1].id, low.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn catalog_generation() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();

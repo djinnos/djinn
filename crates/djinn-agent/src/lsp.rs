@@ -1241,6 +1241,7 @@ pub fn format_diagnostics_xml(diags: Vec<Diagnostic>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::Builder;
     use std::path::PathBuf;
 
     fn make_diag(file: &str, line: u32, character: u32, severity: u32, msg: &str) -> Diagnostic {
@@ -1647,9 +1648,16 @@ mod tests {
         p
     }
 
+    fn tempdir_in_tmp() -> tempfile::TempDir {
+        Builder::new()
+            .prefix("djinn-lsp-")
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
     #[test]
     fn resolve_binary_finds_existing_on_path() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempdir_in_tmp();
         let bin_dir = tmp.path().join("djinn_bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
 
@@ -1667,7 +1675,7 @@ mod tests {
 
     #[test]
     fn resolve_binary_finds_existing_in_bin_dir() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempdir_in_tmp();
         let bin_dir = tmp.path().join("djinn_bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         make_fake_binary(&bin_dir, "rust-analyzer", "#!/bin/sh\n");
@@ -1682,7 +1690,7 @@ mod tests {
 
     #[test]
     fn resolve_binary_npm_not_found_errors() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempdir_in_tmp();
         let bin_dir = tmp.path().join("djinn_bin");
 
         let server = server_for_path(Path::new("foo.ts")).unwrap();
@@ -1695,7 +1703,7 @@ mod tests {
 
     #[test]
     fn resolve_binary_go_not_found_errors() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempdir_in_tmp();
         let bin_dir = tmp.path().join("djinn_bin");
 
         let server = server_for_path(Path::new("foo.go")).unwrap();
@@ -1707,7 +1715,7 @@ mod tests {
 
     #[test]
     fn resolve_binary_rust_no_rustup_errors_with_help() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempdir_in_tmp();
         let bin_dir = tmp.path().join("djinn_bin");
 
         let server = server_for_path(Path::new("foo.rs")).unwrap();
@@ -1721,7 +1729,7 @@ mod tests {
 
     #[test]
     fn resolve_binary_npm_installs_successfully() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempdir_in_tmp();
         let bin_dir = tmp.path().join("djinn_bin");
         let path_dir = tmp.path().join("fakepath");
         std::fs::create_dir_all(&path_dir).unwrap();
@@ -1745,7 +1753,7 @@ mod tests {
 
     #[test]
     fn resolve_binary_npm_failure_returns_error() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempdir_in_tmp();
         let bin_dir = tmp.path().join("djinn_bin");
         let path_dir = tmp.path().join("fakepath");
         std::fs::create_dir_all(&path_dir).unwrap();
@@ -1762,7 +1770,7 @@ mod tests {
 
     #[test]
     fn resolve_binary_go_installs_successfully() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempdir_in_tmp();
         let bin_dir = tmp.path().join("djinn_bin");
         let path_dir = tmp.path().join("fakepath");
         std::fs::create_dir_all(&path_dir).unwrap();
@@ -1785,7 +1793,7 @@ mod tests {
 
     #[test]
     fn resolve_binary_rustup_installs_successfully() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempdir_in_tmp();
         let bin_dir = tmp.path().join("djinn_bin");
         let path_dir = tmp.path().join("fakepath");
         std::fs::create_dir_all(&path_dir).unwrap();
@@ -1814,7 +1822,7 @@ mod tests {
         // Simulates system-packaged rustup (e.g. Arch) where `component add`
         // succeeds but the binary doesn't appear on PATH.  The code should
         // fall back to `rustup which rust-analyzer` to locate the toolchain binary.
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempdir_in_tmp();
         let bin_dir = tmp.path().join("djinn_bin");
         let path_dir = tmp.path().join("fakepath");
         std::fs::create_dir_all(&path_dir).unwrap();
@@ -1845,7 +1853,7 @@ mod tests {
     fn resolve_binary_rustup_which_finds_existing_without_install() {
         // When rust-analyzer is already installed via system rustup, `rustup which`
         // should find it during the initial lookup — no `component add` needed.
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempdir_in_tmp();
         let bin_dir = tmp.path().join("djinn_bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         let path_dir = tmp.path().join("fakepath");

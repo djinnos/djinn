@@ -89,7 +89,7 @@ mod tests {
     use djinn_core::commands::CommandResult;
     use djinn_db::Database;
     use djinn_db::VerificationCacheRepository;
-    use tempfile::tempdir;
+    use tempfile::Builder;
 
     fn test_db() -> Database {
         Database::open_in_memory().expect("in-memory db")
@@ -106,9 +106,16 @@ mod tests {
         .expect("write settings.json");
     }
 
+    fn tempdir_in_tmp() -> tempfile::TempDir {
+        Builder::new()
+            .prefix("djinn-verification-")
+            .tempdir_in("/tmp")
+            .expect("tempdir")
+    }
+
     #[tokio::test]
     async fn verify_commit_cache_miss_runs_full_pipeline_and_caches() {
-        let dir = tempdir().expect("tempdir");
+        let dir = tempdir_in_tmp();
         let marker = dir.path().join("setup_ran");
         write_settings(
             dir.path(),
@@ -137,7 +144,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_commit_cache_hit_runs_setup_only_and_skips_verification() {
-        let dir = tempdir().expect("tempdir");
+        let dir = tempdir_in_tmp();
         let setup_marker = dir.path().join("setup_ran");
         let verify_marker = dir.path().join("verify_ran");
         write_settings(
@@ -180,7 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_commit_failure_is_not_cached() {
-        let dir = tempdir().expect("tempdir");
+        let dir = tempdir_in_tmp();
         write_settings(
             dir.path(),
             r#"[{"name":"setup","command":"echo setup","timeout_secs":10}]"#,
@@ -204,7 +211,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_commit_no_settings_file_passes_with_no_commands() {
-        let dir = tempdir().expect("tempdir");
+        let dir = tempdir_in_tmp();
         let state = test_db();
 
         let result = verify_commit("p1", "sha5", dir.path(), &state)
