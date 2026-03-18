@@ -1,5 +1,6 @@
 -- Canonical SQLite schema snapshot for djinn-db.
--- This file reflects the fully migrated schema including notes cognitive columns.
+-- This file reflects the fully migrated schema including notes cognitive columns
+-- and note_associations table for Hebbian co-access learning.
 
 CREATE TABLE settings (
     key        TEXT NOT NULL PRIMARY KEY,
@@ -236,3 +237,18 @@ CREATE INDEX idx_verification_cache_project_command
     ON verification_cache(project_id, command);
 CREATE INDEX idx_verification_cache_expires_at
     ON verification_cache(expires_at);
+
+-- Note associations for Hebbian co-access learning (ADR-023)
+CREATE TABLE note_associations (
+    note_a_id       TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    note_b_id       TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    weight          REAL NOT NULL DEFAULT 0.01,
+    co_access_count INTEGER NOT NULL DEFAULT 1,
+    last_co_access  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (note_a_id, note_b_id),
+    CHECK (note_a_id < note_b_id)
+);
+
+CREATE INDEX idx_note_associations_a ON note_associations(note_a_id);
+CREATE INDEX idx_note_associations_b ON note_associations(note_b_id);
+CREATE INDEX idx_note_associations_weight ON note_associations(weight);
