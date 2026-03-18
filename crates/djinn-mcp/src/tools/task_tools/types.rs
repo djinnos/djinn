@@ -6,7 +6,7 @@ use super::*;
 pub struct TaskCreateParams {
     /// Absolute project path.
     pub project: String,
-    /// Parent epic ID — UUID or short_id (required).
+    /// Parent epic ID - UUID or short_id (required).
     pub epic_id: Option<String>,
     pub title: String,
     /// Task type: "task" (default), "feature", or "bug".
@@ -70,7 +70,7 @@ pub struct AcceptanceCriterionStatus {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskShowParams {
-    /// Absolute project path. Optional — task IDs are globally unique.
+    /// Absolute project path. Optional - task IDs are globally unique.
     pub project: Option<String>,
     /// Task UUID or short_id.
     pub id: String,
@@ -130,7 +130,7 @@ pub struct TaskBlockersListParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskBlockedListParams {
-    /// Absolute project path. Optional — task IDs are globally unique.
+    /// Absolute project path. Optional - task IDs are globally unique.
     pub project: Option<String>,
     /// Task UUID or short_id.
     pub id: String,
@@ -153,7 +153,7 @@ pub struct TaskReadyParams {
 pub struct TaskActivityListParams {
     /// Absolute project path.
     pub project: String,
-    /// Task UUID or short_id (optional — omit to query all tasks).
+    /// Task UUID or short_id (optional - omit to query all tasks).
     pub id: Option<String>,
     /// Filter by event_type (e.g. "status_changed", "comment").
     pub event_type: Option<String>,
@@ -475,7 +475,7 @@ pub struct BoardHealthResponse {
     pub stale_tasks: Vec<BoardHealthTaskItem>,
     pub review_queue: Vec<BoardHealthReviewItem>,
     pub stale_threshold_hours: i64,
-    /// Per-project health issues blocking execution (project_id → error message).
+    /// Per-project health issues blocking execution (project_id -> error message).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_issues: Option<HashMap<String, String>>,
     /// Missing LSP servers that should be installed for diagnostics to work.

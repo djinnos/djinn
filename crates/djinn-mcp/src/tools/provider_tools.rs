@@ -132,6 +132,9 @@ pub struct ProviderCatalogResponse {
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderCatalogItem {
     pub id: String,
+    pub builtin_id: String,
+    #[serde(rename = "goose_provider_id")]
+    pub legacy_builtin_id: String,
     pub name: String,
     pub npm: String,
     pub env_vars: Vec<String>,
@@ -209,7 +212,9 @@ pub struct ProviderOauthStartResponse {
     pub ok: bool,
     pub success: bool,
     pub provider_id: String,
-    pub goose_provider_id: Option<String>,
+    pub builtin_id: Option<String>,
+    #[serde(rename = "goose_provider_id")]
+    pub legacy_builtin_id: Option<String>,
     pub oauth_supported: bool,
     pub configured_keys: Vec<String>,
     pub error: Option<String>,
@@ -426,6 +431,8 @@ impl DjinnMcpServer {
                 );
                 ProviderCatalogItem {
                     id: p.id.clone(),
+                    builtin_id: p.id.clone(),
+                    legacy_builtin_id: p.id.clone(),
                     name: p.name.clone(),
                     npm: p.npm.clone(),
                     env_vars: p.env_vars.clone(),
@@ -484,6 +491,8 @@ impl DjinnMcpServer {
                 }
                 Some(ProviderCatalogItem {
                     id: p.id.clone(),
+                    builtin_id: p.id.clone(),
+                    legacy_builtin_id: p.id.clone(),
                     name: p.name.clone(),
                     npm: p.npm.clone(),
                     env_vars: p.env_vars.clone(),
@@ -628,7 +637,8 @@ impl DjinnMcpServer {
                 ok: false,
                 success: false,
                 provider_id: input.provider_id,
-                goose_provider_id: None,
+                builtin_id: None,
+                legacy_builtin_id: None,
                 oauth_supported: false,
                 configured_keys: vec![],
                 error: Some("provider is not a known built-in".into()),
@@ -651,7 +661,8 @@ impl DjinnMcpServer {
                 ok: false,
                 success: false,
                 provider_id: input.provider_id,
-                goose_provider_id: Some(builtin_id.to_string()),
+                builtin_id: Some(builtin_id.to_string()),
+                legacy_builtin_id: Some(builtin_id.to_string()),
                 oauth_supported: false,
                 configured_keys: vec![],
                 error: Some("provider does not support OAuth flow".into()),
@@ -664,7 +675,8 @@ impl DjinnMcpServer {
                 ok: false,
                 success: false,
                 provider_id: input.provider_id,
-                goose_provider_id: Some(builtin_id.to_string()),
+                builtin_id: Some(builtin_id.to_string()),
+                legacy_builtin_id: Some(builtin_id.to_string()),
                 oauth_supported: true,
                 configured_keys: vec![],
                 error: Some(format!("no OAuth flow implemented for '{effective_id}'")),
@@ -688,7 +700,8 @@ impl DjinnMcpServer {
                 ok: true,
                 success: true,
                 provider_id: input.provider_id,
-                goose_provider_id: Some(builtin_id.to_string()),
+                builtin_id: Some(builtin_id.to_string()),
+                legacy_builtin_id: Some(builtin_id.to_string()),
                 oauth_supported: true,
                 configured_keys: oauth_keys,
                 error: None,
@@ -697,7 +710,8 @@ impl DjinnMcpServer {
                 ok: false,
                 success: false,
                 provider_id: input.provider_id,
-                goose_provider_id: Some(builtin_id.to_string()),
+                builtin_id: Some(builtin_id.to_string()),
+                legacy_builtin_id: Some(builtin_id.to_string()),
                 oauth_supported: true,
                 configured_keys: vec![],
                 error: Some(e.to_string()),

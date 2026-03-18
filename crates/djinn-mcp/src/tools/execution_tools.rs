@@ -122,7 +122,7 @@ pub struct ExecutionStatusResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(with = "ExecutionStatusMetrics")]
     pub metrics: Option<ExecutionStatusMetrics>,
-    /// Per-project health issues blocking execution (project_id → error message).
+    /// Per-project health issues blocking execution (project_id -> error message).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_issues: Option<HashMap<String, String>>,
     pub error: Option<String>,
@@ -205,7 +205,7 @@ impl DjinnMcpServer {
             tracing::warn!(error = %e, "execution_start: failed to trigger project health validation");
         }
 
-        // Always use resume_project — it's idempotent (removes from paused set
+        // Always use resume_project - it's idempotent (removes from paused set
         // if present, then dispatches). This avoids a race where the status watch
         // hasn't yet reflected startup pause state.
         let (resumed, result) = match project_id.as_deref() {
@@ -251,7 +251,7 @@ impl DjinnMcpServer {
 
     /// Pause active project execution phases.
     #[tool(
-        description = "Pause active project execution phases. Graceful mode blocks new task dispatch immediately and lets active sessions run to completion before pausing — no work is lost. Immediate mode commits work-in-progress to each task's git branch, then stops all active sessions; interrupted tasks return to open status for re-dispatch after resume. Feature branches and worktrees are preserved in both modes."
+        description = "Pause active project execution phases. Graceful mode blocks new task dispatch immediately and lets active sessions run to completion before pausing - no work is lost. Immediate mode commits work-in-progress to each task's git branch, then stops all active sessions; interrupted tasks return to open status for re-dispatch after resume. Feature branches and worktrees are preserved in both modes."
     )]
     pub async fn execution_pause(
         &self,
