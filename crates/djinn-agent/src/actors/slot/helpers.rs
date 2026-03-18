@@ -221,14 +221,6 @@ pub(crate) async fn default_target_branch(project_id: &str, app_state: &AgentCon
     "main".to_string()
 }
 
-pub(crate) async fn project_path_for_id(
-    project_id: &str,
-    app_state: &AgentContext,
-) -> Option<String> {
-    let repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    repo.get_path(project_id).await.ok().flatten()
-}
-
 pub(crate) async fn find_paused_session_record(
     task_id: &str,
     role_name: &str,

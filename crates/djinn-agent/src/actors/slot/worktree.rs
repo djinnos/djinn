@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use crate::context::AgentContext;
 use djinn_db::ProjectRepository;
-use djinn_db::SessionRepository;
 use djinn_git::GitError;
 
 use super::*;
@@ -164,28 +163,18 @@ pub(crate) async fn prepare_worktree(
         .join("worktrees")
         .join(&task.short_id);
 
-    let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let has_paused_session = session_repo
-        .paused_for_task(&task.id)
-        .await
-        .ok()
-        .flatten()
-        .is_some();
-    if has_paused_session
-        && stale_worktree_path.exists()
-        && stale_worktree_path.join(".git").exists()
-    {
+    // Reuse existing worktree if it's still valid.  This preserves the
+    // branch's own target/ build cache across worker → verify → review
+    // cycles, avoiding full rebuilds on every session.  The worktree is
+    // only nuked on task close/merge or when the PM calls
+    // `task_delete_branch` (which invokes `teardown_worktree`).
+    if stale_worktree_path.exists() && stale_worktree_path.join(".git").exists() {
         tracing::info!(
             task_id = %task.short_id,
             worktree = %stale_worktree_path.display(),
-            "Lifecycle: reusing existing worktree from paused session"
+            "Lifecycle: reusing existing worktree"
         );
         return Ok(stale_worktree_path);
-    }
-
-    let _ = git.remove_worktree(&stale_worktree_path).await;
-    if stale_worktree_path.exists() {
-        let _ = std::fs::remove_dir_all(&stale_worktree_path);
     }
 
     // Ensure the target branch has at least one commit — a bare `git init`
@@ -409,64 +398,20 @@ pub(crate) async fn commit_final_work_if_needed(
     Ok(())
 }
 
+/// Post-session worktree cleanup.  The worktree is intentionally **kept alive**
+/// so that subsequent sessions on the same task branch can reuse its `target/`
+/// build cache.  Real cleanup happens via `teardown_worktree` on task
+/// close/merge or when the PM calls `task_delete_branch`.
 pub(crate) async fn cleanup_worktree(
     task_id: &str,
     worktree_path: &Path,
-    app_state: &AgentContext,
+    _app_state: &AgentContext,
 ) {
-    // Never remove the main worktree (project root). Linked worktrees have `.git`
-    // as a file; the main worktree has `.git` as a directory.
-    let git_entry = worktree_path.join(".git");
-    if git_entry.is_dir() {
-        tracing::debug!(
-            task_id = %task_id,
-            worktree = %worktree_path.display(),
-            "Lifecycle: skipping cleanup — path is the main worktree (project root)"
-        );
-        return;
-    }
-
-    let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    if let Ok(Some(paused)) = session_repo.paused_for_task(task_id).await
-        && paused.worktree_path.as_deref() == Some(worktree_path.to_str().unwrap_or(""))
-    {
-        tracing::info!(
-            task_id = %task_id,
-            worktree = %worktree_path.display(),
-            "Lifecycle: skipping worktree cleanup — paused session still references it"
-        );
-        return;
-    }
-
-    let task = match load_task(task_id, app_state).await {
-        Ok(task) => task,
-        Err(e) => {
-            tracing::warn!(task_id = %task_id, error = %e, "failed to load task for worktree cleanup");
-            return;
-        }
-    };
-
-    let Some(project_path) = project_path_for_id(&task.project_id, app_state).await else {
-        tracing::warn!(task_id = %task_id, "project path not found for worktree cleanup");
-        return;
-    };
-
-    let git = match app_state.git_actor(Path::new(&project_path)).await {
-        Ok(git) => git,
-        Err(e) => {
-            tracing::warn!(task_id = %task_id, error = %e, "failed to open git actor for worktree cleanup");
-            return;
-        }
-    };
-
-    if let Err(e) = git.remove_worktree(worktree_path).await {
-        tracing::warn!(task_id = %task_id, error = %e, "failed to remove worktree; attempting filesystem cleanup");
-        if worktree_path.exists()
-            && let Err(remove_err) = std::fs::remove_dir_all(worktree_path)
-        {
-            tracing::warn!(task_id = %task_id, error = %remove_err, "failed to remove worktree directory");
-        }
-    }
+    tracing::debug!(
+        task_id = %task_id,
+        worktree = %worktree_path.display(),
+        "Lifecycle: keeping worktree alive for build cache reuse"
+    );
 }
 
 /// Tear down a task worktree in the correct order to avoid git errors:
