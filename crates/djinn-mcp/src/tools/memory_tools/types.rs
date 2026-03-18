@@ -164,6 +164,32 @@ pub struct ReindexParams {
     pub project: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct AssociationsParams {
+    pub project: String,
+    /// Note ID or permalink (e.g. "decisions/my-adr").
+    pub identifier: String,
+    /// Minimum association weight [0.0, 1.0]. Default: 0.0 (all associations).
+    pub min_weight: Option<f64>,
+    /// Maximum number of results. Default: 20.
+    pub limit: Option<i64>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryAssociationEntry {
+    pub note_permalink: String,
+    pub note_title: String,
+    pub weight: f64,
+    pub co_access_count: i64,
+    pub last_co_access: String,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryAssociationsResponse {
+    pub associations: Vec<MemoryAssociationEntry>,
+    pub error: Option<String>,
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryNoteResponse {
     pub id: Option<String>,

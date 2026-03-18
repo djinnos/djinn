@@ -13,9 +13,10 @@ use crate::tools::execution_tools::{
     ExecutionStatusParams, SessionForTaskParams,
 };
 use crate::tools::memory_tools::{
-    BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams, DiffParams, EditParams,
-    GraphParams, HealthParams, HistoryParams, ListParams, MoveParams, OrphansParams, ReadParams,
-    RecentParams, ReindexParams, SearchParams, TaskRefsParams, WriteParams,
+    AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
+    DiffParams, EditParams, GraphParams, HealthParams, HistoryParams, ListParams, MoveParams,
+    OrphansParams, ReadParams, RecentParams, ReindexParams, SearchParams, TaskRefsParams,
+    WriteParams,
 };
 use crate::tools::project_tools::{
     ProjectAddParams, ProjectConfigGetParams, ProjectConfigSetParams, ProjectRemoveParams,
@@ -408,6 +409,13 @@ impl DjinnMcpServer {
                 name,
                 self.memory_move(Parameters(decode_args::<MoveParams>(name, args)?))
                     .await,
+            ),
+            "memory_associations" => map_json(
+                name,
+                self.memory_associations(Parameters(decode_args::<AssociationsParams>(
+                    name, args,
+                )?))
+                .await,
             ),
             "session_list" => map_json(
                 name,

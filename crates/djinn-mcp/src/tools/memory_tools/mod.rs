@@ -14,10 +14,13 @@ use djinn_db::ProjectRepository;
 pub(crate) mod types;
 pub use types::*;
 
+mod associations;
 mod reads;
 mod search;
 mod writes;
 
+#[cfg(test)]
+mod associations_tests;
 #[cfg(test)]
 mod build_context_tests;
 
@@ -25,7 +28,10 @@ mod build_context_tests;
 
 impl DjinnMcpServer {
     pub fn memory_tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
-        Self::memory_reads_router() + Self::memory_writes_router() + Self::memory_search_router()
+        Self::memory_reads_router()
+            + Self::memory_writes_router()
+            + Self::memory_search_router()
+            + Self::memory_associations_router()
     }
 }
 
