@@ -10,13 +10,114 @@ const HOTNESS_ALPHA: f64 = 0.2;
 const HALF_LIFE_DAYS: f64 = 7.0;
 const MIN_ASSOCIATION_WEIGHT: f64 = 0.05;
 
+#[allow(dead_code)]
+pub const CONFIDENCE_FLOOR: f64 = 0.025;
+#[allow(dead_code)]
+pub const CONFIDENCE_CEILING: f64 = 0.975;
+
+#[allow(dead_code)]
+pub const TASK_SUCCESS: f64 = 0.65;
+#[allow(dead_code)]
+pub const CO_ACCESS_HIGH: f64 = 0.65;
+#[allow(dead_code)]
+pub const USER_CONFIRM: f64 = 0.95;
+#[allow(dead_code)]
+pub const CONTRADICTION: f64 = 0.1;
+#[allow(dead_code)]
+pub const TASK_FAILURE: f64 = 0.1;
+#[allow(dead_code)]
+pub const STALE_CITATION: f64 = 0.3;
+
+pub fn bayesian_update(prior: f64, signal: f64) -> f64 {
+    let posterior = (prior * signal) / (prior * signal + (1.0 - prior) * (1.0 - signal));
+    posterior.clamp(CONFIDENCE_FLOOR, CONFIDENCE_CEILING)
+}
+
 #[derive(Clone)]
 struct ProximityEdge {
     target: String,
     multiplier: f64,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bayesian_update_low_signal_reduces_from_near_one() {
+        let updated = bayesian_update(0.95, 0.1);
+        assert!(updated < 0.7, "expected a significant decrease, got {updated}");
+        assert!(updated >= CONFIDENCE_FLOOR);
+    }
+
+    #[test]
+    fn bayesian_update_medium_positive_signal_increases_from_half() {
+        let updated = bayesian_update(0.5, TASK_SUCCESS);
+        assert!(updated > 0.5);
+    }
+
+    #[test]
+    fn repeated_low_signals_never_cross_floor() {
+        let mut confidence = 0.5;
+        for _ in 0..50 {
+            confidence = bayesian_update(confidence, CONTRADICTION);
+        }
+        assert!(confidence >= CONFIDENCE_FLOOR);
+        assert!((confidence - CONFIDENCE_FLOOR).abs() < 1e-9);
+    }
+
+    #[test]
+    fn repeated_high_signals_never_cross_ceiling() {
+        let mut confidence = 0.5;
+        for _ in 0..50 {
+            confidence = bayesian_update(confidence, USER_CONFIRM);
+        }
+        assert!(confidence <= CONFIDENCE_CEILING);
+        assert!((confidence - CONFIDENCE_CEILING).abs() < 1e-9);
+    }
+}
+
 impl NoteRepository {
+    pub async fn update_confidence(&self, note_id: &str, signal: f64) -> Result<f64> {
+        self.db.ensure_initialized().await?;
+
+        let prior = sqlx::query_scalar::<_, f64>("SELECT confidence FROM notes WHERE id = ?1")
+            .bind(note_id)
+            .fetch_one(self.db.pool())
+            .await?;
+
+        let posterior = bayesian_update(prior, signal);
+
+        sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
+            .bind(posterior)
+            .bind(note_id)
+            .execute(self.db.pool())
+            .await?;
+
+        Ok(posterior)
+    }
+
+    pub async fn confidence_map(&self, note_ids: &[String]) -> Result<HashMap<String, f64>> {
+        if note_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let placeholders = std::iter::repeat_n("?", note_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, confidence FROM notes WHERE id IN ({})",
+            placeholders
+        );
+
+        let mut query = sqlx::query_as::<_, (String, f64)>(&sql);
+        for id in note_ids {
+            query = query.bind(id);
+        }
+
+        Ok(query.fetch_all(self.db.pool()).await?.into_iter().collect())
+    }
+
     pub async fn temporal_scores(
         &self,
         project_id: &str,

@@ -657,7 +657,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prepare_worktree_cleans_broken_remnant() {
         // Set up a real git repo in a temp directory.
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("djinn-worktree-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let project_dir = tmp.path();
 
         std::process::Command::new("git")

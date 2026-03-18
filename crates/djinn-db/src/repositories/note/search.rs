@@ -84,13 +84,15 @@ impl NoteRepository {
         let graph_scores = self.graph_proximity_scores(&candidate_ids, 2).await?;
         let task_scores = self.task_affinity_scores(project_id, task_id).await?;
 
+        let confidence_map = self.confidence_map(&candidate_ids).await?;
+
         let signals = vec![
             (lexical_scores, 60.0),
             (temporal_scores, 60.0),
             (graph_scores, 60.0),
             (task_scores, 60.0),
         ];
-        let fused = rrf_fuse(&signals, &HashMap::new());
+        let fused = rrf_fuse(&signals, &confidence_map);
         let ranked_ids: Vec<String> = fused
             .into_iter()
             .filter_map(|(id, _)| candidate_ids.contains(&id).then_some(id))

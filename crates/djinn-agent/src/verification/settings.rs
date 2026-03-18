@@ -15,7 +15,9 @@ pub struct DjinnSettings {
 /// Load commands from `.djinn/settings.json` in the worktree.
 ///
 /// Returns empty vecs when the file is absent. Errors on malformed JSON.
-pub fn load_commands(worktree_path: &Path) -> Result<(Vec<CommandSpec>, Vec<CommandSpec>), String> {
+pub fn load_commands(
+    worktree_path: &Path,
+) -> Result<(Vec<CommandSpec>, Vec<CommandSpec>), String> {
     let settings_path = worktree_path.join(".djinn/settings.json");
 
     match std::fs::read_to_string(&settings_path) {
@@ -43,11 +45,17 @@ pub fn load_commands(worktree_path: &Path) -> Result<(Vec<CommandSpec>, Vec<Comm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+
+    fn tempdir_in_tmp() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("djinn-settings-")
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
 
     #[test]
     fn load_commands_uses_settings_file_when_present() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir_in_tmp();
         let djinn_dir = dir.path().join(".djinn");
         std::fs::create_dir_all(&djinn_dir).unwrap();
         std::fs::write(
@@ -69,7 +77,7 @@ mod tests {
 
     #[test]
     fn load_commands_returns_empty_when_file_missing() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir_in_tmp();
 
         let (setup, verification) = load_commands(dir.path()).expect("load commands");
 
@@ -79,7 +87,7 @@ mod tests {
 
     #[test]
     fn load_commands_errors_when_file_malformed() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir_in_tmp();
         let djinn_dir = dir.path().join(".djinn");
         std::fs::create_dir_all(&djinn_dir).unwrap();
         std::fs::write(djinn_dir.join("settings.json"), "{not valid json").unwrap();
@@ -90,7 +98,7 @@ mod tests {
 
     #[test]
     fn djinn_settings_defaults_missing_fields_to_empty() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir_in_tmp();
         let djinn_dir = dir.path().join(".djinn");
         std::fs::create_dir_all(&djinn_dir).unwrap();
         std::fs::write(
