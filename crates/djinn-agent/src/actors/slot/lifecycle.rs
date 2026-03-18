@@ -980,7 +980,28 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             false,
         )
         .await;
+
+        // For non-worker roles, free the slot immediately and run
+        // post-session work (finalize payload, on_complete, transition) in a
+        // background task.  This prevents slow operations like merge
+        // verification from blocking a slot while no LLM session is active.
+        let final_error = final_result.as_ref().err().map(|e| e.to_string());
+        let final_result_ok = final_result.is_ok();
+        spawn_post_session_work(PostSessionParams {
+            task_id: task_id.clone(),
+            project_path: project_path.clone(),
+            role: role.clone(),
+            app_state: app_state.clone(),
+            final_output,
+            final_result_ok,
+            final_error,
+            tokens_in,
+            tokens_out,
+        });
+        return_free!();
     }
+
+    // ── Worker path: inline post-session (workers don't do merges) ────────────
 
     // Log reviewer feedback from text markers — only when no finalize payload is
     // present. With ADR-036, reviewer feedback comes via submit_review.feedback
@@ -1058,6 +1079,155 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         Err(reason) => Some(((role.config().release_action)(), Some(reason.to_string()))),
     };
 
+    apply_transition_and_dispatch(
+        transition,
+        &task_id,
+        &project_path,
+        &role,
+        &app_state,
+        tokens_in,
+        tokens_out,
+    )
+    .await;
+
+    return_free!();
+}
+
+// ─── Background post-session work (non-worker roles) ─────────────────────────
+
+/// Parameters for the background post-session task that runs after the slot is
+/// freed.  Handles finalize payload processing, on_complete (which may do slow
+/// merge + verification), transition, and dispatch triggering.
+struct PostSessionParams {
+    task_id: String,
+    project_path: String,
+    role: Arc<dyn AgentRole>,
+    app_state: AgentContext,
+    final_output: crate::output_parser::ParsedAgentOutput,
+    final_result_ok: bool,
+    final_error: Option<String>,
+    tokens_in: i64,
+    tokens_out: i64,
+}
+
+/// Spawn the post-session work as a background tokio task so the slot is freed
+/// immediately after the LLM session ends.
+fn spawn_post_session_work(params: PostSessionParams) {
+    tokio::spawn(async move {
+        let PostSessionParams {
+            task_id,
+            project_path,
+            role,
+            app_state,
+            final_output,
+            final_result_ok,
+            final_error,
+            tokens_in,
+            tokens_out,
+        } = params;
+
+        // Log reviewer feedback from text markers.
+        let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+        if final_output.finalize_payload.is_none()
+            && let Some(feedback) = final_output.reviewer_feedback.as_deref()
+        {
+            let payload = serde_json::json!({ "body": feedback }).to_string();
+            if let Err(e) = task_repo
+                .log_activity(
+                    Some(&task_id),
+                    "agent-supervisor",
+                    "task_reviewer",
+                    "comment",
+                    &payload,
+                )
+                .await
+            {
+                tracing::warn!(task_id = %task_id, error = %e, "failed to store reviewer feedback comment");
+            }
+        }
+
+        // Process finalize tool payload (ADR-036).
+        if final_result_ok {
+            super::finalize_handlers::process_finalize_payload(
+                &final_output.finalize_payload,
+                role.config().finalize_tool_name,
+                &task_id,
+                &app_state,
+            )
+            .await;
+        }
+
+        // Log session errors.
+        if let Some(reason) = &final_error {
+            let payload = serde_json::json!({
+                "error": reason,
+                "agent_type": role.config().name,
+            })
+            .to_string();
+            let _ = task_repo
+                .log_activity(
+                    Some(&task_id),
+                    "agent-supervisor",
+                    "system",
+                    "session_error",
+                    &payload,
+                )
+                .await;
+        }
+        if final_result_ok
+            && let Some(reason) = final_output.runtime_error.as_deref()
+        {
+            let payload = serde_json::json!({
+                "error": reason,
+                "agent_type": role.config().name,
+            })
+            .to_string();
+            let _ = task_repo
+                .log_activity(
+                    Some(&task_id),
+                    "agent-supervisor",
+                    "system",
+                    "session_error",
+                    &payload,
+                )
+                .await;
+        }
+
+        // Determine transition.
+        let transition = if final_result_ok {
+            role.on_complete(&task_id, &final_output, &app_state).await
+        } else if let Some(reason) = final_error {
+            Some(((role.config().release_action)(), Some(reason)))
+        } else {
+            Some(((role.config().release_action)(), None))
+        };
+
+        apply_transition_and_dispatch(
+            transition,
+            &task_id,
+            &project_path,
+            &role,
+            &app_state,
+            tokens_in,
+            tokens_out,
+        )
+        .await;
+    });
+}
+
+/// Apply the transition from on_complete and trigger dispatch for the project.
+/// Shared by both the inline worker path and the background non-worker path.
+async fn apply_transition_and_dispatch(
+    transition: Option<(TransitionAction, Option<String>)>,
+    task_id: &str,
+    project_path: &str,
+    role: &Arc<dyn AgentRole>,
+    app_state: &AgentContext,
+    tokens_in: i64,
+    tokens_out: i64,
+) {
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+
     if let Some((action, reason)) = transition {
         tracing::info!(
             task_id = %task_id,
@@ -1072,7 +1242,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         let is_submit_verification = action == TransitionAction::SubmitVerification;
         if let Err(e) = task_repo
             .transition(
-                &task_id,
+                task_id,
                 action,
                 "agent-supervisor",
                 "system",
@@ -1083,21 +1253,13 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to transition task after session");
         }
-        // Only interrupt the paused worker session on conflict rejection
-        // (agent type changes to ConflictResolver, so the saved conversation
-        // is not useful).  For regular reject/reject_stale, the paused session
-        // stays so the worker can resume with reviewer feedback.
         if is_conflict_rejection {
-            interrupt_paused_worker_session(&task_id, &app_state).await;
+            interrupt_paused_worker_session(task_id, app_state).await;
         }
-        // Spawn background verification — runs outside the slot so the slot is
-        // freed immediately.  The verification pipeline creates its own worktree,
-        // runs setup + verification commands, and transitions the task to
-        // needs_task_review (pass) or open (fail).
         if is_submit_verification {
             super::verification::spawn_verification(
-                task_id.clone(),
-                project_path.clone(),
+                task_id.to_string(),
+                project_path.to_string(),
                 app_state.clone(),
             );
         }
@@ -1112,15 +1274,13 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     }
 
     // Trigger dispatcher for the project so the next ready task starts promptly.
-    if let Ok(task) = load_task(&task_id, &app_state).await
+    if let Ok(task) = load_task(task_id, app_state).await
         && let Some(coordinator) = app_state.coordinator().await
     {
         let _ = coordinator
             .trigger_dispatch_for_project(&task.project_id)
             .await;
     }
-
-    return_free!();
 }
 
 pub(crate) struct ProjectLifecycleParams {
