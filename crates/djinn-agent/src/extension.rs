@@ -914,8 +914,8 @@ async fn call_shell(
         .await
         .map_err(|e| format!("failed to run shell command: {e}"))?;
 
-    let stdout = truncate_shell_output(&String::from_utf8_lossy(&output.stdout));
-    let stderr = truncate_shell_output(&String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
     Ok(serde_json::json!({
         "ok": output.status.success(),
@@ -2457,16 +2457,6 @@ fn tool_task_kill_session() -> RmcpTool {
             }
         }),
     )
-}
-
-/// Truncate shell output to prevent blowing the context window.
-/// Hard cap at 50 KB / 2000 lines — uses 60/40 head+tail split to preserve
-/// both initial context and final errors/results.
-fn truncate_shell_output(raw: &str) -> String {
-    const MAX_LINES: usize = 2000;
-    const MAX_BYTES: usize = 50_000;
-
-    crate::truncate::smart_truncate_lines(raw, MAX_BYTES, MAX_LINES)
 }
 
 fn from_value<T>(value: serde_json::Value) -> Result<T, serde_json::Error>
