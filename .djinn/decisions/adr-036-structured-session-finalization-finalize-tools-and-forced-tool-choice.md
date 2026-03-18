@@ -4,6 +4,7 @@ type: adr
 tags: ["adr","agent-loop","session","tool-choice","roles"]
 ---
 
+
 # ADR-036: Structured Session Finalization — Finalize Tools and Forced Tool Choice
 
 **Status:** Accepted
@@ -229,3 +230,15 @@ Add `tool_choice: Option<ToolChoice>` as a parameter to `LlmProvider::stream()`.
 - [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]] — provider abstraction extended
 - [[ADR-034: Agent Role Hierarchy — Architect Patrol, Scrum Master Rules, and Task Types]] — new roles will also need finalize tools
 - [[Roadmap]] — new phase or integrated into Phase 16 (Operational Reliability)
+
+
+
+## Task Breakdown (Epic `52ok`)
+
+- Task `if6o`: Add ToolChoice enum and thread through LlmProvider::stream() — P0 foundation
+- Task `bw03`: Define finalize tool schemas and add finalize_tool_name() to AgentRole — P0 foundation
+- Task `z525`: Map ToolChoice to wire format in all provider format families — P1, blocked by if6o
+- Task `vizi`: Register finalize tools per role, remove generic tools from agent sessions — P1, blocked by bw03
+- Task `25gm`: Update role prompts to reference finalize tools — P1, blocked by bw03
+- Task `9m22`: Reply loop: finalize-tool detection, nudge loop, remove text-only break — P1, blocked by if6o + bw03 + z525
+- Task `95mc`: Finalize tool handlers and lifecycle processing — P2, blocked by vizi + 9m22
