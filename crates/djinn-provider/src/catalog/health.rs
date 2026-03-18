@@ -227,6 +227,21 @@ impl Default for HealthTracker {
 mod tests {
     use super::*;
 
+    const TEST_MODEL: &str = "model";
+
+    fn expire_cooldown(ht: &HealthTracker, model_id: &str) {
+        let mut map = ht.inner.lock().unwrap();
+        let state = map.get_mut(model_id).unwrap();
+        state.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
+    }
+
+    fn trip_breaker(ht: &HealthTracker, model_id: &str) -> ModelHealth {
+        for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
+            ht.record_failure(model_id);
+        }
+        ht.model_health(model_id)
+    }
+
     #[test]
     fn healthy_model_is_available() {
         let ht = HealthTracker::new();
@@ -236,36 +251,61 @@ mod tests {
     #[test]
     fn circuit_breaker_trips_at_threshold() {
         let ht = HealthTracker::new();
-        for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
+        let pre_threshold = CIRCUIT_BREAKER_THRESHOLD - 1;
+
+        for _ in 0..pre_threshold {
             ht.record_failure("bad-model");
         }
+
+        let before_trip = ht.model_health("bad-model");
+        assert!(ht.is_available("bad-model"));
+        assert!(!before_trip.auto_disabled);
+        assert_eq!(before_trip.consecutive_failures, pre_threshold);
+        assert_eq!(before_trip.total_failures, pre_threshold);
+        assert_eq!(before_trip.disable_ttl_trips, 0);
+        assert!(before_trip.cooldown_seconds_remaining.is_none());
+
+        ht.record_failure("bad-model");
+
         assert!(!ht.is_available("bad-model"));
         let h = ht.model_health("bad-model");
         assert!(h.auto_disabled);
-        assert!(h.cooldown_seconds_remaining.is_some());
+        assert_eq!(h.consecutive_failures, CIRCUIT_BREAKER_THRESHOLD);
+        assert_eq!(h.total_failures, CIRCUIT_BREAKER_THRESHOLD);
+        assert_eq!(h.disable_ttl_trips, 1);
+        let remaining = h.cooldown_seconds_remaining.unwrap();
+        assert!(remaining <= INITIAL_COOLDOWN.as_secs());
+        assert!(remaining >= INITIAL_COOLDOWN.as_secs().saturating_sub(1));
     }
 
     #[test]
     fn success_resets_consecutive_counter() {
         let ht = HealthTracker::new();
         for _ in 0..(CIRCUIT_BREAKER_THRESHOLD - 1) {
-            ht.record_failure("model");
+            ht.record_failure(TEST_MODEL);
         }
-        ht.record_success("model");
-        let h = ht.model_health("model");
-        assert_eq!(h.consecutive_failures, 0);
+        ht.record_success(TEST_MODEL);
+        for _ in 0..(CIRCUIT_BREAKER_THRESHOLD - 1) {
+            ht.record_failure(TEST_MODEL);
+        }
+        let h = ht.model_health(TEST_MODEL);
+        assert_eq!(h.consecutive_failures, CIRCUIT_BREAKER_THRESHOLD - 1);
         assert!(!h.auto_disabled);
+        assert_eq!(h.total_failures, 2 * (CIRCUIT_BREAKER_THRESHOLD - 1));
+        assert_eq!(h.total_successes, 1);
+        assert_eq!(h.disable_ttl_trips, 0);
+        assert!(ht.is_available(TEST_MODEL));
     }
 
     #[test]
     fn reset_clears_state() {
         let ht = HealthTracker::new();
         for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
-            ht.record_failure("model");
+            ht.record_failure(TEST_MODEL);
         }
-        ht.reset("model");
-        assert!(ht.is_available("model"));
-        let h = ht.model_health("model");
+        ht.reset(TEST_MODEL);
+        assert!(ht.is_available(TEST_MODEL));
+        let h = ht.model_health(TEST_MODEL);
         assert_eq!(h.total_failures, 0);
     }
 
@@ -273,60 +313,158 @@ mod tests {
     fn enable_re_enables_without_clearing_counters() {
         let ht = HealthTracker::new();
         for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
-            ht.record_failure("model");
+            ht.record_failure(TEST_MODEL);
         }
-        ht.enable("model");
-        assert!(ht.is_available("model"));
-        // Counters preserved
-        let h = ht.model_health("model");
+        ht.enable(TEST_MODEL);
+        assert!(ht.is_available(TEST_MODEL));
+        let h = ht.model_health(TEST_MODEL);
         assert_eq!(h.total_failures, CIRCUIT_BREAKER_THRESHOLD);
     }
 
     #[test]
-    fn exponential_backoff_doubles_each_trip() {
-        let ht = HealthTracker::new();
-        // First trip.
-        for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
-            ht.record_failure("model");
-        }
-        let h1 = ht.model_health("model");
-        assert_eq!(h1.disable_ttl_trips, 1);
+    fn compute_cooldown_grows_exponentially_and_caps() {
+        let mut state = ModelState::default();
 
-        // Re-enable and trip again.
-        ht.enable("model");
-        {
-            let mut map = ht.inner.lock().unwrap();
-            let s = map.get_mut("model").unwrap();
-            s.consecutive_failures = 0;
-        }
-        for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
-            ht.record_failure("model");
-        }
-        let h2 = ht.model_health("model");
-        assert_eq!(h2.disable_ttl_trips, 2);
-        // Second trip cooldown should be 3x the first (i.e. ≥ 15s).
-        let secs = h2.cooldown_seconds_remaining.unwrap_or(0);
-        assert!(
-            secs > INITIAL_COOLDOWN.as_secs(),
-            "second trip cooldown should be longer"
-        );
+        assert_eq!(state.compute_cooldown(), INITIAL_COOLDOWN);
+
+        state.disable_ttl_trips = 1;
+        assert_eq!(state.compute_cooldown(), INITIAL_COOLDOWN * 3);
+
+        state.disable_ttl_trips = 2;
+        assert_eq!(state.compute_cooldown(), INITIAL_COOLDOWN * 9);
+
+        state.disable_ttl_trips = 3;
+        assert_eq!(state.compute_cooldown(), INITIAL_COOLDOWN * 27);
+
+        state.disable_ttl_trips = 4;
+        assert_eq!(state.compute_cooldown(), MAX_COOLDOWN);
+
+        state.disable_ttl_trips = 12;
+        assert_eq!(state.compute_cooldown(), MAX_COOLDOWN);
     }
 
     #[test]
-    fn restore_all_rehydrates_persisted_state() {
+    fn repeated_trips_increase_cooldown_and_expired_cooldown_reenables() {
+        let ht = HealthTracker::new();
+
+        for (expected_trip, expected_secs) in [(1_u32, 5_u64), (2, 15), (3, 45)] {
+            let health = trip_breaker(&ht, TEST_MODEL);
+            assert_eq!(health.disable_ttl_trips, expected_trip);
+            assert!(health.auto_disabled);
+            let remaining = health.cooldown_seconds_remaining.unwrap();
+            assert!(remaining <= expected_secs);
+            assert!(remaining >= expected_secs.saturating_sub(1));
+            assert!(!ht.is_available(TEST_MODEL));
+
+            expire_cooldown(&ht, TEST_MODEL);
+            let expired = ht.model_health(TEST_MODEL);
+            assert!(!expired.auto_disabled);
+            assert!(expired.cooldown_seconds_remaining.is_none());
+            assert!(ht.is_available(TEST_MODEL));
+        }
+
+        let expired = ht.model_health(TEST_MODEL);
+        assert_eq!(expired.disable_ttl_trips, 3);
+        assert_eq!(expired.consecutive_failures, CIRCUIT_BREAKER_THRESHOLD * 3);
+
+        ht.record_success(TEST_MODEL);
+        let reenabled = ht.model_health(TEST_MODEL);
+        assert!(!reenabled.auto_disabled);
+        assert_eq!(reenabled.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn repeated_trips_cooldown_caps_at_maximum() {
+        let ht = HealthTracker::new();
+
+        for expected_trip in 1..=6 {
+            let health = trip_breaker(&ht, TEST_MODEL);
+            assert_eq!(health.disable_ttl_trips, expected_trip);
+            let remaining = health.cooldown_seconds_remaining.unwrap();
+            assert!(remaining <= MAX_COOLDOWN.as_secs());
+            if expected_trip == 4 {
+                assert!(remaining <= 135);
+                assert!(remaining >= 134);
+            }
+            if expected_trip >= 5 {
+                assert!(remaining >= MAX_COOLDOWN.as_secs().saturating_sub(1));
+            }
+
+            expire_cooldown(&ht, TEST_MODEL);
+        }
+
+        let health = ht.model_health(TEST_MODEL);
+        assert_eq!(health.disable_ttl_trips, 6);
+        assert!(ht.is_available(TEST_MODEL));
+    }
+
+    #[test]
+    fn restore_all_rehydrates_disabled_state_without_new_trip() {
         let ht = HealthTracker::new();
         ht.restore_all(vec![ModelHealth {
             model_id: "a/model".to_string(),
             auto_disabled: true,
-            consecutive_failures: 3,
+            consecutive_failures: CIRCUIT_BREAKER_THRESHOLD,
             total_failures: 10,
             total_successes: 2,
             disable_ttl_trips: 1,
-            cooldown_seconds_remaining: Some(120),
+            cooldown_seconds_remaining: Some(4),
         }]);
 
         let h = ht.model_health("a/model");
         assert!(h.auto_disabled);
+        assert!(!ht.is_available("a/model"));
+        assert_eq!(h.consecutive_failures, CIRCUIT_BREAKER_THRESHOLD);
         assert_eq!(h.total_failures, 10);
+        assert_eq!(h.total_successes, 2);
+        assert_eq!(h.disable_ttl_trips, 1);
+        let remaining = h.cooldown_seconds_remaining.unwrap();
+        assert!(remaining <= 4);
+        assert!(remaining >= 3);
+
+        ht.enable("a/model");
+        let enabled = ht.model_health("a/model");
+        assert!(ht.is_available("a/model"));
+        assert!(!enabled.auto_disabled);
+        assert_eq!(enabled.disable_ttl_trips, 1);
+        assert_eq!(enabled.consecutive_failures, CIRCUIT_BREAKER_THRESHOLD);
+
+        ht.record_success("a/model");
+        let restored = ht.model_health("a/model");
+        assert!(ht.is_available("a/model"));
+        assert!(!restored.auto_disabled);
+        assert_eq!(restored.disable_ttl_trips, 1);
+        assert_eq!(restored.consecutive_failures, 0);
+
+        for failures in 1..CIRCUIT_BREAKER_THRESHOLD {
+            ht.record_failure("a/model");
+            let health = ht.model_health("a/model");
+            assert!(ht.is_available("a/model"));
+            assert!(!health.auto_disabled);
+            assert_eq!(health.disable_ttl_trips, 1);
+            assert_eq!(health.consecutive_failures, failures);
+        }
+
+        let before_expiry = ht.model_health("a/model");
+        assert_eq!(before_expiry.disable_ttl_trips, 1);
+
+        ht.restore_all(vec![ModelHealth {
+            model_id: "a/model".to_string(),
+            auto_disabled: true,
+            consecutive_failures: CIRCUIT_BREAKER_THRESHOLD,
+            total_failures: 10,
+            total_successes: 2,
+            disable_ttl_trips: 1,
+            cooldown_seconds_remaining: Some(2),
+        }]);
+        assert!(!ht.is_available("a/model"));
+        assert_eq!(ht.model_health("a/model").disable_ttl_trips, 1);
+
+        expire_cooldown(&ht, "a/model");
+        let cooled_off = ht.model_health("a/model");
+        assert!(ht.is_available("a/model"));
+        assert!(!cooled_off.auto_disabled);
+        assert_eq!(cooled_off.disable_ttl_trips, 1);
+        assert!(cooled_off.cooldown_seconds_remaining.is_none());
     }
 }
