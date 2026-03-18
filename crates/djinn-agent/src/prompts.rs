@@ -21,7 +21,6 @@ const MAX_SYSTEM_PROMPT_CHARS: usize = 30_000;
 
 const BASE_TEMPLATE: &str = include_str!("prompts/base.md");
 pub(crate) const DEV_TEMPLATE: &str = include_str!("prompts/dev.md");
-pub(crate) const CONFLICT_RESOLVER_TEMPLATE: &str = include_str!("prompts/conflict-resolver.md");
 pub(crate) const TASK_REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.md");
 pub(crate) const PM_TEMPLATE: &str = include_str!("prompts/pm.md");
 pub(crate) const GROOMER_TEMPLATE: &str = include_str!("prompts/groomer.md");
@@ -448,5 +447,34 @@ mod tests {
         let prompt = render_prompt(AgentType::Worker, &task, &ctx);
 
         assert!(!prompt.contains("[system prompt truncated"));
+    }
+
+    #[test]
+    fn worker_prompt_includes_merge_failure_context() {
+        let task = make_task();
+        let ctx = TaskContext {
+            merge_failure_context: Some("**Merge Conflict Detected**\n\nFile `src/main.rs` has conflicts.".into()),
+            ..make_ctx()
+        };
+        let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+        assert!(prompt.contains("Merge Conflict Detected"), "worker prompt should include merge failure context");
+        assert!(!prompt.contains("{{merge_failure_context}}"), "template placeholder should be replaced");
+    }
+
+    #[test]
+    fn worker_prompt_includes_conflict_files_for_conflict_context() {
+        let task = make_task();
+        let ctx = TaskContext {
+            conflict_files: Some("- src/main.rs\n- src/lib.rs".into()),
+            merge_base_branch: Some("task/abc123".into()),
+            merge_target_branch: Some("main".into()),
+            ..make_ctx()
+        };
+        let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+        assert!(prompt.contains("src/main.rs"), "worker prompt should include conflict files");
+        assert!(prompt.contains("task/abc123"), "worker prompt should include merge base branch");
+        assert!(prompt.contains("main"), "worker prompt should include merge target branch");
     }
 }

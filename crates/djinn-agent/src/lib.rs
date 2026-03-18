@@ -37,7 +37,6 @@ pub mod actors;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentType {
     Worker,
-    ConflictResolver,
     TaskReviewer,
     PM,
     Groomer,
@@ -52,11 +51,10 @@ impl AgentType {
         self.role_config().name
     }
 
-    pub fn for_task_status(status: &str, has_conflict_context: bool) -> Self {
+    pub fn for_task_status(status: &str, _has_conflict_context: bool) -> Self {
         match status {
             "needs_task_review" | "in_task_review" => Self::TaskReviewer,
             "needs_pm_intervention" | "in_pm_intervention" => Self::PM,
-            "open" if has_conflict_context => Self::ConflictResolver,
             _ => Self::Worker,
         }
     }
@@ -77,7 +75,6 @@ impl std::str::FromStr for AgentType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "worker" => Ok(Self::Worker),
-            "conflict_resolver" => Ok(Self::ConflictResolver),
             "task_reviewer" => Ok(Self::TaskReviewer),
             "pm" => Ok(Self::PM),
             "groomer" => Ok(Self::Groomer),
@@ -133,7 +130,6 @@ mod tests {
     fn role_config_equivalence_for_all_agent_types() {
         for agent_type in [
             AgentType::Worker,
-            AgentType::ConflictResolver,
             AgentType::TaskReviewer,
             AgentType::PM,
             AgentType::Groomer,
@@ -143,17 +139,10 @@ mod tests {
     }
 
     #[test]
-    fn conflict_resolver_dispatch_role_maps_to_worker_pool() {
-        assert_eq!(AgentType::ConflictResolver.dispatch_role(), "worker");
-    }
-
-    #[test]
     fn for_task_status_covers_all_expected_paths() {
+        // Tasks with conflict context now route to Worker, not a dedicated conflict resolver
         assert_eq!(AgentType::for_task_status("open", false), AgentType::Worker);
-        assert_eq!(
-            AgentType::for_task_status("open", true),
-            AgentType::ConflictResolver
-        );
+        assert_eq!(AgentType::for_task_status("open", true), AgentType::Worker);
         assert_eq!(
             AgentType::for_task_status("needs_task_review", false),
             AgentType::TaskReviewer
@@ -179,7 +168,6 @@ mod tests {
     #[test]
     fn dispatch_role_for_all_variants() {
         assert_eq!(AgentType::Worker.dispatch_role(), "worker");
-        assert_eq!(AgentType::ConflictResolver.dispatch_role(), "worker");
         assert_eq!(AgentType::TaskReviewer.dispatch_role(), "task_reviewer");
         assert_eq!(AgentType::PM.dispatch_role(), "pm");
         assert_eq!(AgentType::Groomer.dispatch_role(), "groomer");
@@ -190,9 +178,6 @@ mod tests {
         let cfg = AgentType::Worker.role_config();
         assert_eq!((cfg.start_action)("open"), Some(TransitionAction::Start));
         assert_eq!((cfg.start_action)("in_progress"), None);
-
-        let cfg = AgentType::ConflictResolver.role_config();
-        assert_eq!((cfg.start_action)("open"), Some(TransitionAction::Start));
 
         let cfg = AgentType::TaskReviewer.role_config();
         assert_eq!(
@@ -214,10 +199,6 @@ mod tests {
     fn release_action_via_role_config() {
         assert_eq!(
             (AgentType::Worker.role_config().release_action)(),
-            TransitionAction::Release
-        );
-        assert_eq!(
-            (AgentType::ConflictResolver.role_config().release_action)(),
             TransitionAction::Release
         );
         assert_eq!(

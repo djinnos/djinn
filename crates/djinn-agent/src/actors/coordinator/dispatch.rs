@@ -163,7 +163,7 @@ impl CoordinatorActor {
                 continue;
             }
 
-            let ctx = DispatchContext::default();
+            let ctx = DispatchContext;
             let Some(role) = self.role_registry.dispatch_role_for_task(&task, &ctx) else {
                 continue;
             };

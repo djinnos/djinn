@@ -8,13 +8,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-mod conflict;
 mod groomer;
 mod pm;
 mod reviewer;
 mod worker;
 
-pub(crate) use conflict::{CONFLICT_RESOLVER_CONFIG, ConflictResolverRole};
 pub(crate) use groomer::{GROOMER_CONFIG, GroomerRole};
 pub(crate) use pm::{PM_CONFIG, PmRole};
 pub(crate) use reviewer::{TASK_REVIEWER_CONFIG, TaskReviewerRole};
@@ -36,7 +34,6 @@ pub(crate) struct RoleConfig {
 pub(crate) fn config_for(agent_type: AgentType) -> &'static RoleConfig {
     match agent_type {
         AgentType::Worker => &WORKER_CONFIG,
-        AgentType::ConflictResolver => &CONFLICT_RESOLVER_CONFIG,
         AgentType::TaskReviewer => &TASK_REVIEWER_CONFIG,
         AgentType::PM => &PM_CONFIG,
         AgentType::Groomer => &GROOMER_CONFIG,
@@ -85,7 +82,6 @@ pub(crate) trait AgentRole: Send + Sync + 'static {
 pub(crate) fn role_impl_for(agent_type: AgentType) -> Arc<dyn AgentRole> {
     match agent_type {
         AgentType::Worker => Arc::new(WorkerRole),
-        AgentType::ConflictResolver => Arc::new(ConflictResolverRole),
         AgentType::TaskReviewer => Arc::new(TaskReviewerRole),
         AgentType::PM => Arc::new(PmRole),
         AgentType::Groomer => Arc::new(GroomerRole),
@@ -96,18 +92,16 @@ pub(crate) fn role_impl_for(agent_type: AgentType) -> Arc<dyn AgentRole> {
 /// without exposing `AgentType` to the caller.
 pub(crate) fn role_for_task_dispatch(
     task: &Task,
-    has_conflict_context: bool,
+    _has_conflict_context: bool,
 ) -> Arc<dyn AgentRole> {
     role_impl_for(AgentType::for_task_status(
         task.status.as_str(),
-        has_conflict_context,
+        false,
     ))
 }
 
 #[derive(Default)]
-pub(crate) struct DispatchContext {
-    pub(crate) has_conflict_context: bool,
-}
+pub(crate) struct DispatchContext;
 
 pub(crate) struct DispatchRule {
     pub(crate) role_name: &'static str,
@@ -129,14 +123,12 @@ impl RoleRegistry {
     pub fn new() -> Self {
         let roles = HashMap::from([
             ("worker", AgentType::Worker),
-            ("conflict_resolver", AgentType::ConflictResolver),
             ("task_reviewer", AgentType::TaskReviewer),
             ("pm", AgentType::PM),
             ("groomer", AgentType::Groomer),
         ]);
 
         let dispatch_rules = vec![
-            conflict_resolver_dispatch_rule(),
             worker_dispatch_rule(),
             task_reviewer_dispatch_rule(),
             pm_dispatch_rule(),
@@ -193,17 +185,6 @@ fn worker_dispatch_rule() -> DispatchRule {
     }
 }
 
-fn conflict_resolver_claims(task: &Task, ctx: &DispatchContext) -> bool {
-    task.status == "open" && ctx.has_conflict_context
-}
-
-fn conflict_resolver_dispatch_rule() -> DispatchRule {
-    DispatchRule {
-        role_name: "conflict_resolver",
-        claims: conflict_resolver_claims,
-    }
-}
-
 fn task_reviewer_claims(task: &Task, _ctx: &DispatchContext) -> bool {
     matches!(task.status.as_str(), "needs_task_review" | "in_task_review")
 }
@@ -237,5 +218,100 @@ fn groomer_dispatch_rule() -> DispatchRule {
     DispatchRule {
         role_name: "groomer",
         claims: groomer_claims,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_core::models::Task;
+
+    fn make_task(status: &str) -> Task {
+        Task {
+            id: "task-123".into(),
+            project_id: "project-1".into(),
+            short_id: "t123".into(),
+            epic_id: None,
+            title: "Test task".into(),
+            description: "Test description".into(),
+            design: "Test design".into(),
+            issue_type: "task".into(),
+            status: status.into(),
+            priority: 1,
+            owner: "dev@example.com".into(),
+            labels: "[]".into(),
+            acceptance_criteria: "[]".into(),
+            reopen_count: 0,
+            continuation_count: 0,
+            verification_failure_count: 0,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            memory_refs: "[]".into(),
+            unresolved_blocker_count: 0,
+        }
+    }
+
+    #[test]
+    fn open_task_with_conflict_context_dispatches_to_worker() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+        
+        // Test that open tasks dispatch to worker regardless of conflict context
+        let task = make_task("open");
+        let role = registry.role_for_task(&task, &ctx);
+        assert_eq!(role, Some("worker"), "open task should dispatch to worker");
+        
+        // Verify the dispatch_role is "worker"
+        let dispatch_role = registry.dispatch_role_for_task(&task, &ctx);
+        assert_eq!(dispatch_role, Some("worker"), "open task should have worker dispatch role");
+    }
+
+    #[test]
+    fn in_progress_task_dispatches_to_worker() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+        
+        let task = make_task("in_progress");
+        let role = registry.role_for_task(&task, &ctx);
+        assert_eq!(role, Some("worker"));
+    }
+
+    #[test]
+    fn task_reviewer_statuses_dispatches_to_task_reviewer() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+        
+        for status in ["needs_task_review", "in_task_review"] {
+            let task = make_task(status);
+            let role = registry.role_for_task(&task, &ctx);
+            assert_eq!(role, Some("task_reviewer"), "{status} should dispatch to task_reviewer");
+        }
+    }
+
+    #[test]
+    fn pm_intervention_statuses_dispatches_to_pm() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+        
+        for status in ["needs_pm_intervention", "in_pm_intervention"] {
+            let task = make_task(status);
+            let role = registry.role_for_task(&task, &ctx);
+            assert_eq!(role, Some("pm"), "{status} should dispatch to pm");
+        }
+    }
+
+    #[test]
+    fn role_for_task_dispatch_returns_worker_role() {
+        let task = make_task("open");
+        // Test that conflict-context tasks route to Worker (not a dedicated conflict_resolver)
+        let role = role_for_task_dispatch(&task, true);
+        assert_eq!(role.config().name, "worker", "conflict context task should dispatch to worker role");
+        
+        // Also test without conflict context
+        let role_no_conflict = role_for_task_dispatch(&task, false);
+        assert_eq!(role_no_conflict.config().name, "worker");
     }
 }
