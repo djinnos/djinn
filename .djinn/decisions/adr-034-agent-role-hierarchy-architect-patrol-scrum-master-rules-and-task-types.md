@@ -113,7 +113,10 @@ The Architect is a **project-scoped agent dispatched every 5 minutes** to review
 The Scrum Master is NOT an LLM agent — it is **deterministic coordinator logic** in the existing tick loop. Zero LLM cost.
 
 **Rules:**
-- Non-worker session (Lead, Planner, Architect) running > 10 minutes → kill session
+- **Session timeout (all agents):** Any session (Worker, Lead, Planner, Architect, Reviewer, Resolver) running > 5 minutes → kill session, reopen task. Workers included — 5 minutes is enough for any single attempt; verification is the quality gate, not session length.
+- **Token stall detection:** Session producing 0 tokens for > 2 minutes → kill session, reopen task. Catches provider failures (empty assistant turns) and hung connections before they waste the full 5-minute timeout.
+- **Verification step timeout:** Verification commands (clippy, test) running > 5 minutes → kill the command, count as verification failure. Prevents hung builds or infinite-loop tests from blocking the pipeline.
+- **Verifying orphan detection:** Task in `verifying` state with no active session for > 1 minute → re-trigger verification. Catches the case where a session ends without verification running (error, crash, provider failure).
 - 2nd `request_lead` escalation on same task → route to Architect instead of Lead
 - Spike/research task completed under an epic → create `decomposition` task for Planner (next batch)
 - Track throughput metrics per epic (tasks merged per hour, rolling window)
@@ -213,18 +216,16 @@ Architect patrol (every 5min) → catches everything else
 
 The Architect is the escalation ceiling. If it can't resolve, it leaves a comment and the task stays for human review.
 
-### 9. Session Timeouts
+### 9. Session Timeouts and Stall Detection
 
-| Agent | Timeout |
-|---|---|
-| Worker | No hard timeout (verification gate is backstop) |
-| Lead | 10 minutes |
-| Planner | 10 minutes |
-| Architect | 10 minutes |
-| Reviewer | 10 minutes |
-| Resolver | 10 minutes |
+| Timeout | Scope | Duration | Action |
+|---|---|---|---|
+| **Session hard timeout** | All agents | 5 minutes | Kill session, reopen task |
+| **Token stall** | All agents | 2 minutes no tokens | Kill session, reopen task |
+| **Verification step** | Verification commands | 5 minutes | Kill command, count as verification failure |
+| **Verifying orphan** | Tasks in `verifying` | 1 minute with no session | Re-trigger verification |
 
-Non-worker sessions exceeding timeout are killed by coordinator (Scrum Master rules).
+All timeouts enforced by coordinator (Scrum Master rules). Workers get the same 5-minute cap as everyone else — keeping attempts short and cheap, relying on verification + escalation to catch problems rather than giving agents more rope.
 
 ## Consequences
 
