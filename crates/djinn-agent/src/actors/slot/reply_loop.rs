@@ -48,7 +48,10 @@ fn serialize_message(msg: &Message) -> serde_json::Value {
     })
 }
 
-fn serialize_llm_input(conversation: &Conversation, tools: &[serde_json::Value]) -> serde_json::Value {
+fn serialize_llm_input(
+    conversation: &Conversation,
+    tools: &[serde_json::Value],
+) -> serde_json::Value {
     serde_json::json!({
         "messages": conversation.to_openai_messages(),
         "tools": tools,

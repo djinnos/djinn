@@ -453,13 +453,21 @@ mod tests {
     fn worker_prompt_includes_merge_failure_context() {
         let task = make_task();
         let ctx = TaskContext {
-            merge_failure_context: Some("**Merge Conflict Detected**\n\nFile `src/main.rs` has conflicts.".into()),
+            merge_failure_context: Some(
+                "**Merge Conflict Detected**\n\nFile `src/main.rs` has conflicts.".into(),
+            ),
             ..make_ctx()
         };
         let prompt = render_prompt(AgentType::Worker, &task, &ctx);
 
-        assert!(prompt.contains("Merge Conflict Detected"), "worker prompt should include merge failure context");
-        assert!(!prompt.contains("{{merge_failure_context}}"), "template placeholder should be replaced");
+        assert!(
+            prompt.contains("Merge Conflict Detected"),
+            "worker prompt should include merge failure context"
+        );
+        assert!(
+            !prompt.contains("{{merge_failure_context}}"),
+            "template placeholder should be replaced"
+        );
     }
 
     #[test]
@@ -473,8 +481,17 @@ mod tests {
         };
         let prompt = render_prompt(AgentType::Worker, &task, &ctx);
 
-        assert!(prompt.contains("src/main.rs"), "worker prompt should include conflict files");
-        assert!(prompt.contains("task/abc123"), "worker prompt should include merge base branch");
-        assert!(prompt.contains("main"), "worker prompt should include merge target branch");
+        assert!(
+            prompt.contains("src/main.rs"),
+            "worker prompt should include conflict files"
+        );
+        assert!(
+            prompt.contains("task/abc123"),
+            "worker prompt should include merge base branch"
+        );
+        assert!(
+            prompt.contains("main"),
+            "worker prompt should include merge target branch"
+        );
     }
 }

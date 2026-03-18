@@ -67,8 +67,7 @@ pub(crate) fn spawn_verification(task_id: String, project_path: String, app_stat
                     error = %e,
                     "Verification pipeline crashed; releasing task"
                 );
-                let repo =
-                    TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+                let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
                 let _ = repo
                     .transition(
                         &task_id,
@@ -86,8 +85,7 @@ pub(crate) fn spawn_verification(task_id: String, project_path: String, app_stat
                     timeout_secs = pipeline_timeout.as_secs(),
                     "Verification pipeline timed out; releasing task"
                 );
-                let repo =
-                    TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+                let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
                 let _ = repo
                     .transition(
                         &task_id,

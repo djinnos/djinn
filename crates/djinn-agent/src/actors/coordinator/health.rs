@@ -344,18 +344,9 @@ pub(super) async fn sweep_stale_resources(
     db: &djinn_db::Database,
     app_state: &crate::context::AgentContext,
 ) {
-    let project_repo = ProjectRepository::new(
-        db.clone(),
-        app_state.event_bus.clone(),
-    );
-    let task_repo = TaskRepository::new(
-        db.clone(),
-        app_state.event_bus.clone(),
-    );
-    let session_repo = djinn_db::SessionRepository::new(
-        db.clone(),
-        app_state.event_bus.clone(),
-    );
+    let project_repo = ProjectRepository::new(db.clone(), app_state.event_bus.clone());
+    let task_repo = TaskRepository::new(db.clone(), app_state.event_bus.clone());
+    let session_repo = djinn_db::SessionRepository::new(db.clone(), app_state.event_bus.clone());
 
     let projects = match project_repo.list().await {
         Ok(p) => p,

@@ -1,7 +1,7 @@
 //! Tests for worktree pre-dispatch sync behavior.
 
 use super::worktree::try_rebase_existing_task_branch;
-use crate::test_helpers::{create_test_db, agent_context_from_db};
+use crate::test_helpers::{agent_context_from_db, create_test_db};
 use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::process::Command;

@@ -264,6 +264,71 @@ pub fn extract_tool_result_payload(result: &Value) -> Value {
     result.clone()
 }
 
+pub async fn mcp_call_tool_with_headers(
+    app: &axum::Router,
+    session_id: &str,
+    tool_name: &str,
+    params: Value,
+    extra_headers: &[(&str, &str)],
+) -> Value {
+    let payload = serde_json::json!({
+        "name": tool_name,
+        "arguments": params,
+    });
+
+    let req = extra_headers.iter().fold(
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header("mcp-session-id", session_id),
+        |builder, (name, value)| builder.header(*name, *value),
+    );
+
+    let req = req.body(Body::from(
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 999,
+            "method": "tools/call",
+            "params": payload,
+        })
+        .to_string(),
+    ))
+    .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let raw = String::from_utf8(body.to_vec()).expect("response body should be utf-8");
+    let event = if let Ok(single) = serde_json::from_str::<Value>(&raw)
+        && single.get("id") == Some(&Value::from(999))
+    {
+        single
+    } else {
+        parse_sse_json_events(&raw)
+            .into_iter()
+            .find(|event| event.get("id") == Some(&Value::from(999)))
+            .expect("missing JSON-RPC event with requested id")
+    };
+
+    if let Some(error) = event.get("error") {
+        return serde_json::json!({
+            "ok": false,
+            "error": error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown MCP error"),
+        });
+    }
+
+    let result = event
+        .get("result")
+        .unwrap_or_else(|| panic!("tools/call missing result payload: {event}"));
+    extract_tool_result_payload(result)
+}
+
 pub async fn mcp_call_tool(
     app: &axum::Router,
     session_id: &str,
@@ -282,9 +347,19 @@ pub async fn mcp_call_tool(
     )
     .await;
 
+    if let Some(error) = event.get("error") {
+        return serde_json::json!({
+            "ok": false,
+            "error": error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown MCP error"),
+        });
+    }
+
     let result = event
         .get("result")
-        .expect("tools/call missing result payload");
+        .unwrap_or_else(|| panic!("tools/call missing result payload: {event}"));
     extract_tool_result_payload(result)
 }
 
@@ -331,6 +406,68 @@ pub async fn initialize_mcp_session(app: &axum::Router) -> String {
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json, text/event-stream")
         .header("mcp-session-id", session_id.clone())
+        .body(Body::from(init_notify_payload.to_string()))
+        .unwrap();
+    let init_notify_resp = app.clone().oneshot(init_notify_req).await.unwrap();
+    assert_eq!(init_notify_resp.status(), 202);
+
+    session_id
+}
+
+pub async fn initialize_mcp_session_with_headers(
+    app: &axum::Router,
+    extra_headers: &[(&str, &str)],
+) -> String {
+    let initialize_payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "schema-test-client",
+                "version": "0.0.0"
+            }
+        }
+    });
+
+    let mut init_req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream");
+    for (name, value) in extra_headers {
+        init_req = init_req.header(*name, *value);
+    }
+    let init_req = init_req
+        .body(Body::from(initialize_payload.to_string()))
+        .unwrap();
+    let init_resp = app.clone().oneshot(init_req).await.unwrap();
+    assert_eq!(init_resp.status(), 200);
+
+    let session_id = init_resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .expect("missing mcp-session-id header on initialize response")
+        .to_string();
+
+    let init_notify_payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {}
+    });
+    let mut init_notify_req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", session_id.clone());
+    for (name, value) in extra_headers {
+        init_notify_req = init_notify_req.header(*name, *value);
+    }
+    let init_notify_req = init_notify_req
         .body(Body::from(init_notify_payload.to_string()))
         .unwrap();
     let init_notify_resp = app.clone().oneshot(init_notify_req).await.unwrap();

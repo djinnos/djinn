@@ -43,11 +43,21 @@ const NOTE_SELECT_WHERE_ID: &str = "SELECT id, project_id, permalink, title, fil
 pub struct NoteRepository {
     db: Database,
     events: EventBus,
+    worktree_root: Option<PathBuf>,
 }
 
 impl NoteRepository {
     pub fn new(db: Database, events: EventBus) -> Self {
-        Self { db, events }
+        Self {
+            db,
+            events,
+            worktree_root: None,
+        }
+    }
+
+    pub fn with_worktree_root(mut self, worktree_root: Option<PathBuf>) -> Self {
+        self.worktree_root = worktree_root;
+        self
     }
 }
 
@@ -243,6 +253,48 @@ mod tests {
         assert_eq!(envelope.entity_type, "note");
         assert_eq!(envelope.action, "deleted");
         assert_eq!(envelope.payload["id"].as_str().unwrap(), note.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_update_delete_use_worktree_disk_path_but_keep_canonical_db_path() {
+        let project_tmp = tempfile::tempdir().unwrap();
+        let worktree_tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, project_tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx))
+            .with_worktree_root(Some(worktree_tmp.path().to_path_buf()));
+
+        let note = repo
+            .create(
+                &project.id,
+                project_tmp.path(),
+                "Worktree Note",
+                "body",
+                "research",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let canonical_path = project_tmp.path().join(".djinn/research/worktree-note.md");
+        let worktree_path = worktree_tmp.path().join(".djinn/research/worktree-note.md");
+
+        assert_eq!(
+            std::path::Path::new(&note.file_path),
+            canonical_path.as_path()
+        );
+        assert!(worktree_path.exists());
+        assert!(!canonical_path.exists());
+
+        repo.update(&note.id, &note.title, "updated body", &note.tags)
+            .await
+            .unwrap();
+        let updated_file = std::fs::read_to_string(&worktree_path).unwrap();
+        assert!(updated_file.contains("updated body"));
+
+        repo.delete(&note.id).await.unwrap();
+        assert!(!worktree_path.exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

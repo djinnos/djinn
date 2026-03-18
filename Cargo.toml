@@ -17,6 +17,8 @@ djinn-provider = { path = "crates/djinn-provider" }
 async-trait = "0.1"
 anyhow = "1"
 axum = "0.8"
+http-body-util = "0.1"
+tower-service = "0.3"
 tower-http = { version = "0.6", features = ["cors"] }
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form"] }
@@ -57,7 +59,6 @@ opentelemetry-semantic-conventions = "0.31"
 landlock = "0.4"
 
 [dev-dependencies]
-http-body-util = "0.1"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }

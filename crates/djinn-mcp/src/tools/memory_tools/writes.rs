@@ -11,6 +11,14 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<WriteParams>,
     ) -> Json<MemoryNoteResponse> {
+        self.memory_write_with_worktree(Parameters(p), None).await
+    }
+
+    pub(crate) async fn memory_write_with_worktree(
+        &self,
+        Parameters(p): Parameters<WriteParams>,
+        worktree_root: Option<std::path::PathBuf>,
+    ) -> Json<MemoryNoteResponse> {
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => return Json(MemoryNoteResponse::error(e)),
@@ -22,9 +30,9 @@ impl DjinnMcpServer {
             .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
             .unwrap_or_else(|| "[]".to_string());
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus())
+            .with_worktree_root(worktree_root);
 
-        // For singletons, upsert: try create, fall back to update if already exists.
         use djinn_db::is_singleton;
         if is_singleton(&p.note_type)
             && let Some(existing) = repo
@@ -38,9 +46,7 @@ impl DjinnMcpServer {
                 .await
             {
                 Ok(note) => return Json(MemoryNoteResponse::from_note(&note)),
-                Err(e) => {
-                    return Json(MemoryNoteResponse::error(e.to_string()));
-                }
+                Err(e) => return Json(MemoryNoteResponse::error(e.to_string())),
             }
         }
 
@@ -74,6 +80,14 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<EditParams>,
     ) -> Json<MemoryNoteResponse> {
+        self.memory_edit_with_worktree(Parameters(p), None).await
+    }
+
+    pub(crate) async fn memory_edit_with_worktree(
+        &self,
+        Parameters(p): Parameters<EditParams>,
+        worktree_root: Option<std::path::PathBuf>,
+    ) -> Json<MemoryNoteResponse> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
             return Json(MemoryNoteResponse::error(format!(
                 "project not found: {}",
@@ -81,9 +95,9 @@ impl DjinnMcpServer {
             )));
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus())
+            .with_worktree_root(worktree_root);
 
-        // Resolve note by permalink or title.
         let note = match resolve_note_by_identifier(&repo, &project_id, &p.identifier).await {
             Some(n) => n,
             None => {
@@ -94,7 +108,6 @@ impl DjinnMcpServer {
             }
         };
 
-        // If type changed, move first.
         let note = if let Some(ref new_type) = p.note_type {
             if new_type != &note.note_type {
                 match repo
@@ -102,9 +115,7 @@ impl DjinnMcpServer {
                     .await
                 {
                     Ok(moved) => moved,
-                    Err(e) => {
-                        return Json(MemoryNoteResponse::error(e.to_string()));
-                    }
+                    Err(e) => return Json(MemoryNoteResponse::error(e.to_string())),
                 }
             } else {
                 note
@@ -113,7 +124,6 @@ impl DjinnMcpServer {
             note
         };
 
-        // Apply edit operation.
         let new_content = match apply_edit_operation(
             &note.content,
             &p.operation,
@@ -140,6 +150,14 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<DeleteParams>,
     ) -> Json<MemoryDeleteResponse> {
+        self.memory_delete_with_worktree(Parameters(p), None).await
+    }
+
+    pub(crate) async fn memory_delete_with_worktree(
+        &self,
+        Parameters(p): Parameters<DeleteParams>,
+        worktree_root: Option<std::path::PathBuf>,
+    ) -> Json<MemoryDeleteResponse> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
             return Json(MemoryDeleteResponse {
                 ok: false,
@@ -147,7 +165,8 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus())
+            .with_worktree_root(worktree_root);
 
         let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await else {
             return Json(MemoryDeleteResponse {

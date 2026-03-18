@@ -162,7 +162,8 @@ pub(crate) async fn prepare_worktree(
         .join(".djinn")
         .join("worktrees")
         .join(&task.short_id);
-    let resumed_worktree_exists = stale_worktree_path.exists() && stale_worktree_path.join(".git").exists();
+    let resumed_worktree_exists =
+        stale_worktree_path.exists() && stale_worktree_path.join(".git").exists();
 
     // Reuse existing worktree if it's still valid.  This preserves the
     // branch's own target/ build cache across worker → verify → review
@@ -230,7 +231,8 @@ pub(crate) async fn prepare_worktree(
             .await
             .map_err(|e| anyhow::anyhow!("create branch: {e}"))?;
     } else {
-        try_rebase_existing_task_branch(project_dir, &branch, &target_branch, None, app_state).await;
+        try_rebase_existing_task_branch(project_dir, &branch, &target_branch, None, app_state)
+            .await;
     }
 
     git.create_worktree(&task.short_id, &branch, false)
@@ -294,14 +296,7 @@ pub(crate) async fn try_rebase_existing_task_branch(
     // If we're resuming a task with an existing worktree, sync directly in that
     // worktree so conflicts can be left in place for the worker to resolve.
     if let Some(resumed_path) = resumed_worktree_path {
-        sync_in_resumed_worktree(
-            project_dir,
-            branch,
-            &upstream,
-            resumed_path,
-            app_state,
-        )
-        .await;
+        sync_in_resumed_worktree(project_dir, branch, &upstream, resumed_path, app_state).await;
         return;
     }
 
@@ -421,7 +416,9 @@ async fn sync_in_resumed_worktree(
 
     if has_uncommitted {
         // Commit any uncommitted changes as WIP before sync
-        let _ = worktree_git.run_command(vec!["add".into(), "-A".into()]).await;
+        let _ = worktree_git
+            .run_command(vec!["add".into(), "-A".into()])
+            .await;
         let _ = worktree_git
             .run_command(vec![
                 "commit".into(),
@@ -707,7 +704,10 @@ mod tests {
 
         // prepare_worktree should clean the remnant and create a valid worktree.
         let result = prepare_worktree(project_dir, &task, &ctx).await;
-        assert!(result.is_ok(), "prepare_worktree should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "prepare_worktree should succeed: {result:?}"
+        );
 
         let wt = result.unwrap();
         assert!(wt.join(".git").exists(), "worktree should have .git file");

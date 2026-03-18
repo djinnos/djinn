@@ -132,7 +132,9 @@ impl NoteRepository {
         let temporal_scores = self.temporal_scores_all(project_id).await?;
 
         // Get graph proximity scores from seed
-        let graph_scores = self.graph_proximity_scores(std::slice::from_ref(&seed.id), 2).await?;
+        let graph_scores = self
+            .graph_proximity_scores(std::slice::from_ref(&seed.id), 2)
+            .await?;
 
         // Get task-affinity scores
         let task_scores = self.task_affinity_scores(project_id, task_id).await?;
@@ -428,8 +430,7 @@ fn age_days(timestamp: &str, now: std::time::SystemTime) -> f64 {
     };
 
     let days = days_from_civil(y, m, d);
-    let timestamp_unix =
-        days as f64 * 86_400.0 + (hh as f64 * 3600.0) + (mm as f64 * 60.0) + ss;
+    let timestamp_unix = days as f64 * 86_400.0 + (hh as f64 * 3600.0) + (mm as f64 * 60.0) + ss;
     let seconds = (now_unix - timestamp_unix).max(0.0);
     (seconds / 86_400.0).max(f64::EPSILON)
 }
