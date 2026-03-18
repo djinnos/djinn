@@ -1,6 +1,9 @@
 [build]
 build-dir = "{cargo-cache-home}/build/djinn-server"
 
+[unstable]
+fine-grain-locking = true
+
 [net]
 git-fetch-with-cli = true
 

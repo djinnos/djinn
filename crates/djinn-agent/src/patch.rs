@@ -310,7 +310,7 @@ fn apply_chunks(content: &str, chunks: &[Chunk], file_path: &str) -> Result<Stri
     }
 
     // Sort by position descending so we apply from bottom to top
-    chunk_positions.sort_by(|a, b| b.0.cmp(&a.0));
+    chunk_positions.sort_by_key(|item| std::cmp::Reverse(item.0));
 
     for (start_pos, chunk) in chunk_positions {
         apply_single_chunk(&mut lines, start_pos, chunk)?;
