@@ -16,6 +16,8 @@ pub struct CommandSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandResult {
     pub name: String,
+    /// The shell command that was executed (e.g. `cargo clippy --workspace -- -D warnings`).
+    pub command: String,
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,

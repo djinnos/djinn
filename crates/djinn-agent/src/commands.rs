@@ -40,6 +40,7 @@ pub async fn run_commands(
 
         results.push(CommandResult {
             name: spec.name.clone(),
+            command: spec.command.clone(),
             exit_code,
             stdout,
             stderr,
