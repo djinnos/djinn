@@ -1,11 +1,4 @@
 {
-  "setup": [
-    {
-      "name": "seed-external-deps",
-      "command": "bash scripts/seed-external-deps.sh",
-      "timeout_secs": 60
-    }
-  ],
   "verification": [
     {
       "name": "clippy",
