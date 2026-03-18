@@ -36,8 +36,11 @@ impl AgentRole for PmRole {
                 && let Ok(decision) = serde_json::from_value::<SubmitDecision>(payload.clone())
             {
                 let action = match decision.decision.as_str() {
-                    // reopen / decompose: complete the intervention and send back to worker.
-                    "reopen" | "decompose" => TransitionAction::PmInterventionComplete,
+                    // reopen: complete the intervention and send back to worker.
+                    "reopen" => TransitionAction::PmInterventionComplete,
+                    // decompose: the PM split this task into subtasks — close the
+                    // original so it doesn't get re-dispatched to a worker.
+                    "decompose" => TransitionAction::ForceClose,
                     // force_close: hard-close the task.
                     "force_close" => TransitionAction::ForceClose,
                     // escalate: release back to the PM queue (needs_pm_intervention).
