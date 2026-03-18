@@ -8,6 +8,13 @@ use super::NoteRepository;
 const HOP_DECAY: f64 = 0.7;
 const HOTNESS_ALPHA: f64 = 0.2;
 const HALF_LIFE_DAYS: f64 = 7.0;
+const MIN_ASSOCIATION_WEIGHT: f64 = 0.05;
+
+#[derive(Clone)]
+struct ProximityEdge {
+    target: String,
+    multiplier: f64,
+}
 
 impl NoteRepository {
     pub async fn temporal_scores(
@@ -79,7 +86,7 @@ impl NoteRepository {
             return Ok(Vec::new());
         }
 
-        let edges: Vec<(String, String)> = sqlx::query_as(
+        let link_edges: Vec<(String, String)> = sqlx::query_as(
             "SELECT source_id, target_id FROM note_links WHERE target_id IS NOT NULL AND source_id IN (
                 SELECT id FROM notes WHERE project_id = ?1
             )",
@@ -88,13 +95,46 @@ impl NoteRepository {
         .fetch_all(self.db.pool())
         .await?;
 
-        let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
-        for (source, target) in edges {
+        let association_edges: Vec<(String, String, f64)> = sqlx::query_as(
+            "SELECT note_a_id, note_b_id, weight
+             FROM note_associations
+             WHERE weight >= ?1
+               AND note_a_id IN (SELECT id FROM notes WHERE project_id = ?2)
+               AND note_b_id IN (SELECT id FROM notes WHERE project_id = ?2)",
+        )
+        .bind(MIN_ASSOCIATION_WEIGHT)
+        .bind(&project_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        let mut adjacency: HashMap<String, Vec<ProximityEdge>> = HashMap::new();
+        for (source, target) in link_edges {
             adjacency
                 .entry(source.clone())
                 .or_default()
-                .push(target.clone());
-            adjacency.entry(target).or_default().push(source);
+                .push(ProximityEdge {
+                    target: target.clone(),
+                    multiplier: HOP_DECAY,
+                });
+            adjacency.entry(target).or_default().push(ProximityEdge {
+                target: source,
+                multiplier: HOP_DECAY,
+            });
+        }
+
+        for (note_a_id, note_b_id, weight) in association_edges {
+            let multiplier = HOP_DECAY * weight;
+            adjacency
+                .entry(note_a_id.clone())
+                .or_default()
+                .push(ProximityEdge {
+                    target: note_b_id.clone(),
+                    multiplier,
+                });
+            adjacency.entry(note_b_id).or_default().push(ProximityEdge {
+                target: note_a_id,
+                multiplier,
+            });
         }
 
         let seed_set: HashSet<String> = seed_ids.iter().cloned().collect();
@@ -113,12 +153,12 @@ impl NoteRepository {
             if let Some(neighbors) = adjacency.get(&node) {
                 for neighbor in neighbors {
                     let next_depth = depth + 1;
-                    let next_score = score * HOP_DECAY;
+                    let next_score = score * neighbor.multiplier;
 
-                    let current_best = best_scores.get(neighbor).copied().unwrap_or(0.0);
+                    let current_best = best_scores.get(&neighbor.target).copied().unwrap_or(0.0);
                     if next_score > current_best {
-                        best_scores.insert(neighbor.clone(), next_score);
-                        queue.push_back((neighbor.clone(), next_depth, next_score));
+                        best_scores.insert(neighbor.target.clone(), next_score);
+                        queue.push_back((neighbor.target.clone(), next_depth, next_score));
                     }
                 }
             }
