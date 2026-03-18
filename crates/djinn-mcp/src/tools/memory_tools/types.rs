@@ -129,6 +129,11 @@ pub struct BuildContextParams {
     pub depth: Option<i64>,
     /// Maximum related notes to return (default 10).
     pub max_related: Option<i64>,
+    /// Token budget for context (default 4096). Seed notes are uncapped.
+    #[schemars(with = "i64")]
+    pub budget: Option<i64>,
+    /// Optional task ID for task-affinity scoring in RRF retrieval.
+    pub task_id: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
