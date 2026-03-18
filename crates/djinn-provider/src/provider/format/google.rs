@@ -262,4 +262,26 @@ mod tests {
         let events = parse_google_line(line);
         assert!(!events.iter().any(|e| matches!(e, StreamEvent::Done)));
     }
+
+    #[test]
+    fn test_missing_parts_is_ignored() {
+        let line = r#"{"candidates":[{"content":{"role":"model"}}]}"#;
+        let events = parse_google_line(line);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_function_call_placeholder_id_generation() {
+        let line = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"id":1}}}],"role":"model"}}]}"#;
+        let events = parse_google_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }) => {
+                assert_eq!(id, "google_fc_lookup");
+                assert_eq!(name, "lookup");
+                assert_eq!(input["id"], 1);
+            }
+            _ => panic!("expected tool use"),
+        }
+    }
 }
