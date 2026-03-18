@@ -1195,6 +1195,49 @@ fn try_line_trimmed_match(content: &str, old_text: &str, new_text: &str) -> Opti
     Some(FuzzyResult::Unique(result))
 }
 
+fn reindent_replacement(matched_block: &str, replacement: &str) -> String {
+    let matched_lines: Vec<&str> = matched_block.split('\n').collect();
+    let replacement_lines: Vec<&str> = replacement.split('\n').collect();
+
+    if replacement_lines.is_empty() {
+        return String::new();
+    }
+
+    let matched_base_indent = matched_lines
+        .iter()
+        .find(|line| !line.trim().is_empty())
+        .map_or("", |line| leading_whitespace(line));
+
+    let replacement_base_indent = replacement_lines
+        .iter()
+        .find(|line| !line.trim().is_empty())
+        .map_or("", |line| leading_whitespace(line));
+
+    replacement_lines
+        .iter()
+        .map(|line| {
+            if line.is_empty() {
+                return String::new();
+            }
+
+            let replacement_indent = leading_whitespace(line);
+            let relative_indent = replacement_indent
+                .strip_prefix(replacement_base_indent)
+                .unwrap_or(replacement_indent);
+
+            format!(
+                "{matched_base_indent}{relative_indent}{}",
+                &line[replacement_indent.len()..]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn leading_whitespace(line: &str) -> &str {
+    &line[..line.len() - line.trim_start().len()]
+}
+
 /// Map byte positions from a trimmed version back to the original content.
 fn map_trimmed_to_original(
     original: &str,
@@ -1360,28 +1403,8 @@ fn try_indentation_flexible_match(
     }
     orig_end = orig_end.min(content.len());
 
-    let first_orig_line = content_lines[match_start_line];
-    let base_indent: &str =
-        &first_orig_line[..first_orig_line.len() - first_orig_line.trim_start().len()];
-
-    let new_lines: Vec<&str> = new_text.lines().collect();
-    let first_new_indent = new_lines
-        .first()
-        .map_or(0, |l| l.len() - l.trim_start().len());
-    let reindented: String = new_lines
-        .iter()
-        .map(|line| {
-            if line.is_empty() {
-                String::new()
-            } else {
-                let this_indent = line.len() - line.trim_start().len();
-                let relative = this_indent.saturating_sub(first_new_indent);
-                let extra: String = " ".repeat(relative);
-                format!("{base_indent}{extra}{}", line.trim_start())
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let matched_block = &content[orig_start..orig_end];
+    let reindented = reindent_replacement(matched_block, new_text);
 
     let needs_trailing_newline = content[..orig_end].ends_with('\n') && !reindented.ends_with('\n');
 
@@ -2608,7 +2631,56 @@ mod tests {
     use super::*;
     use crate::AgentType;
     use crate::test_helpers::create_test_db;
+    use std::path::Path;
     use tokio_util::sync::CancellationToken;
+
+    pub(crate) mod fuzzy_replace_tests {
+        use super::*;
+
+        #[test]
+        fn rebases_multiline_replacement_using_matched_indentation() {
+            let content = "fn main() {\n    match value {\n        Some(x) => {\n            process(x);\n        }\n    }\n}\n";
+            let old_text = "match value {\n    Some(x) => {\n        process(x);\n    }\n}";
+            let new_text = "match value {\n    Some(x) => {\n        if ready {\n            process(x);\n        }\n    }\n}";
+
+            let (updated, note) = fuzzy_replace(content, old_text, new_text, Path::new("test.rs"))
+                .expect("fuzzy replace should succeed");
+
+            assert_eq!(note.as_deref(), Some("(matched with flexible indentation)"));
+            assert!(updated.contains(
+                "    match value {\n        Some(x) => {\n            if ready {\n                process(x);\n            }\n        }\n    }"
+            ));
+        }
+
+        #[test]
+        fn preserves_later_nested_indent_when_first_replacement_line_is_less_indented() {
+            let content =
+                "impl Example {\n        if condition {\n            run();\n        }\n}\n";
+            let old_text = "if condition {\n    run();\n}";
+            let new_text =
+                "if condition {\n    let nested = || {\n        run();\n    };\n    nested();\n}";
+
+            let (updated, note) = fuzzy_replace(content, old_text, new_text, Path::new("test.rs"))
+                .expect("fuzzy replace should succeed");
+
+            assert_eq!(note.as_deref(), Some("(matched with flexible indentation)"));
+            assert!(updated.contains(
+                "        if condition {\n            let nested = || {\n                run();\n            };\n            nested();\n        }"
+            ));
+        }
+
+        #[test]
+        fn reindent_replacement_preserves_internal_relative_indentation() {
+            let matched_block = "        if ready {\n            execute();\n        }";
+            let replacement =
+                "if ready {\n    let nested = || {\n        execute();\n    };\n    nested();\n}";
+
+            assert_eq!(
+                reindent_replacement(matched_block, replacement),
+                "        if ready {\n            let nested = || {\n                execute();\n            };\n            nested();\n        }"
+            );
+        }
+    }
 
     #[test]
     fn floor_char_boundary_ascii() {
