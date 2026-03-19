@@ -832,7 +832,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             project_path: &project_path,
             worktree_path: &worktree_path,
             role_name: role.config().name,
-            finalize_tool_name: role.config().finalize_tool_name,
+            finalize_tool_names: role.config().finalize_tool_names,
             context_window,
             model_id: &model_id,
             cancel: &cancel,
@@ -1030,7 +1030,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     if final_result.is_ok() {
         super::finalize_handlers::process_finalize_payload(
             &final_output.finalize_payload,
-            role.config().finalize_tool_name,
+            final_output.finalize_tool_name.as_deref().unwrap_or(""),
             &task_id,
             &app_state,
         )
@@ -1150,7 +1150,7 @@ fn spawn_post_session_work(params: PostSessionParams) {
         if final_result_ok {
             super::finalize_handlers::process_finalize_payload(
                 &final_output.finalize_payload,
-                role.config().finalize_tool_name,
+                final_output.finalize_tool_name.as_deref().unwrap_or(""),
                 &task_id,
                 &app_state,
             )
@@ -1493,7 +1493,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
             project_path: &project_path,
             worktree_path: &project_dir, // worktree = project dir (no worktree for groomer)
             role_name: role.config().name,
-            finalize_tool_name: role.config().finalize_tool_name,
+            finalize_tool_names: role.config().finalize_tool_names,
             context_window,
             model_id: &model_id,
             cancel: &cancel,
