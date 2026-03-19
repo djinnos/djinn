@@ -39,25 +39,32 @@ fn compute_pipeline_timeout(project_path: &str) -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
-/// Spawn a background verification pipeline for a completed worker task.
-///
-/// The task should already be in `verifying` status.  This function:
-/// 1. Creates a fresh worktree from the task branch
-/// 2. Runs setup commands
-/// 3. Runs verification commands
-/// 4. On pass: transitions to `needs_task_review` (VerificationPass)
-/// 5. On fail: logs the failure as an activity comment, transitions to `open` (VerificationFail)
-/// 6. Cleans up the worktree
-/// 7. Triggers redispatch for the project
-pub(crate) fn spawn_verification(task_id: String, project_path: String, app_state: AgentContext) {
-    let pipeline_timeout = compute_pipeline_timeout(&project_path);
-    app_state.register_verification(&task_id);
+struct VerificationRegistrationGuard {
+    app_state: AgentContext,
+    task_id: String,
+}
+
+impl Drop for VerificationRegistrationGuard {
+    fn drop(&mut self) {
+        self.app_state.deregister_verification(&self.task_id);
+    }
+}
+
+fn spawn_verification_with_timeout<F>(
+    task_id: String,
+    app_state: AgentContext,
+    pipeline_timeout: std::time::Duration,
+    pipeline: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+{
     tokio::spawn(async move {
-        let result = tokio::time::timeout(
-            pipeline_timeout,
-            run_verification_pipeline(&task_id, &project_path, &app_state),
-        )
-        .await;
+        let _guard = VerificationRegistrationGuard {
+            app_state: app_state.clone(),
+            task_id: task_id.clone(),
+        };
+        let result = tokio::time::timeout(pipeline_timeout, pipeline).await;
 
         match result {
             Ok(Ok(())) => {}
@@ -102,10 +109,6 @@ pub(crate) fn spawn_verification(task_id: String, project_path: String, app_stat
             }
         }
 
-        app_state.deregister_verification(&task_id);
-
-        // Trigger redispatch so newly-open tasks (on failure) or newly-ready
-        // review tasks (on pass) get picked up promptly.
         if let Ok(task) = load_task(&task_id, &app_state).await
             && let Some(coordinator) = app_state.coordinator().await
         {
@@ -113,7 +116,40 @@ pub(crate) fn spawn_verification(task_id: String, project_path: String, app_stat
                 .trigger_dispatch_for_project(&task.project_id)
                 .await;
         }
-    });
+    })
+}
+
+/// Spawn a background verification pipeline for a completed worker task.
+///
+/// The task should already be in `verifying` status.  This function:
+/// 1. Creates a fresh worktree from the task branch
+/// 2. Runs setup commands
+/// 3. Runs verification commands
+/// 4. On pass: transitions to `needs_task_review` (VerificationPass)
+/// 5. On fail: logs the failure as an activity comment, transitions to `open` (VerificationFail)
+/// 6. Cleans up the worktree
+/// 7. Triggers redispatch for the project
+pub(crate) fn spawn_verification(task_id: String, project_path: String, app_state: AgentContext) {
+    let pipeline_timeout = compute_pipeline_timeout(&project_path);
+    app_state.register_verification(&task_id);
+    let task_id_for_pipeline = task_id.clone();
+    let project_path_for_pipeline = project_path.clone();
+    let app_state_for_pipeline = app_state.clone();
+    let pipeline = async move {
+        run_verification_pipeline(
+            &task_id_for_pipeline,
+            &project_path_for_pipeline,
+            &app_state_for_pipeline,
+        )
+        .await
+    };
+
+    std::mem::drop(spawn_verification_with_timeout(
+        task_id,
+        app_state,
+        pipeline_timeout,
+        pipeline,
+    ));
 }
 
 async fn run_verification_pipeline(
@@ -397,11 +433,32 @@ mod tests {
         agent_context_from_db, create_test_db, create_test_epic, create_test_project,
         create_test_task, test_events,
     };
+    use std::time::Duration;
     use crate::verification::service::VerificationResult;
+    use crate::verification::settings::load_commands;
     use djinn_core::commands::CommandResult;
     use djinn_core::models::TransitionAction;
     use djinn_db::TaskRepository;
     use tokio_util::sync::CancellationToken;
+
+    fn tempdir_in_tmp() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("djinn-verification-")
+            .tempdir_in("/tmp")
+            .expect("tempdir")
+    }
+
+    fn write_settings(dir: &std::path::Path, body: &str) {
+        let djinn_dir = dir.join(".djinn");
+        std::fs::create_dir_all(&djinn_dir).expect("create .djinn directory");
+        std::fs::write(djinn_dir.join("settings.json"), body).expect("write settings.json");
+    }
+
+    async fn tick_spawned_verification() {
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::ZERO).await;
+        tokio::task::yield_now().await;
+    }
 
     fn make_result(stdout: &str, stderr: &str) -> VerificationResult {
         VerificationResult {
@@ -456,6 +513,63 @@ mod tests {
         assert!(feedback.len() < 7_000);
     }
 
+    fn setup_verifying_task_with_count_blocking(count: i64) -> (TaskRepository, String, AgentContext) {
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build runtime");
+                rt.block_on(async move {
+                    let db = create_test_db();
+                    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+                    let project = create_test_project(&db).await;
+                    let epic = create_test_epic(&db, &project.id).await;
+                    let task = create_test_task(&db, &project.id, &epic.id).await;
+                    let task_repo = TaskRepository::new(db.clone(), test_events());
+
+                    task_repo
+                        .set_status(&task.id, "open")
+                        .await
+                        .expect("set status open");
+                    task_repo
+                        .transition(
+                            &task.id,
+                            TransitionAction::Start,
+                            "test",
+                            "system",
+                            None,
+                            None,
+                        )
+                        .await
+                        .expect("transition to in_progress");
+                    task_repo
+                        .transition(
+                            &task.id,
+                            TransitionAction::SubmitVerification,
+                            "test",
+                            "system",
+                            None,
+                            None,
+                        )
+                        .await
+                        .expect("transition to verifying");
+
+                    if count > 0 {
+                        sqlx::query("UPDATE tasks SET verification_failure_count = ?1 WHERE id = ?2")
+                            .bind(count)
+                            .bind(&task.id)
+                            .execute(db.pool())
+                            .await
+                            .expect("set verification_failure_count");
+                    }
+
+                    (task_repo, task.id, app_state)
+                })
+            }).join().expect("thread panicked")
+        })
+    }
+
     async fn setup_verifying_task_with_count(count: i64) -> (TaskRepository, String, AgentContext) {
         let db = create_test_db();
         let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
@@ -501,6 +615,92 @@ mod tests {
         }
 
         (task_repo, task.id, app_state)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn compute_pipeline_timeout_uses_configured_timeouts_with_overhead() {
+        let dir = tempdir_in_tmp();
+        write_settings(
+            dir.path(),
+            r#"{
+                "setup": [{"name": "fmt", "command": "cargo fmt --check", "timeout_secs": 7}],
+                "verification": [{"name": "test", "command": "cargo test", "timeout_secs": 11}]
+            }"#,
+        );
+
+        let timeout = compute_pipeline_timeout(dir.path().to_str().expect("utf8 path"));
+        let (setup, verification) = load_commands(dir.path()).expect("load settings commands");
+        let configured_timeout_secs: u64 =
+            setup.iter().chain(verification.iter()).map(|c| c.timeout_secs.unwrap_or(300)).sum();
+        let expected_timeout_secs =
+            (configured_timeout_secs + PIPELINE_TIMEOUT_OVERHEAD_SECS).max(MIN_PIPELINE_TIMEOUT_SECS);
+
+        assert_eq!(
+            timeout,
+            Duration::from_secs(expected_timeout_secs)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn compute_pipeline_timeout_uses_minimum_when_settings_missing() {
+        let dir = tempdir_in_tmp();
+
+        let timeout = compute_pipeline_timeout(dir.path().to_str().expect("utf8 path"));
+
+        assert_eq!(timeout, Duration::from_secs(MIN_PIPELINE_TIMEOUT_SECS));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spawn_verification_times_out_deterministically_and_releases_task() {
+        let (_task_repo, task_id, app_state) = setup_verifying_task_with_count_blocking(0);
+        let timeout = Duration::from_secs(5);
+
+        app_state.register_verification(&task_id);
+        let background = spawn_verification_with_timeout(
+            task_id.clone(),
+            app_state.clone(),
+            timeout,
+            std::future::pending::<anyhow::Result<()>>(),
+        );
+        tick_spawned_verification().await;
+
+        assert!(app_state.has_verification(&task_id));
+
+        tokio::time::advance(timeout - Duration::from_secs(1)).await;
+        tick_spawned_verification().await;
+        assert!(app_state.has_verification(&task_id), "should still be verifying before timeout");
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tick_spawned_verification().await;
+        background.await.expect("background task completed");
+
+        assert!(!app_state.has_verification(&task_id), "verification should be released after timeout");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aborting_verification_task_releases_tracker_before_timeout() {
+        let (_task_repo, task_id, app_state) = setup_verifying_task_with_count_blocking(0);
+        let timeout = Duration::from_secs(60);
+
+        app_state.register_verification(&task_id);
+        let background = spawn_verification_with_timeout(
+            task_id.clone(),
+            app_state.clone(),
+            timeout,
+            std::future::pending::<anyhow::Result<()>>(),
+        );
+
+        tick_spawned_verification().await;
+        assert!(app_state.has_verification(&task_id));
+
+        background.abort();
+        let _ = background.await;
+
+        assert!(!app_state.has_verification(&task_id));
+
+        tokio::time::advance(timeout - Duration::from_secs(1)).await;
+        tick_spawned_verification().await;
+        assert!(!app_state.has_verification(&task_id));
     }
 
     #[tokio::test]
