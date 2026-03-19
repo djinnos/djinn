@@ -445,6 +445,7 @@ mod tests {
             merge_commit_sha: None,
             merge_conflict_metadata: None,
             memory_refs: "[]".into(),
+            agent_type: None,
             unresolved_blocker_count: 0,
         };
 

@@ -66,17 +66,17 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     let TaskLifecycleParams {
         task_id,
         project_path,
-        model_id,
+        mut model_id,
         role,
         app_state,
         cancel,
         pause,
         event_tx,
-        system_prompt_extensions,
-        learned_prompt,
-        mcp_servers,
-        skills,
-        role_verification_command,
+        mut system_prompt_extensions,
+        mut learned_prompt,
+        mut mcp_servers,
+        mut skills,
+        mut role_verification_command,
         #[cfg(test)]
         provider_override,
     } = params;
@@ -134,6 +134,40 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     };
     let conflict_ctx = conflict_context_for_dispatch(&task.id, &app_state).await;
     let merge_validation_ctx = merge_validation_context_for_dispatch(&task.id, &app_state).await;
+
+    // ── Specialist override: if the task has an explicit agent_type, load that role ──
+    // The actor already loaded the default DB role for system_prompt_extensions / skills.
+    // If the task carries a specialist name, reload role fields from that specialist.
+    if let Some(ref specialist_name) = task.agent_type
+        && !specialist_name.is_empty()
+    {
+        let role_repo = djinn_db::AgentRoleRepository::new(
+            app_state.db.clone(),
+            app_state.event_bus.clone(),
+        );
+        let specialist = role_repo
+            .get_by_name_for_project(&task.project_id, specialist_name)
+            .await
+            .unwrap_or(None);
+        if let Some(ref r) = specialist {
+            tracing::debug!(
+                task_id = %task.short_id,
+                specialist = %r.name,
+                base_role = %r.base_role,
+                "Lifecycle: overriding role config from specialist agent_type"
+            );
+            system_prompt_extensions = r.system_prompt_extensions.clone();
+            learned_prompt = r.learned_prompt.clone();
+            mcp_servers = djinn_core::models::parse_json_array(&r.mcp_servers);
+            skills = djinn_core::models::parse_json_array(&r.skills);
+            role_verification_command = r.verification_command.clone();
+            if let Some(ref preferred) = r.model_preference
+                && !preferred.is_empty()
+            {
+                model_id = preferred.clone();
+            }
+        }
+    }
 
     tracing::info!(
         task_id = %task.short_id,
@@ -1593,11 +1627,43 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         helpers::format_command_details(&verification_specs)
     };
 
+    // ── Build specialist roster for planner prompt ────────────────────────
+    let specialist_roster = {
+        let role_repo = djinn_db::AgentRoleRepository::new(
+            app_state.db.clone(),
+            app_state.event_bus.clone(),
+        );
+        match role_repo.all_for_project(&project_id).await {
+            Ok(roles) if !roles.is_empty() => {
+                let mut lines = Vec::new();
+                // Group by base_role for readability.
+                let mut by_base: std::collections::BTreeMap<String, Vec<_>> =
+                    std::collections::BTreeMap::new();
+                for r in &roles {
+                    by_base.entry(r.base_role.clone()).or_default().push(r);
+                }
+                for (base_role, specialists) in &by_base {
+                    lines.push(format!("**{}**", base_role));
+                    for s in specialists {
+                        let default_marker = if s.is_default { " *(default)*" } else { "" };
+                        lines.push(format!(
+                            "- `{}` — {}{}",
+                            s.name, s.description, default_marker
+                        ));
+                    }
+                }
+                Some(lines.join("\n"))
+            }
+            _ => None,
+        }
+    };
+
     // ── Build prompt ──────────────────────────────────────────────────────
     let system_prompt = crate::prompts::render_project_prompt_for_role(
         role.config(),
         &project_path,
         verification_commands.as_deref(),
+        specialist_roster.as_deref(),
     );
 
     let context_window = app_state

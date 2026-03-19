@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension.rs
-assertion_line: 2926
 expression: tool_schemas_planner()
 ---
 [
@@ -300,6 +299,10 @@ expression: tool_schemas_planner()
             "type": "string"
           },
           "type": "array"
+        },
+        "agent_type": {
+          "description": "Specialist role name to route this task (e.g. 'rust-expert'). Must match a configured AgentRole name for this project.",
+          "type": "string"
         },
         "blocked_by": {
           "description": "Task IDs (UUID or short_id) that block this task.",

@@ -188,6 +188,14 @@ impl DjinnMcpServer {
             }
         }
 
+        // Apply agent_type (specialist routing) if provided.
+        if let Some(ref agent_type) = p.agent_type {
+            let at = if agent_type.is_empty() { None } else { Some(agent_type.as_str()) };
+            if let Ok(t) = repo.update_agent_type(&task.id, at).await {
+                task = t;
+            }
+        }
+
         Json(ErrorOr::Ok(task_to_response(&task)))
     }
 
@@ -382,6 +390,17 @@ impl DjinnMcpServer {
                 return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
             }
         }
+
+        // Apply agent_type (specialist routing) if provided.
+        let updated = if let Some(ref agent_type) = p.agent_type {
+            let at = if agent_type.is_empty() { None } else { Some(agent_type.as_str()) };
+            match repo.update_agent_type(&updated.id, at).await {
+                Ok(t) => t,
+                Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
+            }
+        } else {
+            updated
+        };
 
         Json(ErrorOr::Ok(task_to_response(&updated)))
     }

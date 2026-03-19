@@ -251,6 +251,28 @@ impl TaskRepository {
         Ok(())
     }
 
+    /// Set or clear the `agent_type` specialist name on a task.
+    pub async fn update_agent_type(&self, id: &str, agent_type: Option<&str>) -> Result<Task> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE tasks SET agent_type = ?2,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(agent_type)
+        .execute(self.db.pool())
+        .await?;
+        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(self.db.pool())
+            .await?;
+
+        self.events
+            .send(DjinnEventEnvelope::task_updated(&task, false));
+        Ok(task)
+    }
+
     /// Replace the `memory_refs` JSON array on a task.
     pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;

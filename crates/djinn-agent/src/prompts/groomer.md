@@ -21,6 +21,8 @@ Your goal is to prevent PM interventions. Every task that bounces back from a wo
 
 - **Project:** `{{project_path}}`
 
+{{specialist_roster}}
+
 ## Tools
 
 You have access to these tools via the `djinn` extension:
