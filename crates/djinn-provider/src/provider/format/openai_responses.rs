@@ -371,8 +371,47 @@ impl LlmProvider for OpenAIResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, routing::post};
     use crate::message::{Message, Role};
     use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities};
+    use futures::TryStreamExt;
+    use std::sync::{Arc, Mutex};
+
+    fn spawn_sse_server(
+        status: u16,
+        body: &'static str,
+        seen_auth: Arc<Mutex<Option<String>>>,
+    ) -> String {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("bind local tcp listener");
+        let addr = listener.local_addr().expect("local addr");
+        listener.set_nonblocking(true).expect("set nonblocking");
+
+        let app = Router::new().route(
+            "/responses",
+            post(move |req: axum::extract::Request| async move {
+                let auth = req
+                    .headers()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                *seen_auth.lock().expect("lock seen auth") = auth;
+                (
+                    axum::http::StatusCode::from_u16(status).expect("status"),
+                    [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                    body,
+                )
+            }),
+        );
+
+        let tokio_listener =
+            tokio::net::TcpListener::from_std(listener).expect("convert to tokio listener");
+        tokio::spawn(async move {
+            axum::serve(tokio_listener, app).await.ok();
+        });
+
+        format!("http://{}:{}", addr.ip(), addr.port())
+    }
 
     fn test_provider() -> OpenAIResponsesProvider {
         OpenAIResponsesProvider::new(ProviderConfig {
@@ -711,5 +750,76 @@ mod tests {
     fn test_effective_url() {
         let provider = test_provider();
         assert_eq!(provider.effective_url(), "https://api.openai.com/responses");
+    }
+
+    #[tokio::test]
+    async fn test_stream_dispatches_text_and_completed_tool_call_from_data_lines() {
+        let seen_auth = Arc::new(Mutex::new(None));
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_stream\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":11,\"output_tokens\":13}}}\n\n"
+        );
+        let mut config = test_provider().config.clone();
+        config.base_url = spawn_sse_server(200, body, seen_auth.clone());
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let stream = provider.stream(&conv, &[], None).await.expect("stream start");
+        let events: Vec<_> = stream.try_collect().await.expect("stream events");
+
+        assert_eq!(
+            seen_auth.lock().expect("seen auth").as_deref(),
+            Some("Bearer test")
+        );
+        assert!(matches!(&events[0], StreamEvent::Delta(ContentBlock::Text { text }) if text == "Hello"));
+        assert!(matches!(&events[1], StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }) if id == "call_stream" && name == "bash" && input["cmd"] == "pwd"));
+        assert!(matches!(&events[2], StreamEvent::Usage(TokenUsage { input: 11, output: 13 })));
+        assert!(matches!(&events[3], StreamEvent::Done));
+    }
+
+    #[tokio::test]
+    async fn test_stream_http_error_is_propagated() {
+        let seen_auth = Arc::new(Mutex::new(None));
+        let mut config = test_provider().config.clone();
+        config.base_url = spawn_sse_server(401, "unauthorized", seen_auth);
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let stream = provider.stream(&conv, &[], None).await.expect("stream start");
+        let result: Result<Vec<_>, _> = stream.try_collect().await;
+        let err = match result {
+            Ok(_) => panic!("expected provider error"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("provider API error 401"));
+        assert!(msg.contains("unauthorized"));
+    }
+
+    #[tokio::test]
+    async fn test_stream_response_failed_event_is_propagated() {
+        let seen_auth = Arc::new(Mutex::new(None));
+        let body = "data: {\"type\":\"response.failed\",\"error\":{\"message\":\"quota exceeded\",\"code\":\"insufficient_quota\"}}\n\n";
+        let mut config = test_provider().config.clone();
+        config.base_url = spawn_sse_server(200, body, seen_auth);
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let stream = provider.stream(&conv, &[], None).await.expect("stream start");
+        let result: Result<Vec<_>, _> = stream.try_collect().await;
+        let err = match result {
+            Ok(_) => panic!("expected provider error"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("insufficient_quota"));
+        assert!(msg.contains("quota exceeded"));
     }
 }

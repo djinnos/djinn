@@ -210,8 +210,43 @@ impl LlmProvider for GoogleProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, routing::post};
+    use futures::TryStreamExt;
     use crate::message::{Conversation, Message};
     use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
+    use std::sync::{Arc, Mutex};
+
+    fn spawn_sse_server(status: u16, body: &'static str, seen_auth: Arc<Mutex<Option<String>>>) -> String {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("bind local tcp listener");
+        let addr = listener.local_addr().expect("local addr");
+        listener.set_nonblocking(true).expect("set nonblocking");
+
+        let app = Router::new().route(
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+            post(move |req: axum::extract::Request| async move {
+                let auth = req
+                    .headers()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                *seen_auth.lock().expect("lock seen auth") = auth;
+                (
+                    axum::http::StatusCode::from_u16(status).expect("status"),
+                    [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                    body,
+                )
+            }),
+        );
+
+        let tokio_listener =
+            tokio::net::TcpListener::from_std(listener).expect("convert to tokio listener");
+        tokio::spawn(async move {
+            axum::serve(tokio_listener, app).await.ok();
+        });
+
+        format!("http://{}:{}", addr.ip(), addr.port())
+    }
 
     fn test_google_config() -> ProviderConfig {
         ProviderConfig {
@@ -288,6 +323,15 @@ mod tests {
     }
 
     #[test]
+    fn test_safety_finish_reason_currently_emits_done() {
+        let line =
+            r#"{"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"SAFETY"}]}"#;
+        let events = parse_google_line(line);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], StreamEvent::Done));
+    }
+
+    #[test]
     fn test_streaming_chunk_no_finish_no_done() {
         // Intermediate chunk without finishReason shouldn't emit Done
         let line = r#"{"candidates":[{"content":{"parts":[{"text":"hello"}],"role":"model"}}]}"#;
@@ -340,5 +384,56 @@ mod tests {
 
         let req = provider.build_request(&conv, &[], Some(ToolChoice::Required));
         assert!(req.get("toolConfig").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stream_uses_data_lines_and_ignores_event_metadata() {
+        let seen_auth = Arc::new(Mutex::new(None));
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello from google\"}],\"role\":\"model\"}}]}\n\n",
+            "event: done\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":9}}\n\n"
+        );
+        let base_url = spawn_sse_server(200, body, seen_auth.clone());
+        let provider = GoogleProvider::new(ProviderConfig {
+            base_url,
+            ..test_google_config()
+        });
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let stream = provider.stream(&conv, &[], None).await.expect("stream start");
+        let events: Vec<_> = stream.try_collect().await.expect("stream events");
+
+        assert!(seen_auth.lock().expect("seen auth").is_none());
+        assert!(matches!(
+            &events[0],
+            StreamEvent::Delta(ContentBlock::Text { text }) if text == "Hello from google"
+        ));
+        assert!(matches!(&events[1], StreamEvent::Usage(TokenUsage { input: 7, output: 9 })));
+        assert!(matches!(&events[2], StreamEvent::Done));
+    }
+
+    #[tokio::test]
+    async fn test_stream_http_error_is_propagated() {
+        let seen_auth = Arc::new(Mutex::new(None));
+        let base_url = spawn_sse_server(400, "bad request", seen_auth);
+        let provider = GoogleProvider::new(ProviderConfig {
+            base_url,
+            ..test_google_config()
+        });
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let stream = provider.stream(&conv, &[], None).await.expect("stream start");
+        let result: Result<Vec<_>, _> = stream.try_collect().await;
+        let err = match result {
+            Ok(_) => panic!("expected provider error"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("provider API error 400"));
+        assert!(msg.contains("bad request"));
     }
 }
