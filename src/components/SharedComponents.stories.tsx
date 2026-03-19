@@ -5,6 +5,7 @@ import { EmptyState } from './EmptyState';
 import { LoadingScreen } from './LoadingScreen';
 import { InlineError } from './InlineError';
 import { WizardStepIndicator } from './WizardStepIndicator';
+import { WizardStep } from './WizardStep';
 import { Sidebar } from './Sidebar';
 import { ProjectSelector } from './ProjectSelector';
 import { ConnectionStatus } from './ConnectionStatus';
@@ -229,4 +230,36 @@ export const WizardFlowInitial = {
 export const WizardFlowInProgress = {
   name: 'Wizard / In Progress',
   render: () => <WizardState currentStep={3} totalSteps={4} completedSteps={[1, 2]} skippedSteps={[2]} />,
+};
+
+const WizardStepState = ({ activeStep, displayStep }: { activeStep: number; displayStep: number }) => {
+  const goToStep = useWizardStore((s) => s.goToStep);
+
+  useEffect(() => {
+    goToStep(activeStep);
+  }, [activeStep, goToStep]);
+
+  return (
+    <WizardStep stepNumber={displayStep}>
+      <div className="rounded-md border p-4">
+        <h3 className="font-semibold">Step {displayStep} Content</h3>
+        <p className="text-sm text-muted-foreground">This content is visible because the current step matches.</p>
+      </div>
+    </WizardStep>
+  );
+};
+
+export const WizardStepVisible = {
+  name: 'WizardStep / Visible (step matches)',
+  render: () => <WizardStepState activeStep={2} displayStep={2} />,
+};
+
+export const WizardStepHidden = {
+  name: 'WizardStep / Hidden (step mismatch)',
+  render: () => (
+    <div>
+      <WizardStepState activeStep={1} displayStep={3} />
+      <p className="text-sm text-muted-foreground">Step 3 content is hidden because current step is 1.</p>
+    </div>
+  ),
 };
