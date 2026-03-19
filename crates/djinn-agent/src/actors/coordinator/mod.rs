@@ -1040,7 +1040,7 @@ mod tests {
                 models: vec![ModelSlotConfig {
                     model_id: DEFAULT_MODEL_ID.to_owned(),
                     max_slots: 2,
-                    roles: ["worker", "task_reviewer"]
+                    roles: ["worker", "reviewer"]
                         .into_iter()
                         .map(ToOwned::to_owned)
                         .collect(),
@@ -1279,7 +1279,7 @@ mod tests {
                 models: vec![ModelSlotConfig {
                     model_id: DEFAULT_MODEL_ID.to_owned(),
                     max_slots: 2,
-                    roles: ["worker", "task_reviewer"]
+                    roles: ["worker", "reviewer"]
                         .into_iter()
                         .map(ToOwned::to_owned)
                         .collect(),

@@ -21,9 +21,9 @@ const MAX_SYSTEM_PROMPT_CHARS: usize = 30_000;
 
 const BASE_TEMPLATE: &str = include_str!("prompts/base.md");
 pub(crate) const DEV_TEMPLATE: &str = include_str!("prompts/dev.md");
-pub(crate) const TASK_REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.md");
+pub(crate) const REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.md");
 pub(crate) const PM_TEMPLATE: &str = include_str!("prompts/pm.md");
-pub(crate) const GROOMER_TEMPLATE: &str = include_str!("prompts/groomer.md");
+pub(crate) const PLANNER_TEMPLATE: &str = include_str!("prompts/groomer.md");
 
 // ─── Context ───────────────────────────────────────────────────────────────────
 
@@ -358,7 +358,7 @@ mod tests {
     fn task_reviewer_prompt_contains_task_fields() {
         let task = make_task();
         let ctx = make_ctx();
-        let prompt = render_prompt(AgentType::TaskReviewer, &task, &ctx);
+        let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
 
         // Task ID and title are substituted.
         assert!(prompt.contains(&task.id));
@@ -418,7 +418,7 @@ mod tests {
             verification_commands: Some("- `cargo test`".into()),
             ..make_ctx()
         };
-        let prompt = render_prompt(AgentType::TaskReviewer, &task, &ctx);
+        let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
 
         assert!(prompt.contains("Automated Verification"));
         assert!(prompt.contains("Focus on acceptance criteria"));
@@ -436,7 +436,7 @@ mod tests {
             end_commit: Some("abc1234".into()),
             ..make_ctx()
         };
-        let prompt = render_prompt(AgentType::TaskReviewer, &task, &ctx);
+        let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
 
         assert!(!prompt.contains("Automated Verification"));
         assert!(!prompt.contains("{{verification_section}}"));

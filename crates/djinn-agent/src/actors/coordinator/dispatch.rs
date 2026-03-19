@@ -16,7 +16,7 @@ enum DispatchOutcome {
 
 impl CoordinatorActor {
     /// Shared model-resolution → health-check → pool-dispatch loop used by
-    /// both regular task dispatch and groomer dispatch.
+    /// both regular task dispatch and planner dispatch.
     ///
     /// `dispatch_fn` receives `(&SlotPoolHandle, &str)` — the pool handle and
     /// model_id — and returns the pool dispatch future's result.

@@ -9,14 +9,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub mod finalize;
-mod groomer;
-mod pm;
+mod lead;
+mod planner;
 mod reviewer;
 mod worker;
 
-pub(crate) use groomer::{GROOMER_CONFIG, GroomerRole};
-pub(crate) use pm::{PM_CONFIG, PmRole};
-pub(crate) use reviewer::{TASK_REVIEWER_CONFIG, TaskReviewerRole};
+pub(crate) use lead::{LEAD_CONFIG, LeadRole};
+pub(crate) use planner::{PLANNER_CONFIG, PlannerRole};
+pub(crate) use reviewer::{REVIEWER_CONFIG, ReviewerRole};
 pub(crate) use worker::{WORKER_CONFIG, WorkerRole};
 
 #[derive(Clone, Copy)]
@@ -39,9 +39,9 @@ pub(crate) struct RoleConfig {
 pub(crate) fn config_for(agent_type: AgentType) -> &'static RoleConfig {
     match agent_type {
         AgentType::Worker => &WORKER_CONFIG,
-        AgentType::TaskReviewer => &TASK_REVIEWER_CONFIG,
-        AgentType::PM => &PM_CONFIG,
-        AgentType::Groomer => &GROOMER_CONFIG,
+        AgentType::Reviewer => &REVIEWER_CONFIG,
+        AgentType::Lead => &LEAD_CONFIG,
+        AgentType::Planner => &PLANNER_CONFIG,
     }
 }
 
@@ -103,9 +103,9 @@ pub fn finalize_tool_name_for(agent_type: AgentType) -> &'static str {
 pub(crate) fn role_impl_for(agent_type: AgentType) -> Arc<dyn AgentRole> {
     match agent_type {
         AgentType::Worker => Arc::new(WorkerRole),
-        AgentType::TaskReviewer => Arc::new(TaskReviewerRole),
-        AgentType::PM => Arc::new(PmRole),
-        AgentType::Groomer => Arc::new(GroomerRole),
+        AgentType::Reviewer => Arc::new(ReviewerRole),
+        AgentType::Lead => Arc::new(LeadRole),
+        AgentType::Planner => Arc::new(PlannerRole),
     }
 }
 
@@ -141,16 +141,16 @@ impl RoleRegistry {
     pub fn new() -> Self {
         let roles = HashMap::from([
             ("worker", AgentType::Worker),
-            ("task_reviewer", AgentType::TaskReviewer),
-            ("pm", AgentType::PM),
-            ("groomer", AgentType::Groomer),
+            ("reviewer", AgentType::Reviewer),
+            ("lead", AgentType::Lead),
+            ("planner", AgentType::Planner),
         ]);
 
         let dispatch_rules = vec![
             worker_dispatch_rule(),
-            task_reviewer_dispatch_rule(),
-            pm_dispatch_rule(),
-            groomer_dispatch_rule(),
+            reviewer_dispatch_rule(),
+            lead_dispatch_rule(),
+            planner_dispatch_rule(),
         ];
 
         Self {
@@ -203,39 +203,39 @@ fn worker_dispatch_rule() -> DispatchRule {
     }
 }
 
-fn task_reviewer_claims(task: &Task, _ctx: &DispatchContext) -> bool {
+fn reviewer_claims(task: &Task, _ctx: &DispatchContext) -> bool {
     matches!(task.status.as_str(), "needs_task_review" | "in_task_review")
 }
 
-fn task_reviewer_dispatch_rule() -> DispatchRule {
+fn reviewer_dispatch_rule() -> DispatchRule {
     DispatchRule {
-        role_name: "task_reviewer",
-        claims: task_reviewer_claims,
+        role_name: "reviewer",
+        claims: reviewer_claims,
     }
 }
 
-fn pm_claims(task: &Task, _ctx: &DispatchContext) -> bool {
+fn lead_claims(task: &Task, _ctx: &DispatchContext) -> bool {
     matches!(
         task.status.as_str(),
         "needs_pm_intervention" | "in_pm_intervention"
     )
 }
 
-fn pm_dispatch_rule() -> DispatchRule {
+fn lead_dispatch_rule() -> DispatchRule {
     DispatchRule {
-        role_name: "pm",
-        claims: pm_claims,
+        role_name: "lead",
+        claims: lead_claims,
     }
 }
 
-fn groomer_claims(_task: &Task, _ctx: &DispatchContext) -> bool {
+fn planner_claims(_task: &Task, _ctx: &DispatchContext) -> bool {
     false
 }
 
-fn groomer_dispatch_rule() -> DispatchRule {
+fn planner_dispatch_rule() -> DispatchRule {
     DispatchRule {
-        role_name: "groomer",
-        claims: groomer_claims,
+        role_name: "planner",
+        claims: planner_claims,
     }
 }
 
@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn task_reviewer_statuses_dispatches_to_task_reviewer() {
+    fn task_reviewer_statuses_dispatches_to_reviewer() {
         let registry = RoleRegistry::new();
         let ctx = DispatchContext;
 
@@ -312,21 +312,21 @@ mod tests {
             let role = registry.role_for_task(&task, &ctx);
             assert_eq!(
                 role,
-                Some("task_reviewer"),
-                "{status} should dispatch to task_reviewer"
+                Some("reviewer"),
+                "{status} should dispatch to reviewer"
             );
         }
     }
 
     #[test]
-    fn pm_intervention_statuses_dispatches_to_pm() {
+    fn pm_intervention_statuses_dispatches_to_lead() {
         let registry = RoleRegistry::new();
         let ctx = DispatchContext;
 
         for status in ["needs_pm_intervention", "in_pm_intervention"] {
             let task = make_task(status);
             let role = registry.role_for_task(&task, &ctx);
-            assert_eq!(role, Some("pm"), "{status} should dispatch to pm");
+            assert_eq!(role, Some("lead"), "{status} should dispatch to lead");
         }
     }
 

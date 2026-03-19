@@ -148,7 +148,7 @@ async fn handle_submit_review(
         .log_activity(
             Some(task_id),
             "agent-supervisor",
-            "task_reviewer",
+            "reviewer",
             "review_submitted",
             &activity_payload,
         )
@@ -223,7 +223,7 @@ async fn handle_submit_decision(
         .log_activity(
             Some(task_id),
             "agent-supervisor",
-            "pm",
+            "lead",
             "decision_submitted",
             &activity_payload,
         )
@@ -237,9 +237,9 @@ async fn handle_submit_decision(
     }
 }
 
-/// Log per-task grooming activity entries.
+/// Log per-task planning activity entries.
 ///
-/// The groomer is project-scoped, so `task_id` is a synthetic project identifier.
+/// The planner is project-scoped, so `task_id` is a synthetic project identifier.
 /// Each `tasks_reviewed` entry references a real task by its own `task_id` field.
 async fn handle_submit_grooming(payload: &serde_json::Value, app_state: &AgentContext) {
     let grooming = match serde_json::from_value::<SubmitGrooming>(payload.clone()) {
@@ -265,8 +265,8 @@ async fn handle_submit_grooming(payload: &serde_json::Value, app_state: &AgentCo
             .log_activity(
                 Some(&entry.task_id),
                 "agent-supervisor",
-                "groomer",
-                "grooming_entry",
+                "planner",
+                "planning_entry",
                 &activity_payload,
             )
             .await
@@ -274,7 +274,7 @@ async fn handle_submit_grooming(payload: &serde_json::Value, app_state: &AgentCo
             tracing::warn!(
                 task_id = %entry.task_id,
                 error = %e,
-                "finalize_handlers: failed to log grooming_entry activity"
+                "finalize_handlers: failed to log planning_entry activity"
             );
         }
     }
@@ -549,22 +549,22 @@ mod tests {
             "summary": "groomed 2 tasks"
         }));
 
-        // Groomer is project-scoped; pass synthetic task_id.
-        let synthetic_id = format!("project:{}:groomer", project.id);
+        // Planner is project-scoped; pass synthetic task_id.
+        let synthetic_id = format!("project:{}:planner", project.id);
         process_finalize_payload(&payload, "submit_grooming", &synthetic_id, &ctx).await;
 
         let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
 
         let entries1 = repo.list_activity(&task1.id).await.unwrap();
-        let e1 = entries1.iter().find(|e| e.event_type == "grooming_entry");
-        assert!(e1.is_some(), "expected grooming_entry for task1");
+        let e1 = entries1.iter().find(|e| e.event_type == "planning_entry");
+        assert!(e1.is_some(), "expected planning_entry for task1");
         let b1: serde_json::Value = serde_json::from_str(&e1.unwrap().payload).unwrap();
         assert_eq!(b1["action"], "promoted");
         assert_eq!(b1["changes"], "bumped priority to 1");
 
         let entries2 = repo.list_activity(&task2.id).await.unwrap();
-        let e2 = entries2.iter().find(|e| e.event_type == "grooming_entry");
-        assert!(e2.is_some(), "expected grooming_entry for task2");
+        let e2 = entries2.iter().find(|e| e.event_type == "planning_entry");
+        assert!(e2.is_some(), "expected planning_entry for task2");
         let b2: serde_json::Value = serde_json::from_str(&e2.unwrap().payload).unwrap();
         assert_eq!(b2["action"], "skipped");
     }
@@ -582,7 +582,7 @@ mod tests {
         // Since tasks_reviewed has #[serde(default)], this will succeed with empty vec.
         // Test a completely invalid payload type instead.
         let payload = Some(serde_json::json!("not-an-object"));
-        process_finalize_payload(&payload, "submit_grooming", "project:x:groomer", &ctx).await;
+        process_finalize_payload(&payload, "submit_grooming", "project:x:planner", &ctx).await;
     }
 
     // ── no-op cases ──────────────────────────────────────────────────────────

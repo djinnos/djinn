@@ -146,7 +146,7 @@ impl SlotActor {
                                 let (event_tx, _rx) = mpsc::channel::<SlotEvent>(1);
                                 let app_state = self.app_state.clone();
                                 let project_task_id = format!("project:{project_id}:{agent_type}");
-                                let role = role_impl_for(agent_type.parse().unwrap_or(crate::AgentType::Groomer));
+                                let role = role_impl_for(agent_type.parse().unwrap_or(crate::AgentType::Planner));
                                 let kill_for_task = kill.clone();
                                 let pause_for_task = pause.clone();
                                 let join = tokio::spawn(async move {

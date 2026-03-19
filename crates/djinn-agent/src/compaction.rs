@@ -37,7 +37,7 @@ fn compaction_prompt(ctx: &CompactionContext) -> &'static str {
         CompactionContext::PreResume(role) if role == "worker" => PRE_RESUME_WORKER_PROMPT,
         CompactionContext::MidSession(role) if role == "worker" => MID_SESSION_WORKER_PROMPT,
         CompactionContext::MidSession(role) | CompactionContext::PreResume(role)
-            if role == "task_reviewer" =>
+            if role == "reviewer" || role == "task_reviewer" =>
         {
             REVIEWER_PROMPT
         }
@@ -55,7 +55,7 @@ fn summariser_system(ctx: &CompactionContext) -> &'static str {
             SUMMARISER_SYSTEM_WORKER_MID_SESSION
         }
         CompactionContext::MidSession(role) | CompactionContext::PreResume(role)
-            if role == "task_reviewer" =>
+            if role == "reviewer" || role == "task_reviewer" =>
         {
             SUMMARISER_SYSTEM_TASK_REVIEWER
         }
@@ -876,7 +876,7 @@ mod tests {
         let worker_resume = compaction_prompt(&CompactionContext::PreResume("worker".to_string()));
         let worker_mid = compaction_prompt(&CompactionContext::MidSession("worker".to_string()));
         let reviewer =
-            compaction_prompt(&CompactionContext::MidSession("task_reviewer".to_string()));
+            compaction_prompt(&CompactionContext::MidSession("reviewer".to_string()));
 
         // Each context gets a different prompt
         assert!(worker_resume.contains("rejected or needs fixes"));
@@ -1133,7 +1133,7 @@ mod tests {
         let contexts = [
             CompactionContext::MidSession("worker".to_string()),
             CompactionContext::PreResume("worker".to_string()),
-            CompactionContext::MidSession("task_reviewer".to_string()),
+            CompactionContext::MidSession("reviewer".to_string()),
         ];
 
         for ctx in contexts {

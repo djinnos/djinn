@@ -157,7 +157,7 @@ pub struct TaskActivityListParams {
     pub id: Option<String>,
     /// Filter by event_type (e.g. "status_changed", "comment").
     pub event_type: Option<String>,
-    /// Filter by actor_role (e.g. "pm", "task_reviewer", "worker", "verification", "system").
+    /// Filter by actor_role (e.g. "lead", "reviewer", "worker", "verification", "system").
     pub actor_role: Option<String>,
     /// ISO-8601 lower bound on created_at.
     pub from_time: Option<String>,

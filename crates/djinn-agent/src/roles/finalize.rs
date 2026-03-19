@@ -12,7 +12,7 @@ pub struct AcVerdict {
     pub met: bool,
 }
 
-/// Entry from a groomer's `submit_grooming` call.
+/// Entry from a planner's `submit_grooming` call.
 #[derive(Debug, Deserialize)]
 pub struct TaskGroomingEntry {
     pub task_id: String,
@@ -46,22 +46,22 @@ pub struct SubmitReview {
     pub feedback: Option<String>,
 }
 
-/// Payload for a PM submitting an intervention decision.
+/// Payload for a Lead submitting an intervention decision.
 #[derive(Debug, Deserialize)]
 pub struct SubmitDecision {
     pub task_id: String,
     /// Decision taken: "reopen", "decompose", "force_close", or "escalate".
     pub decision: String,
     pub rationale: Option<String>,
-    /// IDs of tasks created during this PM intervention (for decompose decisions).
+    /// IDs of tasks created during this Lead intervention (for decompose decisions).
     #[serde(default)]
     pub created_tasks: Vec<String>,
 }
 
-/// Payload for a groomer submitting grooming results.
+/// Payload for a Planner submitting planning results.
 #[derive(Debug, Deserialize)]
 pub struct SubmitGrooming {
-    /// Per-task grooming entries.
+    /// Per-task planning entries.
     #[serde(default)]
     pub tasks_reviewed: Vec<TaskGroomingEntry>,
     /// Optional overall summary of the grooming session.
@@ -94,7 +94,7 @@ pub fn tool_submit_work() -> RmcpTool {
     )
 }
 
-/// MCP tool descriptor for the TaskReviewer finalize tool.
+/// MCP tool descriptor for the Reviewer finalize tool.
 pub fn tool_submit_review() -> RmcpTool {
     RmcpTool::new(
         "submit_review".to_string(),
@@ -127,11 +127,11 @@ pub fn tool_submit_review() -> RmcpTool {
     )
 }
 
-/// MCP tool descriptor for the PM finalize tool.
+/// MCP tool descriptor for the Lead finalize tool.
 pub fn tool_submit_decision() -> RmcpTool {
     RmcpTool::new(
         "submit_decision".to_string(),
-        "Submit the PM intervention decision and release the task back to the worker queue. Your session ends after this call.".to_string(),
+        "Submit the Lead intervention decision and release the task back to the worker queue. Your session ends after this call.".to_string(),
         object!({
             "type": "object",
             "required": ["task_id", "decision"],
@@ -140,7 +140,7 @@ pub fn tool_submit_decision() -> RmcpTool {
                 "decision": {
                     "type": "string",
                     "enum": ["reopen", "decompose", "force_close", "escalate"],
-                    "description": "The decision taken: reopen (send back to worker), decompose (split into subtasks), force_close, or escalate (release back to PM queue)"
+                    "description": "The decision taken: reopen (send back to worker), decompose (split into subtasks), force_close, or escalate (release back to Lead queue)"
                 },
                 "rationale": {"type": "string", "description": "Explanation for the decision"},
                 "created_tasks": {
@@ -153,7 +153,7 @@ pub fn tool_submit_decision() -> RmcpTool {
     )
 }
 
-/// MCP tool descriptor for the Groomer finalize tool.
+/// MCP tool descriptor for the Planner finalize tool.
 pub fn tool_submit_grooming() -> RmcpTool {
     RmcpTool::new(
         "submit_grooming".to_string(),

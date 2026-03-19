@@ -13,11 +13,11 @@ use futures::future::BoxFuture;
 
 use super::{AgentRole, RoleConfig};
 
-pub(crate) struct TaskReviewerRole;
+pub(crate) struct ReviewerRole;
 
-impl AgentRole for TaskReviewerRole {
+impl AgentRole for ReviewerRole {
     fn config(&self) -> &RoleConfig {
-        &TASK_REVIEWER_CONFIG
+        &REVIEWER_CONFIG
     }
 
     fn render_prompt(&self, task: &Task, ctx: &TaskContext) -> String {
@@ -198,17 +198,17 @@ impl AgentRole for TaskReviewerRole {
     }
 }
 
-pub(crate) const TASK_REVIEWER_CONFIG: RoleConfig = RoleConfig {
-    name: "task_reviewer",
-    display_name: "Task Reviewer",
-    dispatch_role: "task_reviewer",
+pub(crate) const REVIEWER_CONFIG: RoleConfig = RoleConfig {
+    name: "reviewer",
+    display_name: "Reviewer",
+    dispatch_role: "reviewer",
     tool_schemas: extension::tool_schemas_reviewer,
     start_action: |status| match status {
         "needs_task_review" => Some(TransitionAction::TaskReviewStart),
         _ => None,
     },
     release_action: || TransitionAction::ReleaseTaskReview,
-    initial_message: crate::prompts::TASK_REVIEWER_TEMPLATE,
+    initial_message: crate::prompts::REVIEWER_TEMPLATE,
     preserves_session: false,
     is_project_scoped: false,
     finalize_tool_names: &["submit_review", "request_pm"],
@@ -271,7 +271,7 @@ mod tests {
         let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
         set_task_ac(&ctx.db, &task.id, &ac(&[true, false])).await;
 
-        let role = TaskReviewerRole;
+        let role = ReviewerRole;
         let output = ParsedAgentOutput::new(true);
         let result = role.on_complete(&task.id, &output, &ctx).await;
 
@@ -299,7 +299,7 @@ mod tests {
         insert_review_snapshot(&ctx.db, &task.id, &current).await;
         set_continuation_count(&ctx.db, &task.id, 0).await;
 
-        let role = TaskReviewerRole;
+        let role = ReviewerRole;
         let output = ParsedAgentOutput::new(true);
         let result = role.on_complete(&task.id, &output, &ctx).await;
 
@@ -327,7 +327,7 @@ mod tests {
         insert_review_snapshot(&ctx.db, &task.id, &current).await;
         set_continuation_count(&ctx.db, &task.id, STALE_ESCALATION_THRESHOLD - 1).await;
 
-        let role = TaskReviewerRole;
+        let role = ReviewerRole;
         let output = ParsedAgentOutput::new(true);
         let result = role.on_complete(&task.id, &output, &ctx).await;
 
@@ -351,7 +351,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
         );
 
-        let role = TaskReviewerRole;
+        let role = ReviewerRole;
         let output = ParsedAgentOutput::new(true);
         let result = role.on_complete("missing-task-id", &output, &ctx).await;
 

@@ -165,7 +165,7 @@ async fn recent_feedback_filters_orders_and_limits() {
 
     let all_feedback = recent_feedback(&activity, 10);
     assert_eq!(all_feedback.len(), 3);
-    assert!(all_feedback[0].contains("PM guidance"));
+    assert!(all_feedback[0].contains("Lead guidance"));
     assert!(all_feedback[0].contains("pm note"));
     assert!(all_feedback[1].contains("Reviewer feedback"));
     assert!(all_feedback[1].contains("review note"));

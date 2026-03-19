@@ -552,7 +552,7 @@ async fn full_happy_path() {
             &t.id,
             TransitionAction::TaskReviewStart,
             "",
-            "task_reviewer",
+            "reviewer",
             None,
             None,
         )
@@ -566,7 +566,7 @@ async fn full_happy_path() {
             &t.id,
             TransitionAction::TaskReviewApprove,
             "",
-            "task_reviewer",
+            "reviewer",
             None,
             None,
         )
@@ -646,7 +646,7 @@ async fn task_review_reject_increments_reopen() {
             &t.id,
             TransitionAction::TaskReviewStart,
             "",
-            "task_reviewer",
+            "reviewer",
             None,
             None,
         )
@@ -658,7 +658,7 @@ async fn task_review_reject_increments_reopen() {
             &t.id,
             TransitionAction::TaskReviewReject,
             "reviewer@example.com",
-            "task_reviewer",
+            "reviewer",
             Some("needs more tests"),
             None,
         )
@@ -698,7 +698,7 @@ async fn task_review_reject_conflict_does_not_increment_reopen() {
             &t.id,
             TransitionAction::TaskReviewStart,
             "",
-            "task_reviewer",
+            "reviewer",
             None,
             None,
         )
@@ -710,7 +710,7 @@ async fn task_review_reject_conflict_does_not_increment_reopen() {
             &t.id,
             TransitionAction::TaskReviewRejectConflict,
             "reviewer@example.com",
-            "task_reviewer",
+            "reviewer",
             Some("merge conflict"),
             None,
         )
