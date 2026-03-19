@@ -10,6 +10,7 @@ pub mod process;
 pub mod server;
 pub mod sse;
 pub mod sync;
+mod task_confidence;
 pub mod watchers;
 
 #[cfg(test)]
