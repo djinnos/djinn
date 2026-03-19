@@ -561,7 +561,14 @@ mod tests {
             .filter(|e| e.event_type == "status_changed")
             .map(|e| serde_json::from_str(&e.payload).expect("status payload json"))
             .collect();
-        assert!(!statuses.iter().any(|p| p["to_status"] == "open"));
+        // Filter out the setup set_status("open") call (from_status == "backlog")
+        let non_setup_statuses: Vec<_> = statuses
+            .iter()
+            .filter(|p| p["from_status"].as_str() != Some("backlog"))
+            .collect();
+        // After setup, we should NOT see an intermediate open status
+        // when escalating directly to PM; the transition should be verifying->needs_pm_intervention
+        assert!(!non_setup_statuses.iter().any(|p| p["to_status"] == "open"));
         assert!(
             statuses
                 .iter()

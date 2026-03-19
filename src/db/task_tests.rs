@@ -230,7 +230,8 @@ async fn transition_emits_event_reopen() {
     let _ = rx.recv().await.unwrap();
 
     repo.set_status(&task.id, "closed").await.unwrap();
-    let _ = rx.recv().await.unwrap();
+    let _ = rx.recv().await.unwrap(); // task_updated event
+    let _ = rx.recv().await.unwrap(); // activity_logged event from set_status
 
     repo.transition(
         &task.id,
