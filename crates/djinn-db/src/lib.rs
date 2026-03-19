@@ -8,8 +8,8 @@ pub use database::{Database, default_db_path};
 pub use error::{DbError as Error, DbResult as Result};
 pub use repositories::{
     agent_role::{
-        AgentRoleCreateInput, AgentRoleListQuery, AgentRoleListResult, AgentRoleRepository,
-        AgentRoleUpdateInput, VALID_BASE_ROLES,
+        AgentRoleCreateInput, AgentRoleListQuery, AgentRoleListResult, AgentRoleMetrics,
+        AgentRoleRepository, AgentRoleUpdateInput, VALID_BASE_ROLES,
     },
     epic::{
         EpicCountQuery, EpicCreateInput, EpicListQuery, EpicListResult, EpicRepository,

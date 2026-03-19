@@ -4474,6 +4474,117 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "role_id": {
+          "description": "Optional role UUID or name — if omitted returns metrics for all roles.",
+          "nullable": true,
+          "type": "string"
+        },
+        "window_days": {
+          "description": "How many days back to include session data (default 30).",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "RoleMetricsParams",
+      "type": "object"
+    },
+    "name": "role_metrics",
+    "output_schema": {
+      "$defs": {
+        "RoleMetricEntry": {
+          "properties": {
+            "avg_reopens": {
+              "description": "Average reopen_count across tasks dispatched to this role.",
+              "format": "double",
+              "type": "number"
+            },
+            "avg_time_seconds": {
+              "description": "Average session wall-clock duration in seconds (completed sessions only).",
+              "format": "double",
+              "type": "number"
+            },
+            "avg_tokens": {
+              "description": "Average total tokens (in + out) per completed session.",
+              "format": "double",
+              "type": "number"
+            },
+            "base_role": {
+              "type": "string"
+            },
+            "completed_task_count": {
+              "description": "Number of completed tasks included in the calculation.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "role_id": {
+              "type": "string"
+            },
+            "role_name": {
+              "type": "string"
+            },
+            "success_rate": {
+              "description": "Fraction of completed tasks that closed as \"completed\" (0.0–1.0).",
+              "format": "double",
+              "type": "number"
+            },
+            "verification_pass_rate": {
+              "description": "Fraction of tasks with zero verification failures (0.0–1.0).",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "role_id",
+            "role_name",
+            "base_role",
+            "success_rate",
+            "avg_tokens",
+            "avg_time_seconds",
+            "verification_pass_rate",
+            "avg_reopens",
+            "completed_task_count"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/RoleMetricEntry"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "window_days": {
+          "description": "Window used for session queries (days back from now).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "window_days"
+      ],
+      "title": "RoleMetricsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
         "id": {
           "description": "Role UUID or name.",
           "type": "string"

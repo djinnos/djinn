@@ -1,4 +1,4 @@
-// MCP tools for agent role CRUD (role_create, role_update, role_list, role_show).
+// MCP tools for agent role CRUD (role_create, role_update, role_list, role_show, role_metrics).
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,7 @@ use djinn_db::{
     AgentRoleCreateInput, AgentRoleListQuery, AgentRoleRepository, AgentRoleUpdateInput,
     VALID_BASE_ROLES,
 };
+use djinn_db::AgentRoleMetrics as DbRoleMetrics;
 
 // ── View model ───────────────────────────────────────────────────────────────
 
@@ -455,6 +456,164 @@ impl DjinnMcpServer {
                 error: Some(e.to_string()),
             }),
         }
+    }
+}
+
+// ── role_metrics types ────────────────────────────────────────────────────────
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct RoleMetricEntry {
+    pub role_id: String,
+    pub role_name: String,
+    pub base_role: String,
+    /// Fraction of completed tasks that closed as "completed" (0.0–1.0).
+    pub success_rate: f64,
+    /// Average total tokens (in + out) per completed session.
+    pub avg_tokens: f64,
+    /// Average session wall-clock duration in seconds (completed sessions only).
+    pub avg_time_seconds: f64,
+    /// Fraction of tasks with zero verification failures (0.0–1.0).
+    pub verification_pass_rate: f64,
+    /// Average reopen_count across tasks dispatched to this role.
+    pub avg_reopens: f64,
+    /// Number of completed tasks included in the calculation.
+    pub completed_task_count: i64,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct RoleMetricsResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<RoleMetricEntry>>,
+    /// Window used for session queries (days back from now).
+    pub window_days: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RoleMetricsParams {
+    /// Absolute project path.
+    pub project: String,
+    /// Optional role UUID or name — if omitted returns metrics for all roles.
+    pub role_id: Option<String>,
+    /// How many days back to include session data (default 30).
+    pub window_days: Option<i64>,
+}
+
+// ── role_metrics impl ─────────────────────────────────────────────────────────
+
+/// Map a DB agent_role base_role to the session agent_type string.
+fn base_role_to_agent_type(base_role: &str) -> &str {
+    match base_role {
+        "worker" | "resolver" => "worker",
+        "reviewer" => "task_reviewer",
+        "planner" => "pm",
+        "lead" => "groomer",
+        other => other,
+    }
+}
+
+#[tool_router(router = role_metrics_tool_router, vis = "pub")]
+impl DjinnMcpServer {
+    /// Aggregate effectiveness metrics per agent role: success rate, token usage,
+    /// session duration, verification pass rate, reopen rate.
+    /// Optionally filter to a single role by UUID or name.
+    #[tool(
+        description = "Return aggregated effectiveness metrics per agent role (success_rate, avg_tokens, avg_time_seconds, verification_pass_rate, avg_reopens). Accepts optional role_id filter and window_days (default 30)."
+    )]
+    pub async fn role_metrics(
+        &self,
+        Parameters(p): Parameters<RoleMetricsParams>,
+    ) -> Json<RoleMetricsResponse> {
+        let window_days = p.window_days.unwrap_or(30).max(1);
+
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => {
+                return Json(RoleMetricsResponse {
+                    roles: None,
+                    window_days,
+                    error: Some(e),
+                });
+            }
+        };
+
+        let repo = AgentRoleRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        // Collect the roles to compute metrics for.
+        let roles: Vec<AgentRole> = if let Some(ref id_or_name) = p.role_id {
+            match resolve_role(&repo, &project_id, id_or_name).await {
+                Ok(Some(r)) => vec![r],
+                Ok(None) => {
+                    return Json(RoleMetricsResponse {
+                        roles: None,
+                        window_days,
+                        error: Some(role_not_found_error(id_or_name)),
+                    });
+                }
+                Err(e) => {
+                    return Json(RoleMetricsResponse {
+                        roles: None,
+                        window_days,
+                        error: Some(e),
+                    });
+                }
+            }
+        } else {
+            match repo
+                .list_for_project(AgentRoleListQuery {
+                    project_id: project_id.clone(),
+                    base_role: None,
+                    limit: 200,
+                    offset: 0,
+                })
+                .await
+            {
+                Ok(result) => result.roles,
+                Err(e) => {
+                    return Json(RoleMetricsResponse {
+                        roles: None,
+                        window_days,
+                        error: Some(e.to_string()),
+                    });
+                }
+            }
+        };
+
+        let mut entries: Vec<RoleMetricEntry> = Vec::with_capacity(roles.len());
+
+        for role in &roles {
+            let agent_type = base_role_to_agent_type(&role.base_role);
+            let m: DbRoleMetrics = repo
+                .get_metrics(&project_id, agent_type, window_days)
+                .await
+                .unwrap_or(DbRoleMetrics {
+                    success_rate: 0.0,
+                    avg_reopens: 0.0,
+                    verification_pass_rate: 0.0,
+                    completed_task_count: 0,
+                    avg_tokens: 0.0,
+                    avg_time_seconds: 0.0,
+                });
+
+            entries.push(RoleMetricEntry {
+                role_id: role.id.clone(),
+                role_name: role.name.clone(),
+                base_role: role.base_role.clone(),
+                success_rate: m.success_rate,
+                avg_reopens: m.avg_reopens,
+                verification_pass_rate: m.verification_pass_rate,
+                completed_task_count: m.completed_task_count,
+                avg_tokens: m.avg_tokens,
+                avg_time_seconds: m.avg_time_seconds,
+            });
+        }
+
+        Json(RoleMetricsResponse {
+            roles: Some(entries),
+            window_days,
+            error: None,
+        })
     }
 }
 

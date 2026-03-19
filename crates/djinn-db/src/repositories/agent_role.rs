@@ -45,6 +45,22 @@ pub struct AgentRoleListResult {
     pub total_count: i64,
 }
 
+/// Per-role aggregated effectiveness metrics.
+pub struct AgentRoleMetrics {
+    /// Fraction of closed tasks that completed successfully (0.0–1.0).
+    pub success_rate: f64,
+    /// Average reopen_count across closed tasks for this role.
+    pub avg_reopens: f64,
+    /// Fraction of closed tasks with zero verification failures (0.0–1.0).
+    pub verification_pass_rate: f64,
+    /// Number of closed tasks included in calculations.
+    pub completed_task_count: i64,
+    /// Average total tokens (in + out) per completed session in the window.
+    pub avg_tokens: f64,
+    /// Average session duration in seconds (completed sessions in the window).
+    pub avg_time_seconds: f64,
+}
+
 pub struct AgentRoleRepository {
     db: Database,
     events: EventBus,
@@ -196,6 +212,72 @@ impl AgentRoleRepository {
         Ok(AgentRoleListResult {
             roles,
             total_count: total,
+        })
+    }
+
+    /// Compute aggregated effectiveness metrics for a role identified by its
+    /// base_role→agent_type mapping. `window_days` limits session data lookback.
+    pub async fn get_metrics(
+        &self,
+        project_id: &str,
+        agent_type: &str,
+        window_days: i64,
+    ) -> Result<AgentRoleMetrics> {
+        self.db.ensure_initialized().await?;
+
+        // Task-level metrics: closed tasks that had at least one session of this agent_type.
+        let task_row: (f64, f64, f64, i64) = sqlx::query_as(
+            "SELECT
+                CAST(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END) AS REAL)
+                    / CAST(MAX(1, COUNT(DISTINCT t.id)) AS REAL),
+                COALESCE(AVG(CAST(t.reopen_count AS REAL)), 0.0),
+                CAST(SUM(CASE WHEN t.verification_failure_count = 0 THEN 1 ELSE 0 END) AS REAL)
+                    / CAST(MAX(1, COUNT(DISTINCT t.id)) AS REAL),
+                COUNT(DISTINCT t.id)
+             FROM tasks t
+             WHERE t.project_id = ?1
+               AND t.status = 'closed'
+               AND EXISTS (
+                   SELECT 1 FROM sessions s
+                   WHERE s.task_id = t.id AND s.agent_type = ?2
+               )",
+        )
+        .bind(project_id)
+        .bind(agent_type)
+        .fetch_one(self.db.pool())
+        .await
+        .unwrap_or((0.0, 0.0, 0.0, 0));
+
+        // Session-level metrics: completed sessions within the lookback window.
+        let session_row: (f64, f64) = sqlx::query_as(
+            "SELECT
+                COALESCE(AVG(CAST(s.tokens_in + s.tokens_out AS REAL)), 0.0),
+                COALESCE(AVG(
+                    CASE WHEN s.ended_at IS NOT NULL
+                        THEN CAST((julianday(s.ended_at) - julianday(s.started_at)) * 86400 AS REAL)
+                        ELSE NULL END
+                ), 0.0)
+             FROM sessions s
+             JOIN tasks t ON t.id = s.task_id
+             WHERE t.project_id = ?1
+               AND s.agent_type = ?2
+               AND s.status = 'completed'
+               AND s.started_at >= datetime('now', '-' || ?3 || ' days')",
+        )
+        .bind(project_id)
+        .bind(agent_type)
+        .bind(window_days)
+        .fetch_one(self.db.pool())
+        .await
+        .unwrap_or((0.0, 0.0));
+
+        Ok(AgentRoleMetrics {
+            success_rate: task_row.0,
+            avg_reopens: task_row.1,
+            verification_pass_rate: task_row.2,
+            completed_task_count: task_row.3,
+            avg_tokens: session_row.0,
+            avg_time_seconds: session_row.1,
         })
     }
 }
