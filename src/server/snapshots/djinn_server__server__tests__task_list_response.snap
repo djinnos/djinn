@@ -26,7 +26,7 @@ expression: task_list
       "reopen_count": 0,
       "session_count": 0,
       "short_id": "[SHORT_ID]",
-      "status": "backlog",
+      "status": "open",
       "title": "Snapshot Task",
       "unresolved_blocker_count": 0,
       "updated_at": "[TIMESTAMP]",

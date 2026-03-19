@@ -40,7 +40,6 @@ async fn make_open_task() -> (TaskRepository, String) {
 
 fn arb_status() -> impl Strategy<Value = TaskStatus> {
     prop_oneof![
-        Just(TaskStatus::Backlog),
         Just(TaskStatus::Open),
         Just(TaskStatus::InProgress),
         Just(TaskStatus::Verifying),
@@ -54,7 +53,6 @@ fn arb_status() -> impl Strategy<Value = TaskStatus> {
 
 fn arb_non_closed_status() -> impl Strategy<Value = TaskStatus> {
     prop_oneof![
-        Just(TaskStatus::Backlog),
         Just(TaskStatus::Open),
         Just(TaskStatus::InProgress),
         Just(TaskStatus::Verifying),
@@ -67,7 +65,6 @@ fn arb_non_closed_status() -> impl Strategy<Value = TaskStatus> {
 
 fn arb_action() -> impl Strategy<Value = TransitionAction> {
     prop_oneof![
-        Just(TransitionAction::Accept),
         Just(TransitionAction::Start),
         Just(TransitionAction::SubmitVerification),
         Just(TransitionAction::VerificationPass),

@@ -60,7 +60,6 @@ pub struct ActivityEntry {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
-    Backlog,
     Open,
     InProgress,
     Verifying,
@@ -75,7 +74,6 @@ impl TaskStatus {
     /// The DB/wire string representation.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Backlog => "backlog",
             Self::Open => "open",
             Self::InProgress => "in_progress",
             Self::Verifying => "verifying",
@@ -90,7 +88,6 @@ impl TaskStatus {
     /// Parse from a DB/wire string.
     pub fn parse(s: &str) -> Result<Self> {
         match s {
-            "backlog" => Ok(Self::Backlog),
             "open" => Ok(Self::Open),
             "in_progress" => Ok(Self::InProgress),
             "verifying" => Ok(Self::Verifying),
@@ -114,7 +111,6 @@ impl std::fmt::Display for TaskStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransitionAction {
-    Accept,
     Start,
     SubmitVerification,
     VerificationPass,
@@ -169,7 +165,6 @@ impl TransitionAction {
     /// Parse from a wire string.
     pub fn parse(s: &str) -> Result<Self> {
         match s {
-            "accept" => Ok(Self::Accept),
             "start" => Ok(Self::Start),
             "submit_verification" => Ok(Self::SubmitVerification),
             "verification_pass" => Ok(Self::VerificationPass),
@@ -273,13 +268,6 @@ pub fn compute_transition(
     let bad = |msg: &str| Err(Error::InvalidTransition(msg.to_owned()));
 
     Ok(match action {
-        TransitionAction::Accept => {
-            if *from != TaskStatus::Backlog {
-                return bad("accept is only valid from backlog");
-            }
-            TransitionApply::simple(TaskStatus::Open)
-        }
-
         TransitionAction::Start => {
             if *from != TaskStatus::Open {
                 return bad("start is only valid from open");
@@ -539,8 +527,7 @@ pub fn compute_transition(
 mod tests {
     use super::*;
 
-    const STATUSES: [TaskStatus; 9] = [
-        TaskStatus::Backlog,
+    const STATUSES: [TaskStatus; 8] = [
         TaskStatus::Open,
         TaskStatus::InProgress,
         TaskStatus::Verifying,
@@ -551,8 +538,7 @@ mod tests {
         TaskStatus::Closed,
     ];
 
-    const ACTIONS: [TransitionAction; 24] = [
-        TransitionAction::Accept,
+    const ACTIONS: [TransitionAction; 23] = [
         TransitionAction::Start,
         TransitionAction::SubmitVerification,
         TransitionAction::VerificationPass,
@@ -580,7 +566,6 @@ mod tests {
 
     fn expected_status(action: &TransitionAction, from: &TaskStatus) -> Option<TaskStatus> {
         match (action, from) {
-            (TransitionAction::Accept, TaskStatus::Backlog) => Some(TaskStatus::Open),
             (TransitionAction::Start, TaskStatus::Open) => Some(TaskStatus::InProgress),
             (TransitionAction::SubmitVerification, TaskStatus::InProgress) => {
                 Some(TaskStatus::Verifying)

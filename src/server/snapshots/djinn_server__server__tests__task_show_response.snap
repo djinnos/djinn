@@ -22,7 +22,7 @@ expression: task_show
   "reopen_count": 0,
   "session_count": 0,
   "short_id": "[SHORT_ID]",
-  "status": "backlog",
+  "status": "open",
   "title": "Snapshot Task",
   "updated_at": "[TIMESTAMP]",
   "verification_failure_count": 0

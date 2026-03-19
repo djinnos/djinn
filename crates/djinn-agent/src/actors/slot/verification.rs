@@ -529,10 +529,6 @@ mod tests {
                     let task_repo = TaskRepository::new(db.clone(), test_events());
 
                     task_repo
-                        .set_status(&task.id, "open")
-                        .await
-                        .expect("set status open");
-                    task_repo
                         .transition(
                             &task.id,
                             TransitionAction::Start,
@@ -578,10 +574,6 @@ mod tests {
         let task = create_test_task(&db, &project.id, &epic.id).await;
         let task_repo = TaskRepository::new(db.clone(), test_events());
 
-        task_repo
-            .set_status(&task.id, "open")
-            .await
-            .expect("set status open");
         task_repo
             .transition(
                 &task.id,
@@ -761,14 +753,9 @@ mod tests {
             .filter(|e| e.event_type == "status_changed")
             .map(|e| serde_json::from_str(&e.payload).expect("status payload json"))
             .collect();
-        // Filter out the setup set_status("open") call (from_status == "backlog")
-        let non_setup_statuses: Vec<_> = statuses
-            .iter()
-            .filter(|p| p["from_status"].as_str() != Some("backlog"))
-            .collect();
         // After setup, we should NOT see an intermediate open status
         // when escalating directly to PM; the transition should be verifying->needs_pm_intervention
-        assert!(!non_setup_statuses.iter().any(|p| p["to_status"] == "open"));
+        assert!(!statuses.iter().any(|p| p["to_status"] == "open"));
         assert!(
             statuses
                 .iter()
