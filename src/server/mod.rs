@@ -173,12 +173,13 @@ pub async fn run(router: Router, port: u16, cancel: CancellationToken) {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::path::Path;
 
     use axum::body::Body;
     use axum::http::header::{ACCEPT, CONTENT_TYPE};
     use http_body_util::BodyExt;
-    use serde_json::Value;
+    use insta::assert_json_snapshot;
+    use serde_json::{Value, json};
     use tower::ServiceExt;
 
     use crate::server::{self, AppState};
@@ -561,59 +562,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn mcp_tools_list_schema_snapshot_matches_repo_file() {
+    async fn mcp_tools_schema_snapshot() {
         let app = test_helpers::create_test_app();
         let session_id = test_helpers::initialize_mcp_session(&app).await;
-
-        let list_event =
-            mcp_jsonrpc(&app, &session_id, 2, "tools/list", serde_json::json!({})).await;
-        let tools = list_event
-            .get("result")
-            .and_then(|result| result.get("tools"))
-            .and_then(Value::as_array)
-            .expect("tools/list result missing tools array");
+        let list_event = mcp_jsonrpc(&app, &session_id, 2, "tools/list", json!({})).await;
+        let tools = list_event["result"]["tools"].as_array().expect("tools array");
 
         let mut signatures: Vec<Value> = tools
             .iter()
             .map(|tool| {
-                serde_json::json!({
-                    "name": tool.get("name").cloned().unwrap_or(Value::Null),
+                json!({
+                    "name": tool["name"],
                     "input_schema": canonicalize_json(tool.get("inputSchema").unwrap_or(&Value::Null)),
                     "output_schema": canonicalize_json(tool.get("outputSchema").unwrap_or(&Value::Null)),
                 })
             })
             .collect();
+        signatures.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
 
-        signatures.sort_by(|a, b| {
-            let a_name = a.get("name").and_then(Value::as_str).unwrap_or("");
-            let b_name = b.get("name").and_then(Value::as_str).unwrap_or("");
-            a_name.cmp(b_name)
-        });
-
-        let snapshot = serde_json::json!({ "tools": signatures });
-        let snapshot_text = format!(
-            "{}\n",
-            serde_json::to_string_pretty(&snapshot).expect("serialize schema snapshot")
-        );
-
-        let snapshot_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/mcp_tools_schema_snapshot.json");
-
-        if !snapshot_path.exists() {
-            if let Some(parent) = snapshot_path.parent() {
-                fs::create_dir_all(parent).expect("create snapshot parent directory");
-            }
-            fs::write(&snapshot_path, &snapshot_text).expect("write initial schema snapshot");
-            return;
-        }
-
-        let expected = fs::read_to_string(&snapshot_path).expect("read tools schema snapshot");
-        assert_eq!(
-            expected,
-            snapshot_text,
-            "MCP tools schema snapshot changed. Review and update {} if intentional.",
-            snapshot_path.display()
-        );
+        assert_json_snapshot!("mcp_tools_schema", signatures);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
