@@ -1,3 +1,4 @@
+pub mod agent_role;
 pub mod credential;
 pub mod epic;
 pub mod git_settings;
@@ -10,6 +11,7 @@ pub mod session_message;
 pub mod settings;
 pub mod task;
 
+pub use agent_role::AgentRole;
 pub use credential::Credential;
 pub use epic::Epic;
 pub use git_settings::GitSettings;
