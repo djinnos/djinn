@@ -193,6 +193,61 @@ mod tests {
         assert_eq!(found.id, note.id);
     }
 
+    #[test]
+    fn mergeable_note_types_map_to_expected_folders_and_round_trip() {
+        assert_eq!(folder_for_type("pattern"), "patterns");
+        assert_eq!(folder_for_type("case"), "cases");
+        assert_eq!(folder_for_type("pitfall"), "pitfalls");
+
+        assert_eq!(permalink_for("case", "Task Recovery Example"), "cases/task-recovery-example");
+        assert_eq!(permalink_for("pitfall", "Retry Storm"), "pitfalls/retry-storm");
+
+        assert_eq!(file_helpers::infer_note_type("patterns/reusable-flow"), "pattern");
+        assert_eq!(file_helpers::infer_note_type("cases/task-recovery-example"), "case");
+        assert_eq!(file_helpers::infer_note_type("pitfalls/retry-storm"), "pitfall");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_supports_case_and_pitfall_note_types() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let case_note = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Incident Recovery",
+                "Case details",
+                "case",
+                "[]",
+            )
+            .await
+            .unwrap();
+        assert_eq!(case_note.note_type, "case");
+        assert_eq!(case_note.folder, "cases");
+        assert_eq!(case_note.permalink, "cases/incident-recovery");
+        assert!(case_note.file_path.ends_with("cases/incident-recovery.md"));
+
+        let pitfall_note = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Retry Storm",
+                "Pitfall details",
+                "pitfall",
+                "[]",
+            )
+            .await
+            .unwrap();
+        assert_eq!(pitfall_note.note_type, "pitfall");
+        assert_eq!(pitfall_note.folder, "pitfalls");
+        assert_eq!(pitfall_note.permalink, "pitfalls/retry-storm");
+        assert!(pitfall_note.file_path.ends_with("pitfalls/retry-storm.md"));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_note() {
         let tmp = tempfile::tempdir().unwrap();

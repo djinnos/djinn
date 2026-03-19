@@ -259,6 +259,28 @@ mod param_tests {
     }
 
     #[test]
+    fn mergeable_write_and_edit_params_deserialize_case_and_pitfall_types() {
+        let write_params: WriteParams = serde_json::from_value(serde_json::json!({
+            "project": "/tmp/test",
+            "title": "Recovered Incident",
+            "content": "details",
+            "type": "case"
+        }))
+        .unwrap();
+        assert_eq!(write_params.note_type, "case");
+
+        let edit_params: EditParams = serde_json::from_value(serde_json::json!({
+            "project": "/tmp/test",
+            "identifier": "reference/test",
+            "operation": "append",
+            "content": "details",
+            "type": "pitfall"
+        }))
+        .unwrap();
+        assert_eq!(edit_params.note_type, Some("pitfall".to_string()));
+    }
+
+    #[test]
     fn edit_params_deserializes_type_field() {
         let json = serde_json::json!({
             "project": "/tmp/test",

@@ -8,9 +8,9 @@ pub struct WriteParams {
     pub project: String,
     pub title: String,
     pub content: String,
-    /// Note type: adr, pattern, research, requirement, reference, design,
-    /// session, persona, journey, design_spec, competitive, tech_spike,
-    /// brief (singleton), roadmap (singleton).
+    /// Note type: adr, pattern, case, pitfall, research, requirement,
+    /// reference, design, session, persona, journey, design_spec,
+    /// competitive, tech_spike, brief (singleton), roadmap (singleton).
     #[serde(rename = "type")]
     #[schemars(rename = "type")]
     pub note_type: String,
