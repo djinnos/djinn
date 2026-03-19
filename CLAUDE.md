@@ -1,5 +1,3 @@
-# djinn Desktop
-
 Tauri v2 desktop app — React 19 + TypeScript + Vite frontend, Rust backend.
 
 ## Dependency Management (pnpm)
