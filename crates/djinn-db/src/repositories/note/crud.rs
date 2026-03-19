@@ -123,6 +123,14 @@ impl NoteRepository {
         .await?)
     }
 
+    pub async fn get_summary_state(&self, id: &str) -> Result<Option<Note>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await?)
+    }
+
     /// Resolve a note by permalink (primary) or title search (fallback).
     ///
     /// This is the canonical way to look up a note when the caller has a
@@ -225,6 +233,36 @@ impl NoteRepository {
         Ok(note)
     }
 
+    pub async fn update_summaries(
+        &self,
+        id: &str,
+        abstract_: Option<&str>,
+        overview: Option<&str>,
+    ) -> Result<Note> {
+        self.db.ensure_initialized().await?;
+
+        sqlx::query(
+            "UPDATE notes SET
+                abstract = ?2,
+                overview = ?3,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(abstract_)
+        .bind(overview)
+        .execute(self.db.pool())
+        .await?;
+
+        let note = self
+            .get(id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
+
+        self.events.send(DjinnEventEnvelope::note_updated(&note));
+        Ok(note)
+    }
+
     /// Delete a note. Removes the DB row (and FTS5 index via trigger) first,
     /// then attempts to remove the file from disk.
     pub async fn delete(&self, id: &str) -> Result<()> {
@@ -257,6 +295,11 @@ impl NoteRepository {
     /// tracking should not flood the SSE stream).
     pub async fn touch_accessed(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
+        let note = self
+            .get_summary_state(id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
+
         sqlx::query(
             "UPDATE notes SET
                 last_accessed = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
@@ -266,6 +309,12 @@ impl NoteRepository {
         .bind(id)
         .execute(self.db.pool())
         .await?;
+
+        if note.abstract_.is_none() || note.overview.is_none() {
+            self.events
+                .send(DjinnEventEnvelope::note_missing_summary(&note));
+        }
+
         Ok(())
     }
 

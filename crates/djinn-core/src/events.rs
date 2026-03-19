@@ -167,6 +167,25 @@ impl DjinnEventEnvelope {
             from_sync: false,
         }
     }
+    pub fn note_missing_summary(note: &Note) -> Self {
+        Self {
+            entity_type: "note",
+            action: "missing_summary",
+            payload: serde_json::to_value(serde_json::json!({
+                "id": note.id,
+                "project_id": note.project_id,
+                "permalink": note.permalink,
+                "title": note.title,
+                "note_type": note.note_type,
+                "missing_abstract": note.abstract_.is_none(),
+                "missing_overview": note.overview.is_none(),
+            }))
+            .unwrap(),
+            id: Some(note.id.clone()),
+            project_id: Some(note.project_id.clone()),
+            from_sync: false,
+        }
+    }
     pub fn git_settings_updated(project_id: &str, settings: &GitSettings) -> Self {
         Self {
             entity_type: "git_settings",
