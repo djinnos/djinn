@@ -635,6 +635,7 @@ dependencies = [
  "djinn-provider",
  "futures",
  "git2",
+ "insta",
  "landlock",
  "libc",
  "regex",

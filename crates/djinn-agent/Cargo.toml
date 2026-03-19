@@ -42,3 +42,4 @@ landlock = "0.4"
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
+insta = { version = "1", features = ["json"] }
