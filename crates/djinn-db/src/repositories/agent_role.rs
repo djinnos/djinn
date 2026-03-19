@@ -168,6 +168,47 @@ impl AgentRoleRepository {
         Ok(role)
     }
 
+    /// Set a role as the default for its base_role within a project.
+    /// Atomically clears any existing default for the same (project_id, base_role) pair
+    /// before marking this role as the new default, satisfying the unique partial index.
+    pub async fn set_default(&self, id: &str) -> Result<AgentRole> {
+        self.db.ensure_initialized().await?;
+
+        // Fetch the role so we know its project_id and base_role.
+        let role = self
+            .get(id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("agent_role not found: {id}")))?;
+
+        // Clear any existing default for this (project_id, base_role).
+        sqlx::query(
+            "UPDATE agent_roles SET is_default = 0
+             WHERE project_id = ?1 AND base_role = ?2 AND is_default = 1",
+        )
+        .bind(&role.project_id)
+        .bind(&role.base_role)
+        .execute(self.db.pool())
+        .await?;
+
+        // Set this role as default.
+        sqlx::query(
+            "UPDATE agent_roles SET is_default = 1,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .execute(self.db.pool())
+        .await?;
+
+        let updated = self
+            .get(id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("agent_role not found after set_default: {id}")))?;
+        self.events
+            .send(DjinnEventEnvelope::agent_role_updated(&updated));
+        Ok(updated)
+    }
+
     pub async fn delete(&self, id: &str, project_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query("DELETE FROM agent_roles WHERE id = ?1")
@@ -306,11 +347,12 @@ mod tests {
     }
 
     async fn create_project(db: &Database) -> String {
+        db.ensure_initialized().await.unwrap();
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
             .bind(&id)
             .bind("test")
-            .bind("/tmp/test")
+            .bind(format!("/tmp/test-{id}"))
             .execute(db.pool())
             .await
             .unwrap();
@@ -488,6 +530,106 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(all.total_count, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_default_switches_default() {
+        let db = test_db();
+        let project_id = create_project(&db).await;
+        let repo = AgentRoleRepository::new(db, EventBus::noop());
+
+        // Create two worker roles; first one is default.
+        let default_role = repo
+            .create_for_project(
+                &project_id,
+                AgentRoleCreateInput {
+                    name: "Worker A",
+                    base_role: "worker",
+                    description: "",
+                    system_prompt_extensions: "",
+                    model_preference: None,
+                    verification_command: None,
+                    mcp_servers: None,
+                    skills: None,
+                    is_default: true,
+                },
+            )
+            .await
+            .unwrap();
+
+        let specialist = repo
+            .create_for_project(
+                &project_id,
+                AgentRoleCreateInput {
+                    name: "Worker B",
+                    base_role: "worker",
+                    description: "",
+                    system_prompt_extensions: "",
+                    model_preference: None,
+                    verification_command: None,
+                    mcp_servers: None,
+                    skills: None,
+                    is_default: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Promote specialist to default.
+        let updated = repo.set_default(&specialist.id).await.unwrap();
+        assert!(updated.is_default);
+
+        // Old default should now be cleared.
+        let old = repo.get(&default_role.id).await.unwrap().unwrap();
+        assert!(!old.is_default);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplicate_default_rejected_by_db() {
+        let db = test_db();
+        let project_id = create_project(&db).await;
+        let repo = AgentRoleRepository::new(db, EventBus::noop());
+
+        // First default worker — OK.
+        repo.create_for_project(
+            &project_id,
+            AgentRoleCreateInput {
+                name: "Worker A",
+                base_role: "worker",
+                description: "",
+                system_prompt_extensions: "",
+                model_preference: None,
+                verification_command: None,
+                mcp_servers: None,
+                skills: None,
+                is_default: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Second default worker in the same project — must fail.
+        let result = repo
+            .create_for_project(
+                &project_id,
+                AgentRoleCreateInput {
+                    name: "Worker B",
+                    base_role: "worker",
+                    description: "",
+                    system_prompt_extensions: "",
+                    model_preference: None,
+                    verification_command: None,
+                    mcp_servers: None,
+                    skills: None,
+                    is_default: true,
+                },
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "inserting a second default for the same base_role should fail"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
