@@ -55,6 +55,26 @@ impl Note {
     }
 }
 
+/// Risk level of a structural contradiction candidate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypeRisk {
+    High,
+    Medium,
+}
+
+/// Candidate note that may structurally contradict a newly written note.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContradictionCandidate {
+    pub id: String,
+    pub permalink: String,
+    pub title: String,
+    pub folder: String,
+    pub note_type: String,
+    pub score: f64,
+    pub risk: TypeRisk,
+}
+
 /// A compact search result from FTS5 with BM25 score and content snippet.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NoteSearchResult {

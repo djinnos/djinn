@@ -65,6 +65,52 @@ impl NoteRepository {
         )
     }
 
+    /// Upsert a semantic association with a minimum target weight.
+    ///
+    /// Unlike `upsert_association` (which uses multiplicative growth from 0.01),
+    /// this method sets the weight to at least `min_weight`. Used for
+    /// LLM-classified semantic relationships (contradiction, supersedes, elaborates).
+    ///
+    /// The note IDs are canonicalized internally (min < max).
+    pub async fn upsert_association_min_weight(
+        &self,
+        note_a_id: &str,
+        note_b_id: &str,
+        min_weight: f64,
+    ) -> Result<NoteAssociation> {
+        self.db.ensure_initialized().await?;
+
+        let (a_id, b_id) = canonical_pair(note_a_id, note_b_id);
+        let min_weight = min_weight.clamp(0.0, 1.0);
+
+        sqlx::query(
+            "INSERT INTO note_associations
+             (note_a_id, note_b_id, weight, co_access_count, last_co_access)
+             VALUES (?1, ?2, ?3, 1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+             ON CONFLICT (note_a_id, note_b_id) DO UPDATE SET
+                 weight = MAX(note_associations.weight, excluded.weight),
+                 co_access_count = note_associations.co_access_count + 1,
+                 last_co_access = excluded.last_co_access",
+        )
+        .bind(a_id)
+        .bind(b_id)
+        .bind(min_weight)
+        .execute(self.db.pool())
+        .await?;
+
+        Ok::<NoteAssociation, crate::error::DbError>(
+            sqlx::query_as(
+                "SELECT note_a_id, note_b_id, weight, co_access_count, last_co_access
+                 FROM note_associations
+                 WHERE note_a_id = ?1 AND note_b_id = ?2",
+            )
+            .bind(a_id)
+            .bind(b_id)
+            .fetch_one(self.db.pool())
+            .await?,
+        )
+    }
+
     /// Get all associations for a given note.
     ///
     /// Returns associations where the note is either note_a_id or note_b_id,
