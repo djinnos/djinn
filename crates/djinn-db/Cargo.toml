@@ -3,6 +3,9 @@ name = "djinn-db"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+doctest = false
+
 [dependencies]
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }
 dirs = "6"
