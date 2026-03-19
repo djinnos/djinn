@@ -25,9 +25,6 @@ type TaskDetailPanelProps = {
 };
 
 const STATUS_LABELS: Record<string, string> = {
-  backlog: "Backlog",
-  grooming: "Backlog — Grooming",
-  ready: "Backlog — Ready",
   open: "Open",
   in_progress: "In Flight — Coding",
   verifying: "In Flight — Verification",

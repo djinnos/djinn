@@ -45,7 +45,6 @@ const makeTask = (overrides: Partial<Task> & Pick<Task, "id" | "title" | "status
 describe("KanbanBoard", () => {
   it("renders status columns with tasks in correct columns and header counts", () => {
     const tasks: Task[] = [
-      makeTask({ id: "t-backlog", title: "Backlog task", status: "backlog", epic_id: epicA.id }),
       makeTask({ id: "t-open", title: "Open task", status: "open", epic_id: epicA.id }),
       makeTask({ id: "t-flight", title: "Flight task", status: "in_progress", epic_id: epicA.id }),
       makeTask({ id: "t-done", title: "Done task", status: "closed", epic_id: epicA.id }),
@@ -62,17 +61,14 @@ describe("KanbanBoard", () => {
       />
     );
 
-    const backlogCol = screen.getByText("Backlog").closest(".flex.flex-col");
     const openCol = screen.getByText("Open").closest(".flex.flex-col");
     const inFlightCol = screen.getByText("In Flight").closest(".flex.flex-col");
     const doneCol = screen.getByText("Done").closest(".flex.flex-col");
 
-    expect(backlogCol).toHaveTextContent("1");
     expect(openCol).toHaveTextContent("1");
     expect(inFlightCol).toHaveTextContent("1");
     expect(doneCol).toHaveTextContent("1");
 
-    expect(within(backlogCol!.parentElement as HTMLElement).getByText("Backlog task")).toBeInTheDocument();
     expect(within(openCol!.parentElement as HTMLElement).getByText("Open task")).toBeInTheDocument();
     expect(within(inFlightCol!.parentElement as HTMLElement).getByText("Flight task")).toBeInTheDocument();
     expect(within(doneCol!.parentElement as HTMLElement).getByText("Done task")).toBeInTheDocument();
@@ -117,6 +113,6 @@ describe("KanbanBoard", () => {
   it("shows empty board state when no tasks", () => {
     render(<KanbanBoard tasks={[]} epics={new Map()} disableSearchParamSync />);
 
-    expect(screen.getAllByText("No tasks")).toHaveLength(4);
+    expect(screen.getAllByText("No tasks")).toHaveLength(3);
   });
 });

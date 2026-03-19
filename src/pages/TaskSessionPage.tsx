@@ -31,9 +31,6 @@ import {
 // ── Status labels ────────────────────────────────────────────────────────────
 
 const STATUS_LABELS: Record<string, string> = {
-  backlog: "Backlog",
-  grooming: "Grooming",
-  ready: "Ready",
   open: "Open",
   in_progress: "Coding",
   verifying: "Verifying",

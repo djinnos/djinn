@@ -136,15 +136,6 @@ function getCardTint(task: Task): { ring: string; bg: string; hover: string; act
   return null;
 }
 
-// --- Backlog badge ---
-
-function getBacklogBadge(status: string): { label: string; className: string } | null {
-  if (status === "ready") {
-    return { label: "ready", className: "text-violet-400 bg-violet-400/10" };
-  }
-  return null;
-}
-
 const AGENT_AVATARS: Record<string, string> = {
   worker: workerAvatar,
   task_reviewer: taskReviewerAvatar,
@@ -318,7 +309,6 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const acTotal = ac.length;
   const acMet = ac.filter((c: { met?: boolean }) => c.met).length;
   const cardTint = getCardTint(task);
-  const backlogBadge = getBacklogBadge(task.status);
   const runningStep = useStoreWithEqualityFn(verificationStore, (state) => getTaskRunningStep(task.id, state));
   const isSettingUp = task.status === "in_progress" && runningStep?.phase === "setup";
   const statusLabel =
@@ -396,13 +386,6 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
             <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/15 px-1 py-px text-[10px] font-medium text-amber-400">
               <HugeiconsIcon icon={ArrowReloadHorizontalIcon} size={10} className="shrink-0" />
               {task.reopen_count}
-            </span>
-          )}
-
-          {/* Backlog badge (grooming / ready) */}
-          {backlogBadge && (
-            <span className={cn("rounded px-1 py-px text-[10px] font-medium", backlogBadge.className)}>
-              {backlogBadge.label}
             </span>
           )}
 
