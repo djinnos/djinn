@@ -10,6 +10,13 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant, sleep};
 
+/// Timeout for LSP `initialize` — rust-analyzer can take 30-45s on first run
+/// while it builds its index.  Matches opencode's 45s timeout.
+const INIT_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Timeout for regular LSP requests (hover, definition, references, symbols).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub file: String,
@@ -808,6 +815,7 @@ async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, Stri
                 },
             },
         }),
+        INIT_TIMEOUT,
     )
     .await
     .map_err(|e| format!("LSP initialize failed for {}: {e}", server.id))?;
@@ -844,13 +852,18 @@ async fn write_lsp_message(stdin: &Arc<Mutex<ChildStdin>>, payload: &str) -> Res
         .map_err(|e| format!("lsp write failed: {e}"))
 }
 
-/// Send a JSON-RPC request and wait for the response (up to 10s).
+/// Send a JSON-RPC request and wait for the response.
+///
+/// `timeout` controls how long to wait — use `INIT_TIMEOUT` for initialize
+/// (rust-analyzer can take 30-45s on first run) and `REQUEST_TIMEOUT` for
+/// regular requests.
 async fn send_request(
     stdin: &ClientStdin,
     pending: &PendingResponses,
     seq: &AtomicU64,
     method: &str,
     params: serde_json::Value,
+    timeout: Duration,
 ) -> Result<serde_json::Value, String> {
     let id = seq.fetch_add(1, Ordering::SeqCst);
     let msg = json!({
@@ -865,7 +878,7 @@ async fn send_request(
 
     write_lsp_message(stdin, &msg.to_string()).await?;
 
-    match tokio::time::timeout(Duration::from_secs(10), rx).await {
+    match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(v)) => {
             if let Some(err) = v.get("error") {
                 Err(format!("LSP error: {err}"))
@@ -876,7 +889,7 @@ async fn send_request(
         Ok(Err(_)) => Err("LSP response channel closed".to_string()),
         Err(_) => {
             pending.lock().await.remove(&id);
-            Err("LSP request timed out (10s)".to_string())
+            Err(format!("LSP request timed out ({}s)", timeout.as_secs()))
         }
     }
 }
@@ -1065,6 +1078,7 @@ impl LspManager {
                 "textDocument": { "uri": uri },
                 "position": { "line": line, "character": character },
             }),
+            REQUEST_TIMEOUT,
         )
         .await?;
 
@@ -1119,6 +1133,7 @@ impl LspManager {
                 "textDocument": { "uri": uri },
                 "position": { "line": line, "character": character },
             }),
+            REQUEST_TIMEOUT,
         )
         .await?;
 
@@ -1161,6 +1176,7 @@ impl LspManager {
                 "position": { "line": line, "character": character },
                 "context": { "includeDeclaration": true },
             }),
+            REQUEST_TIMEOUT,
         )
         .await?;
 
@@ -1196,6 +1212,7 @@ impl LspManager {
             json!({
                 "textDocument": { "uri": uri },
             }),
+            REQUEST_TIMEOUT,
         )
         .await?;
 
