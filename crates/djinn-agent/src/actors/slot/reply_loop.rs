@@ -189,7 +189,7 @@ pub(super) async fn run_reply_loop(
     // The agent can navigate stashed outputs via `output_view` and `output_grep`.
     let output_stash = Arc::new(Mutex::new(OutputStash::new()));
 
-    let mut output = ParsedAgentOutput::new(role_name == "task_reviewer");
+    let mut output = ParsedAgentOutput::new(role_name == "reviewer" || role_name == "task_reviewer");
 
     // Token counts and last assistant text are declared outside the async block
     // so they survive the borrow and can be used for telemetry/return values.

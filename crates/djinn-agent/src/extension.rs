@@ -721,8 +721,8 @@ async fn call_request_pm(
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
 
-    // Log the PM request as a structured comment.
-    let mut body = format!("[PM_REQUEST] {}", p.reason);
+    // Log the Lead request as a structured comment.
+    let mut body = format!("[LEAD_REQUEST] {}", p.reason);
     if let Some(ref breakdown) = p.suggested_breakdown {
         body.push_str(&format!("\n\nSuggested breakdown:\n{breakdown}"));
     }
@@ -737,7 +737,7 @@ async fn call_request_pm(
     .await
     .map_err(|e| e.to_string())?;
 
-    // Escalate to PM intervention queue.
+    // Escalate to Lead intervention queue.
     let updated = repo
         .transition(
             &task.id,
@@ -754,7 +754,7 @@ async fn call_request_pm(
         "status": "escalated",
         "task_id": updated.id,
         "new_status": updated.status,
-        "message": "Task escalated to PM. Your session should end now."
+        "message": "Task escalated to Lead. Your session should end now."
     }))
 }
 
@@ -1773,7 +1773,7 @@ fn task_to_value(t: &Task) -> serde_json::Value {
     })
 }
 
-// ── PM-only tool params and handlers ─────────────────────────────────────────
+// ── Lead-only tool params and handlers ────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct TaskTransitionParams {
@@ -1782,7 +1782,7 @@ struct TaskTransitionParams {
     reason: Option<String>,
     target_status: Option<String>,
     /// Required when action = "force_close". UUIDs or short IDs of replacement
-    /// tasks the PM created before closing this one.
+    /// tasks the Lead created before closing this one.
     replacement_task_ids: Option<Vec<String>>,
 }
 
@@ -1845,8 +1845,8 @@ async fn call_task_transition(
             .transition(
                 &task.id,
                 merge_action,
-                "pm-agent",
-                "pm",
+                "lead-agent",
+                "lead",
                 reason.as_deref(),
                 None,
             )
@@ -1856,7 +1856,7 @@ async fn call_task_transition(
     }
 
     // Guard: force_close requires either replacement_task_ids (for decomposition)
-    // or a reason (for redundant/already-landed tasks). This prevents the PM from
+    // or a reason (for redundant/already-landed tasks). This prevents the Lead from
     // silently closing tasks without explanation while still allowing closure of
     // tasks whose work already landed on main.
     if action == TransitionAction::ForceClose {
@@ -1923,8 +1923,8 @@ async fn call_task_transition(
         .transition(
             &task.id,
             action,
-            "pm-agent",
-            "pm",
+            "lead-agent",
+            "lead",
             p.reason.as_deref(),
             target,
         )
@@ -2082,7 +2082,7 @@ fn tool_epic_show() -> RmcpTool {
 fn tool_epic_update() -> RmcpTool {
     RmcpTool::new(
         "epic_update".to_string(),
-        "Update epic fields (title/description) and accept memory ref delta args for groomer workflows.".to_string(),
+        "Update epic fields (title/description) and accept memory ref delta args for planner workflows.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
@@ -2179,14 +2179,14 @@ fn tool_task_blocked_list() -> RmcpTool {
 fn tool_task_activity_list() -> RmcpTool {
     RmcpTool::new(
         "task_activity_list".to_string(),
-        "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect PM guidance, reviewer feedback, or verification history.".to_string(),
+        "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
             "properties": {
                 "id": {"type": "string", "description": "Task UUID or short ID"},
                 "event_type": {"type": "string", "description": "Filter by event type: comment, status_changed, commands_run, merge_conflict, task_review_start"},
-                "actor_role": {"type": "string", "description": "Filter by actor: pm, task_reviewer, worker, verification, system"},
+                "actor_role": {"type": "string", "description": "Filter by actor: lead, reviewer, worker, verification, system"},
                 "limit": {"type": "integer", "description": "Max entries to return (default 30, max 50)"}
             }
         }),
@@ -2210,15 +2210,15 @@ fn tool_task_show() -> RmcpTool {
 fn tool_request_pm() -> RmcpTool {
     RmcpTool::new(
         "request_pm".to_string(),
-        "Request PM intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the PM queue. Your session will effectively end after this call."
+        "Request Lead intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the Lead queue. Your session will effectively end after this call."
             .to_string(),
         object!({
             "type": "object",
             "required": ["id", "reason"],
             "properties": {
                 "id": {"type": "string", "description": "Task UUID or short_id"},
-                "reason": {"type": "string", "description": "Why PM intervention is needed (e.g. task too large, design ambiguous, blocked on decision)"},
-                "suggested_breakdown": {"type": "string", "description": "Optional suggested split: list of smaller tasks the PM should create"}
+                "reason": {"type": "string", "description": "Why Lead intervention is needed (e.g. task too large, design ambiguous, blocked on decision)"},
+                "suggested_breakdown": {"type": "string", "description": "Optional suggested split: list of smaller tasks the Lead should create"}
             }
         }),
     )
@@ -2389,7 +2389,7 @@ fn tool_task_update() -> RmcpTool {
 fn tool_task_transition() -> RmcpTool {
     RmcpTool::new(
         "task_transition".to_string(),
-        "Execute a state machine transition on a task. PM can use: pm_intervention_complete (rescope and reopen for worker), pm_approve (approve implementation and merge), force_close (requires replacement_task_ids for decomposition OR reason for redundant/already-landed tasks), escalate.".to_string(),
+        "Execute a state machine transition on a task. Lead can use: pm_intervention_complete (rescope and reopen for worker), pm_approve (approve implementation and merge), force_close (requires replacement_task_ids for decomposition OR reason for redundant/already-landed tasks), escalate.".to_string(),
         object!({
             "type": "object",
             "required": ["id", "action"],
@@ -2520,7 +2520,7 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     tool_values
 }
 
-/// Tool schemas for Worker and ConflictResolver: base + file-editing tools.
+/// Tool schemas for Worker and Resolver: base + file-editing tools.
 pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
@@ -2534,7 +2534,7 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     tool_values
 }
 
-/// Tool schemas for TaskReviewer: base + submit_review finalize tool.
+/// Tool schemas for Reviewer: base + submit_review finalize tool.
 /// task_update_ac is excluded — submit_review sets AC atomically.
 pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
@@ -2545,7 +2545,13 @@ pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     tool_values
 }
 
-/// Tool schemas for PM: base + task/epic management tools + submit_decision finalize tool.
+/// Tool schemas for Lead: base + task/epic management tools + submit_decision finalize tool.
+/// task_comment_add and task_transition are excluded — submit_decision drives transitions.
+pub(crate) fn tool_schemas_lead() -> Vec<serde_json::Value> {
+    tool_schemas_pm()
+}
+
+/// Tool schemas for PM (Lead): base + task/epic management tools + submit_decision finalize tool.
 /// task_comment_add and task_transition are excluded — submit_decision drives transitions.
 pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
@@ -2570,7 +2576,13 @@ pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
     tool_values
 }
 
-/// Tool schemas for Groomer: base + task/epic management tools + submit_grooming finalize tool.
+/// Tool schemas for Planner: base + task/epic management tools + submit_grooming finalize tool.
+/// task_comment_add is excluded — submit_grooming captures session output.
+pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
+    tool_schemas_groomer()
+}
+
+/// Tool schemas for Groomer (Planner): base + task/epic management tools + submit_grooming finalize tool.
 /// task_comment_add is excluded — submit_grooming captures session output.
 pub(crate) fn tool_schemas_groomer() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
@@ -2744,9 +2756,9 @@ mod tests {
             AgentType::Worker,
             "submit_decision"
         ));
-        assert!(is_tool_allowed_for_agent(AgentType::PM, "submit_decision"));
+        assert!(is_tool_allowed_for_agent(AgentType::Lead, "submit_decision"));
         // task_transition is not in the PM tool set (removed by ADR-036).
-        assert!(!is_tool_allowed_for_agent(AgentType::PM, "task_transition"));
+        assert!(!is_tool_allowed_for_agent(AgentType::Lead, "task_transition"));
     }
 
     #[test]
@@ -2783,17 +2795,17 @@ mod tests {
         assert!(!reviewer.iter().any(|n| n == "task_update_ac"));
         assert!(!reviewer.iter().any(|n| n == "task_comment_add"));
 
-        let pm = schema_names(tool_schemas_pm());
-        assert!(pm.iter().any(|n| n == "task_create"));
-        assert!(pm.iter().any(|n| n == "submit_decision"));
-        assert!(!pm.iter().any(|n| n == "task_transition"));
-        assert!(!pm.iter().any(|n| n == "task_comment_add"));
+        let lead = schema_names(tool_schemas_lead());
+        assert!(lead.iter().any(|n| n == "task_create"));
+        assert!(lead.iter().any(|n| n == "submit_decision"));
+        assert!(!lead.iter().any(|n| n == "task_transition"));
+        assert!(!lead.iter().any(|n| n == "task_comment_add"));
 
-        let groomer = schema_names(tool_schemas_groomer());
-        assert!(groomer.iter().any(|n| n == "task_create"));
-        assert!(groomer.iter().any(|n| n == "task_transition"));
-        assert!(groomer.iter().any(|n| n == "submit_grooming"));
-        assert!(!groomer.iter().any(|n| n == "task_comment_add"));
+        let planner = schema_names(tool_schemas_planner());
+        assert!(planner.iter().any(|n| n == "task_create"));
+        assert!(planner.iter().any(|n| n == "task_transition"));
+        assert!(planner.iter().any(|n| n == "submit_grooming"));
+        assert!(!planner.iter().any(|n| n == "task_comment_add"));
     }
 
     #[test]
@@ -2891,27 +2903,27 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_pm_tool_names() {
-        let schemas = tool_schemas_pm();
+    fn snapshot_lead_tool_names() {
+        let schemas = tool_schemas_lead();
         let names = tool_names(&schemas);
-        insta::assert_json_snapshot!("pm_tool_names", names);
+        insta::assert_json_snapshot!("lead_tool_names", names);
     }
 
     #[test]
-    fn snapshot_pm_tool_schemas() {
-        insta::assert_json_snapshot!("pm_tool_schemas", tool_schemas_pm());
+    fn snapshot_lead_tool_schemas() {
+        insta::assert_json_snapshot!("lead_tool_schemas", tool_schemas_lead());
     }
 
     #[test]
-    fn snapshot_groomer_tool_names() {
-        let schemas = tool_schemas_groomer();
+    fn snapshot_planner_tool_names() {
+        let schemas = tool_schemas_planner();
         let names = tool_names(&schemas);
-        insta::assert_json_snapshot!("groomer_tool_names", names);
+        insta::assert_json_snapshot!("planner_tool_names", names);
     }
 
     #[test]
-    fn snapshot_groomer_tool_schemas() {
-        insta::assert_json_snapshot!("groomer_tool_schemas", tool_schemas_groomer());
+    fn snapshot_planner_tool_schemas() {
+        insta::assert_json_snapshot!("planner_tool_schemas", tool_schemas_planner());
     }
 }
 

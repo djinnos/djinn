@@ -39,9 +39,9 @@ pub mod actors;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentType {
     Worker,
-    TaskReviewer,
-    PM,
-    Groomer,
+    Reviewer,
+    Lead,
+    Planner,
 }
 
 impl AgentType {
@@ -55,8 +55,8 @@ impl AgentType {
 
     pub fn for_task_status(status: &str, _has_conflict_context: bool) -> Self {
         match status {
-            "needs_task_review" | "in_task_review" => Self::TaskReviewer,
-            "needs_pm_intervention" | "in_pm_intervention" => Self::PM,
+            "needs_task_review" | "in_task_review" => Self::Reviewer,
+            "needs_pm_intervention" | "in_pm_intervention" => Self::Lead,
             _ => Self::Worker,
         }
     }
@@ -77,9 +77,9 @@ impl std::str::FromStr for AgentType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "worker" => Ok(Self::Worker),
-            "task_reviewer" => Ok(Self::TaskReviewer),
-            "pm" => Ok(Self::PM),
-            "groomer" => Ok(Self::Groomer),
+            "reviewer" => Ok(Self::Reviewer),
+            "lead" => Ok(Self::Lead),
+            "planner" => Ok(Self::Planner),
             _ => Err(format!("unknown agent type: {s}")),
         }
     }
@@ -132,9 +132,9 @@ mod tests {
     fn role_config_equivalence_for_all_agent_types() {
         for agent_type in [
             AgentType::Worker,
-            AgentType::TaskReviewer,
-            AgentType::PM,
-            AgentType::Groomer,
+            AgentType::Reviewer,
+            AgentType::Lead,
+            AgentType::Planner,
         ] {
             assert_equivalent_to_role_config(agent_type);
         }
@@ -147,28 +147,28 @@ mod tests {
         assert_eq!(AgentType::for_task_status("open", true), AgentType::Worker);
         assert_eq!(
             AgentType::for_task_status("needs_task_review", false),
-            AgentType::TaskReviewer
+            AgentType::Reviewer
         );
         assert_eq!(
             AgentType::for_task_status("in_task_review", false),
-            AgentType::TaskReviewer
+            AgentType::Reviewer
         );
         assert_eq!(
             AgentType::for_task_status("needs_pm_intervention", false),
-            AgentType::PM
+            AgentType::Lead
         );
         assert_eq!(
             AgentType::for_task_status("in_pm_intervention", false),
-            AgentType::PM
+            AgentType::Lead
         );
     }
 
     #[test]
     fn dispatch_role_for_all_variants() {
         assert_eq!(AgentType::Worker.dispatch_role(), "worker");
-        assert_eq!(AgentType::TaskReviewer.dispatch_role(), "task_reviewer");
-        assert_eq!(AgentType::PM.dispatch_role(), "pm");
-        assert_eq!(AgentType::Groomer.dispatch_role(), "groomer");
+        assert_eq!(AgentType::Reviewer.dispatch_role(), "reviewer");
+        assert_eq!(AgentType::Lead.dispatch_role(), "lead");
+        assert_eq!(AgentType::Planner.dispatch_role(), "planner");
     }
 
     #[test]
@@ -177,19 +177,19 @@ mod tests {
         assert_eq!((cfg.start_action)("open"), Some(TransitionAction::Start));
         assert_eq!((cfg.start_action)("in_progress"), None);
 
-        let cfg = AgentType::TaskReviewer.role_config();
+        let cfg = AgentType::Reviewer.role_config();
         assert_eq!(
             (cfg.start_action)("needs_task_review"),
             Some(TransitionAction::TaskReviewStart)
         );
 
-        let cfg = AgentType::PM.role_config();
+        let cfg = AgentType::Lead.role_config();
         assert_eq!(
             (cfg.start_action)("needs_pm_intervention"),
             Some(TransitionAction::PmInterventionStart)
         );
 
-        let cfg = AgentType::Groomer.role_config();
+        let cfg = AgentType::Planner.role_config();
         assert_eq!((cfg.start_action)("open"), None);
     }
 
@@ -200,15 +200,15 @@ mod tests {
             TransitionAction::Release
         );
         assert_eq!(
-            (AgentType::TaskReviewer.role_config().release_action)(),
+            (AgentType::Reviewer.role_config().release_action)(),
             TransitionAction::ReleaseTaskReview
         );
         assert_eq!(
-            (AgentType::PM.role_config().release_action)(),
+            (AgentType::Lead.role_config().release_action)(),
             TransitionAction::PmInterventionRelease
         );
         assert_eq!(
-            (AgentType::Groomer.role_config().release_action)(),
+            (AgentType::Planner.role_config().release_action)(),
             TransitionAction::Release
         );
     }

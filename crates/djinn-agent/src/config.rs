@@ -22,7 +22,7 @@ impl DispatchConfig {
 
     pub fn task_reviewer(provider_name: impl Into<String>, model_name: impl Into<String>) -> Self {
         Self {
-            agent_type: AgentType::TaskReviewer,
+            agent_type: AgentType::Reviewer,
             provider_name: provider_name.into(),
             model_name: model_name.into(),
         }

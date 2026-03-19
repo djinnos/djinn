@@ -998,7 +998,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             .log_activity(
                 Some(&task_id),
                 "agent-supervisor",
-                "task_reviewer",
+                "reviewer",
                 "comment",
                 &payload,
             )
@@ -1385,7 +1385,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     let verification_commands = {
         let (_, verification_specs) = load_commands(std::path::Path::new(&project_path))
             .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "failed to load project commands for groomer prompt");
+                tracing::warn!(error = %e, "failed to load project commands for planner prompt");
                 (Vec::new(), Vec::new())
             });
         helpers::format_command_details(&verification_specs)
@@ -1466,7 +1466,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     let mut conversation = Conversation::new();
     conversation.push(Message::system(system_prompt));
     conversation.push(Message::user(
-        "Begin grooming the backlog for this project.",
+        "Begin planning the backlog for this project.",
     ));
 
     let project_dir = PathBuf::from(&project_path);
@@ -1480,7 +1480,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
             task_short_id: &task_id, // short_id — use task_id for project-scoped
             session_id: &current_session_id,
             project_path: &project_path,
-            worktree_path: &project_dir, // worktree = project dir (no worktree for groomer)
+            worktree_path: &project_dir, // worktree = project dir (no worktree for planner)
             role_name: role.config().name,
             finalize_tool_names: role.config().finalize_tool_names,
             context_window,

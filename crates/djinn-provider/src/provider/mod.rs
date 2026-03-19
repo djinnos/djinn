@@ -84,7 +84,7 @@ pub struct ProviderConfig {
 pub struct TelemetryMeta {
     /// Task ID for correlation.
     pub task_id: Option<String>,
-    /// Agent type (e.g. "worker", "task_reviewer").
+    /// Agent type (e.g. "worker", "reviewer").
     pub agent_type: Option<String>,
     /// Session ID for grouping.
     pub session_id: Option<String>,

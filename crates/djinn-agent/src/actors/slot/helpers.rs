@@ -28,7 +28,9 @@ pub(crate) fn recent_feedback(
         .rev()
         .filter(|e| {
             e.event_type == "comment"
-                && (e.actor_role == "pm"
+                && (e.actor_role == "lead"
+                    || e.actor_role == "pm"
+                    || e.actor_role == "reviewer"
                     || e.actor_role == "task_reviewer"
                     || e.actor_role == "verification")
         })
@@ -43,8 +45,8 @@ pub(crate) fn recent_feedback(
             let payload = serde_json::from_str::<serde_json::Value>(&e.payload).ok()?;
             let body = payload.get("body").and_then(|v| v.as_str())?;
             let label = match e.actor_role.as_str() {
-                "pm" => "PM guidance",
-                "task_reviewer" => "Reviewer feedback",
+                "lead" | "pm" => "Lead guidance",
+                "reviewer" | "task_reviewer" => "Reviewer feedback",
                 "verification" => "Verification failure",
                 _ => "Feedback",
             };

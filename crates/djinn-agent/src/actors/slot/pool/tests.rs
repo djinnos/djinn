@@ -266,17 +266,17 @@ async fn role_isolation_skips_models_that_do_not_serve_role() {
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![
-            model("opus", 1, &["task_reviewer"]),
+            model("opus", 1, &["reviewer"]),
             model("sonnet", 1, &["worker"]),
         ],
         &[
             ("worker", vec!["opus", "sonnet"]),
-            ("task_reviewer", vec!["opus"]),
+            ("reviewer", vec!["opus"]),
         ],
     );
     let role_priorities = config.role_priorities.clone();
     let model_roles: HashMap<String, HashSet<String>> = HashMap::from([
-        ("opus".to_string(), role_set(&["task_reviewer"])),
+        ("opus".to_string(), role_set(&["reviewer"])),
         ("sonnet".to_string(), role_set(&["worker"])),
     ]);
 

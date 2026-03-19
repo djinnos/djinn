@@ -33,12 +33,12 @@ pub struct SettingsSetParams {
     pub dispatch_limit: Option<u32>,
     /// Ordered model list for the 'worker' role (e.g. ["chatgpt_codex/gpt-5.3-codex"]). Omit to keep current value.
     pub model_priority_worker: Option<Vec<String>>,
-    /// Ordered model list for the 'task_reviewer' role. Omit to keep current value.
-    pub model_priority_task_reviewer: Option<Vec<String>>,
-    /// Ordered model list for the 'pm' role. Omit to keep current value.
-    pub model_priority_pm: Option<Vec<String>>,
-    /// Ordered model list for the 'groomer' role. Omit to keep current value.
-    pub model_priority_groomer: Option<Vec<String>>,
+    /// Ordered model list for the 'reviewer' role. Omit to keep current value.
+    pub model_priority_reviewer: Option<Vec<String>>,
+    /// Ordered model list for the 'lead' role. Omit to keep current value.
+    pub model_priority_lead: Option<Vec<String>>,
+    /// Ordered model list for the 'planner' role. Omit to keep current value.
+    pub model_priority_planner: Option<Vec<String>>,
     /// Per-model concurrent session caps (e.g. {"chatgpt_codex/gpt-5.3-codex": 4}). Omit to keep current value.
     #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
@@ -142,23 +142,23 @@ impl DjinnMcpServer {
                 .get_or_insert_with(HashMap::new)
                 .insert("worker".to_string(), v);
         }
-        if let Some(v) = p.model_priority_task_reviewer {
+        if let Some(v) = p.model_priority_reviewer {
             settings
                 .model_priority
                 .get_or_insert_with(HashMap::new)
-                .insert("task_reviewer".to_string(), v);
+                .insert("reviewer".to_string(), v);
         }
-        if let Some(v) = p.model_priority_pm {
+        if let Some(v) = p.model_priority_lead {
             settings
                 .model_priority
                 .get_or_insert_with(HashMap::new)
-                .insert("pm".to_string(), v);
+                .insert("lead".to_string(), v);
         }
-        if let Some(v) = p.model_priority_groomer {
+        if let Some(v) = p.model_priority_planner {
             settings
                 .model_priority
                 .get_or_insert_with(HashMap::new)
-                .insert("groomer".to_string(), v);
+                .insert("planner".to_string(), v);
         }
         if let Some(v) = p.langfuse_public_key {
             settings.langfuse_public_key = if v.is_empty() { None } else { Some(v) };
