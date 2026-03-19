@@ -214,6 +214,10 @@ struct DeltaToolCall {
 #[derive(Deserialize, Default)]
 struct Delta {
     content: Option<String>,
+    /// Chain-of-thought tokens (Kimi K2.5, DeepSeek-R1, etc.)
+    reasoning_content: Option<String>,
+    /// Chain-of-thought tokens (GLM-4.7, Minimax, etc.)
+    reasoning_details: Option<String>,
     tool_calls: Option<Vec<DeltaToolCall>>,
 }
 
@@ -266,6 +270,15 @@ pub fn parse_openai_line(
             Some(d) => d,
             None => continue,
         };
+
+        // Reasoning/thinking content (e.g. Kimi K2.5, DeepSeek-R1, GLM-4.7)
+        let thinking = delta
+            .reasoning_content
+            .or(delta.reasoning_details)
+            .filter(|s| !s.is_empty());
+        if let Some(text) = thinking {
+            events.push(StreamEvent::Thinking(text));
+        }
 
         // Text content
         if let Some(text) = delta.content
@@ -627,6 +640,49 @@ mod tests {
             _ => panic!("expected usage"),
         }
     }
+    #[test]
+    fn test_parse_reasoning_content() {
+        let line = r#"{"choices":[{"delta":{"reasoning_content":"let me think..."},"finish_reason":null,"index":0}]}"#;
+        let mut acc = None;
+        let events = parse_openai_line(line, &mut acc);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            StreamEvent::Thinking(text) => assert_eq!(text, "let me think..."),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_reasoning_details() {
+        let line = r#"{"choices":[{"delta":{"reasoning_details":"step 1: analyze"},"finish_reason":null,"index":0}]}"#;
+        let mut acc = None;
+        let events = parse_openai_line(line, &mut acc);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            StreamEvent::Thinking(text) => assert_eq!(text, "step 1: analyze"),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_reasoning_content_with_text() {
+        // Some models send both reasoning and content in same chunk
+        let line = r#"{"choices":[{"delta":{"reasoning_content":"thinking","content":"hello"},"finish_reason":null,"index":0}]}"#;
+        let mut acc = None;
+        let events = parse_openai_line(line, &mut acc);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], StreamEvent::Thinking(t) if t == "thinking"));
+        assert!(matches!(&events[1], StreamEvent::Delta(ContentBlock::Text { text }) if text == "hello"));
+    }
+
+    #[test]
+    fn test_parse_empty_reasoning_content_skipped() {
+        let line = r#"{"choices":[{"delta":{"reasoning_content":""},"finish_reason":null,"index":0}]}"#;
+        let mut acc = None;
+        let events = parse_openai_line(line, &mut acc);
+        assert!(events.is_empty());
+    }
+
     #[test]
     fn test_parse_done_sentinel_ignored() {
         let mut acc = None;

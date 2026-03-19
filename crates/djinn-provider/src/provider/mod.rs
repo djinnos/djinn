@@ -23,6 +23,9 @@ pub struct TokenUsage {
 pub enum StreamEvent {
     /// A content delta (text token or complete tool use block).
     Delta(ContentBlock),
+    /// Reasoning/thinking token from models that stream their chain-of-thought
+    /// (e.g. Kimi K2.5 `reasoning_content`, GLM `reasoning_details`).
+    Thinking(String),
     /// Token usage report from the provider.
     Usage(TokenUsage),
     /// End-of-stream sentinel.
