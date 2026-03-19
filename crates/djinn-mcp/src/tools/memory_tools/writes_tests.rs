@@ -183,18 +183,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn is_mergeable_returns_correct_values() {
-        // Test the is_mergeable helper function
-        let mergeable_types = ["pattern", "case", "pitfall"];
-        let non_mergeable_types = [
-            "adr", "research", "design", "reference",
+    async fn mergeable_note_type_returns_correct_values() {
+        // Test the mergeable_note_type helper function
+        let mergeable_types = ["pattern", "case", "pitfall", "adr", "research", "design", "reference",
             "requirement", "session", "persona", "journey",
-            "design_spec", "competitive", "tech_spike", "brief", "roadmap",
+            "design_spec", "competitive", "tech_spike"];
+        let non_mergeable_types = [
+            "brief", "roadmap",
         ];
 
         for note_type in mergeable_types {
             assert!(
-                super::super::writes::is_mergeable(note_type),
+                super::super::writes::mergeable_note_type(note_type),
                 "{} should be mergeable",
                 note_type
             );
@@ -202,7 +202,7 @@ mod tests {
 
         for note_type in non_mergeable_types {
             assert!(
-                !super::super::writes::is_mergeable(note_type),
+                !super::super::writes::mergeable_note_type(note_type),
                 "{} should not be mergeable",
                 note_type
             );
