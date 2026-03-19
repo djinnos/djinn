@@ -1159,10 +1159,7 @@ mod tests {
 
         // Register the task in the verification tracker (same as
         // spawn_post_session_work does for real sessions).
-        tracker
-            .lock()
-            .unwrap()
-            .insert(task.id.clone());
+        tracker.lock().unwrap().insert(task.id.clone());
 
         // Trigger stuck scan — task should NOT be recovered because it has
         // registered background work.

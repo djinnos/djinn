@@ -25,6 +25,15 @@ pub struct ReadParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct MemoryConfirmParams {
+    pub project: String,
+    /// Note permalink or note ID.
+    pub identifier: String,
+    /// Optional reason for confirmation.
+    pub comment: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct EditParams {
     pub project: String,
     /// Note permalink or title.
@@ -205,6 +214,27 @@ pub struct MemoryNoteResponse {
     pub updated_at: Option<String>,
     pub last_accessed: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryConfirmResponse {
+    pub note_id: Option<String>,
+    pub permalink: Option<String>,
+    pub previous_confidence: Option<f64>,
+    pub new_confidence: Option<f64>,
+    pub error: Option<String>,
+}
+
+impl MemoryConfirmResponse {
+    pub(super) fn error(error: String) -> Self {
+        Self {
+            note_id: None,
+            permalink: None,
+            previous_confidence: None,
+            new_confidence: None,
+            error: Some(error),
+        }
+    }
 }
 
 #[derive(Serialize, schemars::JsonSchema)]

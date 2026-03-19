@@ -88,10 +88,9 @@ impl CoAccessBatch {
                 .get(*note_id)
                 .is_some_and(|confidence| *confidence <= HIGH_CONFIDENCE_THRESHOLD)
         }) {
-            let has_high_confidence_partner = self
-                .note_ids
-                .iter()
-                .any(|candidate| candidate != note_id && high_confidence_notes.contains(candidate.as_str()));
+            let has_high_confidence_partner = self.note_ids.iter().any(|candidate| {
+                candidate != note_id && high_confidence_notes.contains(candidate.as_str())
+            });
 
             if !has_high_confidence_partner {
                 continue;

@@ -24,7 +24,9 @@ mod search;
 
 pub use association::NoteAssociationEntry;
 pub use context::BuildContextResponse;
-pub use scoring::{CO_ACCESS_HIGH, bayesian_update};
+pub use scoring::{
+    CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, USER_CONFIRM, bayesian_update,
+};
 
 pub use indexing::UpdateNoteIndexParams;
 
@@ -511,7 +513,14 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
 
         let note = repo
-            .create(&project.id, tmp.path(), "Confidence Note", "body", "research", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Confidence Note",
+                "body",
+                "research",
+                "[]",
+            )
             .await
             .unwrap();
 
@@ -521,7 +530,10 @@ mod tests {
             .await
             .unwrap();
 
-        let updated = repo.update_confidence(&note.id, scoring::TASK_SUCCESS).await.unwrap();
+        let updated = repo
+            .update_confidence(&note.id, scoring::TASK_SUCCESS)
+            .await
+            .unwrap();
         assert!(updated > 0.5);
 
         let stored: f64 = sqlx::query_scalar("SELECT confidence FROM notes WHERE id = ?1")

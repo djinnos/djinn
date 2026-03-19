@@ -46,7 +46,10 @@ mod tests {
     #[test]
     fn bayesian_update_low_signal_reduces_from_near_one() {
         let updated = bayesian_update(0.95, 0.1);
-        assert!(updated < 0.7, "expected a significant decrease, got {updated}");
+        assert!(
+            updated < 0.7,
+            "expected a significant decrease, got {updated}"
+        );
         assert!(updated >= CONFIDENCE_FLOOR);
     }
 

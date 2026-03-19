@@ -89,10 +89,7 @@ fn extract_stash_content(tool_name: &str, value: &serde_json::Value) -> Option<S
     let obj = value.as_object()?;
     let stdout = obj.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
     let stderr = obj.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
-    let exit_code = obj
-        .get("exit_code")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(-1);
+    let exit_code = obj.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
 
     let mut out = String::with_capacity(stdout.len() + stderr.len() + 64);
     if !stdout.is_empty() {
@@ -1649,18 +1646,16 @@ mod tests {
     async fn finalize_tool_call_ends_session_and_captures_payload() {
         let tools = vec![dummy_tool_schema("submit_work")];
 
-        let provider = MockProvider::new(vec![
-            MockResponse {
-                text: None,
-                tool_calls: vec![ContentBlock::ToolUse {
-                    id: "fin1".to_string(),
-                    name: "submit_work".to_string(),
-                    input: serde_json::json!({"task_id": "t1", "summary": "done"}),
-                }],
-                input_tokens: 100,
-                output_tokens: 10,
-            },
-        ]);
+        let provider = MockProvider::new(vec![MockResponse {
+            text: None,
+            tool_calls: vec![ContentBlock::ToolUse {
+                id: "fin1".to_string(),
+                name: "submit_work".to_string(),
+                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+            }],
+            input_tokens: 100,
+            output_tokens: 10,
+        }]);
 
         let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
         let worktree_path = std::path::PathBuf::from("/tmp");

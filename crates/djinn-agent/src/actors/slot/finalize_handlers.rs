@@ -167,8 +167,7 @@ async fn handle_submit_review(
 /// Uses index-based matching. If an incoming verdict is missing `criterion` text,
 /// the existing criterion text at that index is preserved.
 fn apply_ac_verdicts(existing_json: &str, verdicts: &[AcVerdict]) -> String {
-    let existing: Vec<serde_json::Value> =
-        serde_json::from_str(existing_json).unwrap_or_default();
+    let existing: Vec<serde_json::Value> = serde_json::from_str(existing_json).unwrap_or_default();
 
     let merged: Vec<serde_json::Value> = verdicts
         .iter()
@@ -290,10 +289,17 @@ mod tests {
 
     #[test]
     fn apply_ac_verdicts_sets_met_flags_from_payload() {
-        let existing = r#"[{"criterion":"write tests","met":false},{"criterion":"passing ci","met":false}]"#;
+        let existing =
+            r#"[{"criterion":"write tests","met":false},{"criterion":"passing ci","met":false}]"#;
         let verdicts = vec![
-            AcVerdict { criterion: "write tests".to_string(), met: true },
-            AcVerdict { criterion: "passing ci".to_string(), met: true },
+            AcVerdict {
+                criterion: "write tests".to_string(),
+                met: true,
+            },
+            AcVerdict {
+                criterion: "passing ci".to_string(),
+                met: true,
+            },
         ];
         let result = apply_ac_verdicts(existing, &verdicts);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
@@ -304,7 +310,10 @@ mod tests {
     #[test]
     fn apply_ac_verdicts_preserves_existing_criterion_text_when_empty() {
         let existing = r#"[{"criterion":"write tests","met":false}]"#;
-        let verdicts = vec![AcVerdict { criterion: String::new(), met: true }];
+        let verdicts = vec![AcVerdict {
+            criterion: String::new(),
+            met: true,
+        }];
         let result = apply_ac_verdicts(existing, &verdicts);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed[0]["criterion"], "write tests");
@@ -314,7 +323,10 @@ mod tests {
     #[test]
     fn apply_ac_verdicts_handles_empty_existing_gracefully() {
         let existing = "not-valid-json";
-        let verdicts = vec![AcVerdict { criterion: "x".to_string(), met: false }];
+        let verdicts = vec![AcVerdict {
+            criterion: "x".to_string(),
+            met: false,
+        }];
         let result = apply_ac_verdicts(existing, &verdicts);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed[0]["criterion"], "x");
@@ -346,10 +358,12 @@ mod tests {
         let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
         let entries = repo.list_activity(&task.id).await.unwrap();
         let work_entry = entries.iter().find(|e| e.event_type == "work_submitted");
-        assert!(work_entry.is_some(), "expected work_submitted activity entry");
+        assert!(
+            work_entry.is_some(),
+            "expected work_submitted activity entry"
+        );
 
-        let body: serde_json::Value =
-            serde_json::from_str(&work_entry.unwrap().payload).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&work_entry.unwrap().payload).unwrap();
         assert_eq!(body["summary"], "implemented the feature");
         assert_eq!(body["files_changed"][0], "src/main.rs");
         assert_eq!(body["remaining_concerns"][0], "needs perf testing");
@@ -484,8 +498,13 @@ mod tests {
 
         let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
         let entries = repo.list_activity(&task.id).await.unwrap();
-        let entry = entries.iter().find(|e| e.event_type == "decision_submitted");
-        assert!(entry.is_some(), "expected decision_submitted activity entry");
+        let entry = entries
+            .iter()
+            .find(|e| e.event_type == "decision_submitted");
+        assert!(
+            entry.is_some(),
+            "expected decision_submitted activity entry"
+        );
 
         let body: serde_json::Value = serde_json::from_str(&entry.unwrap().payload).unwrap();
         assert_eq!(body["decision"], "reopen");

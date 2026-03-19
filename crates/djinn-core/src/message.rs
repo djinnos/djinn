@@ -807,7 +807,10 @@ mod tests {
         let msgs = mixed_provider_conversation().to_openai_messages();
 
         assert_eq!(msgs.len(), 7);
-        assert_eq!(msgs[0], json!({"role": "system", "content": "Follow policy."}));
+        assert_eq!(
+            msgs[0],
+            json!({"role": "system", "content": "Follow policy."})
+        );
         assert_eq!(
             msgs[1],
             json!({
@@ -817,12 +820,18 @@ mod tests {
                 "is_error": true,
             })
         );
-        assert_eq!(msgs[2], json!({"role": "user", "content": "Need weather now"}));
+        assert_eq!(
+            msgs[2],
+            json!({"role": "user", "content": "Need weather now"})
+        );
         assert_eq!(msgs[3]["role"], "assistant");
         assert_eq!(msgs[3]["content"], "Checking.Done.");
         assert_eq!(msgs[3]["tool_calls"][0]["id"], "call_1");
         assert_eq!(msgs[3]["tool_calls"][0]["function"]["name"], "weather");
-        assert_eq!(msgs[3]["tool_calls"][0]["function"]["arguments"], "{\"city\":\"Paris\"}");
+        assert_eq!(
+            msgs[3]["tool_calls"][0]["function"]["arguments"],
+            "{\"city\":\"Paris\"}"
+        );
         assert_eq!(
             msgs[4],
             json!({
@@ -833,7 +842,10 @@ mod tests {
             })
         );
         assert_eq!(msgs[5], json!({"role": "user", "content": "Thanks"}));
-        assert_eq!(msgs[6], json!({"role": "assistant", "content": "It is 72F and sunny."}));
+        assert_eq!(
+            msgs[6],
+            json!({"role": "assistant", "content": "It is 72F and sunny."})
+        );
     }
 
     // ── Anthropic serialization ───────────────────────────────────────────────
@@ -901,21 +913,39 @@ mod tests {
         assert_eq!(system, Some("Follow policy.".to_string()));
         assert_eq!(msgs.len(), 4);
         assert_eq!(msgs[0]["role"], "user");
-        assert_eq!(msgs[0]["content"][0], json!({"type": "text", "text": "Need weather"}));
+        assert_eq!(
+            msgs[0]["content"][0],
+            json!({"type": "text", "text": "Need weather"})
+        );
         assert_eq!(msgs[0]["content"][1]["type"], "tool_result");
         assert_eq!(msgs[0]["content"][1]["tool_use_id"], "orphan");
-        assert_eq!(msgs[0]["content"][2], json!({"type": "text", "text": " now"}));
+        assert_eq!(
+            msgs[0]["content"][2],
+            json!({"type": "text", "text": " now"})
+        );
         assert_eq!(msgs[1]["role"], "assistant");
-        assert_eq!(msgs[1]["content"][0], json!({"type": "text", "text": "Checking."}));
+        assert_eq!(
+            msgs[1]["content"][0],
+            json!({"type": "text", "text": "Checking."})
+        );
         assert_eq!(msgs[1]["content"][1]["type"], "tool_use");
         assert_eq!(msgs[1]["content"][1]["name"], "weather");
-        assert_eq!(msgs[1]["content"][2], json!({"type": "text", "text": "Done."}));
+        assert_eq!(
+            msgs[1]["content"][2],
+            json!({"type": "text", "text": "Done."})
+        );
         assert_eq!(msgs[2]["role"], "user");
         assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
-        assert_eq!(msgs[2]["content"][1], json!({"type": "text", "text": "Thanks"}));
+        assert_eq!(
+            msgs[2]["content"][1],
+            json!({"type": "text", "text": "Thanks"})
+        );
         assert_eq!(msgs[2]["content"][2], json!({"type": "text", "text": ""}));
         assert_eq!(msgs[3]["role"], "assistant");
-        assert_eq!(msgs[3]["content"][0], json!({"type": "text", "text": "It is 72F and sunny."}));
+        assert_eq!(
+            msgs[3]["content"][0],
+            json!({"type": "text", "text": "It is 72F and sunny."})
+        );
     }
 
     // ── Google serialization ──────────────────────────────────────────────────
@@ -927,26 +957,38 @@ mod tests {
         assert_eq!(system, Some("Follow policy.".to_string()));
         assert_eq!(contents.len(), 4);
         assert_eq!(contents[0]["role"], "user");
-        assert_eq!(contents[0]["parts"], json!([
-            {"text": "Need weather"},
-            {"text": "cached"},
-            {"text": " now"}
-        ]));
+        assert_eq!(
+            contents[0]["parts"],
+            json!([
+                {"text": "Need weather"},
+                {"text": "cached"},
+                {"text": " now"}
+            ])
+        );
         assert_eq!(contents[1]["role"], "model");
-        assert_eq!(contents[1]["parts"], json!([
-            {"text": "Checking."},
-            {"functionCall": {"name": "weather", "args": {"city": "Paris"}}},
-            {"text": "Done."}
-        ]));
+        assert_eq!(
+            contents[1]["parts"],
+            json!([
+                {"text": "Checking."},
+                {"functionCall": {"name": "weather", "args": {"city": "Paris"}}},
+                {"text": "Done."}
+            ])
+        );
         assert_eq!(contents[2]["role"], "user");
-        assert_eq!(contents[2]["parts"], json!([
-            {"text": "72F"},
-            {"text": " sunny"},
-            {"text": "Thanks"},
-            {"text": ""}
-        ]));
+        assert_eq!(
+            contents[2]["parts"],
+            json!([
+                {"text": "72F"},
+                {"text": " sunny"},
+                {"text": "Thanks"},
+                {"text": ""}
+            ])
+        );
         assert_eq!(contents[3]["role"], "model");
-        assert_eq!(contents[3]["parts"], json!([{"text": "It is 72F and sunny."}]));
+        assert_eq!(
+            contents[3]["parts"],
+            json!([{"text": "It is 72F and sunny."}])
+        );
     }
 
     // ── OpenAI Responses serialization ────────────────────────────────────────
@@ -1007,8 +1049,7 @@ mod tests {
             json!({
                 "type": "function_call_output",
                 "call_id": "call_1",
-                "output": "72F
- sunny"
+                "output": "72F\n sunny"
             })
         );
     }
@@ -1025,9 +1066,15 @@ mod tests {
 
         let (instructions, input) = conversation.to_openai_responses_input();
 
-        assert_eq!(instructions, Some("First rule.
+        assert_eq!(
+            instructions,
+            Some(
+                "First rule.
 
-Second rule.".to_string()));
+Second rule."
+                    .to_string()
+            )
+        );
         assert_eq!(
             input,
             vec![json!({

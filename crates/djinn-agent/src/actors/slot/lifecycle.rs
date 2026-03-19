@@ -1116,9 +1116,7 @@ fn spawn_post_session_work(params: PostSessionParams) {
     // Register in the verification tracker so the coordinator's stuck-task
     // recovery doesn't reset the task while post-session work (merge,
     // transition) is still in flight.
-    params
-        .app_state
-        .register_verification(&params.task_id);
+    params.app_state.register_verification(&params.task_id);
     tokio::spawn(async move {
         let PostSessionParams {
             task_id,
@@ -1180,9 +1178,7 @@ fn spawn_post_session_work(params: PostSessionParams) {
                 )
                 .await;
         }
-        if final_result_ok
-            && let Some(reason) = final_output.runtime_error.as_deref()
-        {
+        if final_result_ok && let Some(reason) = final_output.runtime_error.as_deref() {
             let payload = serde_json::json!({
                 "error": reason,
                 "agent_type": role.config().name,

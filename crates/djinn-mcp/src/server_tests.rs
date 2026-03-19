@@ -202,7 +202,11 @@ mod tests {
         let low_a = make_note(&repo, &project.id, tmp.path(), "Low A").await;
         let low_b = make_note(&repo, &project.id, tmp.path(), "Low B").await;
 
-        for (id, confidence) in [(&high.id, 0.9_f64), (&low_a.id, 0.4_f64), (&low_b.id, 0.3_f64)] {
+        for (id, confidence) in [
+            (&high.id, 0.9_f64),
+            (&low_a.id, 0.4_f64),
+            (&low_b.id, 0.3_f64),
+        ] {
             sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
                 .bind(confidence)
                 .bind(id)
@@ -221,16 +225,18 @@ mod tests {
 
         manager.close_session(&session_id).await.unwrap();
 
-        let confidence_low_a: f64 = sqlx::query_scalar("SELECT confidence FROM notes WHERE id = ?1")
-            .bind(&low_a.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-        let confidence_low_b: f64 = sqlx::query_scalar("SELECT confidence FROM notes WHERE id = ?1")
-            .bind(&low_b.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
+        let confidence_low_a: f64 =
+            sqlx::query_scalar("SELECT confidence FROM notes WHERE id = ?1")
+                .bind(&low_a.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let confidence_low_b: f64 =
+            sqlx::query_scalar("SELECT confidence FROM notes WHERE id = ?1")
+                .bind(&low_b.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
 
         assert!((confidence_low_a - note::bayesian_update(0.4, note::CO_ACCESS_HIGH)).abs() < 1e-9);
         assert!((confidence_low_b - note::bayesian_update(0.3, note::CO_ACCESS_HIGH)).abs() < 1e-9);

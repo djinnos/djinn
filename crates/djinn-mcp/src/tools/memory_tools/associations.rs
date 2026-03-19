@@ -21,8 +21,7 @@ impl DjinnMcpServer {
 
         let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
 
-        let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await
-        else {
+        let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await else {
             return Json(MemoryAssociationsResponse {
                 associations: vec![],
                 error: Some(format!("note not found: {}", p.identifier)),

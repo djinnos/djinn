@@ -1241,8 +1241,8 @@ pub fn format_diagnostics_xml(diags: Vec<Diagnostic>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::Builder;
     use std::path::PathBuf;
+    use tempfile::Builder;
 
     fn make_diag(file: &str, line: u32, character: u32, severity: u32, msg: &str) -> Diagnostic {
         Diagnostic {

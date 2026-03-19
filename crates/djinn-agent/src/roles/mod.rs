@@ -67,7 +67,11 @@ pub(crate) trait AgentRole: Send + Sync + 'static {
     }
     /// The primary MCP tool name this role uses to signal session completion.
     fn finalize_tool_name(&self) -> &'static str {
-        self.config().finalize_tool_names.first().copied().unwrap_or("")
+        self.config()
+            .finalize_tool_names
+            .first()
+            .copied()
+            .unwrap_or("")
     }
     /// Whether this role should build epic context for the prompt.
     fn needs_epic_context(&self) -> bool {

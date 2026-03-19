@@ -15,6 +15,7 @@ pub(crate) mod types;
 pub use types::*;
 
 mod associations;
+mod confirm;
 mod reads;
 mod search;
 mod writes;
@@ -29,6 +30,7 @@ mod build_context_tests;
 impl DjinnMcpServer {
     pub fn memory_tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         Self::memory_reads_router()
+            + Self::memory_confirm_router()
             + Self::memory_writes_router()
             + Self::memory_search_router()
             + Self::memory_associations_router()
@@ -60,6 +62,12 @@ async fn resolve_note_by_identifier(
     project_id: &str,
     identifier: &str,
 ) -> Option<Note> {
+    if let Ok(Some(note)) = repo.get(identifier).await
+        && note.project_id == project_id
+    {
+        return Some(note);
+    }
+
     repo.resolve(project_id, identifier).await.ok().flatten()
 }
 
