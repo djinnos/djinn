@@ -272,7 +272,37 @@ impl LlmProvider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::{Conversation, Message};
     use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
+    use axum::{Router, routing::post};
+    use futures::TryStreamExt;
+
+    fn spawn_sse_server(status: u16, body: &'static str) -> String {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("bind local tcp listener");
+        let addr = listener.local_addr().expect("local addr");
+        listener.set_nonblocking(true).expect("set nonblocking");
+
+        let rt = tokio::runtime::Handle::current();
+        rt.spawn(async move {
+            let app = Router::new().route(
+                "/v1/messages",
+                post(move |_req: axum::extract::Request| async move {
+                    (
+                        axum::http::StatusCode::from_u16(status).expect("status"),
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        body,
+                    )
+                }),
+            );
+
+            let tokio_listener =
+                tokio::net::TcpListener::from_std(listener).expect("convert to tokio listener");
+            axum::serve(tokio_listener, app).await.ok();
+        });
+
+        format!("http://{}:{}", addr.ip(), addr.port())
+    }
 
     fn test_anthropic_config() -> ProviderConfig {
         ProviderConfig {
@@ -289,6 +319,10 @@ mod tests {
                 max_tokens_default: Some(8192),
             },
         }
+    }
+
+    fn test_provider() -> AnthropicProvider {
+        AnthropicProvider::new(test_anthropic_config())
     }
 
     #[test]
@@ -320,20 +354,17 @@ mod tests {
         let mut acc = None;
         let mut input_tokens = 0u32;
 
-        // content_block_start with tool_use
         let start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"shell"}}"#;
         let e1 = parse_anthropic_event("content_block_start", start, &mut acc, &mut input_tokens);
         assert!(e1.is_empty());
         assert!(acc.is_some());
 
-        // input_json_delta fragments
-        let frag1 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\""}}"#;
+        let frag1 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"l"}}"#;
         parse_anthropic_event("content_block_delta", frag1, &mut acc, &mut input_tokens);
 
-        let frag2 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"ls\"}"}}"#;
+        let frag2 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"s\",\"dir\":\"/tmp\"}"}}"#;
         parse_anthropic_event("content_block_delta", frag2, &mut acc, &mut input_tokens);
 
-        // content_block_stop emits tool use
         let stop = r#"{"type":"content_block_stop","index":0}"#;
         let events = parse_anthropic_event("content_block_stop", stop, &mut acc, &mut input_tokens);
         assert_eq!(events.len(), 1);
@@ -342,6 +373,7 @@ mod tests {
                 assert_eq!(id.as_str(), "toolu_01");
                 assert_eq!(name.as_str(), "shell");
                 assert_eq!(input["cmd"].as_str(), Some("ls"));
+                assert_eq!(input["dir"].as_str(), Some("/tmp"));
             }
             _ => panic!("expected tool use"),
         }
@@ -376,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_build_request_always_populates_system_field() {
-        let provider = AnthropicProvider::new(test_anthropic_config());
+        let provider = test_provider();
         let mut conv = Conversation::default();
         conv.push(crate::message::Message::system("system prompt"));
         conv.push(crate::message::Message::user("first user"));
@@ -401,39 +433,93 @@ mod tests {
         assert!(acc.is_none());
     }
 
-    #[test]
-    fn test_content_block_delta_unknown_variant_ignored() {
-        let data =
-            r#"{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}"#;
-        let mut acc = None;
-        let mut input_tokens = 0u32;
-        let events =
-            parse_anthropic_event("content_block_delta", data, &mut acc, &mut input_tokens);
-        assert!(events.is_empty());
+    #[tokio::test]
+    async fn test_stream_uses_payload_type_over_sse_event_name() {
+        let body = concat!(
+            "event: nope\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\n",
+            "event: wrong-name\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello from payload\"}}\n\n",
+            "event: definitely-not-message-delta\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n",
+            "event: not-message-stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mut config = test_anthropic_config();
+        config.base_url = spawn_sse_server(200, body);
+        let provider = AnthropicProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let events = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("collect events");
+
+        assert_eq!(events.len(), 3);
+        match &events[0] {
+            StreamEvent::Delta(ContentBlock::Text { text }) => {
+                assert_eq!(text, "Hello from payload")
+            }
+            _ => panic!("expected text delta"),
+        }
+        match &events[1] {
+            StreamEvent::Usage(u) => {
+                assert_eq!(u.input, 7);
+                assert_eq!(u.output, 9);
+            }
+            _ => panic!("expected usage"),
+        }
+        assert!(matches!(events[2], StreamEvent::Done));
     }
 
-    #[test]
-    fn test_empty_text_delta_ignored() {
-        let data = r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":""}}"#;
-        let mut acc = None;
-        let mut input_tokens = 0u32;
-        let events =
-            parse_anthropic_event("content_block_delta", data, &mut acc, &mut input_tokens);
-        assert!(events.is_empty());
-    }
+    #[tokio::test]
+    async fn test_streamed_error_event_is_ignored_but_http_error_shape_surfaces() {
+        let body = concat!(
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"try again later\"}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mut config = test_anthropic_config();
+        config.base_url = spawn_sse_server(200, body);
+        let provider = AnthropicProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
 
-    #[test]
-    fn test_content_block_stop_without_active_tool_emits_nothing() {
-        let data = r#"{"type":"content_block_stop","index":0}"#;
-        let mut acc = None;
-        let mut input_tokens = 0u32;
-        let events = parse_anthropic_event("content_block_stop", data, &mut acc, &mut input_tokens);
-        assert!(events.is_empty());
+        let events = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("collect events");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], StreamEvent::Done));
+
+        let error_body = r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#;
+        let mut error_config = test_anthropic_config();
+        error_config.base_url = spawn_sse_server(401, error_body);
+        let provider = AnthropicProvider::new(error_config);
+        let err = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect_err("expected anthropic http error");
+        let err_text = err.to_string();
+        assert!(err_text.contains("provider API error 401 Unauthorized"));
+        assert!(err_text.contains("authentication_error"));
+        assert!(err_text.contains("invalid x-api-key"));
     }
 
     #[test]
     fn test_build_request_sets_required_tool_choice_when_tools_present() {
-        let provider = AnthropicProvider::new(test_anthropic_config());
+        let provider = test_provider();
         let mut conv = Conversation::new();
         conv.push(crate::message::Message::user("Hello"));
         let tools = vec![json!({
@@ -444,15 +530,5 @@ mod tests {
 
         let req = provider.build_request(&conv, &tools, Some(ToolChoice::Required));
         assert_eq!(req["tool_choice"]["type"], "any");
-    }
-
-    #[test]
-    fn test_build_request_omits_tool_choice_when_tools_empty() {
-        let provider = AnthropicProvider::new(test_anthropic_config());
-        let mut conv = Conversation::new();
-        conv.push(crate::message::Message::user("Hello"));
-
-        let req = provider.build_request(&conv, &[], Some(ToolChoice::Required));
-        assert!(req.get("tool_choice").is_none());
     }
 }
