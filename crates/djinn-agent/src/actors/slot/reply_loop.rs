@@ -26,10 +26,13 @@ const MAX_NUDGE_ATTEMPTS: u32 = 3;
 fn is_context_length_error(e: &anyhow::Error) -> bool {
     let msg = e.to_string().to_lowercase();
     msg.contains("context_length")
+        || msg.contains("context limit")
         || msg.contains("too many tokens")
         || msg.contains("maximum context")
         || msg.contains("context window")
         || msg.contains("prompt is too long")
+        || msg.contains("max_tokens")
+        || msg.contains("token limit")
 }
 
 /// Detect "No tool call found for function call output" errors from the OpenAI
