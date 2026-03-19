@@ -3,7 +3,10 @@ use super::*;
 use crate::tools::memory_tools::summaries::NoteSummaryService;
 use djinn_core::models::NoteDedupCandidate;
 use djinn_db::{folder_for_type, is_singleton};
-use djinn_provider::{CompletionRequest, CompletionResponse, complete};
+use djinn_provider::{
+    CompletionRequest, CompletionResponse, complete,
+    provider::LlmProvider,
+};
 
 const DEDUP_CANDIDATE_LIMIT: usize = 5;
 const DEDUP_SYSTEM: &str = "You decide whether an incoming memory note should be skipped, merged into an existing note, or kept as a separate note. Respond with JSON only.";
@@ -43,11 +46,64 @@ pub(crate) trait MemoryWriteDedupDecider: Send + Sync {
 
 struct LlmMemoryWriteDedupDecider {
     db: djinn_db::Database,
+    runtime: MemoryWriteProviderRuntime,
+}
+
+#[derive(Clone)]
+#[allow(clippy::type_complexity)]
+struct MemoryWriteProviderRuntime {
+    resolve_provider: std::sync::Arc<
+        dyn for<'a> Fn(
+                &'a djinn_db::Database,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<Box<dyn LlmProvider>, String>> + Send + 'a,
+                >,
+            > + Send
+            + Sync,
+    >,
+    complete: std::sync::Arc<
+        dyn for<'a> Fn(
+                &'a dyn LlmProvider,
+                CompletionRequest,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<CompletionResponse, String>> + Send + 'a,
+                >,
+            > + Send
+            + Sync,
+    >,
+}
+
+impl Default for MemoryWriteProviderRuntime {
+    fn default() -> Self {
+        Self {
+            resolve_provider: std::sync::Arc::new(|db| {
+                let db = db.clone();
+                Box::pin(async move {
+                    djinn_provider::resolve_memory_provider(&db)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+            }),
+            complete: std::sync::Arc::new(|provider, request| {
+                Box::pin(async move { complete(provider, request).await.map_err(|error| error.to_string()) })
+            }),
+        }
+    }
 }
 
 impl LlmMemoryWriteDedupDecider {
     fn new(db: djinn_db::Database) -> Self {
-        Self { db }
+        Self {
+            db,
+            runtime: MemoryWriteProviderRuntime::default(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_runtime(db: djinn_db::Database, runtime: MemoryWriteProviderRuntime) -> Self {
+        Self { db, runtime }
     }
 }
 
@@ -63,7 +119,7 @@ impl MemoryWriteDedupDecider for LlmMemoryWriteDedupDecider {
         Box<dyn std::future::Future<Output = Result<DedupDecision, String>> + Send + 'a>,
     > {
         Box::pin(async move {
-            let provider = djinn_provider::resolve_memory_provider(&self.db)
+            let provider = (self.runtime.resolve_provider)(&self.db)
                 .await
                 .map_err(|error| error.to_string())?;
             let prompt = render_dedup_prompt(
@@ -73,7 +129,7 @@ impl MemoryWriteDedupDecider for LlmMemoryWriteDedupDecider {
                 note_type,
                 candidates,
             );
-            let response = complete(
+            let response = (self.runtime.complete)(
                 provider.as_ref(),
                 CompletionRequest {
                     system: DEDUP_SYSTEM.to_string(),
@@ -529,8 +585,15 @@ mod tests {
     use super::*;
     use crate::{server::DjinnMcpServer, state::stubs::test_mcp_state};
     use djinn_core::events::EventBus;
+    use djinn_core::message::{ContentBlock, Conversation};
     use djinn_db::{Database, NoteRepository, ProjectRepository};
+    use djinn_provider::provider::ToolChoice;
+    use futures::Stream;
+    use futures::stream;
     use rmcp::{Json, handler::server::wrapper::Parameters};
+    use serde_json::Value;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone)]
     struct StubDedupDecider {
@@ -576,6 +639,107 @@ mod tests {
             .await
             .unwrap()
             .len()
+    }
+
+    struct MockProvider {
+        response_text: String,
+        stream_calls: AtomicUsize,
+    }
+
+    impl MockProvider {
+        fn new(response_text: impl Into<String>) -> Self {
+            Self {
+                response_text: response_text.into(),
+                stream_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl LlmProvider for MockProvider {
+        fn name(&self) -> &str {
+            "mock-memory-write-provider"
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _conversation: &'a Conversation,
+            _tools: &'a [Value],
+            _tool_choice: Option<ToolChoice>,
+        ) -> Pin<
+            Box<
+                dyn futures::Future<
+                        Output = anyhow::Result<
+                            Pin<Box<dyn Stream<Item = anyhow::Result<djinn_provider::provider::StreamEvent>> + Send>>,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            let response_text = self.response_text.clone();
+            Box::pin(async move {
+                let events: Vec<anyhow::Result<djinn_provider::provider::StreamEvent>> = vec![
+                    Ok(djinn_provider::provider::StreamEvent::Delta(ContentBlock::text(
+                        response_text,
+                    ))),
+                    Ok(djinn_provider::provider::StreamEvent::Done),
+                ];
+                Ok(Box::pin(stream::iter(events)) as Pin<Box<dyn Stream<Item = anyhow::Result<djinn_provider::provider::StreamEvent>> + Send>>)
+            })
+        }
+    }
+
+    fn provider_runtime_with_response(response_text: &'static str) -> MemoryWriteProviderRuntime {
+        MemoryWriteProviderRuntime {
+            resolve_provider: std::sync::Arc::new(move |_db| {
+                Box::pin(async move {
+                    Ok(Box::new(MockProvider::new(response_text)) as Box<dyn LlmProvider>)
+                })
+            }),
+            complete: std::sync::Arc::new(|provider, request| {
+                Box::pin(async move { complete(provider, request).await.map_err(|error| error.to_string()) })
+            }),
+        }
+    }
+
+    fn provider_runtime_with_resolution_error(message: &'static str) -> MemoryWriteProviderRuntime {
+        MemoryWriteProviderRuntime {
+            resolve_provider: std::sync::Arc::new(move |_db| {
+                Box::pin(async move { Err(message.to_string()) })
+            }),
+            complete: std::sync::Arc::new(|provider, request| {
+                Box::pin(async move { complete(provider, request).await.map_err(|error| error.to_string()) })
+            }),
+        }
+    }
+
+    async fn write_with_provider_runtime(
+        server: &DjinnMcpServer,
+        db: &Database,
+        params: WriteParams,
+        runtime: MemoryWriteProviderRuntime,
+    ) -> MemoryNoteResponse {
+        let decider = LlmMemoryWriteDedupDecider::with_runtime(db.clone(), runtime);
+        write_with_decider(server, params, &decider).await
+    }
+
+    async fn create_indexed_note(
+        server: &DjinnMcpServer,
+        project_path: &std::path::Path,
+        title: &str,
+        content: &str,
+        note_type: &str,
+    ) -> MemoryNoteResponse {
+        let Json(response) = server
+            .memory_write(Parameters(WriteParams {
+                project: project_path.to_str().unwrap().to_string(),
+                title: title.to_string(),
+                content: content.to_string(),
+                note_type: note_type.to_string(),
+                tags: None,
+            }))
+            .await;
+        response
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -637,156 +801,124 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_write_skip_returns_existing_note() {
+    async fn memory_write_provider_backed_skip_returns_existing_note() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
-        let repo = NoteRepository::new(db.clone(), EventBus::noop());
-        
-        // Create existing note directly (no need for FTS indexing in this test)
-        let _existing = repo
-            .create(
-                &project.id,
-                tmp.path(),
-                "Existing Note",
-                "test content for skip",
-                "reference",
-                "[]",
-            )
-            .await
-            .unwrap();
-
-        // Test the skip path directly through the decider seam
-        // by using a stub decider that returns Skip
-        let decider = StubDedupDecider {
-            result: Ok(DedupDecision {
-                disposition: DedupDisposition::Skip,
-            }),
-        };
-
-        let response = write_with_decider(
+        let existing = create_indexed_note(
             &server,
-            WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
-                title: "Incoming Note".to_string(),
-                content: "different content".to_string(),
-                note_type: "pattern".to_string(), // pattern is mergeable, so dedup runs
-                tags: None,
-            },
-            &decider,
+            tmp.path(),
+            "Existing Pattern",
+            "tokio spawn concurrent execution pattern for rust services",
+            "pattern",
         )
         .await;
+        assert!(existing.error.is_none());
 
-        // With no candidates, skip can't happen, so a new note is created
-        // This verifies the "no candidates" path works correctly
-        assert!(response.error.is_none());
-        assert!(response.id.is_some());
-        
-        // Verify we now have 2 notes (existing + new)
-        let all = repo.list(&project.id, None).await.unwrap();
-        assert_eq!(all.len(), 2);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_write_merge_updates_existing_note_via_repository_update() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = Database::open_in_memory().unwrap();
-        let state = test_mcp_state(db.clone());
-        let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
-        let repo = NoteRepository::new(db.clone(), EventBus::noop());
-        
-        // Create existing note directly
-        let existing = repo
-            .create(
-                &project.id,
-                tmp.path(),
-                "Merge Target",
-                "original test content",
-                "pattern",
-                "[]",
-            )
-            .await
-            .unwrap();
-        let existing_id = existing.id.clone();
-
-        // Test the merge path - since there are no candidates (no FTS match),
-        // the decider won't be called and a new note is created
-        let decider = StubDedupDecider {
-            result: Err("should not be called without candidates".to_string()),
-        };
-
-        let response = write_with_decider(
+        let response = write_with_provider_runtime(
             &server,
+            &db,
             WriteParams {
                 project: tmp.path().to_str().unwrap().to_string(),
-                title: "Incoming Note".to_string(),
-                content: "completely different content for merge test".to_string(),
+                title: "Incoming Pattern".to_string(),
+                content: "tokio spawn concurrent execution pattern for rust services".to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
             },
-            &decider,
+            provider_runtime_with_response(r#"{"decision":"skip"}"#),
         )
         .await;
 
-        // Without candidates, a new note is created
         assert!(response.error.is_none());
         assert!(response.id.is_some());
-        assert_ne!(response.id.as_deref(), Some(existing_id.as_str()));
-        
-        // Verify we have 2 notes
-        assert_eq!(note_count_for_project(&db, &project.id).await, 2);
+        assert_eq!(response.id, existing.id);
+        assert_eq!(note_count_for_project(&db, &project.id).await, 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_write_dedup_failures_fall_back_to_keep_both() {
+    async fn memory_write_provider_backed_merge_updates_existing_note() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
-        
-        // Create existing note directly
-        repo.create(
-            &project.id,
+
+        // Use identical content to ensure FTS finds it as a dedup candidate
+        let shared_content = "rust retry backoff strategy for transient service calls with exponential backoff and jitter";
+        let existing = create_indexed_note(
+            &server,
+            tmp.path(),
+            "Merge Target",
+            shared_content,
+            "pattern",
+        )
+        .await;
+        assert!(existing.error.is_none());
+        let existing_id = existing.id.clone();
+
+        // Use identical content to ensure high FTS match score
+        let response = write_with_provider_runtime(
+            &server,
+            &db,
+            WriteParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                title: "Incoming Note".to_string(),
+                content: shared_content.to_string(),
+                note_type: "pattern".to_string(),
+                tags: None,
+            },
+            provider_runtime_with_response(r#"{"decision":"merge"}"#),
+        )
+        .await;
+
+        assert!(response.error.is_none(), "Expected no error but got: {:?}", response.error);
+        assert!(response.id.is_some(), "Expected response to have an id");
+        assert_eq!(response.id.as_deref(), existing_id.as_deref(), "Expected merged note to have same id as existing");
+        assert_eq!(note_count_for_project(&db, &project.id).await, 1, "Expected only 1 note after merge");
+
+        let merged = repo.get(existing_id.as_deref().unwrap()).await.unwrap().unwrap();
+        assert!(merged.content.contains("rust retry backoff strategy"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_write_provider_resolution_failures_fall_back_to_keep_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+
+        let existing = create_indexed_note(
+            &server,
             tmp.path(),
             "Existing Note",
-            "test content for fallback",
+            "database migration sequencing playbook for releases",
             "pattern",
-            "[]",
         )
-        .await
-        .unwrap();
+        .await;
+        assert!(existing.error.is_none());
 
-        for result in [
-            Err("timeout".to_string()),
-            Err("invalid json".to_string()),
-            Ok(DedupDecision {
-                disposition: DedupDisposition::KeepBoth,
-            }),
-        ] {
-            let decider = StubDedupDecider { result };
-            let response = write_with_decider(
-                &server,
-                WriteParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
-                    title: format!("Incoming {}", repo.list(&project.id, None).await.unwrap().len()),
-                    content: "different content each time".to_string(),
-                    note_type: "pattern".to_string(),
-                    tags: None,
-                },
-                &decider,
-            )
-            .await;
-            assert!(response.error.is_none());
-        }
+        let response = write_with_provider_runtime(
+            &server,
+            &db,
+            WriteParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                title: "Incoming Fallback".to_string(),
+                content: "database migration sequencing playbook for releases with rollback checklist"
+                    .to_string(),
+                note_type: "pattern".to_string(),
+                tags: None,
+            },
+            provider_runtime_with_resolution_error("provider unavailable"),
+        )
+        .await;
 
-        // Should have 4 notes: 1 existing + 3 new
-        let all = repo.list(&project.id, None).await.unwrap();
-        assert_eq!(all.len(), 4);
+        assert!(response.error.is_none());
+        assert_ne!(response.id, existing.id);
+        assert_eq!(note_count_for_project(&db, &project.id).await, 2);
     }
 
     #[test]
