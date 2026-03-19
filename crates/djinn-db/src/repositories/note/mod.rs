@@ -24,6 +24,7 @@ mod search;
 
 pub use association::NoteAssociationEntry;
 pub use context::BuildContextResponse;
+pub use scoring::{CO_ACCESS_HIGH, bayesian_update};
 
 pub use indexing::UpdateNoteIndexParams;
 
