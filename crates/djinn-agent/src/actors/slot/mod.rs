@@ -120,4 +120,7 @@ pub use worktree::*;
 mod helpers_tests;
 
 #[cfg(test)]
+mod lifecycle_tests;
+
+#[cfg(test)]
 mod worktree_tests;

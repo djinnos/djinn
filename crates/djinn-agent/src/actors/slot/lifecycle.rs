@@ -8,6 +8,7 @@ use crate::commands::run_commands;
 use crate::context::AgentContext;
 use crate::message::{Conversation, Message};
 use crate::prompts::TaskContext;
+use crate::provider::LlmProvider;
 use crate::provider::create_provider;
 use crate::roles::AgentRole;
 use crate::verification::settings::load_commands;
@@ -40,6 +41,10 @@ pub(crate) struct TaskLifecycleParams {
     pub cancel: CancellationToken,
     pub pause: CancellationToken,
     pub event_tx: mpsc::Sender<SlotEvent>,
+    /// Test-only: inject a pre-built provider, bypassing credential loading.
+    /// When `Some`, `parse_model_id` and `load_provider_credential` are skipped.
+    #[cfg(test)]
+    pub provider_override: Option<Arc<dyn LlmProvider>>,
 }
 
 pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::Result<()> {
@@ -52,6 +57,8 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         cancel,
         pause,
         event_tx,
+        #[cfg(test)]
+        provider_override,
     } = params;
     let emit_step = |task_id: &str, step: &str, detail: serde_json::Value| {
         app_state
@@ -142,54 +149,65 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     );
 
     // ── Parse model ID and load credentials ───────────────────────────────────
-    let (catalog_provider_id, model_name) = match parse_model_id(&model_id) {
-        Ok((provider_id, name)) => {
-            // Settings may store display names (e.g. "GPT-5.3 Codex") or
-            // bare suffixes (e.g. "GLM-4.7" for internal "hf:zai-org/GLM-4.7").
-            // Resolve to the actual model ID for the provider API.
-            let resolved = app_state
-                .catalog
-                .list_models(&provider_id)
-                .iter()
-                .find(|m| {
-                    let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
-                    m.id == name || m.name == name || bare == name
-                })
-                .map(|m| m.id.clone())
-                .unwrap_or(name);
-            (provider_id, resolved)
-        }
-        Err(e) => {
-            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: invalid model ID");
-            transition_interrupted(
-                &task_id,
-                role.config().release_action,
-                &e.to_string(),
-                &app_state,
-            )
-            .await;
-            return_free!();
-        }
-    };
-    emit_step(
-        &task.id,
-        "credential_loading",
-        serde_json::json!({"provider_id": catalog_provider_id}),
-    );
-    let provider_credential = match load_provider_credential(&catalog_provider_id, &app_state).await
-    {
-        Ok(cred) => cred,
-        Err(e) => {
-            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");
-            transition_interrupted(
-                &task_id,
-                role.config().release_action,
-                &e.to_string(),
-                &app_state,
-            )
-            .await;
-            return_free!();
-        }
+    // In tests, a provider_override bypasses credential loading entirely.
+    #[cfg(test)]
+    let _credential_skipped = provider_override.is_some();
+    #[cfg(not(test))]
+    let _credential_skipped = false;
+
+    let (catalog_provider_id, model_name, provider_credential) = if _credential_skipped {
+        // Test seam: skip credential/catalog lookups.
+        (String::new(), String::new(), None)
+    } else {
+        let (cpid, mname) = match parse_model_id(&model_id) {
+            Ok((provider_id, name)) => {
+                // Settings may store display names (e.g. "GPT-5.3 Codex") or
+                // bare suffixes (e.g. "GLM-4.7" for internal "hf:zai-org/GLM-4.7").
+                // Resolve to the actual model ID for the provider API.
+                let resolved = app_state
+                    .catalog
+                    .list_models(&provider_id)
+                    .iter()
+                    .find(|m| {
+                        let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
+                        m.id == name || m.name == name || bare == name
+                    })
+                    .map(|m| m.id.clone())
+                    .unwrap_or(name);
+                (provider_id, resolved)
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: invalid model ID");
+                transition_interrupted(
+                    &task_id,
+                    role.config().release_action,
+                    &e.to_string(),
+                    &app_state,
+                )
+                .await;
+                return_free!();
+            }
+        };
+        emit_step(
+            &task.id,
+            "credential_loading",
+            serde_json::json!({"provider_id": cpid}),
+        );
+        let cred = match load_provider_credential(&cpid, &app_state).await {
+            Ok(cred) => cred,
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");
+                transition_interrupted(
+                    &task_id,
+                    role.config().release_action,
+                    &e.to_string(),
+                    &app_state,
+                )
+                .await;
+                return_free!();
+            }
+        };
+        (cpid, mname, Some(cred))
     };
 
     // ── Prepare worktree / paused-session resume context ──────────────────────
@@ -609,45 +627,100 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
 
     // ── Build Djinn-native provider ───────────────────────────────────────────
-    let telemetry_meta = build_telemetry_meta(role.config().name, &task_id);
-
-    let provider_config = match provider_credential {
-        ProviderCredential::OAuthConfig(mut cfg) => {
-            // OAuth config carries defaults; override model_id and context_window
-            // from the dispatch request.
-            cfg.model_id = model_name.clone();
-            cfg.context_window = context_window.max(0) as u32;
-            cfg.telemetry = Some(telemetry_meta);
-            cfg.session_affinity_key = Some(affinity_key.clone());
-            *cfg
-        }
-        ProviderCredential::ApiKey(_key_name, api_key) => {
-            let format_family = format_family_for_provider(&catalog_provider_id, &model_name);
-            // Prefer the catalog's base_url (handles custom providers like
-            // "synthetic"); fall back to the hardcoded defaults for well-known
-            // providers that may not carry a base_url in the catalog.
-            let base_url = app_state
-                .catalog
-                .list_providers()
-                .iter()
-                .find(|p| p.id == catalog_provider_id)
-                .map(|p| p.base_url.clone())
-                .filter(|u| !u.is_empty())
-                .unwrap_or_else(|| default_base_url(&catalog_provider_id));
-            crate::provider::ProviderConfig {
-                base_url,
-                auth: auth_method_for_provider(&catalog_provider_id, &api_key),
-                format_family,
-                model_id: model_name.clone(),
-                context_window: context_window.max(0) as u32,
-                telemetry: Some(telemetry_meta),
-                session_affinity_key: Some(affinity_key.clone()),
-                provider_headers: Default::default(),
-                capabilities: capabilities_for_provider(&catalog_provider_id),
+    #[cfg(test)]
+    let provider: Box<dyn LlmProvider> = if let Some(p) = provider_override {
+        // Wrap the Arc in a Box so the type matches the non-test path.
+        struct ArcProvider(Arc<dyn LlmProvider>);
+        use std::pin::Pin;
+        use crate::provider::{StreamEvent, ToolChoice};
+        impl LlmProvider for ArcProvider {
+            fn name(&self) -> &str { self.0.name() }
+            fn stream<'a>(
+                &'a self,
+                conv: &'a djinn_provider::message::Conversation,
+                tools: &'a [serde_json::Value],
+                tool_choice: Option<ToolChoice>,
+            ) -> Pin<Box<dyn futures::Future<Output = anyhow::Result<Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>>> + Send + 'a>>
+            {
+                self.0.stream(conv, tools, tool_choice)
             }
         }
+        Box::new(ArcProvider(p))
+    } else {
+        let cred = provider_credential
+            .expect("provider_credential must be Some when provider_override is None");
+        let telemetry_meta = build_telemetry_meta(role.config().name, &task_id);
+        let provider_config = match cred {
+            ProviderCredential::OAuthConfig(mut cfg) => {
+                cfg.model_id = model_name.clone();
+                cfg.context_window = context_window.max(0) as u32;
+                cfg.telemetry = Some(telemetry_meta);
+                cfg.session_affinity_key = Some(affinity_key.clone());
+                *cfg
+            }
+            ProviderCredential::ApiKey(_key_name, api_key) => {
+                let format_family = format_family_for_provider(&catalog_provider_id, &model_name);
+                let base_url = app_state
+                    .catalog
+                    .list_providers()
+                    .iter()
+                    .find(|p| p.id == catalog_provider_id)
+                    .map(|p| p.base_url.clone())
+                    .filter(|u| !u.is_empty())
+                    .unwrap_or_else(|| default_base_url(&catalog_provider_id));
+                crate::provider::ProviderConfig {
+                    base_url,
+                    auth: auth_method_for_provider(&catalog_provider_id, &api_key),
+                    format_family,
+                    model_id: model_name.clone(),
+                    context_window: context_window.max(0) as u32,
+                    telemetry: Some(telemetry_meta),
+                    session_affinity_key: Some(affinity_key.clone()),
+                    provider_headers: Default::default(),
+                    capabilities: capabilities_for_provider(&catalog_provider_id),
+                }
+            }
+        };
+        create_provider(provider_config)
     };
-    let provider = create_provider(provider_config);
+    #[cfg(not(test))]
+    let provider: Box<dyn LlmProvider> = {
+        let telemetry_meta = build_telemetry_meta(role.config().name, &task_id);
+        let cred = provider_credential
+            .expect("provider_credential must be Some in non-test builds");
+        let provider_config = match cred {
+            ProviderCredential::OAuthConfig(mut cfg) => {
+                cfg.model_id = model_name.clone();
+                cfg.context_window = context_window.max(0) as u32;
+                cfg.telemetry = Some(telemetry_meta);
+                cfg.session_affinity_key = Some(affinity_key.clone());
+                *cfg
+            }
+            ProviderCredential::ApiKey(_key_name, api_key) => {
+                let format_family = format_family_for_provider(&catalog_provider_id, &model_name);
+                let base_url = app_state
+                    .catalog
+                    .list_providers()
+                    .iter()
+                    .find(|p| p.id == catalog_provider_id)
+                    .map(|p| p.base_url.clone())
+                    .filter(|u| !u.is_empty())
+                    .unwrap_or_else(|| default_base_url(&catalog_provider_id));
+                crate::provider::ProviderConfig {
+                    base_url,
+                    auth: auth_method_for_provider(&catalog_provider_id, &api_key),
+                    format_family,
+                    model_id: model_name.clone(),
+                    context_window: context_window.max(0) as u32,
+                    telemetry: Some(telemetry_meta),
+                    session_affinity_key: Some(affinity_key.clone()),
+                    provider_headers: Default::default(),
+                    capabilities: capabilities_for_provider(&catalog_provider_id),
+                }
+            }
+        };
+        create_provider(provider_config)
+    };
 
     // ── Create or resume session record + build conversation ─────────────────
     let tools = (role.config().tool_schemas)();
