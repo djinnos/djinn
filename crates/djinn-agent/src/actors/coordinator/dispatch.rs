@@ -421,6 +421,19 @@ impl CoordinatorActor {
                             to = release_to,
                             "CoordinatorActor: recovered stuck task"
                         );
+                        // Finalize any orphaned "running" session records for this
+                        // task so they don't accumulate as ghost rows.
+                        let session_repo = djinn_db::SessionRepository::new(
+                            self.db.clone(),
+                            crate::events::event_bus_for(&self.events_tx),
+                        );
+                        if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                error = %e,
+                                "CoordinatorActor: failed to finalize orphaned sessions"
+                            );
+                        }
                         affected += 1;
                     }
                     Err(e) => {
