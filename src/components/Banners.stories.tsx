@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react";
+import { fn } from "@storybook/test";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Alert02Icon,
@@ -265,6 +266,44 @@ export const MultipleIssues: StoryObj = {
   ),
 };
 
+export const BoardHealthMultipleFailures: StoryObj = {
+  render: () => (
+    <BoardHealthBannerMock
+      failedSteps={[
+        {
+          index: 0,
+          name: "Install dependencies",
+          command: "pnpm install --frozen-lockfile",
+          phase: "setup",
+          status: "failed",
+          exitCode: 1,
+          stderr:
+            "ERR_PNPM_FROZEN_LOCKFILE  Cannot perform installation with frozen lockfile because the lockfile needs updates.",
+        },
+        {
+          index: 1,
+          name: "Type check",
+          command: "pnpm tsc --noEmit",
+          phase: "verification",
+          status: "failed",
+          exitCode: 2,
+          stderr:
+            "src/index.ts(14,5): error TS2322: Type 'string' is not assignable to type 'number'.\nsrc/api/client.ts(88,12): error TS2345: Argument of type 'null' is not assignable to parameter of type 'Request'.",
+        },
+        {
+          index: 2,
+          name: "Lint",
+          command: "pnpm lint",
+          phase: "verification",
+          status: "failed",
+          exitCode: 1,
+        },
+      ]}
+      failedRunTaskId="019cbe9f-6ae7-7d90-a8be-6ba626cc0119"
+    />
+  ),
+};
+
 /* ---- SyncHealthBanner stories ---- */
 
 export const SyncFailure: StoryObj = {
@@ -285,7 +324,7 @@ export const InitialState: StoryObj = {
   render: () => (
     <GitRemoteSetupBanner
       projectPath="/home/user/projects/my-app"
-      onResolved={() => {}}
+      onResolved={fn()}
     />
   ),
 };
