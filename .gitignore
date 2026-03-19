@@ -31,5 +31,8 @@ dist-ssr
 # TypeScript build cache
 tsconfig.tsbuildinfo
 
+# Storybook build output
+storybook-static
+
 # Claude Code
 .claude/
