@@ -29,6 +29,9 @@ pub struct Task {
     pub closed_at: Option<String>,
     pub close_reason: Option<String>,
     pub merge_commit_sha: Option<String>,
+    /// JSON metadata about an active merge conflict (set by conflict transitions
+    /// and worktree rebase failures; cleared on submit_verification/close).
+    pub merge_conflict_metadata: Option<String>,
     /// JSON array of memory note permalinks associated with this task.
     pub memory_refs: String,
     /// Number of unresolved blocker tasks (blocking tasks not yet closed).
@@ -221,6 +224,10 @@ pub struct TransitionApply {
     pub close_reason: Option<&'static str>,
     /// Set `close_reason` to NULL.
     pub clear_close_reason: bool,
+    /// Set merge_conflict_metadata to a value (caller provides the JSON).
+    pub set_merge_conflict_metadata: bool,
+    /// Clear merge_conflict_metadata to NULL.
+    pub clear_merge_conflict_metadata: bool,
     /// Value for `event_type` in the activity log entry.
     pub activity_type: &'static str,
 }
@@ -238,6 +245,8 @@ impl Default for TransitionApply {
             clear_closed_at: false,
             close_reason: None,
             clear_close_reason: false,
+            set_merge_conflict_metadata: false,
+            clear_merge_conflict_metadata: false,
             activity_type: "status_changed",
         }
     }
@@ -282,7 +291,11 @@ pub fn compute_transition(
             if *from != TaskStatus::InProgress {
                 return bad("submit_verification is only valid from in_progress");
             }
-            TransitionApply::simple(TaskStatus::Verifying)
+            TransitionApply {
+                to_status: Some(TaskStatus::Verifying),
+                clear_merge_conflict_metadata: true,
+                ..Default::default()
+            }
         }
 
         TransitionAction::VerificationPass => {
@@ -318,7 +331,11 @@ pub fn compute_transition(
             if !matches!(from, TaskStatus::InProgress | TaskStatus::Verifying) {
                 return bad("submit_task_review is only valid from in_progress or verifying");
             }
-            TransitionApply::simple(TaskStatus::NeedsTaskReview)
+            TransitionApply {
+                to_status: Some(TaskStatus::NeedsTaskReview),
+                clear_merge_conflict_metadata: true,
+                ..Default::default()
+            }
         }
 
         TransitionAction::TaskReviewStart => {
@@ -359,6 +376,7 @@ pub fn compute_transition(
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
                 reset_continuation: true,
+                set_merge_conflict_metadata: true,
                 ..Default::default()
             }
         }
@@ -383,6 +401,7 @@ pub fn compute_transition(
                 to_status: Some(TaskStatus::Closed),
                 set_closed_at: true,
                 close_reason: Some("completed"),
+                clear_merge_conflict_metadata: true,
                 ..Default::default()
             }
         }
@@ -423,6 +442,7 @@ pub fn compute_transition(
                 to_status: Some(TaskStatus::Closed),
                 set_closed_at: true,
                 close_reason: Some("force_closed"),
+                clear_merge_conflict_metadata: true,
                 ..Default::default()
             }
         }
@@ -439,6 +459,7 @@ pub fn compute_transition(
                 clear_closed_at: !closing,
                 close_reason: if closing { Some("force_closed") } else { None },
                 clear_close_reason: !closing,
+                clear_merge_conflict_metadata: true,
                 ..Default::default()
             }
         }
@@ -507,6 +528,7 @@ pub fn compute_transition(
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
                 reset_continuation: true,
+                set_merge_conflict_metadata: true,
                 ..Default::default()
             }
         }
@@ -771,5 +793,71 @@ mod tests {
         .expect("conflict reject should be valid");
         assert!(!conflict.increment_continuation);
         assert!(conflict.reset_continuation);
+    }
+
+    #[test]
+    fn conflict_metadata_flags_set_and_cleared() {
+        // Conflict transitions set the flag
+        let conflict_reject = compute_transition(
+            &TransitionAction::TaskReviewRejectConflict,
+            &TaskStatus::InTaskReview,
+            None,
+        ).unwrap();
+        assert!(conflict_reject.set_merge_conflict_metadata);
+        assert!(!conflict_reject.clear_merge_conflict_metadata);
+
+        let pm_conflict = compute_transition(
+            &TransitionAction::PmApproveConflict,
+            &TaskStatus::InPmIntervention,
+            None,
+        ).unwrap();
+        assert!(pm_conflict.set_merge_conflict_metadata);
+        assert!(!pm_conflict.clear_merge_conflict_metadata);
+
+        // Clearing transitions
+        let submit_verify = compute_transition(
+            &TransitionAction::SubmitVerification,
+            &TaskStatus::InProgress,
+            None,
+        ).unwrap();
+        assert!(submit_verify.clear_merge_conflict_metadata);
+        assert!(!submit_verify.set_merge_conflict_metadata);
+
+        let submit_review = compute_transition(
+            &TransitionAction::SubmitTaskReview,
+            &TaskStatus::InProgress,
+            None,
+        ).unwrap();
+        assert!(submit_review.clear_merge_conflict_metadata);
+
+        let close = compute_transition(
+            &TransitionAction::Close,
+            &TaskStatus::Open,
+            None,
+        ).unwrap();
+        assert!(close.clear_merge_conflict_metadata);
+
+        let force_close = compute_transition(
+            &TransitionAction::ForceClose,
+            &TaskStatus::Open,
+            None,
+        ).unwrap();
+        assert!(force_close.clear_merge_conflict_metadata);
+
+        let user_override = compute_transition(
+            &TransitionAction::UserOverride,
+            &TaskStatus::InProgress,
+            Some(&TaskStatus::Open),
+        ).unwrap();
+        assert!(user_override.clear_merge_conflict_metadata);
+
+        // Start does NOT clear
+        let start = compute_transition(
+            &TransitionAction::Start,
+            &TaskStatus::Open,
+            None,
+        ).unwrap();
+        assert!(!start.clear_merge_conflict_metadata);
+        assert!(!start.set_merge_conflict_metadata);
     }
 }

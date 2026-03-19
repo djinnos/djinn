@@ -299,6 +299,10 @@ pub struct TaskResponse {
     pub closed_at: Option<String>,
     pub close_reason: Option<String>,
     pub merge_commit_sha: Option<String>,
+    /// JSON metadata about an active merge conflict (files, branches).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
+    pub merge_conflict_metadata: Option<AnyJson>,
     /// Set when force_close unblocks downstream tasks that may need replacement blockers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
@@ -534,6 +538,10 @@ pub struct TaskListItem {
     pub closed_at: Option<String>,
     pub close_reason: Option<String>,
     pub merge_commit_sha: Option<String>,
+    /// JSON metadata about an active merge conflict (files, branches).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
+    pub merge_conflict_metadata: Option<AnyJson>,
     pub unresolved_blocker_count: i64,
     /// Active running session for this task, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -589,6 +597,11 @@ pub fn task_to_response(t: &Task) -> TaskResponse {
         closed_at: t.closed_at.clone(),
         close_reason: t.close_reason.clone(),
         merge_commit_sha: t.merge_commit_sha.clone(),
+        merge_conflict_metadata: t
+            .merge_conflict_metadata
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .map(AnyJson),
         warning: None,
     }
 }
@@ -621,6 +634,7 @@ pub fn task_to_list_item(
         closed_at: base.closed_at,
         close_reason: base.close_reason,
         merge_commit_sha: base.merge_commit_sha,
+        merge_conflict_metadata: base.merge_conflict_metadata,
         unresolved_blocker_count: t.unresolved_blocker_count,
         active_session,
         session_count,

@@ -199,6 +199,36 @@ impl TaskRepository {
         Ok(task)
     }
 
+    /// Set or clear the merge conflict metadata JSON on a task.
+    ///
+    /// Used by the worktree lifecycle when a rebase detects conflicts
+    /// (outside of a state-machine transition).
+    pub async fn set_merge_conflict_metadata(
+        &self,
+        id: &str,
+        metadata: Option<&str>,
+    ) -> Result<Task> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE tasks SET merge_conflict_metadata = ?2,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(metadata)
+        .execute(self.db.pool())
+        .await?;
+
+        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(self.db.pool())
+            .await?;
+
+        self.events
+            .send(DjinnEventEnvelope::task_updated(&task, false));
+        Ok(task)
+    }
+
     /// Increment `continuation_count` by 1 (used by compaction).
     pub async fn increment_continuation_count(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;

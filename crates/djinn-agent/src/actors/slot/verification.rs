@@ -126,7 +126,7 @@ async fn run_verification_pipeline(
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
     // Create a fresh worktree from the task branch.
-    let worktree_path = prepare_worktree(&project_dir, &task, app_state).await?;
+    let (worktree_path, _) = prepare_worktree(&project_dir, &task, app_state).await?;
     let commit_sha = resolve_head_commit(&worktree_path)?;
 
     let result =
@@ -199,7 +199,7 @@ pub(crate) async fn run_verification_gate(
         return Ok(());
     }
 
-    let worktree_path = prepare_worktree(&project_dir, &task, app_state)
+    let (worktree_path, _) = prepare_worktree(&project_dir, &task, app_state)
         .await
         .map_err(|e| format!("failed to create verification worktree: {e}"))?;
 

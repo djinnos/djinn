@@ -198,7 +198,7 @@ pub(super) const TASK_SELECT_WHERE_ID: &str =
     "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
             status, priority, owner, labels, acceptance_criteria,
             reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-            close_reason, merge_commit_sha, memory_refs
+            close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
      FROM tasks WHERE id = ?1";
 
 pub(super) fn short_id_from_uuid(id: &uuid::Uuid) -> String {
