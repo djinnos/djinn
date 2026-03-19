@@ -247,6 +247,8 @@ impl SlotHandle {
                         cancel: kill,
                         pause,
                         event_tx: sink,
+                        #[cfg(test)]
+                        provider_override: None,
                     })
                     .await
                 })
