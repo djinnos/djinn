@@ -154,6 +154,39 @@ impl SessionRepository {
         Ok(result.rows_affected())
     }
 
+    /// Mark all `running` sessions for a specific task as `interrupted`.
+    /// Used by stuck-task recovery to clean up orphaned session records.
+    pub async fn interrupt_running_for_task(&self, task_id: &str) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+
+        let orphans = sqlx::query_as::<_, SessionRecord>(&format!(
+            "SELECT {SESSION_COLS} FROM sessions WHERE task_id = ?1 AND status = 'running'"
+        ))
+        .bind(task_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        if orphans.is_empty() {
+            return Ok(0);
+        }
+
+        let result = sqlx::query(
+            "UPDATE sessions
+             SET status = 'interrupted',
+                 ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE task_id = ?1 AND status = 'running'",
+        )
+        .bind(task_id)
+        .execute(self.db.pool())
+        .await?;
+
+        for session in &orphans {
+            let _ = self.fetch_and_emit_update(&session.id).await;
+        }
+
+        Ok(result.rows_affected())
+    }
+
     pub async fn get(&self, id: &str) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(&format!(
