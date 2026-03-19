@@ -7,6 +7,9 @@ name = "djinn-server"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+doctest = false
+
 [dependencies]
 djinn-agent = { path = "crates/djinn-agent" }
 djinn-core = { path = "crates/djinn-core", features = ["sqlx"] }
