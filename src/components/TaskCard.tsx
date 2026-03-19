@@ -36,6 +36,25 @@ type TaskCardProps = {
   onClick?: () => void;
 };
 
+const ISSUE_TYPE_CONFIG: Record<string, { label: string; className: string }> = {
+  feature: { label: "feature", className: "bg-emerald-500/15 text-emerald-400" },
+  bug: { label: "bug", className: "bg-red-500/15 text-red-400" },
+  spike: { label: "spike", className: "bg-amber-500/15 text-amber-400" },
+  research: { label: "research", className: "bg-violet-500/15 text-violet-400" },
+  decomposition: { label: "breakdown", className: "bg-cyan-500/15 text-cyan-400" },
+  review: { label: "review", className: "bg-lime-500/15 text-lime-400" },
+};
+
+function IssueTypeBadge({ issueType }: { issueType: string }) {
+  const config = ISSUE_TYPE_CONFIG[issueType];
+  if (!config) return null;
+  return (
+    <span className={cn("rounded px-1 py-px text-[10px] font-medium", config.className)}>
+      {config.label}
+    </span>
+  );
+}
+
 const PRIORITY_CONFIG: Record<number, { icon: typeof NoSignalIcon; color: string }> = {
   0: { icon: FullSignalIcon, color: "text-[#D1D5DB]" },
   1: { icon: MediumSignalIcon, color: "text-[#9CA3AF]" },
@@ -353,6 +372,11 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           <ProjectBadge projectId={task.project_id ?? undefined} />
           <PriorityBadge priority={task.priority} />
 
+          {/* Issue type badge – shown for non-default types */}
+          {task.issue_type && task.issue_type !== "task" && (
+            <IssueTypeBadge issueType={task.issue_type} />
+          )}
+
           {/* Acceptance criteria progress */}
           {acTotal > 0 && (
             <span className={cn(
@@ -483,6 +507,9 @@ export function DoneTaskRow({ task, onClick }: { task: Task; onClick?: () => voi
     >
       <TaskIdLabel taskId={task.id} shortId={task.short_id} />
       <PriorityBadge priority={task.priority} />
+      {task.issue_type && task.issue_type !== "task" && (
+        <IssueTypeBadge issueType={task.issue_type} />
+      )}
       <span className="min-w-0 flex-1 truncate">{task.title}</span>
       {duration > 0 && (
         <span className="shrink-0 text-[10px]">{formatCompactDuration(duration)}</span>
