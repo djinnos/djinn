@@ -61,13 +61,13 @@ describe('AgentConfig', () => {
 
     const legend = root.querySelector('.flex.items-center.gap-4.text-xs.text-muted-foreground') as HTMLElement;
     expect(within(legend).getByText((_, el) => el?.textContent === 'W = Worker')).toBeInTheDocument();
-    expect(within(legend).getByText((_, el) => el?.textContent === 'R = Task Reviewer')).toBeInTheDocument();
-    expect(within(legend).getByText((_, el) => el?.textContent === 'PM = PM')).toBeInTheDocument();
+    expect(within(legend).getByText((_, el) => el?.textContent === 'R = Reviewer')).toBeInTheDocument();
+    expect(within(legend).getByText((_, el) => el?.textContent === 'L = Lead')).toBeInTheDocument();
 
     expect(within(root).getByText('gpt-4o')).toBeInTheDocument();
     expect(within(root).getByText('openai')).toBeInTheDocument();
     expect(within(root).getByTitle('Disable for Worker')).toBeInTheDocument();
-    expect(within(root).getByTitle('Disable for PM')).toBeInTheDocument();
+    expect(within(root).getByTitle('Disable for Lead')).toBeInTheDocument();
 
     fireEvent.focus(searchInput);
     expect(within(root).getByRole('button', { name: /GPT 4o Mini/i })).toBeInTheDocument();
