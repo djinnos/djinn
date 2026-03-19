@@ -1,0 +1,7 @@
+---
+source: src/server/mod.rs
+expression: task_count_plain
+---
+{
+  "total_count": 1
+}

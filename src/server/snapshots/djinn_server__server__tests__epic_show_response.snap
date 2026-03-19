@@ -1,0 +1,22 @@
+---
+source: src/server/mod.rs
+expression: epic_show
+---
+{
+  "closed_at": null,
+  "closed_count": 0,
+  "color": "",
+  "created_at": "[TIMESTAMP]",
+  "description": "Epic used for MCP snapshot contract testing",
+  "emoji": "",
+  "id": "[UUID]",
+  "in_progress_count": 0,
+  "memory_refs": [],
+  "open_count": 1,
+  "owner": "",
+  "short_id": "[SHORT_ID]",
+  "status": "open",
+  "task_count": 1,
+  "title": "Snapshot Epic",
+  "updated_at": "[TIMESTAMP]"
+}

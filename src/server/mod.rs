@@ -831,6 +831,7 @@ mod tests {
         assert_json_snapshot!("epic_list_response", epic_list, {
             ".epics.**.id" => "[UUID]",
             ".epics.**.project_id" => "[UUID]",
+            ".epics.**.short_id" => "[SHORT_ID]",
             ".epics.**.created_at" => "[TIMESTAMP]",
             ".epics.**.updated_at" => "[TIMESTAMP]"
         });
