@@ -28,6 +28,9 @@ pub struct AgentRoleUpdateInput<'a> {
     pub verification_command: Option<&'a str>,
     pub mcp_servers: &'a str,
     pub skills: &'a str,
+    /// Final learned_prompt value to persist. Pass None to clear (set NULL).
+    /// MCP layer resolves the "keep existing / set / clear" logic before calling.
+    pub learned_prompt: Option<&'a str>,
 }
 
 pub struct AgentRoleListQuery {
@@ -57,7 +60,7 @@ impl AgentRoleRepository {
         Ok(sqlx::query_as::<_, AgentRole>(
             "SELECT id, project_id, name, base_role, description,
                     system_prompt_extensions, model_preference, verification_command,
-                    mcp_servers, skills, is_default, created_at, updated_at
+                    mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
              FROM agent_roles WHERE id = ?1",
         )
         .bind(id)
@@ -74,7 +77,7 @@ impl AgentRoleRepository {
         Ok(sqlx::query_as::<_, AgentRole>(
             "SELECT id, project_id, name, base_role, description,
                     system_prompt_extensions, model_preference, verification_command,
-                    mcp_servers, skills, is_default, created_at, updated_at
+                    mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
              FROM agent_roles WHERE project_id = ?1 AND name = ?2",
         )
         .bind(project_id)
@@ -125,7 +128,7 @@ impl AgentRoleRepository {
             "UPDATE agent_roles
              SET name = ?2, description = ?3, system_prompt_extensions = ?4,
                  model_preference = ?5, verification_command = ?6,
-                 mcp_servers = ?7, skills = ?8,
+                 mcp_servers = ?7, skills = ?8, learned_prompt = ?9,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1",
         )
@@ -137,6 +140,7 @@ impl AgentRoleRepository {
         .bind(input.verification_command)
         .bind(input.mcp_servers)
         .bind(input.skills)
+        .bind(input.learned_prompt)
         .execute(self.db.pool())
         .await?;
 
@@ -174,7 +178,7 @@ impl AgentRoleRepository {
         let sql = format!(
             "SELECT id, project_id, name, base_role, description,
                     system_prompt_extensions, model_preference, verification_command,
-                    mcp_servers, skills, is_default, created_at, updated_at
+                    mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
              FROM agent_roles WHERE {where_sql}
              ORDER BY is_default DESC, base_role ASC, name ASC
              LIMIT ? OFFSET ?"
@@ -341,6 +345,7 @@ mod tests {
                     verification_command: Some("cargo test"),
                     mcp_servers: "[]",
                     skills: "[]",
+                    learned_prompt: None,
                 },
             )
             .await
