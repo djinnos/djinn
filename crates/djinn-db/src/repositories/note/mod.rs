@@ -681,9 +681,14 @@ mod tests {
             .unwrap();
         let _ = rx.recv().await.unwrap(); // NoteCreated
 
+        repo.update_summaries(&note.id, Some("short"), Some("longer summary"))
+            .await
+            .unwrap();
+        let _ = rx.recv().await.unwrap(); // NoteUpdated
+
         repo.touch_accessed(&note.id).await.unwrap();
 
-        // No event should be in the channel.
+        // No event should be in the channel when summaries already exist.
         assert!(rx.try_recv().is_err());
     }
 
@@ -713,6 +718,81 @@ mod tests {
 
         let updated = repo.get(&note.id).await.unwrap().unwrap();
         assert_eq!(updated.access_count, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn touch_accessed_emits_missing_summary_signal_when_summaries_are_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, mut rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let note = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Needs Summary",
+                "body",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let _ = rx.recv().await.unwrap(); // NoteCreated
+
+        repo.touch_accessed(&note.id).await.unwrap();
+
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "note");
+        assert_eq!(envelope.action, "missing_summary");
+        assert_eq!(envelope.id.as_deref(), Some(note.id.as_str()));
+        assert_eq!(envelope.project_id.as_deref(), Some(project.id.as_str()));
+        assert_eq!(envelope.payload["id"].as_str(), Some(note.id.as_str()));
+        assert_eq!(
+            envelope.payload["project_id"].as_str(),
+            Some(project.id.as_str())
+        );
+        assert_eq!(envelope.payload["missing_abstract"].as_bool(), Some(true));
+        assert_eq!(envelope.payload["missing_overview"].as_bool(), Some(true));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_summaries_persists_summary_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, mut rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let note = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Summarize Me",
+                "body",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let _ = rx.recv().await.unwrap(); // NoteCreated
+
+        let updated = repo
+            .update_summaries(&note.id, Some("abstract"), Some("overview"))
+            .await
+            .unwrap();
+
+        assert_eq!(updated.abstract_.as_deref(), Some("abstract"));
+        assert_eq!(updated.overview.as_deref(), Some("overview"));
+
+        let persisted = repo.get_summary_state(&note.id).await.unwrap().unwrap();
+        assert_eq!(persisted.abstract_.as_deref(), Some("abstract"));
+        assert_eq!(persisted.overview.as_deref(), Some("overview"));
+
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.entity_type, "note");
+        assert_eq!(envelope.action, "updated");
     }
 
     // ── Wikilink graph tests ──────────────────────────────────────────────────
