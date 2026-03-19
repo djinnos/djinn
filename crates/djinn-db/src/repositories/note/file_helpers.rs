@@ -9,6 +9,8 @@ pub fn folder_for_type(note_type: &str) -> &'static str {
     match note_type {
         "adr" => "decisions",
         "pattern" => "patterns",
+        "case" => "cases",
+        "pitfall" => "pitfalls",
         "research" => "research",
         "requirement" => "requirements",
         "reference" => "reference",
@@ -162,6 +164,8 @@ pub(super) fn infer_note_type(permalink: &str) -> String {
     match folder {
         "decisions" => "adr",
         "patterns" => "pattern",
+        "cases" => "case",
+        "pitfalls" => "pitfall",
         "research" => "research",
         "requirements" => "requirement",
         "reference" => "reference",

@@ -2940,7 +2940,7 @@
             "type": "string"
           },
           "type": {
-            "description": "Note type: adr, pattern, research, requirement, reference, design,\nsession, persona, journey, design_spec, competitive, tech_spike,\nbrief (singleton), roadmap (singleton).",
+            "description": "Note type: adr, pattern, case, pitfall, research, requirement,\nreference, design, session, persona, journey, design_spec,\ncompetitive, tech_spike, brief (singleton), roadmap (singleton).",
             "type": "string"
           }
         },

@@ -310,6 +310,48 @@ mod memory_tools {
     }
 
     #[tokio::test]
+    async fn mcp_memory_write_and_move_accept_case_and_pitfall_types() {
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let app = create_test_app_with_db(db.clone());
+        let session_id = initialize_mcp_session(&app).await;
+
+        let created = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_write",
+            json!({
+                "project": project,
+                "title": "Recovered Incident",
+                "content": "body",
+                "type": "case"
+            }),
+        )
+        .await;
+
+        assert_eq!(created["note_type"], "case");
+        assert_eq!(created["folder"], "cases");
+        assert_eq!(created["permalink"], "cases/recovered-incident");
+
+        let moved = mcp_call_tool(
+            &app,
+            &session_id,
+            "memory_move",
+            json!({
+                "project": project,
+                "identifier": created["permalink"],
+                "type": "pitfall"
+            }),
+        )
+        .await;
+
+        assert_eq!(moved["note_type"], "pitfall");
+        assert_eq!(moved["folder"], "pitfalls");
+        assert_eq!(moved["permalink"], "pitfalls/recovered-incident");
+    }
+
+    #[tokio::test]
     async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
         let db = create_test_db();
         let (proj, _dir) = create_test_project_with_dir(&db).await;
@@ -907,6 +949,21 @@ mod memory_tools {
         assert_eq!(p.content, "C");
         assert_eq!(p.note_type, "adr");
         assert!(p.tags.is_none());
+    }
+
+    #[test]
+    fn write_and_move_params_accept_mergeable_case_and_pitfall_types() {
+        let write: WriteParams = serde_json::from_value(
+            serde_json::json!({"project":"/tmp/p","title":"T","content":"C","type":"case"}),
+        )
+        .unwrap();
+        assert_eq!(write.note_type, "case");
+
+        let moved: MoveParams = serde_json::from_value(
+            serde_json::json!({"project":"/tmp/p","identifier":"a","type":"pitfall"}),
+        )
+        .unwrap();
+        assert_eq!(moved.note_type, "pitfall");
     }
 
     #[test]
