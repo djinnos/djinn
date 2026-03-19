@@ -203,6 +203,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
 
     emit_step(&task.id, "worktree_creating", serde_json::json!({}));
     emit_step(&task.id, "branch_creating", serde_json::json!({}));
+    let mut worktree_conflict_files: Option<Vec<String>> = None;
     let worktree_path = if let Some(paused) = paused {
         if let Some(paused_worktree_path) = paused.worktree_path.as_deref().map(PathBuf::from) {
             if paused.model_id != model_id {
@@ -213,7 +214,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     "Lifecycle: paused session model mismatch; starting fresh session"
                 );
                 match prepare_worktree(&project_dir, &task, &app_state).await {
-                    Ok(p) => p,
+                    Ok((p, cf)) => { worktree_conflict_files = cf; p },
                     Err(e) => {
                         tracing::error!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed; leaving task in_progress for stuck-detector recovery");
                         return_free!();
@@ -227,7 +228,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     "Lifecycle: paused session agent type mismatch; starting fresh session"
                 );
                 match prepare_worktree(&project_dir, &task, &app_state).await {
-                    Ok(p) => p,
+                    Ok((p, cf)) => { worktree_conflict_files = cf; p },
                     Err(e) => {
                         tracing::error!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed; leaving task in_progress for stuck-detector recovery");
                         return_free!();
@@ -251,7 +252,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     "Lifecycle: paused session worktree missing; finalized as interrupted"
                 );
                 match prepare_worktree(&project_dir, &task, &app_state).await {
-                    Ok(p) => p,
+                    Ok((p, cf)) => { worktree_conflict_files = cf; p },
                     Err(e) => {
                         tracing::error!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed; leaving task in_progress for stuck-detector recovery");
                         return_free!();
@@ -271,7 +272,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         } else {
             tracing::warn!(task_id = %task_id, session_record_id = %paused.id, "Lifecycle: paused session missing worktree; starting fresh session");
             match prepare_worktree(&project_dir, &task, &app_state).await {
-                Ok(p) => p,
+                Ok((p, cf)) => { worktree_conflict_files = cf; p },
                 Err(e) => {
                     tracing::error!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed; leaving task in_progress for stuck-detector recovery");
                     return_free!();
@@ -280,7 +281,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         }
     } else {
         match prepare_worktree(&project_dir, &task, &app_state).await {
-            Ok(p) => p,
+            Ok((p, cf)) => { worktree_conflict_files = cf; p },
             Err(e) => {
                 // Do NOT call transition_interrupted here — that would release
                 // the task back to "open" immediately, and return_free!() would
@@ -293,6 +294,23 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             }
         }
     };
+
+    // ── Persist worktree rebase conflict metadata if detected ────────────────
+    if let Some(ref conflict_files) = worktree_conflict_files {
+        let target_branch = default_target_branch(&task.project_id, &app_state).await;
+        let meta = serde_json::json!({
+            "conflicting_files": conflict_files,
+            "base_branch": format!("task/{}", task.short_id),
+            "merge_target": target_branch,
+        });
+        let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+        if let Err(e) = task_repo
+            .set_merge_conflict_metadata(&task.id, Some(&meta.to_string()))
+            .await
+        {
+            tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to persist merge conflict metadata");
+        }
+    }
 
     // ── Role-specific worktree preparation (e.g. conflict resolver merge) ────
     emit_step(

@@ -1134,7 +1134,6 @@ mod tests {
             CompactionContext::MidSession("worker".to_string()),
             CompactionContext::PreResume("worker".to_string()),
             CompactionContext::MidSession("task_reviewer".to_string()),
-            CompactionContext::MidSession("conflict_resolver".to_string()),
         ];
 
         for ctx in contexts {

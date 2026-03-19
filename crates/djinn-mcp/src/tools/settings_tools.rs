@@ -35,8 +35,6 @@ pub struct SettingsSetParams {
     pub model_priority_worker: Option<Vec<String>>,
     /// Ordered model list for the 'task_reviewer' role. Omit to keep current value.
     pub model_priority_task_reviewer: Option<Vec<String>>,
-    /// Ordered model list for the 'conflict_resolver' role. Omit to keep current value.
-    pub model_priority_conflict_resolver: Option<Vec<String>>,
     /// Ordered model list for the 'pm' role. Omit to keep current value.
     pub model_priority_pm: Option<Vec<String>>,
     /// Ordered model list for the 'groomer' role. Omit to keep current value.
@@ -149,12 +147,6 @@ impl DjinnMcpServer {
                 .model_priority
                 .get_or_insert_with(HashMap::new)
                 .insert("task_reviewer".to_string(), v);
-        }
-        if let Some(v) = p.model_priority_conflict_resolver {
-            settings
-                .model_priority
-                .get_or_insert_with(HashMap::new)
-                .insert("conflict_resolver".to_string(), v);
         }
         if let Some(v) = p.model_priority_pm {
             settings

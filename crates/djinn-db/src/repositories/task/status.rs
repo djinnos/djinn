@@ -15,6 +15,24 @@ impl TaskRepository {
         reason: Option<&str>,
         target_override: Option<TaskStatus>,
     ) -> Result<Task> {
+        self.transition_with_conflict_metadata(id, action, actor_id, actor_role, reason, target_override, None).await
+    }
+
+    /// Transition with optional conflict metadata.
+    ///
+    /// When `conflict_metadata` is provided and the transition sets the
+    /// `set_merge_conflict_metadata` flag, the JSON is persisted on the task.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn transition_with_conflict_metadata(
+        &self,
+        id: &str,
+        action: TransitionAction,
+        actor_id: &str,
+        actor_role: &str,
+        reason: Option<&str>,
+        target_override: Option<TaskStatus>,
+        conflict_metadata: Option<&str>,
+    ) -> Result<Task> {
         // Check reason requirement before touching the DB.
         if action.requires_reason() && reason.map(str::is_empty).unwrap_or(true) {
             return Err(Error::InvalidTransition(format!(
@@ -74,6 +92,22 @@ impl TaskRepository {
         let to_str = to_status.as_str();
         let from_str = from.as_str();
 
+        // Auto-extract conflict metadata from reason when the transition sets the flag
+        // but no explicit metadata was provided. The reason has the format:
+        // "merge_conflict:{JSON}" — extract the JSON portion.
+        let effective_conflict_metadata: Option<String> = if apply.set_merge_conflict_metadata {
+            conflict_metadata
+                .map(|s| s.to_owned())
+                .or_else(|| {
+                    reason_str
+                        .strip_prefix("merge_conflict:")
+                        .map(|s| s.to_owned())
+                })
+        } else {
+            None
+        };
+        let conflict_meta_ref = effective_conflict_metadata.as_deref();
+
         // Apply all side effects atomically.
         sqlx::query(
             "UPDATE tasks SET
@@ -91,6 +125,11 @@ impl TaskRepository {
                     WHEN ?9 THEN NULL
                     ELSE close_reason
                 END,
+                merge_conflict_metadata = CASE
+                    WHEN ?12 THEN NULL
+                    WHEN ?13 THEN ?14
+                    ELSE merge_conflict_metadata
+                END,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1",
         )
@@ -105,6 +144,9 @@ impl TaskRepository {
         .bind(apply.clear_close_reason)
         .bind(apply.reset_verification_failure)
         .bind(apply.increment_verification_failure)
+        .bind(apply.clear_merge_conflict_metadata)
+        .bind(apply.set_merge_conflict_metadata)
+        .bind(conflict_meta_ref)
         .execute(&mut *tx)
         .await?;
 

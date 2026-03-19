@@ -242,16 +242,21 @@ pub(crate) async fn conflict_context_for_dispatch(
     task_id: &str,
     app_state: &AgentContext,
 ) -> Option<MergeConflictMetadata> {
-    // Try the status_changed reason first (carries the full metadata).
+    // Fast path: check the task's persistent merge_conflict_metadata field.
+    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    if let Ok(Some(task)) = repo.get(task_id).await
+        && let Some(ref meta_json) = task.merge_conflict_metadata
+        && let Ok(meta) = serde_json::from_str(meta_json)
+    {
+        return Some(meta);
+    }
+    // Fallback: scan activity log for backward compat with tasks that
+    // existed before the merge_conflict_metadata column was added.
     if let Some(reason) = last_review_rejection_reason(task_id, app_state).await
         && let Some(meta) = parse_conflict_metadata(&reason)
     {
         return Some(meta);
     }
-    // Fallback: look for a merge_conflict activity event directly.
-    // This covers cases where the status_changed reason was lost or
-    // the rejection used a different prefix format.
-    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let activity = repo.list_activity(task_id).await.ok()?;
     activity
         .iter()

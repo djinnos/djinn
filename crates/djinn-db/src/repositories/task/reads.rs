@@ -10,7 +10,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
              FROM tasks WHERE project_id = ?1 ORDER BY priority, created_at",
         )
         .bind(project_id)
@@ -24,7 +24,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
              FROM tasks WHERE epic_id = ?1 ORDER BY priority, created_at",
         )
         .bind(epic_id)
@@ -38,7 +38,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
              FROM tasks WHERE status = ?1 ORDER BY priority, created_at",
         )
         .bind(status)
@@ -60,7 +60,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
              FROM tasks WHERE short_id = ?1",
         )
         .bind(short_id)
@@ -75,7 +75,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
              FROM tasks WHERE id = ?1 OR short_id = ?1",
         )
         .bind(id_or_short)
@@ -93,7 +93,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
              FROM tasks WHERE project_id = ?1 AND (id = ?2 OR short_id = ?2)",
         )
         .bind(project_id)
@@ -113,7 +113,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
              FROM tasks WHERE memory_refs LIKE ?1
              ORDER BY priority, created_at",
         )
@@ -133,7 +133,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
              FROM tasks
              WHERE project_id = ?1
                AND (status != 'closed' OR closed_at > datetime('now', '-1 hour'))
@@ -142,7 +142,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
              FROM tasks
              WHERE (status != 'closed' OR closed_at > datetime('now', '-1 hour'))
              ORDER BY priority, created_at"
@@ -195,10 +195,10 @@ impl TaskRepository {
                     issue_type, status, priority, owner, labels,
                     acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
                  )
                  ON CONFLICT(id) DO UPDATE SET
                     project_id          = excluded.project_id,
@@ -218,6 +218,7 @@ impl TaskRepository {
                     closed_at           = excluded.closed_at,
                     close_reason        = excluded.close_reason,
                     merge_commit_sha    = excluded.merge_commit_sha,
+                    merge_conflict_metadata = excluded.merge_conflict_metadata,
                     memory_refs         = excluded.memory_refs
                  WHERE excluded.updated_at > tasks.updated_at
                    AND NOT (tasks.status = 'closed' AND excluded.status != 'closed')",
@@ -243,6 +244,7 @@ impl TaskRepository {
             .bind(&task.closed_at)
             .bind(&task.close_reason)
             .bind(&task.merge_commit_sha)
+            .bind(&task.merge_conflict_metadata)
             .bind(&task.memory_refs)
             .execute(&mut *tx)
             .await;
@@ -347,10 +349,10 @@ impl TaskRepository {
                     issue_type, status, priority, owner, labels,
                     acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
                  )
                  ON CONFLICT(id) DO UPDATE SET
                     project_id          = excluded.project_id,
@@ -370,6 +372,7 @@ impl TaskRepository {
                     closed_at           = excluded.closed_at,
                     close_reason        = excluded.close_reason,
                     merge_commit_sha    = excluded.merge_commit_sha,
+                    merge_conflict_metadata = excluded.merge_conflict_metadata,
                     memory_refs         = excluded.memory_refs
                  WHERE excluded.updated_at > tasks.updated_at
                    AND NOT (tasks.status = 'closed' AND excluded.status != 'closed')",
@@ -395,6 +398,7 @@ impl TaskRepository {
             .bind(&task.closed_at)
             .bind(&task.close_reason)
             .bind(&task.merge_commit_sha)
+            .bind(&task.merge_conflict_metadata)
             .bind(&task.memory_refs)
             .execute(&mut **tx)
             .await;

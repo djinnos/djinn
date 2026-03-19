@@ -50,7 +50,7 @@ impl TaskRepository {
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.verification_failure_count,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.close_reason, t.merge_commit_sha, t.memory_refs
+                    t.close_reason, t.merge_commit_sha, t.merge_conflict_metadata, t.memory_refs
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -130,7 +130,7 @@ impl TaskRepository {
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.verification_failure_count,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.close_reason, t.merge_commit_sha, t.memory_refs
+                    t.close_reason, t.merge_commit_sha, t.merge_conflict_metadata, t.memory_refs
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -224,7 +224,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs,
+                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs,
                     (SELECT COUNT(*) FROM blockers b
                      JOIN tasks bt ON b.blocking_task_id = bt.id
                      WHERE b.task_id = tasks.id AND bt.status != 'closed') AS unresolved_blocker_count
@@ -426,7 +426,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, memory_refs
+                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
              FROM tasks
              WHERE status = 'in_progress'
                AND updated_at < datetime('now', '-{stale_hours} hours')"

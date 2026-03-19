@@ -146,11 +146,13 @@ async fn ensure_target_branch_ready(
     Ok(())
 }
 
+/// Returns `(worktree_path, conflicting_files)`.
+/// `conflicting_files` is `Some` when a resumed worktree sync hit merge conflicts.
 pub(crate) async fn prepare_worktree(
     project_dir: &Path,
     task: &djinn_core::models::Task,
     app_state: &AgentContext,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<(PathBuf, Option<Vec<String>>)> {
     let branch = format!("task/{}", task.short_id);
     let target_branch = default_target_branch(&task.project_id, app_state).await;
     let git = app_state
@@ -171,7 +173,7 @@ pub(crate) async fn prepare_worktree(
     // only nuked on task close/merge or when the PM calls
     // `task_delete_branch` (which invokes `teardown_worktree`).
     if resumed_worktree_exists {
-        try_rebase_existing_task_branch(
+        let conflict_files = try_rebase_existing_task_branch(
             project_dir,
             &branch,
             &target_branch,
@@ -182,9 +184,10 @@ pub(crate) async fn prepare_worktree(
         tracing::info!(
             task_id = %task.short_id,
             worktree = %stale_worktree_path.display(),
+            has_conflicts = conflict_files.is_some(),
             "Lifecycle: reusing existing worktree"
         );
-        return Ok(stale_worktree_path);
+        return Ok((stale_worktree_path, conflict_files));
     }
 
     // Clean up broken worktree remnants (dir exists but no .git file).
@@ -235,9 +238,11 @@ pub(crate) async fn prepare_worktree(
             .await;
     }
 
-    git.create_worktree(&task.short_id, &branch, false)
+    let path = git
+        .create_worktree(&task.short_id, &branch, false)
         .await
-        .map_err(|e| anyhow::anyhow!("create worktree: {e}"))
+        .map_err(|e| anyhow::anyhow!("create worktree: {e}"))?;
+    Ok((path, None))
 }
 
 /// Sync an existing task branch against the latest target branch.
@@ -248,18 +253,20 @@ pub(crate) async fn prepare_worktree(
 ///
 /// When `resumed_worktree_path` is None (fresh task), a temporary sync worktree
 /// is used and discarded after the sync.
+///
+/// Returns `Some(conflicting_files)` when a resumed worktree sync hits conflicts.
 pub(crate) async fn try_rebase_existing_task_branch(
     project_dir: &Path,
     branch: &str,
     target_branch: &str,
     resumed_worktree_path: Option<&Path>,
     app_state: &AgentContext,
-) {
+) -> Option<Vec<String>> {
     let git = match app_state.git_actor(project_dir).await {
         Ok(git) => git,
         Err(e) => {
             tracing::warn!(branch = %branch, error = %e, "failed to open git actor for branch sync");
-            return;
+            return None;
         }
     };
 
@@ -289,15 +296,14 @@ pub(crate) async fn try_rebase_existing_task_branch(
                 error = %e,
                 "failed to resolve upstream for branch sync"
             );
-            return;
+            return None;
         }
     };
 
     // If we're resuming a task with an existing worktree, sync directly in that
     // worktree so conflicts can be left in place for the worker to resolve.
     if let Some(resumed_path) = resumed_worktree_path {
-        sync_in_resumed_worktree(project_dir, branch, &upstream, resumed_path, app_state).await;
-        return;
+        return sync_in_resumed_worktree(project_dir, branch, &upstream, resumed_path, app_state).await;
     }
 
     // Fresh task: use a temporary sync worktree approach.
@@ -320,7 +326,7 @@ pub(crate) async fn try_rebase_existing_task_branch(
         .await
     {
         tracing::warn!(branch = %branch, error = %e, "failed to create sync worktree for branch rebase");
-        return;
+        return None;
     }
 
     let sync_git = match app_state.git_actor(&sync_worktree_path).await {
@@ -331,7 +337,7 @@ pub(crate) async fn try_rebase_existing_task_branch(
             if sync_worktree_path.exists() {
                 let _ = std::fs::remove_dir_all(&sync_worktree_path);
             }
-            return;
+            return None;
         }
     };
 
@@ -360,19 +366,23 @@ pub(crate) async fn try_rebase_existing_task_branch(
     if sync_worktree_path.exists() {
         let _ = std::fs::remove_dir_all(&sync_worktree_path);
     }
+    None
 }
 
 /// Sync a resumed task's worktree against the latest target branch.
 /// Performs the sync directly in the resumed worktree so conflicts are
 /// surfaced to the worker. On conflict, aborts the rebase but leaves
 /// conflict markers in place.
+///
+/// Returns `Some(conflicting_files)` when the merge leaves conflict markers,
+/// `None` on clean sync.
 async fn sync_in_resumed_worktree(
     _project_dir: &Path,
     branch: &str,
     upstream: &str,
     resumed_worktree_path: &Path,
     app_state: &AgentContext,
-) {
+) -> Option<Vec<String>> {
     // We only need the worktree git actor for resumed worktree sync
     let worktree_git = match app_state.git_actor(resumed_worktree_path).await {
         Ok(git) => git,
@@ -382,7 +392,7 @@ async fn sync_in_resumed_worktree(
                 error = %e,
                 "failed to open resumed worktree git actor for sync"
             );
-            return;
+            return None;
         }
     };
 
@@ -441,6 +451,7 @@ async fn sync_in_resumed_worktree(
                 upstream = %upstream,
                 "rebased resumed task branch in worktree"
             );
+            None
         }
         Err(GitError::CommandFailed { .. }) => {
             // Rebase failed with conflicts - abort but leave conflict markers
@@ -476,6 +487,27 @@ async fn sync_in_resumed_worktree(
                     "merge with conflict markers applied in resumed worktree"
                 );
             }
+
+            // Detect conflicting files via unmerged paths
+            match worktree_git
+                .run_command(vec![
+                    "diff".into(),
+                    "--name-only".into(),
+                    "--diff-filter=U".into(),
+                ])
+                .await
+            {
+                Ok(out) => {
+                    let files: Vec<String> = out
+                        .stdout
+                        .lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    if files.is_empty() { None } else { Some(files) }
+                }
+                Err(_) => None,
+            }
         }
         Err(e) => {
             tracing::warn!(
@@ -484,6 +516,7 @@ async fn sync_in_resumed_worktree(
                 error = %e,
                 "failed to rebase resumed task branch"
             );
+            None
         }
     }
 }
@@ -712,7 +745,7 @@ mod tests {
             "prepare_worktree should succeed: {result:?}"
         );
 
-        let wt = result.unwrap();
+        let (wt, _conflicts) = result.unwrap();
         assert!(wt.join(".git").exists(), "worktree should have .git file");
     }
 }

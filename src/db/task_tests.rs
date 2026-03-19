@@ -1178,6 +1178,7 @@ fn make_peer_task(
             None
         },
         merge_commit_sha: None,
+        merge_conflict_metadata: None,
         memory_refs: "[]".to_string(),
         unresolved_blocker_count: 0,
     }
