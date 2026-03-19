@@ -26,6 +26,8 @@ mod writes;
 mod associations_tests;
 #[cfg(test)]
 mod build_context_tests;
+#[cfg(test)]
+mod writes_tests;
 
 // ── Router composition ────────────────────────────────────────────────────────
 

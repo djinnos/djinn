@@ -1,6 +1,27 @@
 use super::*;
 
 use crate::tools::memory_tools::summaries::NoteSummaryService;
+use djinn_db::folder_for_type;
+
+/// Decision result from deduplication analysis.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub(crate) enum DedupDecision {
+    /// No duplicates found; proceed with normal write.
+    KeepBoth,
+    /// Skip writing; return the existing note instead.
+    Skip { existing_note_id: String },
+    /// Merge into an existing note; caller should update that note.
+    Merge { target_note_id: String },
+}
+
+/// Returns true for note types that can be merged during deduplication.
+///
+/// Mergeable types (pattern, case, pitfall) benefit from consolidation.
+/// Non-mergeable types get separate notes or supersedes relationships.
+pub(crate) fn is_mergeable(note_type: &str) -> bool {
+    matches!(note_type, "pattern" | "case" | "pitfall")
+}
 
 #[tool_router(router = memory_writes_router, vis = "pub(super)")]
 impl DjinnMcpServer {
@@ -52,6 +73,31 @@ impl DjinnMcpServer {
                     return Json(MemoryNoteResponse::from_note(&note));
                 }
                 Err(e) => return Json(MemoryNoteResponse::error(e.to_string())),
+            }
+        }
+
+        // Deduplication flow: only for mergeable note types
+        if is_mergeable(&p.note_type) {
+            let folder = folder_for_type(&p.note_type);
+            let search_text = format!("{} {}", p.title, p.content);
+
+            match repo
+                .dedup_candidates(&project_id, folder, &p.note_type, &search_text, 5)
+                .await
+            {
+                Ok(candidates) if !candidates.is_empty() => {
+                    // For now, without LLM integration, we fall back to keep_both
+                    // This preserves data and allows the feature to be built incrementally
+                    // TODO: Integrate with memory provider for skip|merge|keep_both decisions
+                    let _ = candidates; // Acknowledge we're checking but not yet acting on them
+                }
+                Ok(_) => {
+                    // No candidates above threshold; proceed with normal write
+                }
+                Err(e) => {
+                    // Log error but proceed (fail open to preserve data)
+                    eprintln!("dedup candidate lookup failed: {e}");
+                }
             }
         }
 
