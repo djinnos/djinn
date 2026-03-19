@@ -77,3 +77,41 @@ export async function deleteRole(id: string): Promise<void> {
     throw new Error(`Failed to delete role: ${text || response.status}`);
   }
 }
+
+// ── Metrics ───────────────────────────────────────────────────────────────────
+
+export interface RoleMetricPoint {
+  /** ISO date string, e.g. "2026-03-01" */
+  date: string;
+  success_rate: number;
+}
+
+export interface RoleMetrics {
+  role_id: string;
+  role_name: string;
+  base_role: BaseRole;
+  is_default: boolean;
+  task_count: number;
+  success_rate: number | null;
+  avg_token_usage: number | null;
+  avg_time_to_complete_seconds: number | null;
+  verification_pass_rate: number | null;
+  reopen_rate: number | null;
+  /** trend: positive = improving, negative = declining, null = not enough data */
+  success_rate_trend: number | null;
+  history: RoleMetricPoint[];
+}
+
+export interface RoleMetricsResponse {
+  metrics: RoleMetrics[];
+  generated_at: string;
+}
+
+export async function fetchRoleMetrics(): Promise<RoleMetricsResponse> {
+  const baseUrl = await getBaseUrl();
+  const response = await fetch(`${baseUrl}/roles/metrics`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch role metrics: ${response.status}`);
+  }
+  return response.json() as Promise<RoleMetricsResponse>;
+}
