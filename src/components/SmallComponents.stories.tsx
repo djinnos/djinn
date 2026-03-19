@@ -1,4 +1,3 @@
-import { fn } from "@storybook/test";
 import { ConfirmButton } from "./ConfirmButton";
 import { TaskIdLabel } from "./TaskIdLabel";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -134,7 +133,7 @@ export const ConfirmButtonDefault = {
     <ConfirmButton
       title="Delete task?"
       description="This action cannot be undone."
-      onConfirm={fn()}
+      onConfirm={() => {}}
     >
       Delete
     </ConfirmButton>
@@ -146,7 +145,7 @@ export const ConfirmButtonDisabled = {
     <ConfirmButton
       title="Delete task?"
       description="This action cannot be undone."
-      onConfirm={fn()}
+      onConfirm={() => {}}
       disabled
     >
       Delete
@@ -197,7 +196,7 @@ export const HealthCheckPassed = {
       open={true}
       projectName="DjinnOS Desktop"
       run={passedRun}
-      onClose={fn()}
+      onClose={() => {}}
     />
   ),
   parameters: { layout: "fullscreen" },
@@ -209,7 +208,7 @@ export const HealthCheckFailed = {
       open={true}
       projectName="DjinnOS Desktop"
       run={failedRun}
-      onClose={fn()}
+      onClose={() => {}}
     />
   ),
   parameters: { layout: "fullscreen" },
@@ -221,7 +220,7 @@ export const HealthCheckRunning = {
       open={true}
       projectName="DjinnOS Desktop"
       run={runningRun}
-      onClose={fn()}
+      onClose={() => {}}
     />
   ),
   parameters: { layout: "fullscreen" },
@@ -233,7 +232,7 @@ export const HealthCheckNoRun = {
       open={true}
       projectName="DjinnOS Desktop"
       run={null}
-      onClose={fn()}
+      onClose={() => {}}
     />
   ),
   parameters: { layout: "fullscreen" },

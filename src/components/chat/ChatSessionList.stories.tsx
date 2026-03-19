@@ -3,7 +3,6 @@ import { useEffect } from 'react';
 import { ChatSessionList } from './ChatSessionList';
 import { useChatStore } from '@/stores/chatStore';
 import { projectStore } from '@/stores/useProjectStore';
-import { fn } from '@storybook/test';
 
 const now = Date.now();
 const hoursAgo = (h: number) => now - h * 3_600_000;
@@ -60,8 +59,8 @@ const meta: Meta<typeof ChatSessionListSeeded> = {
   title: 'Chat/ChatSessionList',
   component: ChatSessionListSeeded,
   args: {
-    onSelectSession: fn(),
-    onNewChat: fn(),
+    onSelectSession: () => {},
+    onNewChat: () => {},
   },
   decorators: [
     (Story) => (

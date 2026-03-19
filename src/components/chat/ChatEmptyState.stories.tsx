@@ -1,12 +1,11 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { ChatEmptyState } from './ChatEmptyState';
-import { fn } from '@storybook/test';
 
 const meta: Meta<typeof ChatEmptyState> = {
   title: 'Chat/ChatEmptyState',
   component: ChatEmptyState,
   args: {
-    onPromptClick: fn(),
+    onPromptClick: () => {},
   },
   decorators: [
     (Story) => (

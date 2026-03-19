@@ -1,4 +1,4 @@
-import type { Meta, StoryObj } from "@storybook/react";
+import type { Meta, StoryObj } from "@storybook/react-vite";
 import { MemoryRouter } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -206,7 +206,6 @@ function ProjectsReplica({
 const ROLE_LABELS: Record<string, string> = {
   worker: "W",
   task_reviewer: "R",
-  conflict_resolver: "C",
   pm: "PM",
   groomer: "G",
 };
@@ -214,7 +213,6 @@ const ROLE_LABELS: Record<string, string> = {
 const ROLE_FULL_LABELS: Record<string, string> = {
   worker: "Worker",
   task_reviewer: "Task Reviewer",
-  conflict_resolver: "Conflict Resolver",
   pm: "PM",
   groomer: "Groomer",
 };
@@ -222,7 +220,6 @@ const ROLE_FULL_LABELS: Record<string, string> = {
 const ALL_ROLES = [
   "worker",
   "task_reviewer",
-  "conflict_resolver",
   "pm",
   "groomer",
 ];

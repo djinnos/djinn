@@ -1,8 +1,7 @@
-import type { Meta, StoryObj } from "@storybook/react";
+import type { Meta, StoryObj } from "@storybook/react-vite";
 import { AgentConfig } from "./AgentConfig";
 import type { UnifiedModelEntry } from "@/stores/settingsStore";
 import type { ProviderModel } from "@/api/settings";
-import { fn } from "@storybook/test";
 
 const availableModels: ProviderModel[] = [
   {
@@ -76,13 +75,13 @@ const threeModels: UnifiedModelEntry[] = [
 ];
 
 const actions = {
-  onAddModel: fn(),
-  onRemoveModel: fn(),
-  onReorderModels: fn(),
-  onToggleRole: fn(),
-  onUpdateMaxSessions: fn(),
-  onDismissError: fn(),
-  onSave: fn(),
+  onAddModel: () => {},
+  onRemoveModel: () => {},
+  onReorderModels: () => {},
+  onToggleRole: () => {},
+  onUpdateMaxSessions: () => {},
+  onDismissError: () => {},
+  onSave: () => {},
 };
 
 const meta: Meta<typeof AgentConfig> = {

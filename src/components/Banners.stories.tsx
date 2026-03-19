@@ -1,6 +1,5 @@
 import { useState } from "react";
-import type { Meta, StoryObj } from "@storybook/react";
-import { fn } from "@storybook/test";
+import type { Meta, StoryObj } from "@storybook/react-vite";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Alert02Icon,
@@ -324,7 +323,7 @@ export const InitialState: StoryObj = {
   render: () => (
     <GitRemoteSetupBanner
       projectPath="/home/user/projects/my-app"
-      onResolved={fn()}
+      onResolved={() => {}}
     />
   ),
 };

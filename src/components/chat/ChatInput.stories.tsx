@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { ChatInput } from './ChatInput';
-import { fn } from '@storybook/test';
 
 const modelNameById = new Map([
   ['claude-sonnet-4-6', 'Claude Sonnet 4.6'],
@@ -32,9 +31,9 @@ const meta: Meta<typeof ChatInput> = {
   title: 'Chat/ChatInput',
   component: ChatInput,
   args: {
-    onSend: fn(),
-    onStop: fn(),
-    onModelChange: fn(),
+    onSend: () => {},
+    onStop: () => {},
+    onModelChange: () => {},
     streaming: false,
     selectedModel: 'claude-sonnet-4-6',
     modelNameById,
