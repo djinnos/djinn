@@ -2366,7 +2366,7 @@ fn tool_task_create() -> RmcpTool {
 fn tool_task_update() -> RmcpTool {
     RmcpTool::new(
         "task_update".to_string(),
-        "Update task fields: title, description, design, priority, owner, labels, acceptance_criteria, memory_refs.".to_string(),
+        "Update task fields: title, description, design, priority, owner, labels, acceptance_criteria, memory_refs, blocked_by.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
@@ -2381,7 +2381,9 @@ fn tool_task_update() -> RmcpTool {
                 "labels_remove": {"type": "array", "items": {"type": "string"}},
                 "acceptance_criteria": {"type": "array", "items": {"type": "object"}},
                 "memory_refs_add": {"type": "array", "items": {"type": "string"}},
-                "memory_refs_remove": {"type": "array", "items": {"type": "string"}}
+                "memory_refs_remove": {"type": "array", "items": {"type": "string"}},
+                "blocked_by_add": {"type": "array", "items": {"type": "string"}, "description": "Task IDs to add as blockers"},
+                "blocked_by_remove": {"type": "array", "items": {"type": "string"}, "description": "Task IDs to remove as blockers"}
             }
         }),
     )
