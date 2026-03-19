@@ -65,6 +65,7 @@ landlock = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
+insta = { version = "1", features = ["json"] }
 
 [profile.dev]
 debug = "line-tables-only"
