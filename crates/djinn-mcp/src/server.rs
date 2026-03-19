@@ -26,9 +26,11 @@ use rmcp::{
 };
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::state::McpState;
+
+const HIGH_CONFIDENCE_THRESHOLD: f64 = 0.8;
 
 #[derive(Clone, Default)]
 pub(crate) struct CoAccessBatch {
@@ -54,6 +56,54 @@ impl CoAccessBatch {
                 if let Err(error) = repo.upsert_association(note_a, note_b, 1).await {
                     warn!(%error, note_a, note_b, "failed to flush co-access association");
                 }
+            }
+        }
+
+        let confidence_map = match repo.note_confidence_map(&self.note_ids).await {
+            Ok(map) => map,
+            Err(error) => {
+                warn!(%error, "failed to load note confidence map for co-access flush");
+                return;
+            }
+        };
+
+        let high_confidence_notes: HashSet<&str> = self
+            .note_ids
+            .iter()
+            .filter_map(|note_id| {
+                confidence_map
+                    .get(note_id)
+                    .copied()
+                    .filter(|confidence| *confidence > HIGH_CONFIDENCE_THRESHOLD)
+                    .map(|_| note_id.as_str())
+            })
+            .collect();
+
+        if high_confidence_notes.is_empty() {
+            return;
+        }
+
+        for note_id in self.note_ids.iter().filter(|note_id| {
+            confidence_map
+                .get(*note_id)
+                .is_some_and(|confidence| *confidence <= HIGH_CONFIDENCE_THRESHOLD)
+        }) {
+            let has_high_confidence_partner = self
+                .note_ids
+                .iter()
+                .any(|candidate| candidate != note_id && high_confidence_notes.contains(candidate.as_str()));
+
+            if !has_high_confidence_partner {
+                continue;
+            }
+
+            if let Err(error) = repo
+                .update_confidence(note_id, djinn_db::repositories::note::CO_ACCESS_HIGH)
+                .await
+            {
+                warn!(%error, note_id, "failed to update co-access confidence");
+            } else {
+                debug!(note_id, "applied high-confidence co-access boost");
             }
         }
     }
