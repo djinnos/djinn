@@ -785,7 +785,11 @@ pub(super) async fn run_reply_loop(
                                     let mut text = if value.is_string() {
                                         value.as_str().unwrap_or("").to_string()
                                     } else {
-                                        value.to_string()
+                                        // Pretty-print JSON so truncation and stash
+                                        // navigation have real line structure (not a
+                                        // single compact JSON line).
+                                        serde_json::to_string_pretty(&value)
+                                            .unwrap_or_else(|_| value.to_string())
                                     };
                                     if text.len() > MAX_TOOL_RESULT_CHARS {
                                         // Stash full output before truncating.
