@@ -23,6 +23,8 @@ pub struct TaskCreateParams {
     pub blocked_by: Option<Vec<String>>,
     /// Optional initial status. Allowed value: "open" (default).
     pub status: Option<String>,
+    /// Specialist role name to route this task (e.g. "rust-expert").
+    pub agent_type: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -52,6 +54,8 @@ pub struct TaskUpdateParams {
     pub blocked_by_add: Option<Vec<String>>,
     /// Task IDs (UUID or short_id) to remove as blockers of this task.
     pub blocked_by_remove: Option<Vec<String>>,
+    /// Specialist role name to assign (set None/"" to clear).
+    pub agent_type: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
@@ -303,6 +307,9 @@ pub struct TaskResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub merge_conflict_metadata: Option<AnyJson>,
+    /// Specialist role name assigned to this task, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
     /// Set when force_close unblocks downstream tasks that may need replacement blockers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
@@ -543,6 +550,9 @@ pub struct TaskListItem {
     #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub merge_conflict_metadata: Option<AnyJson>,
     pub unresolved_blocker_count: i64,
+    /// Specialist role name assigned to this task, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
     /// Active running session for this task, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_session: Option<ActiveSessionSummary>,
@@ -602,6 +612,7 @@ pub fn task_to_response(t: &Task) -> TaskResponse {
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .map(AnyJson),
+        agent_type: t.agent_type.clone(),
         warning: None,
     }
 }
@@ -636,6 +647,7 @@ pub fn task_to_list_item(
         merge_commit_sha: base.merge_commit_sha,
         merge_conflict_metadata: base.merge_conflict_metadata,
         unresolved_blocker_count: t.unresolved_blocker_count,
+        agent_type: t.agent_type.clone(),
         active_session,
         session_count,
     }

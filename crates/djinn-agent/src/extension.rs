@@ -154,6 +154,8 @@ struct TaskCreateParams {
     acceptance_criteria: Option<Vec<String>>,
     blocked_by: Option<Vec<String>>,
     memory_refs: Option<Vec<String>>,
+    /// Specialist role name to route this task (e.g. "rust-expert").
+    agent_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -589,6 +591,14 @@ async fn call_task_create(
                 let _ = repo.add_blocker(&task.id, &blocker_task.id).await;
             }
         }
+    }
+
+    // Set agent_type (specialist routing) if provided.
+    if let Some(ref agent_type) = p.agent_type
+        && !agent_type.is_empty()
+        && let Ok(t) = repo.update_agent_type(&task.id, Some(agent_type)).await
+    {
+        task = t;
     }
 
     Ok(task_to_value(&task))
@@ -1770,6 +1780,7 @@ fn task_to_value(t: &Task) -> serde_json::Value {
         "closed_at": t.closed_at,
         "close_reason": t.close_reason,
         "merge_commit_sha": t.merge_commit_sha,
+        "agent_type": t.agent_type,
     })
 }
 
@@ -2354,7 +2365,8 @@ fn tool_task_create() -> RmcpTool {
                 "status": {"type": "string", "description": "Optional initial status. Allowed: open (default)."},
                 "acceptance_criteria": {"type": "array", "items": {"type": "string"}, "description": "List of acceptance criteria strings."},
                 "blocked_by": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) that block this task."},
-                "memory_refs": {"type": "array", "items": {"type": "string"}, "description": "Memory note permalinks to attach."}
+                "memory_refs": {"type": "array", "items": {"type": "string"}, "description": "Memory note permalinks to attach."},
+                "agent_type": {"type": "string", "description": "Specialist role name to route this task (e.g. 'rust-expert'). Must match a configured AgentRole name for this project."}
             }
         }),
     )

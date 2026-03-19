@@ -199,7 +199,7 @@ impl DjinnMcpServer {
         let repo = AgentRoleRepository::new(self.state.db().clone(), self.state.event_bus());
 
         // Enforce name uniqueness within project.
-        match repo.get_by_name_in_project(&project_id, &name).await {
+        match repo.get_by_name_for_project(&project_id, &name).await {
             Ok(Some(_)) => {
                 return Json(RoleSingleResponse {
                     role: None,
@@ -381,7 +381,7 @@ impl DjinnMcpServer {
         };
 
         if new_name != role.name {
-            match repo.get_by_name_in_project(&project_id, &new_name).await {
+            match repo.get_by_name_for_project(&project_id, &new_name).await {
                 Ok(Some(_)) => {
                     return Json(RoleSingleResponse {
                         role: None,
@@ -630,7 +630,7 @@ async fn resolve_role(
         return Ok(Some(role));
     }
     // Fall back to name lookup within project.
-    repo.get_by_name_in_project(project_id, id_or_name)
+    repo.get_by_name_for_project(project_id, id_or_name)
         .await
         .map_err(|e| e.to_string())
 }

@@ -81,7 +81,7 @@ pub fn render_project_prompt(
     verification_commands: Option<&str>,
 ) -> String {
     let config = agent_type.role_config();
-    render_project_prompt_for_role(config, project_path, verification_commands)
+    render_project_prompt_for_role(config, project_path, verification_commands, None)
 }
 
 /// Role-based variant of `render_project_prompt` — does not require `AgentType`.
@@ -89,6 +89,7 @@ pub(crate) fn render_project_prompt_for_role(
     config: &RoleConfig,
     project_path: &str,
     verification_commands: Option<&str>,
+    specialist_roster: Option<&str>,
 ) -> String {
     if !config.is_project_scoped {
         panic!(
@@ -108,9 +109,19 @@ pub(crate) fn render_project_prompt_for_role(
             "## Project Verification Commands\n\nNo verification commands configured.\n".to_string()
         }
     };
+    let roster_section = match specialist_roster {
+        Some(roster) if !roster.trim().is_empty() => format!(
+            "## Available Specialists\n\n\
+             When creating tasks, set `agent_type` to a specialist name to route it to \
+             the best-fit role. Tasks without `agent_type` use the project default for \
+             their base role.\n\n{roster}\n"
+        ),
+        _ => String::new(),
+    };
     template
         .replace("{{project_path}}", project_path)
         .replace("{{verification_commands}}", &verification_section)
+        .replace("{{specialist_roster}}", &roster_section)
 }
 
 /// Render a system prompt for `agent_type` using data from `task` and `ctx`.
@@ -327,6 +338,7 @@ mod tests {
             merge_commit_sha: None,
             merge_conflict_metadata: None,
             memory_refs: "[]".into(),
+            agent_type: None,
             unresolved_blocker_count: 0,
         }
     }
