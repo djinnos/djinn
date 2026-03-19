@@ -20,6 +20,7 @@ pub struct TokenUsage {
 // ─── Stream events ────────────────────────────────────────────────────────────
 
 /// Events yielded by the streaming response from an LLM provider.
+#[derive(Debug)]
 pub enum StreamEvent {
     /// A content delta (text token or complete tool use block).
     Delta(ContentBlock),

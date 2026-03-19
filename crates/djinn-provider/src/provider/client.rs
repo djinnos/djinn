@@ -29,7 +29,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// If the provider stops sending data for this long, we consider the stream
 /// dead. This catches the "hung connection" scenario that the overall request
 /// timeout might not catch once headers have already been received.
-const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
+/// 300s matches OpenCode's default — reasoning models can be slow to start.
+const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// HTTP client for streaming SSE requests to LLM provider APIs.
 pub struct ApiClient {
@@ -309,8 +310,8 @@ mod tests {
     }
 
     #[test]
-    fn stream_chunk_timeout_is_2_minutes() {
-        assert_eq!(STREAM_CHUNK_TIMEOUT, Duration::from_secs(120));
+    fn stream_chunk_timeout_is_5_minutes() {
+        assert_eq!(STREAM_CHUNK_TIMEOUT, Duration::from_secs(300));
     }
 
     #[test]
