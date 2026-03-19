@@ -4,6 +4,7 @@ pub mod execution_tools;
 pub mod json_object;
 pub mod memory_tools;
 pub mod project_tools;
+pub mod role_tools;
 pub mod provider_tools;
 pub mod session_tools;
 pub mod settings_tools;

@@ -1,3 +1,4 @@
+use crate::models::AgentRole;
 use crate::models::Credential;
 use crate::models::CustomProvider;
 use crate::models::Epic;
@@ -216,6 +217,36 @@ impl DjinnEventEnvelope {
             payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(),
             id: Some(id.to_string()),
             project_id: None,
+            from_sync: false,
+        }
+    }
+    pub fn agent_role_created(role: &AgentRole) -> Self {
+        Self {
+            entity_type: "agent_role",
+            action: "created",
+            payload: serde_json::to_value(role).unwrap(),
+            id: None,
+            project_id: Some(role.project_id.clone()),
+            from_sync: false,
+        }
+    }
+    pub fn agent_role_updated(role: &AgentRole) -> Self {
+        Self {
+            entity_type: "agent_role",
+            action: "updated",
+            payload: serde_json::to_value(role).unwrap(),
+            id: None,
+            project_id: Some(role.project_id.clone()),
+            from_sync: false,
+        }
+    }
+    pub fn agent_role_deleted(id: &str, project_id: &str) -> Self {
+        Self {
+            entity_type: "agent_role",
+            action: "deleted",
+            payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(),
+            id: Some(id.to_string()),
+            project_id: Some(project_id.to_string()),
             from_sync: false,
         }
     }

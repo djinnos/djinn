@@ -155,7 +155,8 @@ impl DjinnMcpServer {
                 + Self::settings_tool_router()
                 + Self::session_tool_router()
                 + Self::task_tool_router()
-                + Self::epic_tool_router(),
+                + Self::epic_tool_router()
+                + Self::role_tool_router(),
         }
     }
 
