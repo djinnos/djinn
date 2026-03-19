@@ -2861,6 +2861,61 @@ mod tests {
         let normalized = resolve_path("./src/../Cargo.toml", base);
         assert_eq!(normalized, PathBuf::from("/tmp/worktree/Cargo.toml"));
     }
+
+    fn tool_names(schemas: &[serde_json::Value]) -> Vec<&str> {
+        schemas
+            .iter()
+            .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn snapshot_worker_tool_names() {
+        let schemas = tool_schemas_worker();
+        let names = tool_names(&schemas);
+        insta::assert_json_snapshot!("worker_tool_names", names);
+    }
+
+    #[test]
+    fn snapshot_worker_tool_schemas() {
+        insta::assert_json_snapshot!("worker_tool_schemas", tool_schemas_worker());
+    }
+
+    #[test]
+    fn snapshot_reviewer_tool_names() {
+        let schemas = tool_schemas_reviewer();
+        let names = tool_names(&schemas);
+        insta::assert_json_snapshot!("reviewer_tool_names", names);
+    }
+
+    #[test]
+    fn snapshot_reviewer_tool_schemas() {
+        insta::assert_json_snapshot!("reviewer_tool_schemas", tool_schemas_reviewer());
+    }
+
+    #[test]
+    fn snapshot_pm_tool_names() {
+        let schemas = tool_schemas_pm();
+        let names = tool_names(&schemas);
+        insta::assert_json_snapshot!("pm_tool_names", names);
+    }
+
+    #[test]
+    fn snapshot_pm_tool_schemas() {
+        insta::assert_json_snapshot!("pm_tool_schemas", tool_schemas_pm());
+    }
+
+    #[test]
+    fn snapshot_groomer_tool_names() {
+        let schemas = tool_schemas_groomer();
+        let names = tool_names(&schemas);
+        insta::assert_json_snapshot!("groomer_tool_names", names);
+    }
+
+    #[test]
+    fn snapshot_groomer_tool_schemas() {
+        insta::assert_json_snapshot!("groomer_tool_schemas", tool_schemas_groomer());
+    }
 }
 
 fn tool_apply_patch() -> RmcpTool {
