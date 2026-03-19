@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::tools::memory_tools::summaries::NoteSummaryService;
+
 #[tool_router(router = memory_writes_router, vis = "pub(super)")]
 impl DjinnMcpServer {
     /// Create or update a note. Type is required and determines storage folder.
@@ -45,7 +47,10 @@ impl DjinnMcpServer {
                 .update(&existing.id, &p.title, &p.content, &tags_json)
                 .await
             {
-                Ok(note) => return Json(MemoryNoteResponse::from_note(&note)),
+                Ok(note) => {
+                    self.schedule_summary_regeneration(&note.id);
+                    return Json(MemoryNoteResponse::from_note(&note));
+                }
                 Err(e) => return Json(MemoryNoteResponse::error(e.to_string())),
             }
         }
@@ -61,7 +66,10 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(note) => Json(MemoryNoteResponse::from_note(&note)),
+            Ok(note) => {
+                self.schedule_summary_regeneration(&note.id);
+                Json(MemoryNoteResponse::from_note(&note))
+            }
             Err(e) => Json(MemoryNoteResponse::error(e.to_string())),
         }
     }
@@ -139,7 +147,10 @@ impl DjinnMcpServer {
             .update(&note.id, &note.title, &new_content, &note.tags)
             .await
         {
-            Ok(updated) => Json(MemoryNoteResponse::from_note(&updated)),
+            Ok(updated) => {
+                self.schedule_summary_regeneration(&updated.id);
+                Json(MemoryNoteResponse::from_note(&updated))
+            }
             Err(e) => Json(MemoryNoteResponse::error(e.to_string())),
         }
     }
@@ -226,5 +237,19 @@ impl DjinnMcpServer {
             }
             Err(e) => Json(MemoryNoteResponse::error(e.to_string())),
         }
+    }
+}
+
+impl DjinnMcpServer {
+    fn schedule_summary_regeneration(&self, note_id: &str) {
+        let db = self.state.db().clone();
+        let note_id = note_id.to_string();
+        tokio::spawn(async move {
+            let service = NoteSummaryService::new(db.clone());
+            match djinn_provider::resolve_memory_provider(&db).await {
+                Ok(_) => service.generate_for_note_ids(&[note_id]).await,
+                Err(_) => service.apply_fallback_for_note_id(&note_id).await,
+            }
+        });
     }
 }

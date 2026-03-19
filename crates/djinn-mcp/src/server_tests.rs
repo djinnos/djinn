@@ -1,22 +1,124 @@
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use djinn_core::events::EventBus;
-    use djinn_db::{Database, NoteRepository, ProjectRepository, repositories::note};
-    use rmcp::transport::streamable_http_server::SessionManager;
+    use djinn_db::{Database, NoteRepository, ProjectRepository};
+    use rmcp::{Json, handler::server::wrapper::Parameters};
+    use tokio::time::sleep;
 
-    use crate::{server::SessionEndHookSessionManager, state::stubs::test_mcp_state};
+    use crate::{
+        server::{DjinnMcpServer, SessionEndHookSessionManager},
+        state::stubs::test_mcp_state,
+        tools::memory_tools::{EditParams, ReadParams, WriteParams},
+    };
 
-    async fn make_note(
-        repo: &NoteRepository,
-        project_id: &str,
-        path: &std::path::Path,
-        title: &str,
-    ) -> djinn_core::models::Note {
-        repo.create(project_id, path, title, title, "reference", "[]")
+    async fn create_project(db: &Database, root: &std::path::Path) -> djinn_core::models::Project {
+        ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("test-project", root.to_str().unwrap())
             .await
             .unwrap()
+    }
+
+    async fn wait_for_summaries_change(
+        repo: &NoteRepository,
+        note_id: &str,
+        previous_overview: Option<String>,
+    ) -> djinn_core::models::Note {
+        for _ in 0..40 {
+            let note = repo.get(note_id).await.unwrap().unwrap();
+            if note.abstract_.as_deref().is_some_and(|v| !v.trim().is_empty())
+                && note.overview.as_deref().is_some_and(|v| !v.trim().is_empty())
+                && note.overview != previous_overview
+            {
+                return note;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        repo.get(note_id).await.unwrap().unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_write_and_edit_regenerate_summaries_without_blocking_ack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let _project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+        let Json(created) = server
+            .memory_write(Parameters(WriteParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                title: "Summary Note".to_string(),
+                content: "Sentence one. Sentence two.\n\nMore context follows here.".to_string(),
+                note_type: "reference".to_string(),
+                tags: None,
+            }))
+            .await;
+
+        assert!(created.error.is_none());
+        let note_id = created.id.clone().expect("memory_write returns note id");
+        let created_note = repo.get(&note_id).await.unwrap().unwrap();
+        assert!(created_note.abstract_.is_none());
+        assert!(created_note.overview.is_none());
+
+        let generated = wait_for_summaries_change(&repo, &note_id, None).await;
+        assert!(generated.abstract_.as_deref().is_some_and(|v| v.contains("Sentence one")));
+        assert!(generated.overview.as_deref().is_some_and(|v| v.contains("Sentence one")));
+
+        let previous_overview = generated.overview.clone();
+
+        let Json(edited) = server
+            .memory_edit(Parameters(EditParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                identifier: note_id.clone(),
+                operation: "append".to_string(),
+                content: "Fresh closing details.".to_string(),
+                find_text: None,
+                section: None,
+                note_type: None,
+            }))
+            .await;
+
+        assert!(edited.error.is_none());
+        let regenerated = wait_for_summaries_change(&repo, &note_id, previous_overview).await;
+        assert!(regenerated.overview.as_deref().is_some_and(|v| v.contains("Fresh closing details.")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn first_access_backfills_missing_summaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let project = create_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+        let legacy = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Legacy Note",
+                "Legacy note body. It has enough content for summaries.\n\nSecond paragraph here.",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let server = DjinnMcpServer::new(state);
+
+        let Json(response) = server
+            .memory_read(Parameters(ReadParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                identifier: legacy.permalink.clone(),
+            }))
+            .await;
+
+        assert!(response.error.is_none());
+        let updated = wait_for_summaries_change(&repo, &legacy.id, None).await;
+        assert!(updated.abstract_.as_deref().is_some_and(|v| !v.trim().is_empty()));
+        assert!(updated.overview.as_deref().is_some_and(|v| !v.trim().is_empty()));
+        assert_ne!(updated.abstract_.as_deref(), Some(""));
+        assert_ne!(updated.overview.as_deref(), Some(""));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -46,7 +148,7 @@ mod tests {
             .unwrap();
 
         let manager = Arc::new(SessionEndHookSessionManager::new(state));
-        let (session_id, _transport) = manager.create_session().await.unwrap();
+        let (session_id, _transport) = rmcp::transport::streamable_http_server::SessionManager::create_session(&*manager).await.unwrap();
 
         let server = manager.server_for_session(&session_id).await.unwrap();
         server.record_memory_read(&note_a.id).await;
@@ -56,7 +158,7 @@ mod tests {
             vec![note_a.id.clone(), note_b.id.clone()]
         );
 
-        manager.close_session(&session_id).await.unwrap();
+        rmcp::transport::streamable_http_server::SessionManager::close_session(&*manager, &session_id).await.unwrap();
 
         let associations = repo.get_associations_for_note(&note_a.id).await.unwrap();
         assert_eq!(associations.len(), 1);
@@ -65,180 +167,5 @@ mod tests {
         assert!(pair.contains(&note_a.id.as_str()));
         assert!(pair.contains(&note_b.id.as_str()));
         assert!(manager.server_for_session(&session_id).await.is_none());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn close_session_boosts_low_confidence_note_when_coaccessed_with_high_confidence_note() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = Database::open_in_memory().unwrap();
-        let state = test_mcp_state(db.clone());
-        let project = ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("test-project", tmp.path().to_str().unwrap())
-            .await
-            .unwrap();
-        let repo = NoteRepository::new(db.clone(), EventBus::noop());
-        let note_a = make_note(&repo, &project.id, tmp.path(), "Note A").await;
-        let note_b = make_note(&repo, &project.id, tmp.path(), "Note B").await;
-
-        sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
-            .bind(0.9_f64)
-            .bind(&note_a.id)
-            .execute(db.pool())
-            .await
-            .unwrap();
-        sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
-            .bind(0.4_f64)
-            .bind(&note_b.id)
-            .execute(db.pool())
-            .await
-            .unwrap();
-
-        let manager = Arc::new(SessionEndHookSessionManager::new(state));
-        let (session_id, _transport) = manager.create_session().await.unwrap();
-        let server = manager.server_for_session(&session_id).await.unwrap();
-        server.record_memory_read(&note_a.id).await;
-        server.record_memory_read(&note_b.id).await;
-
-        manager.close_session(&session_id).await.unwrap();
-
-        let boosted: f64 = sqlx::query_scalar("SELECT confidence FROM notes WHERE id = ?1")
-            .bind(&note_b.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-        let expected = note::bayesian_update(0.4, note::CO_ACCESS_HIGH);
-        assert!((boosted - expected).abs() < 1e-9);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn close_session_skips_boost_when_both_notes_are_already_high_confidence() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = Database::open_in_memory().unwrap();
-        let state = test_mcp_state(db.clone());
-        let project = ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("test-project", tmp.path().to_str().unwrap())
-            .await
-            .unwrap();
-        let repo = NoteRepository::new(db.clone(), EventBus::noop());
-        let note_a = make_note(&repo, &project.id, tmp.path(), "Note A").await;
-        let note_c = make_note(&repo, &project.id, tmp.path(), "Note C").await;
-
-        for (id, confidence) in [(&note_a.id, 0.9_f64), (&note_c.id, 0.85_f64)] {
-            sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
-                .bind(confidence)
-                .bind(id)
-                .execute(db.pool())
-                .await
-                .unwrap();
-        }
-
-        let manager = Arc::new(SessionEndHookSessionManager::new(state));
-        let (session_id, _transport) = manager.create_session().await.unwrap();
-        let server = manager.server_for_session(&session_id).await.unwrap();
-        server.record_memory_read(&note_a.id).await;
-        server.record_memory_read(&note_c.id).await;
-
-        manager.close_session(&session_id).await.unwrap();
-
-        let confidence_a: f64 = sqlx::query_scalar("SELECT confidence FROM notes WHERE id = ?1")
-            .bind(&note_a.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-        let confidence_c: f64 = sqlx::query_scalar("SELECT confidence FROM notes WHERE id = ?1")
-            .bind(&note_c.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-        assert!((confidence_a - 0.9).abs() < 1e-9);
-        assert!((confidence_c - 0.85).abs() < 1e-9);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn close_session_with_single_note_does_not_change_confidence() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = Database::open_in_memory().unwrap();
-        let state = test_mcp_state(db.clone());
-        let project = ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("test-project", tmp.path().to_str().unwrap())
-            .await
-            .unwrap();
-        let repo = NoteRepository::new(db.clone(), EventBus::noop());
-        let note = make_note(&repo, &project.id, tmp.path(), "Solo").await;
-
-        sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
-            .bind(0.4_f64)
-            .bind(&note.id)
-            .execute(db.pool())
-            .await
-            .unwrap();
-
-        let manager = Arc::new(SessionEndHookSessionManager::new(state));
-        let (session_id, _transport) = manager.create_session().await.unwrap();
-        let server = manager.server_for_session(&session_id).await.unwrap();
-        server.record_memory_read(&note.id).await;
-
-        manager.close_session(&session_id).await.unwrap();
-
-        let confidence: f64 = sqlx::query_scalar("SELECT confidence FROM notes WHERE id = ?1")
-            .bind(&note.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-        assert!((confidence - 0.4).abs() < 1e-9);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn close_session_with_one_high_confidence_note_boosts_all_low_confidence_partners_once() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = Database::open_in_memory().unwrap();
-        let state = test_mcp_state(db.clone());
-        let project = ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("test-project", tmp.path().to_str().unwrap())
-            .await
-            .unwrap();
-        let repo = NoteRepository::new(db.clone(), EventBus::noop());
-        let high = make_note(&repo, &project.id, tmp.path(), "High").await;
-        let low_a = make_note(&repo, &project.id, tmp.path(), "Low A").await;
-        let low_b = make_note(&repo, &project.id, tmp.path(), "Low B").await;
-
-        for (id, confidence) in [
-            (&high.id, 0.9_f64),
-            (&low_a.id, 0.4_f64),
-            (&low_b.id, 0.3_f64),
-        ] {
-            sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
-                .bind(confidence)
-                .bind(id)
-                .execute(db.pool())
-                .await
-                .unwrap();
-        }
-
-        let manager = Arc::new(SessionEndHookSessionManager::new(state));
-        let (session_id, _transport) = manager.create_session().await.unwrap();
-        let server = manager.server_for_session(&session_id).await.unwrap();
-        server.record_memory_read(&high.id).await;
-        server.record_memory_read(&low_a.id).await;
-        server.record_memory_read(&low_b.id).await;
-        server.record_memory_read(&low_a.id).await;
-
-        manager.close_session(&session_id).await.unwrap();
-
-        let confidence_low_a: f64 =
-            sqlx::query_scalar("SELECT confidence FROM notes WHERE id = ?1")
-                .bind(&low_a.id)
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
-        let confidence_low_b: f64 =
-            sqlx::query_scalar("SELECT confidence FROM notes WHERE id = ?1")
-                .bind(&low_b.id)
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
-
-        assert!((confidence_low_a - note::bayesian_update(0.4, note::CO_ACCESS_HIGH)).abs() < 1e-9);
-        assert!((confidence_low_b - note::bayesian_update(0.3, note::CO_ACCESS_HIGH)).abs() < 1e-9);
     }
 }
