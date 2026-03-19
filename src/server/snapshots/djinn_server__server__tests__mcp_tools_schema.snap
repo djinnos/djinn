@@ -4286,6 +4286,11 @@ expression: signatures
         "is_default": {
           "type": "boolean"
         },
+        "learned_prompt": {
+          "description": "Auto-improvement loop amendments. None if not yet set.",
+          "nullable": true,
+          "type": "string"
+        },
         "mcp_servers": {
           "items": {
             "$ref": "#/$defs/AnyJson"
@@ -4372,6 +4377,11 @@ expression: signatures
             },
             "is_default": {
               "type": "boolean"
+            },
+            "learned_prompt": {
+              "description": "Auto-improvement loop amendments. None if not yet set.",
+              "nullable": true,
+              "type": "string"
             },
             "mcp_servers": {
               "items": {
@@ -4506,6 +4516,11 @@ expression: signatures
         "is_default": {
           "type": "boolean"
         },
+        "learned_prompt": {
+          "description": "Auto-improvement loop amendments. None if not yet set.",
+          "nullable": true,
+          "type": "string"
+        },
         "mcp_servers": {
           "items": {
             "$ref": "#/$defs/AnyJson"
@@ -4550,12 +4565,22 @@ expression: signatures
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "clear_learned_prompt": {
+          "description": "Set to true to clear learned_prompt back to NULL. Takes precedence over learned_prompt.",
+          "nullable": true,
+          "type": "boolean"
+        },
         "description": {
           "nullable": true,
           "type": "string"
         },
         "id": {
           "description": "Role UUID or name.",
+          "type": "string"
+        },
+        "learned_prompt": {
+          "description": "Set a new learned_prompt value (auto-improvement loop only).",
+          "nullable": true,
           "type": "string"
         },
         "mcp_servers": {
@@ -4625,6 +4650,11 @@ expression: signatures
         },
         "is_default": {
           "type": "boolean"
+        },
+        "learned_prompt": {
+          "description": "Auto-improvement loop amendments. None if not yet set.",
+          "nullable": true,
+          "type": "string"
         },
         "mcp_servers": {
           "items": {

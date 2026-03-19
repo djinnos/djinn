@@ -27,6 +27,8 @@ pub struct AgentRoleModel {
     pub mcp_servers: Vec<AnyJson>,
     pub skills: Vec<AnyJson>,
     pub is_default: bool,
+    /// Auto-improvement loop amendments. None if not yet set.
+    pub learned_prompt: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -45,6 +47,7 @@ impl From<&AgentRole> for AgentRoleModel {
             mcp_servers: parse_json_array_any(&r.mcp_servers),
             skills: parse_json_array_any(&r.skills),
             is_default: r.is_default,
+            learned_prompt: r.learned_prompt.clone(),
             created_at: r.created_at.clone(),
             updated_at: r.updated_at.clone(),
         }
@@ -162,6 +165,10 @@ pub struct RoleUpdateParams {
     pub verification_command: Option<String>,
     pub mcp_servers: Option<Vec<AnyJson>>,
     pub skills: Option<Vec<AnyJson>>,
+    /// Set a new learned_prompt value (auto-improvement loop only).
+    pub learned_prompt: Option<String>,
+    /// Set to true to clear learned_prompt back to NULL. Takes precedence over learned_prompt.
+    pub clear_learned_prompt: Option<bool>,
 }
 
 // ── Tool implementations ──────────────────────────────────────────────────────
@@ -414,6 +421,14 @@ impl DjinnMcpServer {
             .as_ref()
             .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()))
             .unwrap_or_else(|| role.skills.clone());
+        // Resolve learned_prompt: clear wins over set; otherwise keep existing.
+        let learned_prompt_value: Option<&str> = if p.clear_learned_prompt.unwrap_or(false) {
+            None
+        } else if let Some(ref lp) = p.learned_prompt {
+            Some(lp.as_str())
+        } else {
+            role.learned_prompt.as_deref()
+        };
 
         match repo
             .update(
@@ -426,6 +441,7 @@ impl DjinnMcpServer {
                     verification_command,
                     mcp_servers: &mcp_servers_str,
                     skills: &skills_str,
+                    learned_prompt: learned_prompt_value,
                 },
             )
             .await
