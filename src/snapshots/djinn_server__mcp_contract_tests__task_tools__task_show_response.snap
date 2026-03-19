@@ -1,6 +1,5 @@
 ---
 source: src/mcp_contract_tests.rs
-assertion_line: 1473
 expression: ok
 ---
 {
@@ -25,7 +24,7 @@ expression: ok
   "reopen_count": 0,
   "session_count": 0,
   "short_id": "[SHORT_ID]",
-  "status": "backlog",
+  "status": "open",
   "title": "test-task",
   "updated_at": "[TIMESTAMP]",
   "verification_failure_count": 0

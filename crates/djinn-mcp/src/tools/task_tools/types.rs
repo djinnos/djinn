@@ -21,7 +21,7 @@ pub struct TaskCreateParams {
     pub memory_refs: Option<Vec<String>>,
     /// Task IDs (UUID or short_id) that block this task. Blockers are set atomically at creation.
     pub blocked_by: Option<Vec<String>>,
-    /// Optional initial status. Allowed values: "backlog" or "open".
+    /// Optional initial status. Allowed value: "open" (default).
     pub status: Option<String>,
 }
 
@@ -197,7 +197,7 @@ pub struct TaskTransitionParams {
     pub project: String,
     /// Task UUID or short_id.
     pub id: String,
-    /// Transition action: accept, start, submit_verification,
+    /// Transition action: start, submit_verification,
     /// verification_pass, verification_fail, release_verification,
     /// submit_task_review, task_review_start,
     /// task_review_reject, task_review_reject_conflict, task_review_approve,

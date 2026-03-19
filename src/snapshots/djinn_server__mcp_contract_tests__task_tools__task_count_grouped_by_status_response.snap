@@ -1,17 +1,16 @@
 ---
 source: src/mcp_contract_tests.rs
-assertion_line: 1709
 expression: grouped
 ---
 {
   "groups": [
     {
       "count": 1,
-      "key": "in_progress"
+      "key": "open"
     },
     {
       "count": 1,
-      "key": "backlog"
+      "key": "in_progress"
     }
   ]
 }

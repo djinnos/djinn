@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension.rs
-assertion_line: 2905
 expression: tool_schemas_pm()
 ---
 [
@@ -334,7 +333,7 @@ expression: tool_schemas_pm()
           "type": "integer"
         },
         "status": {
-          "description": "Optional initial status. Allowed: backlog or open.",
+          "description": "Optional initial status. Allowed: open (default).",
           "type": "string"
         },
         "title": {

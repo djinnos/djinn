@@ -6,7 +6,7 @@ expression: task_count_status
   "groups": [
     {
       "count": 1,
-      "key": "backlog"
+      "key": "open"
     }
   ]
 }

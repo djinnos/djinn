@@ -1478,7 +1478,7 @@ mod task_tools {
         let payload = mcp_call_tool(&app, &sid, "task_create", json!({"project": project.path, "epic_id": epic.id, "title": "Create task contract test"})).await;
         assert!(payload["id"].as_str().is_some());
         assert!(payload["short_id"].as_str().is_some());
-        assert_eq!(payload["status"], "backlog");
+        assert_eq!(payload["status"], "open");
         assert_eq!(payload["title"], "Create task contract test");
         assert_eq!(payload["epic_id"], epic.id);
 
@@ -1489,7 +1489,7 @@ mod task_tools {
             .unwrap()
             .unwrap();
         assert_eq!(created.title, "Create task contract test");
-        assert_eq!(created.status, "backlog");
+        assert_eq!(created.status, "open");
         assert_eq!(created.epic_id, Some(epic.id));
     }
 
@@ -1596,16 +1596,6 @@ mod task_tools {
             )
             .await
             .unwrap();
-        repo.transition(
-            &t1.id,
-            djinn_core::models::TransitionAction::Accept,
-            "a",
-            "user",
-            None,
-            None,
-        )
-        .await
-        .unwrap();
         repo.update(
             &t1.id,
             "alpha ready",
@@ -1709,11 +1699,11 @@ mod task_tools {
         let app = create_test_app_with_db(db.clone());
         let sid = initialize_mcp_session(&app).await;
 
-        let ok = mcp_call_tool(&app, &sid, "task_transition", json!({"project": project.path, "id": task.id, "action": "accept", "actor_id": "u1", "actor_role": "user"})).await;
-        assert_eq!(ok["status"], "open");
+        let ok = mcp_call_tool(&app, &sid, "task_transition", json!({"project": project.path, "id": task.id, "action": "start", "actor_id": "u1", "actor_role": "user"})).await;
+        assert_eq!(ok["status"], "in_progress");
 
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
-        assert_eq!(repo.get(&task.id).await.unwrap().unwrap().status, "open");
+        assert_eq!(repo.get(&task.id).await.unwrap().unwrap().status, "in_progress");
 
         let bad = mcp_call_tool(&app, &sid, "task_transition", json!({"project": project.path, "id": task.id, "action": "not_real", "actor_id": "u1", "actor_role": "user"})).await;
         assert!(bad["error"].as_str().is_some());
@@ -1726,16 +1716,6 @@ mod task_tools {
         let epic = create_test_epic(&db, &project.id).await;
         let t1 = create_test_task(&db, &project.id, &epic.id).await;
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
-        repo.transition(
-            &t1.id,
-            djinn_core::models::TransitionAction::Accept,
-            "u1",
-            "user",
-            None,
-            None,
-        )
-        .await
-        .unwrap();
         repo.transition(
             &t1.id,
             djinn_core::models::TransitionAction::Start,

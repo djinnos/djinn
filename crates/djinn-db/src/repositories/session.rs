@@ -399,7 +399,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                                 issue_type, priority, owner, status, continuation_count, memory_refs)
-             VALUES (?1, ?2, 'tsst', ?3, 'Task', '', '', 'task', 0, '', 'backlog', 0, '[]')",
+             VALUES (?1, ?2, 'tsst', ?3, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
         )
         .bind(&task_id)
         .bind(&epic.project_id)

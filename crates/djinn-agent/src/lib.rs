@@ -161,10 +161,6 @@ mod tests {
             AgentType::for_task_status("in_pm_intervention", false),
             AgentType::PM
         );
-        assert_eq!(
-            AgentType::for_task_status("backlog", false),
-            AgentType::Worker
-        );
     }
 
     #[test]

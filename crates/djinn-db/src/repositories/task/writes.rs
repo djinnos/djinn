@@ -54,7 +54,7 @@ impl TaskRepository {
             "INSERT INTO tasks
                 (id, project_id, short_id, epic_id, title, description, design,
                  issue_type, priority, owner, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, 'backlog'))",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, 'open'))",
         )
         .bind(&id)
         .bind(project_id)

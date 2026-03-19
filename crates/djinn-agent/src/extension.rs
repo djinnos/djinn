@@ -521,12 +521,9 @@ async fn call_task_create(
     let owner = p.owner.as_deref().unwrap_or("");
     let status = match p.status.as_deref() {
         None => None,
-        Some("backlog") => Some("backlog"),
         Some("open") => Some("open"),
         Some(other) => {
-            return Err(format!(
-                "invalid status: {other:?} (expected backlog or open)"
-            ));
+            return Err(format!("invalid status: {other:?} (expected open)"));
         }
     };
 
@@ -2354,7 +2351,7 @@ fn tool_task_create() -> RmcpTool {
                 "design": {"type": "string"},
                 "priority": {"type": "integer"},
                 "owner": {"type": "string"},
-                "status": {"type": "string", "description": "Optional initial status. Allowed: backlog or open."},
+                "status": {"type": "string", "description": "Optional initial status. Allowed: open (default)."},
                 "acceptance_criteria": {"type": "array", "items": {"type": "string"}, "description": "List of acceptance criteria strings."},
                 "blocked_by": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) that block this task."},
                 "memory_refs": {"type": "array", "items": {"type": "string"}, "description": "Memory note permalinks to attach."}

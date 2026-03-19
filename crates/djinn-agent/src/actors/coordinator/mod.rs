@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant as StdInstant};
 
 use tokio::sync::{broadcast, mpsc, watch};
-use tokio::time::{self, Instant, Interval};
+use tokio::time::{self, Interval};
 use tokio_util::sync::CancellationToken;
 
 use crate::actors::slot::{PoolError, SlotPoolHandle};
@@ -207,10 +207,6 @@ struct CoordinatorActor {
     dispatch_cooldowns: HashMap<String, StdInstant>,
     /// Shared tracker for in-flight verification background tasks.
     verification_tracker: VerificationTracker,
-    /// Per-project debounce deadline for backlog-triggered groomer dispatch.
-    backlog_debounce: HashMap<String, Instant>,
-    /// Projects with an active groomer session.
-    active_groomer_sessions: HashSet<String>,
     last_stale_sweep: StdInstant,
     /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
     prune_tick_counter: u32,
@@ -262,8 +258,6 @@ impl CoordinatorActor {
             last_dispatched: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             verification_tracker,
-            backlog_debounce: HashMap::new(),
-            active_groomer_sessions: HashSet::new(),
             last_stale_sweep: StdInstant::now(),
             prune_tick_counter: 0,
             dispatched: 0,
@@ -323,7 +317,6 @@ impl CoordinatorActor {
                 _ = self.tick.tick() => {
                     self.enforce_session_stall_timeout().await;
                     self.detect_and_recover_stuck_filtered(None).await;
-                    self.ensure_groomer_dispatch(None).await;
                     self.dispatch_ready_tasks(None).await;
                     if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
                         let app_state = crate::context::AgentContext {
@@ -376,11 +369,9 @@ impl CoordinatorActor {
                 // re-dispatched, fails again, frees the slot, triggers
                 // dispatch, etc.  The 30-second tick is sufficient for stuck
                 // recovery.
-                self.ensure_groomer_dispatch(None).await;
                 self.dispatch_ready_tasks(None).await;
             }
             CoordinatorMessage::TriggerProjectDispatch { project_id } => {
-                self.ensure_groomer_dispatch(Some(&project_id)).await;
                 self.dispatch_ready_tasks(Some(&project_id)).await;
             }
             CoordinatorMessage::Pause {
@@ -401,9 +392,6 @@ impl CoordinatorActor {
                     count = self.paused_projects.len(),
                     "CoordinatorActor: paused all projects"
                 );
-                // Always interrupt groomers — they are system-initiated background
-                // maintenance, not user work, so they should stop on any pause.
-                self.interrupt_groomers(None).await;
                 self.publish_status();
                 if interrupt_active && let Err(e) = self.pool.interrupt_all(&reason).await {
                     tracing::warn!(error = %e, "CoordinatorActor: failed to interrupt sessions on pause");
@@ -415,9 +403,6 @@ impl CoordinatorActor {
                 reason,
             } => {
                 self.paused_projects.insert(project_id.clone());
-                // Always interrupt groomers — they are system-initiated background
-                // maintenance, not user work, so they should stop on any pause.
-                self.interrupt_groomers(Some(&project_id)).await;
                 self.publish_status();
                 if interrupt_active
                     && let Err(e) = self.pool.interrupt_project(&project_id, &reason).await
@@ -434,7 +419,6 @@ impl CoordinatorActor {
                 self.paused_projects.clear();
                 tracing::info!("CoordinatorActor: resumed all projects");
                 self.detect_and_recover_stuck_filtered(None).await;
-                self.ensure_groomer_dispatch(None).await;
                 self.dispatch_ready_tasks(None).await;
                 self.publish_status();
             }
@@ -442,7 +426,6 @@ impl CoordinatorActor {
                 self.paused_projects.remove(&project_id);
                 self.detect_and_recover_stuck_filtered(Some(&project_id))
                     .await;
-                self.ensure_groomer_dispatch(Some(&project_id)).await;
                 self.dispatch_ready_tasks(Some(&project_id)).await;
                 self.publish_status();
             }
@@ -499,7 +482,6 @@ impl CoordinatorActor {
                 self.publish_status();
                 // If project just became healthy and dispatch is enabled, trigger a dispatch pass.
                 if healthy && self.is_project_dispatch_enabled(&project_id) {
-                    self.ensure_groomer_dispatch(Some(&project_id)).await;
                     self.dispatch_ready_tasks(Some(&project_id)).await;
                 }
             }
@@ -519,7 +501,6 @@ impl CoordinatorActor {
                 );
                 self.events = self.events_tx.subscribe();
                 self.detect_and_recover_stuck_filtered(None).await;
-                self.ensure_groomer_dispatch(None).await;
                 self.dispatch_ready_tasks(None).await;
             }
             Err(broadcast::error::RecvError::Closed) => {
@@ -563,9 +544,6 @@ impl CoordinatorActor {
                 else {
                     return;
                 };
-                if task.status == "backlog" {
-                    self.mark_backlog_event(&task.project_id);
-                }
                 if matches!(
                     task.status.as_str(),
                     "open" | "needs_task_review" | "needs_pm_intervention" | "closed"
@@ -575,25 +553,7 @@ impl CoordinatorActor {
                         status = %task.status,
                         "CoordinatorActor: ready-task event → dispatch pass"
                     );
-                    self.ensure_groomer_dispatch(Some(&task.project_id)).await;
                     self.dispatch_ready_tasks(Some(&task.project_id)).await;
-                }
-            }
-            ("session", "updated" | "completed" | "interrupted" | "failed") => {
-                let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
-                else {
-                    return;
-                };
-                if session.agent_type == "groomer"
-                    && matches!(
-                        session.status.as_str(),
-                        "completed" | "interrupted" | "failed"
-                    )
-                {
-                    self.active_groomer_sessions.remove(&session.project_id);
-                    if self.has_backlog_tasks(&session.project_id).await {
-                        let _ = self.dispatch_groomer_for_project(&session.project_id).await;
-                    }
                 }
             }
             _ => {}

@@ -1,6 +1,5 @@
 ---
 source: src/server/mod.rs
-assertion_line: 583
 expression: signatures
 ---
 [
@@ -5234,7 +5233,7 @@ expression: signatures
           "type": "string"
         },
         "status": {
-          "description": "Optional initial status. Allowed values: \"backlog\" or \"open\".",
+          "description": "Optional initial status. Allowed value: \"open\" (default).",
           "nullable": true,
           "type": "string"
         },
@@ -6086,7 +6085,7 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "action": {
-          "description": "Transition action: accept, start, submit_verification,\nverification_pass, verification_fail, release_verification,\nsubmit_task_review, task_review_start,\ntask_review_reject, task_review_reject_conflict, task_review_approve,\nreopen, close, release, release_task_review, force_close,\nuser_override.",
+          "description": "Transition action: start, submit_verification,\nverification_pass, verification_fail, release_verification,\nsubmit_task_review, task_review_start,\ntask_review_reject, task_review_reject_conflict, task_review_approve,\nreopen, close, release, release_task_review, force_close,\nuser_override.",
           "type": "string"
         },
         "actor_id": {
