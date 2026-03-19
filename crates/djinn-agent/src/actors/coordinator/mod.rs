@@ -21,10 +21,12 @@ use tokio_util::sync::CancellationToken;
 use crate::actors::slot::{PoolError, SlotPoolHandle};
 use crate::roles::RoleRegistry;
 use djinn_core::events::DjinnEventEnvelope;
+use djinn_core::models::parse_json_array;
 use djinn_db::Database;
 use djinn_db::GitSettingsRepository;
+use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
-use djinn_db::{ReadyQuery, TaskRepository};
+use djinn_db::{ActivityQuery, ReadyQuery, TaskRepository};
 use djinn_git::GitActorHandle;
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
@@ -51,6 +53,10 @@ mod health;
 /// Interval between stuck-detection passes (AGENT-08).
 const STUCK_INTERVAL: Duration = Duration::from_secs(30);
 const STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const TASK_OUTCOME_CONFIDENCE_ACTIVITY: &str = "task_outcome_confidence";
+const TASK_OUTCOME_CONFIDENCE_SIGNAL: f64 = 0.1;
+const TASK_OUTCOME_REOPEN_COUNT: &str = "reopen_count";
+const TASK_OUTCOME_FAILED_CLOSE: &str = "failed_closed";
 
 /// Cooldown before re-dispatching a task that failed lifecycle setup
 /// (e.g. missing credential).  Prevents hot dispatch loops.
@@ -524,6 +530,9 @@ impl CoordinatorActor {
 
     async fn handle_event(&mut self, envelope: DjinnEventEnvelope) {
         match (envelope.entity_type, envelope.action) {
+            ("activity", "logged") => {
+                self.handle_task_outcome_activity(&envelope).await;
+            }
             // A task became dispatch-ready for any role → check dispatch.
             // is_project_dispatch_enabled() handles global-pause + per-project
             // resume, so we don't bail early here — a project-resumed project
@@ -589,6 +598,155 @@ impl CoordinatorActor {
             }
             _ => {}
         }
+    }
+
+    async fn handle_task_outcome_activity(&mut self, envelope: &DjinnEventEnvelope) {
+        let Some(payload) = envelope.payload.as_object() else {
+            return;
+        };
+
+        let Some(task_id) = payload
+            .get("task_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|task_id| !task_id.is_empty())
+        else {
+            return;
+        };
+
+        let Some(action) = payload.get("action").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        if action != "status_changed" {
+            return;
+        }
+
+        let task_repo = self.task_repo();
+        let Ok(Some(task)) = task_repo.get(task_id).await else {
+            return;
+        };
+
+        if let Err(e) = self.maybe_apply_task_outcome_confidence(&task).await {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "failed to apply task outcome confidence penalty"
+            );
+        }
+    }
+
+    async fn maybe_apply_task_outcome_confidence(
+        &self,
+        task: &djinn_core::models::Task,
+    ) -> djinn_db::Result<()> {
+        if task.status == "closed" && task.close_reason.as_deref() == Some("failed")
+            && !self
+                .task_outcome_marker_exists(task, TASK_OUTCOME_FAILED_CLOSE)
+                .await?
+        {
+            self.apply_task_outcome_confidence_to_task_refs(task).await?;
+            self.record_task_outcome_marker(task, TASK_OUTCOME_FAILED_CLOSE)
+                .await?;
+        }
+
+        if task.status == "open" && task.reopen_count > 0
+            && !self
+                .task_outcome_marker_exists(task, TASK_OUTCOME_REOPEN_COUNT)
+                .await?
+        {
+            self.apply_task_outcome_confidence_to_task_refs(task).await?;
+            self.record_task_outcome_marker(task, TASK_OUTCOME_REOPEN_COUNT)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn task_outcome_marker_exists(
+        &self,
+        task: &djinn_core::models::Task,
+        kind: &str,
+    ) -> djinn_db::Result<bool> {
+        let task_repo = self.task_repo();
+        let entries = task_repo
+            .query_activity(ActivityQuery {
+                task_id: Some(task.id.clone()),
+                event_type: Some(TASK_OUTCOME_CONFIDENCE_ACTIVITY.to_string()),
+                actor_role: Some("system".to_string()),
+                project_id: None,
+                from_time: None,
+                to_time: None,
+                limit: 100,
+                offset: 0,
+            })
+            .await?;
+
+        let expected_reopen_count = task.reopen_count;
+        Ok(entries.iter().any(|entry| {
+            serde_json::from_str::<serde_json::Value>(&entry.payload)
+                .ok()
+                .and_then(|payload| {
+                    let marker_kind = payload.get("kind").and_then(serde_json::Value::as_str)?;
+                    if marker_kind != kind {
+                        return None;
+                    }
+                    payload
+                        .get("reopen_count")
+                        .and_then(serde_json::Value::as_i64)
+                        .filter(|value| *value == expected_reopen_count)
+                        .map(|_| ())
+                })
+                .is_some()
+        }))
+    }
+
+    async fn record_task_outcome_marker(
+        &self,
+        task: &djinn_core::models::Task,
+        kind: &str,
+    ) -> djinn_db::Result<()> {
+        let task_repo = self.task_repo();
+        let payload = serde_json::json!({
+            "kind": kind,
+            "reopen_count": task.reopen_count,
+        })
+        .to_string();
+
+        task_repo
+            .log_activity(
+                Some(&task.id),
+                "coordinator",
+                "system",
+                TASK_OUTCOME_CONFIDENCE_ACTIVITY,
+                &payload,
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn apply_task_outcome_confidence_to_task_refs(
+        &self,
+        task: &djinn_core::models::Task,
+    ) -> djinn_db::Result<()> {
+        let note_repo = NoteRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+
+        for permalink in parse_json_array(&task.memory_refs) {
+            let Some(note) = note_repo
+                .get_by_permalink(&task.project_id, &permalink)
+                .await?
+            else {
+                continue;
+            };
+
+            note_repo
+                .update_confidence(&note.id, TASK_OUTCOME_CONFIDENCE_SIGNAL)
+                .await?;
+        }
+
+        Ok(())
     }
 
     fn is_project_dispatch_enabled(&self, project_id: &str) -> bool {
@@ -886,6 +1044,8 @@ impl CoordinatorHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use tokio::sync::broadcast;
     use tokio_util::sync::CancellationToken;
 
@@ -895,6 +1055,7 @@ mod tests {
     use crate::test_helpers;
     use djinn_core::models::TransitionAction;
     use djinn_db::EpicRepository;
+    use djinn_db::NoteRepository;
     use djinn_db::TaskRepository;
     use djinn_provider::catalog::health::HealthTracker;
 
@@ -951,6 +1112,50 @@ mod tests {
             .create("Epic", "", "", "", "", None)
             .await
             .unwrap()
+    }
+
+    async fn create_task_with_note(
+        db: &Database,
+        tx: &broadcast::Sender<DjinnEventEnvelope>,
+        title: &str,
+    ) -> (djinn_core::models::Task, djinn_core::models::Note) {
+        let project = test_helpers::create_test_project(db).await;
+        std::fs::create_dir_all(Path::new(&project.path)).unwrap();
+        let epic = EpicRepository::new(db.clone(), crate::events::event_bus_for(tx))
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                },
+            )
+            .await
+            .unwrap();
+        let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(tx));
+        let note = note_repo
+            .create(&project.id, Path::new(&project.path), title, "body", "research", "[]")
+            .await
+            .unwrap();
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
+        let task = task_repo
+            .create(&epic.id, title, "", "", "task", 0, "", Some("open"))
+            .await
+            .unwrap();
+        let memory_refs = serde_json::to_string(&vec![note.permalink.clone()]).unwrap();
+        let task = task_repo
+            .update_memory_refs(&task.id, &memory_refs)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE notes SET confidence = 0.5 WHERE id = ?1")
+            .bind(&note.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        (task, note)
     }
 
     // ── Status ───────────────────────────────────────────────────────────────
@@ -1218,5 +1423,98 @@ mod tests {
             updated.status, "open",
             "released task should be back to open"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_closed_task_applies_failure_confidence_once() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let _handle = spawn_coordinator(&db, &tx);
+        let (task, note) = create_task_with_note(&db, &tx, "failed-close").await;
+        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        repo.set_status_with_reason(&task.id, "closed", Some("failed"))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let note_after = note_repo.get(&note.id).await.unwrap().unwrap();
+        assert!(note_after.confidence < 0.5);
+
+        let markers = repo
+            .query_activity(ActivityQuery {
+                task_id: Some(task.id.clone()),
+                event_type: Some(TASK_OUTCOME_CONFIDENCE_ACTIVITY.to_string()),
+                actor_role: Some("system".to_string()),
+                project_id: None,
+                from_time: None,
+                to_time: None,
+                limit: 20,
+                offset: 0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(markers.len(), 1);
+        let payload: serde_json::Value = serde_json::from_str(&markers[0].payload).unwrap();
+        assert_eq!(payload["kind"], TASK_OUTCOME_FAILED_CLOSE);
+        assert_eq!(payload["reopen_count"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopened_twice_applies_failure_once_per_reopen_count() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let _handle = spawn_coordinator(&db, &tx);
+        let (task, note) = create_task_with_note(&db, &tx, "reopen-twice").await;
+        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        repo.set_status_with_reason(&task.id, "closed", Some("failed"))
+            .await
+            .unwrap();
+        repo.set_status(&task.id, "open").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let reopened_once = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(reopened_once.reopen_count, 1);
+        let after_first = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
+        assert!(after_first < 0.5);
+
+        repo.set_status(&task.id, "open").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let after_duplicate = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
+        assert!((after_duplicate - after_first).abs() < 1e-9);
+
+        repo.set_status_with_reason(&task.id, "closed", Some("failed"))
+            .await
+            .unwrap();
+        repo.set_status(&task.id, "open").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let reopened_twice = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(reopened_twice.reopen_count, 2);
+        let after_second = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
+        assert!(after_second < after_first);
+
+        let markers = repo
+            .query_activity(ActivityQuery {
+                task_id: Some(task.id.clone()),
+                event_type: Some(TASK_OUTCOME_CONFIDENCE_ACTIVITY.to_string()),
+                actor_role: Some("system".to_string()),
+                project_id: None,
+                from_time: None,
+                to_time: None,
+                limit: 20,
+                offset: 0,
+            })
+            .await
+            .unwrap();
+        let reopen_markers: Vec<serde_json::Value> = markers
+            .into_iter()
+            .map(|entry| serde_json::from_str::<serde_json::Value>(&entry.payload).unwrap())
+            .filter(|payload: &serde_json::Value| payload["kind"] == TASK_OUTCOME_REOPEN_COUNT)
+            .collect();
+        assert_eq!(reopen_markers.len(), 2);
+        assert!(reopen_markers.iter().any(|payload| payload["reopen_count"] == 1));
+        assert!(reopen_markers.iter().any(|payload| payload["reopen_count"] == 2));
     }
 }

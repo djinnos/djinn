@@ -159,12 +159,17 @@ impl TaskRepository {
     /// Only used for tests and admin tooling. Production code should use `transition`.
     pub async fn set_status(&self, id: &str, status: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
+        let from_task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(self.db.pool())
+            .await?;
         let closed_at_sql = if status == "closed" {
             "closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),"
         } else {
             ""
         };
-        let reopen_inc: i64 = if status == "open" { 1 } else { 0 };
+        // Only increment reopen_count on actual reopen transitions (not open->open)
+        let reopen_inc: i64 = if status == "open" && from_task.status != "open" { 1 } else { 0 };
         sqlx::query(&format!(
             "UPDATE tasks SET status = ?2, {closed_at_sql}
                 reopen_count = reopen_count + ?3,
@@ -180,6 +185,92 @@ impl TaskRepository {
             .bind(id)
             .fetch_one(self.db.pool())
             .await?;
+
+        let status_payload = serde_json::json!({
+            "from_status": from_task.status,
+            "to_status": status,
+            "reopen_count": task.reopen_count,
+        })
+        .to_string();
+        let _ = self
+            .log_activity(
+                Some(id),
+                "coordinator",
+                "system",
+                "status_changed",
+                &status_payload,
+            )
+            .await;
+
+        self.events
+            .send(DjinnEventEnvelope::task_updated(&task, false));
+        Ok(task)
+    }
+
+    /// Raw status update with explicit close reason.
+    ///
+    /// This helper is intentionally narrow so tests can represent custom
+    /// terminal outcomes such as `close_reason = "failed"` without broad
+    /// state-machine refactors.
+    pub async fn set_status_with_reason(
+        &self,
+        id: &str,
+        status: &str,
+        close_reason: Option<&str>,
+    ) -> Result<Task> {
+        self.db.ensure_initialized().await?;
+
+        let from_task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(self.db.pool())
+            .await?;
+
+        // Only increment reopen_count on actual reopen transitions (not open->open)
+        let reopen_inc: i64 = if status == "open" && from_task.status != "open" { 1 } else { 0 };
+        sqlx::query(
+            "UPDATE tasks SET
+                status = ?2,
+                closed_at = CASE
+                    WHEN ?2 = 'closed' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHEN status = 'closed' THEN NULL
+                    ELSE closed_at
+                END,
+                reopen_count = reopen_count + ?3,
+                close_reason = CASE
+                    WHEN ?2 = 'closed' THEN ?4
+                    ELSE NULL
+                END,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(reopen_inc)
+        .bind(close_reason)
+        .execute(self.db.pool())
+        .await?;
+
+        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(self.db.pool())
+            .await?;
+
+        let status_payload = serde_json::json!({
+            "from_status": from_task.status,
+            "to_status": status,
+            "reason": close_reason,
+            "reopen_count": task.reopen_count,
+        })
+        .to_string();
+        let _ = self
+            .log_activity(
+                Some(id),
+                "coordinator",
+                "system",
+                "status_changed",
+                &status_payload,
+            )
+            .await;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
