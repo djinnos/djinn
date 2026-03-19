@@ -15,7 +15,7 @@ pub use repositories::{
     git_settings::GitSettingsRepository,
     models::ModelsRepository,
     note::{
-        NoteAssociationEntry, NoteRepository, UpdateNoteIndexParams, file_path_for,
+        NoteAssociationEntry, NoteDedupCandidate, NoteRepository, UpdateNoteIndexParams, file_path_for,
         folder_for_type, is_singleton, permalink_for, slugify,
     },
     project::{ProjectConfig, ProjectRepository},

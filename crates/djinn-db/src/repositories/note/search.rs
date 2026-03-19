@@ -27,6 +27,75 @@ fn sanitize_fts5_query(raw: &str) -> Option<String> {
 }
 
 impl NoteRepository {
+    /// Find same-folder, same-type near-duplicate candidates for a note before write.
+    ///
+    /// The lookup stays repository-local so callers do not need direct SQLx access.
+    /// Results are filtered to candidates whose normalized BM25 score exceeds -3.0.
+    pub async fn dedup_candidates(
+        &self,
+        project_id: &str,
+        folder: &str,
+        note_type: &str,
+        text: &str,
+        limit: usize,
+    ) -> Result<Vec<NoteDedupCandidate>> {
+        self.db.ensure_initialized().await?;
+
+        let Some(safe_query) = sanitize_fts5_query(text) else {
+            return Ok(vec![]);
+        };
+
+        let limit = limit as i64;
+        let rows = sqlx::query_as::<_, (
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            f64,
+        )>(
+            "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,
+                    -bm25(notes_fts, 3.0, 1.0, 2.0) as score
+             FROM notes_fts
+             JOIN notes n ON notes_fts.rowid = n.rowid
+             WHERE notes_fts MATCH ?1
+               AND n.project_id = ?2
+               AND n.folder = ?3
+               AND n.note_type = ?4
+               AND -bm25(notes_fts, 3.0, 1.0, 2.0) > ?5
+             ORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)
+             LIMIT ?6",
+        )
+        .bind(&safe_query)
+        .bind(project_id)
+        .bind(folder)
+        .bind(note_type)
+        .bind(-3.0_f64)
+        .bind(limit)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, permalink, title, folder, note_type, abstract_, overview, score)| {
+                    NoteDedupCandidate {
+                        id,
+                        permalink,
+                        title,
+                        folder,
+                        note_type,
+                        abstract_,
+                        overview,
+                        score,
+                    }
+                },
+            )
+            .collect())
+    }
+
     /// Full-text search with FTS candidate generation and RRF-fused ranking.
     ///
     /// `query` is a natural-language search string. It is sanitized into safe

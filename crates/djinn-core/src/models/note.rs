@@ -67,6 +67,19 @@ pub struct NoteSearchResult {
     pub snippet: String,
 }
 
+/// Compact near-duplicate candidate returned by pre-write dedup lookup.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NoteDedupCandidate {
+    pub id: String,
+    pub permalink: String,
+    pub title: String,
+    pub folder: String,
+    pub note_type: String,
+    pub abstract_: Option<String>,
+    pub overview: Option<String>,
+    pub score: f64,
+}
+
 /// Compact note summary (no full content) for list and recent queries.
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
