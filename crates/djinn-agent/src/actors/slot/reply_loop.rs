@@ -46,6 +46,20 @@ fn is_orphaned_tool_call_error(e: &anyhow::Error) -> bool {
         || msg.contains("no function call found")
 }
 
+/// Providers confirmed to handle `tool_choice: "required"` correctly,
+/// even with reasoning/thinking enabled.
+fn supports_tool_choice_required(model_id: &str) -> bool {
+    let provider = model_id
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    matches!(
+        provider.as_str(),
+        "openai" | "anthropic" | "chatgpt_codex" | "github_copilot"
+    )
+}
+
 fn serialize_message(msg: &Message) -> serde_json::Value {
     serde_json::to_value(msg).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "failed to serialize Message for SessionMessage event");
@@ -289,10 +303,15 @@ pub(super) async fn run_reply_loop(
             });
 
             // ── Start streaming from the provider ────────────────────────────
+            // Only force tool_choice=required for providers known to handle it
+            // well.  Many reasoning models (Kimi K2.5, GLM-4.7, Qwen 3.5)
+            // reject or mishandle "required" when thinking mode is active.
             let tool_choice = if tools.is_empty() {
                 None
-            } else {
+            } else if supports_tool_choice_required(model_id) {
                 Some(ToolChoice::Required)
+            } else {
+                Some(ToolChoice::Auto)
             };
             let stream_result = provider.stream(conversation, tools, tool_choice).await;
             let mut stream = match stream_result {
@@ -1815,10 +1834,10 @@ mod tests {
         assert!(output.finalize_payload.is_some(), "finalize payload set");
     }
 
-    /// ToolChoice::Required is passed on every turn that has tools.
+    /// ToolChoice::Required is passed for providers known to support it (e.g. OpenAI).
     /// Verified by recording the tool_choice values received by the mock provider.
     #[tokio::test]
-    async fn tool_choice_required_passed_on_every_turn_with_tools() {
+    async fn tool_choice_required_for_supported_providers() {
         use std::sync::Mutex;
 
         let tools = vec![dummy_tool_schema("submit_work")];
@@ -1897,7 +1916,7 @@ mod tests {
                 role_name: "worker",
                 finalize_tool_names: &["submit_work", "request_pm"],
                 context_window: 10_000,
-                model_id: "test/mock-model",
+                model_id: "openai/gpt-5.4",
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
@@ -1918,5 +1937,17 @@ mod tests {
                 choice
             );
         }
+    }
+
+    /// Unsupported providers (e.g. synthetic/Kimi) get ToolChoice::Auto
+    /// to avoid 400 errors from reasoning models that reject "required".
+    #[tokio::test]
+    async fn tool_choice_auto_for_unsupported_providers() {
+        assert!(!supports_tool_choice_required("synthetic/Kimi-K2.5"));
+        assert!(!supports_tool_choice_required("synthetic/GLM-4.7"));
+        assert!(!supports_tool_choice_required("deepinfra/some-model"));
+        assert!(supports_tool_choice_required("openai/gpt-5.4"));
+        assert!(supports_tool_choice_required("anthropic/claude-sonnet-4-5"));
+        assert!(supports_tool_choice_required("chatgpt_codex/codex-mini"));
     }
 }
