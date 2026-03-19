@@ -380,7 +380,7 @@ async fn call_llm_for_summary(
                 }
             }
             StreamEvent::Done => break,
-            StreamEvent::Usage(_) => {}
+            StreamEvent::Usage(_) | StreamEvent::Thinking(_) => {}
         }
     }
 

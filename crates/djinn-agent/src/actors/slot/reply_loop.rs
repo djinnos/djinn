@@ -412,6 +412,11 @@ pub(super) async fn run_reply_loop(
                             StreamEvent::Delta(ContentBlock::ToolResult { .. }) => {
                                 // Provider should not be streaming tool results; ignore.
                             }
+                            StreamEvent::Thinking(_) => {
+                                // Reasoning tokens (Kimi K2.5, DeepSeek-R1, GLM, etc.)
+                                // Activity timestamp already updated above — nothing else
+                                // to do; thinking tokens aren't stored in conversation.
+                            }
                             StreamEvent::Usage(usage) => {
                                 turn_tokens_in = usage.input;
                                 turn_tokens_out = usage.output;
