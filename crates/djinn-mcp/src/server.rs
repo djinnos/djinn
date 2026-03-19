@@ -25,10 +25,12 @@ use rmcp::{
     },
 };
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::state::McpState;
+use crate::tools::memory_tools::summaries::spawn_summary_backfill_worker;
 
 const HIGH_CONFIDENCE_THRESHOLD: f64 = 0.8;
 
@@ -118,6 +120,7 @@ impl CoAccessBatch {
 pub struct DjinnMcpServer {
     pub state: McpState,
     co_access_batch: Arc<RwLock<CoAccessBatch>>,
+    summary_backfill_tx: mpsc::Sender<String>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -137,9 +140,11 @@ impl DjinnMcpServer {
     }
 
     fn new_with_batch(state: McpState, co_access_batch: Arc<RwLock<CoAccessBatch>>) -> Self {
+        let summary_backfill_tx = spawn_summary_backfill_worker(state.db().clone());
         Self {
             state: state.clone(),
             co_access_batch,
+            summary_backfill_tx,
             tool_router: Self::system_tool_router()
                 + Self::project_tool_router()
                 + Self::memory_tool_router()
@@ -184,6 +189,12 @@ impl DjinnMcpServer {
     pub(crate) async fn flush_co_access_batch(&self) {
         let batch = self.co_access_batch.read().await.clone();
         batch.flush(&self.state).await;
+    }
+
+    pub(crate) async fn enqueue_missing_summary_backfill(&self, note_id: &str) {
+        if let Err(error) = self.summary_backfill_tx.try_send(note_id.to_string()) {
+            debug!(%error, note_id, "dropping missing-summary backfill request");
+        }
     }
 
     #[cfg(test)]

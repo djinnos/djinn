@@ -1,17 +1,22 @@
 // MCP-owned note summary helpers and worker implementation.
 
+use std::time::Duration;
+
 use djinn_core::events::EventBus;
 use djinn_db::{Database, NoteRepository};
 use djinn_provider::{
     CompletionRequest, complete, prompts::MEMORY_L0_ABSTRACT, prompts::MEMORY_L1_OVERVIEW,
     provider::LlmProvider, resolve_memory_provider,
 };
+use tokio::sync::mpsc;
 use tracing::warn;
 
 const LLM_MAX_TOKENS: u32 = 512;
 const L0_TOKEN_LIMIT: usize = 100;
 const L1_TOKEN_LIMIT: usize = 500;
 const SUMMARY_SYSTEM: &str = "You are an expert note summarizer.";
+pub(crate) const SUMMARY_BACKFILL_QUEUE_CAPACITY: usize = 32;
+pub(crate) const SUMMARY_BACKFILL_DELAY: Duration = Duration::from_millis(100);
 
 /// MCP-owned worker that generates and persists L0/L1 note summaries.
 pub struct NoteSummaryService {
@@ -43,6 +48,11 @@ impl NoteSummaryService {
             self.generate_for_note(&repo, note_id.as_str(), provider)
                 .await;
         }
+    }
+
+    pub async fn apply_fallback_for_note_id(&self, note_id: &str) {
+        let repo = NoteRepository::new(self.db.clone(), EventBus::noop());
+        self.apply_fallback_for_note(&repo, note_id).await;
     }
 
     async fn generate_for_note(
@@ -91,6 +101,46 @@ impl NoteSummaryService {
             );
         }
     }
+
+    async fn apply_fallback_for_note(&self, repo: &NoteRepository, note_id: &str) {
+        let note = match repo.get(note_id).await {
+            Ok(Some(note)) => note,
+            Ok(None) => {
+                warn!(note_id = %note_id, "note summary fallback: note not found");
+                return;
+            }
+            Err(error) => {
+                warn!(note_id = %note_id, error = %error, "note summary fallback: failed to load note");
+                return;
+            }
+        };
+
+        let abstract_summary = fallback_l0_summary(&note.content, L0_TOKEN_LIMIT);
+        let overview_summary = fallback_l1_summary(&note.content, L1_TOKEN_LIMIT);
+
+        if let Err(error) = repo
+            .update_summaries(
+                &note.id,
+                Some(abstract_summary.as_str()),
+                Some(overview_summary.as_str()),
+            )
+            .await
+        {
+            warn!(note_id = %note_id, error = %error, "note summary fallback: failed to persist summaries");
+        }
+    }
+}
+
+pub(crate) fn spawn_summary_backfill_worker(db: Database) -> mpsc::Sender<String> {
+    let (tx, mut rx) = mpsc::channel(SUMMARY_BACKFILL_QUEUE_CAPACITY);
+    tokio::spawn(async move {
+        let service = NoteSummaryService::new(db);
+        while let Some(note_id) = rx.recv().await {
+            service.generate_for_note_ids(&[note_id]).await;
+            tokio::time::sleep(SUMMARY_BACKFILL_DELAY).await;
+        }
+    });
+    tx
 }
 
 fn render_memory_prompt(template: &str, title: &str, content: &str) -> String {

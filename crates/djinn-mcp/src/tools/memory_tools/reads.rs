@@ -49,6 +49,9 @@ impl DjinnMcpServer {
 
         // Update last_accessed in the background (best-effort).
         let _ = repo.touch_accessed(&note.id).await;
+        if note.abstract_.is_none() || note.overview.is_none() {
+            self.enqueue_missing_summary_backfill(&note.id).await;
+        }
         self.record_memory_read(&note.id).await;
 
         Json(MemoryNoteResponse::from_note(&note))
