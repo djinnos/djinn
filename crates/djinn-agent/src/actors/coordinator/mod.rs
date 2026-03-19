@@ -1099,6 +1099,97 @@ mod tests {
 
     // ── Stuck detection ───────────────────────────────────────────────────────
 
+    /// Variant of `spawn_coordinator` that returns the verification tracker
+    /// so tests can register/deregister tasks to simulate background work.
+    fn spawn_coordinator_with_tracker(
+        db: &Database,
+        tx: &broadcast::Sender<DjinnEventEnvelope>,
+    ) -> (CoordinatorHandle, VerificationTracker) {
+        let cancel = CancellationToken::new();
+        let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+        let pool = SlotPoolHandle::spawn(
+            ctx,
+            cancel.clone(),
+            SlotPoolConfig {
+                models: vec![ModelSlotConfig {
+                    model_id: DEFAULT_MODEL_ID.to_owned(),
+                    max_slots: 2,
+                    roles: ["worker", "task_reviewer"]
+                        .into_iter()
+                        .map(ToOwned::to_owned)
+                        .collect(),
+                }],
+                role_priorities: HashMap::new(),
+            },
+        );
+        let catalog = CatalogService::new();
+        let health = HealthTracker::new();
+        let verification_tracker = VerificationTracker::default();
+        let tracker_clone = verification_tracker.clone();
+        let handle = CoordinatorHandle::spawn(CoordinatorDeps {
+            events_tx: tx.clone(),
+            cancel,
+            db: db.clone(),
+            pool,
+            catalog,
+            health,
+            role_registry: Arc::new(RoleRegistry::new()),
+            verification_tracker,
+        });
+        (handle, tracker_clone)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stuck_detection_skips_task_with_background_post_session_work() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let epic = make_epic(&db, tx.clone()).await;
+        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        // Create a task and manually put it in in_task_review (simulating a
+        // reviewer session that just ended — slot freed, but background merge
+        // is still running).
+        let task = repo
+            .create(&epic.id, "Reviewing", "", "", "task", 0, "", Some("open"))
+            .await
+            .unwrap();
+        repo.set_status(&task.id, "in_task_review").await.unwrap();
+
+        let (handle, tracker) = spawn_coordinator_with_tracker(&db, &tx);
+
+        // Register the task in the verification tracker (same as
+        // spawn_post_session_work does for real sessions).
+        tracker
+            .lock()
+            .unwrap()
+            .insert(task.id.clone());
+
+        // Trigger stuck scan — task should NOT be recovered because it has
+        // registered background work.
+        handle.trigger_stuck_scan().await.unwrap();
+        // Give the actor time to process.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let updated = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            updated.status, "in_task_review",
+            "task with background work should NOT be recovered"
+        );
+
+        // Now deregister — simulating background work completing.
+        tracker.lock().unwrap().remove(&task.id);
+
+        // Trigger stuck scan again — this time the task should be recovered.
+        handle.trigger_stuck_scan().await.unwrap();
+        handle.wait_for_status(|s| s.sessions_recovered >= 1).await;
+
+        let final_task = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            final_task.status, "needs_task_review",
+            "task without background work should be recovered to needs_task_review"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stuck_detection_releases_orphaned_in_progress_task() {
         let db = test_helpers::create_test_db();
