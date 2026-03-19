@@ -9,9 +9,13 @@ import { cn } from "@/lib/utils";
 import {
   type BaseRole,
   type CreateRoleRequest,
+  type LearnedPromptAmendment,
+  type LearnedPromptHistory,
   type Role,
+  clearLearnedPrompt,
   createRole,
   deleteRole,
+  fetchLearnedPromptHistory,
   fetchRoles,
   updateRole,
 } from "@/api/roles";
@@ -131,16 +135,208 @@ function RoleForm({ initial, fixedBaseRole, submitLabel, isBusy, onSubmit, onCan
   );
 }
 
+// ── Learned Prompt Section ────────────────────────────────────────────────────
+
+function formatMetricDelta(before: number, after: number): string {
+  const delta = after - before;
+  const sign = delta >= 0 ? "+" : "";
+  return `${sign}${delta.toFixed(2)}`;
+}
+
+function AmendmentEntry({ amendment }: { amendment: LearnedPromptAmendment }) {
+  const isKeep = amendment.action === "keep";
+  const metricKeys = Object.keys(amendment.metrics_before);
+
+  return (
+    <div className="border border-border rounded-md p-3 space-y-2 text-xs">
+      <div className="flex items-center gap-2">
+        <span
+          className={cn(
+            "shrink-0 rounded-full px-2 py-0.5 font-medium",
+            isKeep
+              ? "bg-green-500/15 text-green-700 dark:text-green-400"
+              : "bg-red-500/15 text-red-700 dark:text-red-400",
+          )}
+        >
+          {isKeep ? "kept" : "discarded"}
+        </span>
+        <span className="text-muted-foreground">
+          {new Date(amendment.created_at).toLocaleString()}
+        </span>
+      </div>
+
+      <pre className="whitespace-pre-wrap font-mono text-xs text-foreground bg-muted rounded px-2 py-1.5 leading-relaxed">
+        {amendment.proposed_text}
+      </pre>
+
+      {metricKeys.length > 0 && (
+        <div className="flex flex-wrap gap-3 text-muted-foreground">
+          {metricKeys.map((key) => {
+            const before = amendment.metrics_before[key] ?? 0;
+            const after = amendment.metrics_after[key] ?? 0;
+            const delta = after - before;
+            return (
+              <span key={key}>
+                {key}:{" "}
+                <span className="text-foreground font-mono">
+                  {before.toFixed(2)} → {after.toFixed(2)}
+                </span>{" "}
+                <span
+                  className={cn(
+                    "font-mono",
+                    delta > 0
+                      ? "text-green-600 dark:text-green-400"
+                      : delta < 0
+                        ? "text-red-600 dark:text-red-400"
+                        : "text-muted-foreground",
+                  )}
+                >
+                  ({formatMetricDelta(before, after)})
+                </span>
+              </span>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface LearnedPromptSectionProps {
+  role: Role;
+  onCleared: () => void;
+}
+
+function LearnedPromptSection({ role, onCleared }: LearnedPromptSectionProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [history, setHistory] = useState<LearnedPromptHistory | null>(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
+
+  const loadHistory = useCallback(async () => {
+    setLoadingHistory(true);
+    setHistoryError(null);
+    try {
+      const data = await fetchLearnedPromptHistory(role.id);
+      setHistory(data);
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : "Failed to load history");
+    } finally {
+      setLoadingHistory(false);
+    }
+  }, [role.id]);
+
+  useEffect(() => {
+    if (expanded && !history && !loadingHistory) {
+      void loadHistory();
+    }
+  }, [expanded, history, loadingHistory, loadHistory]);
+
+  const handleClear = async () => {
+    setClearing(true);
+    try {
+      await clearLearnedPrompt(role.id);
+      setHistory(null);
+      setExpanded(false);
+      onCleared();
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : "Failed to clear learned prompt");
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const hasLearnedPrompt = !!role.learned_prompt;
+
+  return (
+    <div className="border-t border-border pt-2 mt-2">
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <span
+            className={cn(
+              "rounded-full w-1.5 h-1.5 shrink-0",
+              hasLearnedPrompt ? "bg-blue-500" : "bg-muted-foreground/40",
+            )}
+          />
+          Learned prompt
+          {hasLearnedPrompt && (
+            <span className="text-blue-600 dark:text-blue-400">(active)</span>
+          )}
+          <span className="text-muted-foreground/60">{expanded ? "▴" : "▾"}</span>
+        </button>
+
+        {hasLearnedPrompt && (
+          <ConfirmButton
+            title="Clear learned prompt"
+            description={`Clear the learned prompt for "${role.name}"? The auto-improvement history will be preserved.`}
+            confirmLabel="Clear"
+            onConfirm={() => void handleClear()}
+            size="sm"
+            variant="ghost"
+            disabled={clearing}
+          >
+            {clearing ? "Clearing..." : "Clear"}
+          </ConfirmButton>
+        )}
+      </div>
+
+      {expanded && (
+        <div className="mt-3 space-y-3">
+          {/* Current learned prompt */}
+          <div>
+            <p className="text-xs font-medium text-muted-foreground mb-1">Current</p>
+            {role.learned_prompt ? (
+              <pre className="whitespace-pre-wrap font-mono text-xs text-foreground bg-muted rounded px-3 py-2 leading-relaxed">
+                {role.learned_prompt}
+              </pre>
+            ) : (
+              <p className="text-xs text-muted-foreground italic">No learned prompt yet.</p>
+            )}
+          </div>
+
+          {/* Amendment history */}
+          <div>
+            <p className="text-xs font-medium text-muted-foreground mb-1">Amendment history</p>
+            {loadingHistory && (
+              <p className="text-xs text-muted-foreground">Loading history...</p>
+            )}
+            {historyError && (
+              <p className="text-xs text-red-500">{historyError}</p>
+            )}
+            {history && !loadingHistory && (
+              history.amendments.length === 0 ? (
+                <p className="text-xs text-muted-foreground italic">No amendments yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {history.amendments.map((amendment) => (
+                    <AmendmentEntry key={amendment.id} amendment={amendment} />
+                  ))}
+                </div>
+              )
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Role Card ────────────────────────────────────────────────────────────────
 
 interface RoleCardProps {
   role: Role;
   onEdit: () => void;
   onDelete: () => void;
+  onRoleCleared: () => void;
   isDeleting: boolean;
 }
 
-function RoleCard({ role, onEdit, onDelete, isDeleting }: RoleCardProps) {
+function RoleCard({ role, onEdit, onDelete, onRoleCleared, isDeleting }: RoleCardProps) {
   return (
     <div className="rounded-lg border border-border bg-card p-4 space-y-2">
       <div className="flex items-start justify-between gap-3">
@@ -184,6 +380,8 @@ function RoleCard({ role, onEdit, onDelete, isDeleting }: RoleCardProps) {
           ))}
         </div>
       )}
+
+      <LearnedPromptSection role={role} onCleared={onRoleCleared} />
     </div>
   );
 }
@@ -344,6 +542,7 @@ export function AgentRoles() {
                       role={role}
                       onEdit={() => setEditingId(role.id)}
                       onDelete={() => void handleDelete(role.id)}
+                      onRoleCleared={() => void loadRoles()}
                       isDeleting={deletingId === role.id}
                     />
                   ),
