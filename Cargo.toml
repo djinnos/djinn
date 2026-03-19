@@ -64,6 +64,7 @@ landlock = "0.4"
 [dev-dependencies]
 insta = { version = "1", features = ["json", "redactions"] }
 proptest = "1"
+rstest = "0.24"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
