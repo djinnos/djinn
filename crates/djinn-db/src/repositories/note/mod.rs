@@ -24,6 +24,7 @@ mod search;
 
 pub use association::NoteAssociationEntry;
 pub use context::BuildContextResponse;
+pub use djinn_core::models::NoteDedupCandidate;
 pub use scoring::{
     CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, USER_CONFIRM, bayesian_update,
 };
@@ -451,6 +452,108 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].title, "tag-ranked note");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dedup_candidates_returns_empty_for_empty_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let results = repo
+            .dedup_candidates(&project.id, "decisions", "adr", "shared term", 10)
+            .await
+            .unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dedup_candidates_returns_no_matches_when_query_has_no_hits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Rust Database Choice",
+            "We chose rusqlite for local simplicity.",
+            "adr",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let results = repo
+            .dedup_candidates(&project.id, "decisions", "adr", "completely unrelated phrase", 10)
+            .await
+            .unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dedup_candidates_filter_by_folder_and_note_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let matching = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Repository Dedup Strategy",
+                "shared dedup token appears here",
+                "adr",
+                "[]",
+            )
+            .await
+            .unwrap();
+        repo.update_summaries(&matching.id, Some("matching abstract"), Some("matching overview"))
+            .await
+            .unwrap();
+
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Repository Dedup Research",
+            "shared dedup token appears here",
+            "research",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Design Dedup Strategy",
+            "shared dedup token appears here",
+            "design",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let results = repo
+            .dedup_candidates(&project.id, "decisions", "adr", "shared dedup token", 10)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, matching.id);
+        assert_eq!(results[0].folder, "decisions");
+        assert_eq!(results[0].note_type, "adr");
+        assert_eq!(results[0].abstract_.as_deref(), Some("matching abstract"));
+        assert_eq!(results[0].overview.as_deref(), Some("matching overview"));
+        assert!(results[0].score > -3.0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
