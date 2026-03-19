@@ -22,10 +22,17 @@ impl AgentRole for WorkerRole {
     fn on_complete<'a>(
         &'a self,
         _task_id: &'a str,
-        _output: &'a ParsedAgentOutput,
+        output: &'a ParsedAgentOutput,
         _app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
-        Box::pin(async { Some((TransitionAction::SubmitVerification, None)) })
+        Box::pin(async move {
+            // If the session ended via request_pm, the task already transitioned
+            // to needs_pm_intervention — no further transition needed.
+            if output.finalize_tool_name.as_deref() == Some("request_pm") {
+                return None;
+            }
+            Some((TransitionAction::SubmitVerification, None))
+        })
     }
 
     fn initial_user_message<'a>(
@@ -50,5 +57,5 @@ pub(crate) const WORKER_CONFIG: RoleConfig = RoleConfig {
     initial_message: crate::prompts::DEV_TEMPLATE,
     preserves_session: true,
     is_project_scoped: false,
-    finalize_tool_name: "submit_work",
+    finalize_tool_names: &["submit_work", "request_pm"],
 };

@@ -12,6 +12,9 @@ pub(crate) struct ParsedAgentOutput {
     /// Payload from the finalize tool call (e.g. `submit_work`, `submit_review`).
     /// Set when the reply loop exits via finalize-tool detection (ADR-036).
     pub finalize_payload: Option<serde_json::Value>,
+    /// Name of the finalize tool that was actually called (e.g. `"submit_work"`,
+    /// `"request_pm"`). Set alongside `finalize_payload`.
+    pub finalize_tool_name: Option<String>,
 }
 
 impl Default for ParsedAgentOutput {
@@ -27,6 +30,7 @@ impl ParsedAgentOutput {
             runtime_error: None,
             reviewer_feedback: None,
             finalize_payload: None,
+            finalize_tool_name: None,
         }
     }
 

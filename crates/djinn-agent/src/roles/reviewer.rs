@@ -31,6 +31,12 @@ impl AgentRole for TaskReviewerRole {
         app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
         Box::pin(async move {
+            // If the session ended via request_pm, the task already transitioned
+            // to needs_pm_intervention — no further transition needed.
+            if output.finalize_tool_name.as_deref() == Some("request_pm") {
+                return None;
+            }
+
             // ADR-036: use the explicit verdict from the finalize payload when present.
             // process_finalize_payload already updated AC state on the task before
             // on_complete is called, so the DB reflects the reviewer's verdicts.
@@ -205,7 +211,7 @@ pub(crate) const TASK_REVIEWER_CONFIG: RoleConfig = RoleConfig {
     initial_message: crate::prompts::TASK_REVIEWER_TEMPLATE,
     preserves_session: false,
     is_project_scoped: false,
-    finalize_tool_name: "submit_review",
+    finalize_tool_names: &["submit_review", "request_pm"],
 };
 
 #[cfg(test)]

@@ -129,8 +129,10 @@ pub(crate) struct ReplyLoopContext<'a> {
     pub project_path: &'a str,
     pub worktree_path: &'a Path,
     pub role_name: &'a str,
-    /// Tool name used by this role to signal session completion (ADR-036).
-    pub finalize_tool_name: &'a str,
+    /// Tool names that signal session completion (ADR-036).
+    /// The first entry is the primary finalize tool; additional entries are
+    /// alternate exit paths (e.g. `request_pm`).
+    pub finalize_tool_names: &'a [&'a str],
     pub context_window: i64,
     pub model_id: &'a str,
     pub cancel: &'a CancellationToken,
@@ -158,7 +160,7 @@ pub(super) async fn run_reply_loop(
         project_path,
         worktree_path,
         role_name,
-        finalize_tool_name,
+        finalize_tool_names,
         context_window,
         model_id,
         cancel,
@@ -630,22 +632,23 @@ pub(super) async fn run_reply_loop(
             // ── Finalize-tool detection (ADR-036) ────────────────────────────
             if let Some(finalize_call) = turn_tool_calls
                 .iter()
-                .find(|tc| matches!(tc, ContentBlock::ToolUse { name, .. } if name == finalize_tool_name))
+                .find(|tc| matches!(tc, ContentBlock::ToolUse { name, .. } if finalize_tool_names.contains(&name.as_str())))
             {
-                let payload = if let ContentBlock::ToolUse { input, .. } = finalize_call {
-                    input.clone()
+                let (matched_name, payload) = if let ContentBlock::ToolUse { name, input, .. } = finalize_call {
+                    (name.clone(), input.clone())
                 } else {
-                    serde_json::Value::Null
+                    (String::from("?"), serde_json::Value::Null)
                 };
                 tracing::info!(
                     task_id = %task_id,
                     agent_type = %role_name,
-                    finalize_tool = %finalize_tool_name,
+                    finalize_tool = %matched_name,
                     turns,
                     assistant_message_count,
                     "ReplyLoop: finalize tool called — session complete"
                 );
                 output.finalize_payload = Some(payload);
+                output.finalize_tool_name = Some(matched_name);
                 break;
             }
 
@@ -662,25 +665,26 @@ pub(super) async fn run_reply_loop(
                     );
                     break;
                 }
+                let finalize_list = finalize_tool_names.join("` or `");
                 consecutive_nudge_count += 1;
                 if consecutive_nudge_count >= MAX_NUDGE_ATTEMPTS {
                     return Err(anyhow::anyhow!(
                         "session failed: {} consecutive text-only responses without calling {}",
                         consecutive_nudge_count,
-                        finalize_tool_name
+                        finalize_list
                     ));
                 }
                 tracing::warn!(
                     task_id = %task_id,
                     agent_type = %role_name,
                     nudge = consecutive_nudge_count,
-                    finalize_tool = %finalize_tool_name,
+                    finalize_tools = %finalize_list,
                     "ReplyLoop: text-only turn without finalize — injecting nudge"
                 );
                 conversation.push(Message::user(format!(
-                    "You have not completed your session. You MUST call `{finalize_tool_name}` \
+                    "You have not completed your session. You MUST call `{finalize_list}` \
                      when you are done. If you still have work to do, use the appropriate tools \
-                     to continue. If you are done, call `{finalize_tool_name}` now."
+                     to continue. If you are done, call one of these tools now."
                 )));
                 continue;
             }
@@ -1212,7 +1216,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_name: "submit_work",
+                finalize_tool_names: &["submit_work", "request_pm"],
                 context_window,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1297,7 +1301,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_name: "submit_work",
+                finalize_tool_names: &["submit_work", "request_pm"],
                 context_window,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1414,7 +1418,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_name: "submit_work",
+                finalize_tool_names: &["submit_work", "request_pm"],
                 context_window,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1537,7 +1541,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_name: "submit_work",
+                finalize_tool_names: &["submit_work", "request_pm"],
                 context_window: 10_000,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1592,7 +1596,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_name: "submit_work",
+                finalize_tool_names: &["submit_work", "request_pm"],
                 context_window: 10_000,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1659,7 +1663,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_name: "submit_work",
+                finalize_tool_names: &["submit_work", "request_pm"],
                 context_window: 10_000,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1756,7 +1760,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_name: "submit_work",
+                finalize_tool_names: &["submit_work", "request_pm"],
                 context_window: 10_000,
                 model_id: "test/mock-model",
                 cancel: &cancel,

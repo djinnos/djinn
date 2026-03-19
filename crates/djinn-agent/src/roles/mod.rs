@@ -30,8 +30,10 @@ pub(crate) struct RoleConfig {
     pub(crate) initial_message: &'static str,
     pub(crate) preserves_session: bool,
     pub(crate) is_project_scoped: bool,
-    /// Tool name the agent must call to signal completion for this role.
-    pub(crate) finalize_tool_name: &'static str,
+    /// Tool names the agent can call to signal completion for this role.
+    /// The first entry is the primary finalize tool; additional entries are
+    /// alternate exit paths (e.g. `request_pm` for workers).
+    pub(crate) finalize_tool_names: &'static [&'static str],
 }
 
 pub(crate) fn config_for(agent_type: AgentType) -> &'static RoleConfig {
@@ -63,9 +65,9 @@ pub(crate) trait AgentRole: Send + Sync + 'static {
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
-    /// The MCP tool name this role uses to signal session completion.
+    /// The primary MCP tool name this role uses to signal session completion.
     fn finalize_tool_name(&self) -> &'static str {
-        self.config().finalize_tool_name
+        self.config().finalize_tool_names.first().copied().unwrap_or("")
     }
     /// Whether this role should build epic context for the prompt.
     fn needs_epic_context(&self) -> bool {
