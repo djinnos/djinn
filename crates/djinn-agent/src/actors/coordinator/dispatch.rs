@@ -377,6 +377,20 @@ impl CoordinatorActor {
                     continue;
                 }
 
+                // Non-worker roles free the slot immediately and run post-session
+                // work (merge, transition) in a background task. The verification
+                // tracker covers both verification pipelines AND post-session work.
+                let has_background_work = {
+                    let guard = self
+                        .verification_tracker
+                        .lock()
+                        .expect("verification tracker mutex poisoned");
+                    guard.contains(&task.id)
+                };
+                if has_background_work {
+                    continue;
+                }
+
                 let (release_action, release_to) = match task.status.as_str() {
                     "in_task_review" => (TransitionAction::ReleaseTaskReview, "needs_task_review"),
                     "in_pm_intervention" => (

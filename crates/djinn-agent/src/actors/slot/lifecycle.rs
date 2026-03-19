@@ -1113,6 +1113,12 @@ struct PostSessionParams {
 /// Spawn the post-session work as a background tokio task so the slot is freed
 /// immediately after the LLM session ends.
 fn spawn_post_session_work(params: PostSessionParams) {
+    // Register in the verification tracker so the coordinator's stuck-task
+    // recovery doesn't reset the task while post-session work (merge,
+    // transition) is still in flight.
+    params
+        .app_state
+        .register_verification(&params.task_id);
     tokio::spawn(async move {
         let PostSessionParams {
             task_id,
@@ -1212,6 +1218,10 @@ fn spawn_post_session_work(params: PostSessionParams) {
             tokens_out,
         )
         .await;
+
+        // Deregister from the verification tracker now that all post-session
+        // work (finalize payload, on_complete, transition, merge) is done.
+        app_state.deregister_verification(&task_id);
     });
 }
 
