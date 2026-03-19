@@ -1,7 +1,7 @@
 ---
-title: ADR-034: Agent Role Hierarchy — Architect Patrol, Scrum Master Rules, and Task Types
+title: "ADR-034: Agent Role Hierarchy — Architect Patrol, Task Types, and Escalation"
 type: adr
-tags: ["adr","architecture","agents","roles","architect","scrum-master","dispatch","escalation","task-types"]
+tags: ["adr","architecture","agents","roles","architect","dispatch","escalation","task-types"]
 ---
 
 # ADR-034: Agent Role Hierarchy — Architect Patrol, Task Types, and Escalation
@@ -42,6 +42,19 @@ ConflictResolver → handles merge conflicts
 ### Gastown Reference
 
 The Gastown project (reference implementation) uses a Deacon daemon that runs Doctor Dog health checks every 5 minutes, with tiered escalation to Mayor for strategic decisions. Key insight: cheap periodic patrol catches systemic issues before they compound.
+
+### What the Coordinator Already Handles
+
+The coordinator tick loop already enforces several mechanical rules that do not require LLM involvement:
+
+- **Session stall timeout** — kills sessions idle for 5+ minutes (`enforce_session_stall_timeout`)
+- **Stuck task detection and recovery** — detects and recovers tasks in stuck states (`detect_and_recover_stuck_filtered`)
+- **Stale worktree/branch cleanup** — removes worktrees for closed tasks, deletes orphaned `task/` branches (`sweep_stale_resources`)
+- **Project health checks** — runs verification in a temporary worktree to validate project builds (`validate_all_project_health`)
+- **Groomer dispatch** — ensures groomer is dispatched when needed (`ensure_groomer_dispatch`)
+- **Note association pruning** — hourly cleanup of low-weight Hebbian associations (`prune_note_associations`)
+
+These are deterministic, zero-LLM-cost rules. This ADR does not re-specify them. New coordinator rules introduced here (§4) are limited to what doesn't exist yet.
 
 ## Decision
 
@@ -108,18 +121,15 @@ The Architect is a **project-scoped agent dispatched every 5 minutes** to review
 
 **Session timeout:** 10 minutes.
 
-### 4. Scrum Master as Coordinator Rules (no LLM)
+### 4. New Coordinator Rules
 
-The Scrum Master is NOT an LLM agent — it is **deterministic coordinator logic** in the existing tick loop. Zero LLM cost.
+The following rules are **new additions** to the coordinator tick loop. Like existing coordinator rules, they are deterministic and cost zero LLM tokens.
 
-**Rules:**
-- **Session timeout (all agents):** Any session (Worker, Lead, Planner, Architect, Reviewer, Resolver) running > 5 minutes → kill session, reopen task. Workers included — 5 minutes is enough for any single attempt; verification is the quality gate, not session length.
-- **Token stall detection:** Session producing 0 tokens for > 2 minutes → kill session, reopen task. Catches provider failures (empty assistant turns) and hung connections before they waste the full 5-minute timeout.
-- **Verification step timeout:** Verification commands (clippy, test) running > 5 minutes → kill the command, count as verification failure. Prevents hung builds or infinite-loop tests from blocking the pipeline.
-- **Verifying orphan detection:** Task in `verifying` state with no active session for > 1 minute → re-trigger verification. Catches the case where a session ends without verification running (error, crash, provider failure).
-- 2nd `request_lead` escalation on same task → route to Architect instead of Lead
-- Spike/research task completed under an epic → create `decomposition` task for Planner (next batch)
-- Track throughput metrics per epic (tasks merged per hour, rolling window)
+- **2nd `request_lead` on same task → route to Architect.** Coordinator tracks `request_lead` count per task. On the second escalation, dispatch goes to Architect instead of Lead.
+- **Spike/research completion → Planner re-dispatch.** When a spike or research task closes under an epic, coordinator creates a `decomposition` task for the Planner to act on the findings.
+- **Batch completion → Planner re-dispatch.** When all non-decomposition/review tasks under an epic are closed and the epic is still open, coordinator creates a `decomposition` task for the Planner (next wave).
+- **Architect patrol scheduling.** Every 5 minutes, if no Architect session is running and there are open epics with active work, coordinator creates a `review` task and dispatches the Architect.
+- **Epic throughput tracking.** Track tasks merged per hour per epic (rolling window). Exposed to the Architect via board health data.
 
 ### 5. Expanded Task Types with Default Workflows
 
@@ -159,7 +169,7 @@ The Planner owns the **per-epic roadmap** — a living design note that evolves 
 
 **Subsequent decompositions (batch completed):**
 
-When the Scrum Master rules detect all tasks in the current batch are closed and the epic is still open, a new `decomposition` task is created and the Planner is re-dispatched.
+When the coordinator detects all tasks in the current batch are closed and the epic is still open, a new `decomposition` task is created and the Planner is re-dispatched.
 
 1. Planner reads the epic's roadmap note
 2. Calls `build_context` — now enriched with:
@@ -174,7 +184,7 @@ When the Scrum Master rules detect all tasks in the current batch are closed and
 4. Creates next batch of 3-5 worker tasks
 5. If Planner determines the epic's goal is met → closes the epic
 
-**Scrum Master rule for batch completion:**
+**Coordinator rule for batch completion:**
 ```
 All non-decomposition/review tasks under epic are closed
   AND epic is still open
@@ -216,17 +226,6 @@ Architect patrol (every 5min) → catches everything else
 
 The Architect is the escalation ceiling. If it can't resolve, it leaves a comment and the task stays for human review.
 
-### 9. Session Timeouts and Stall Detection
-
-| Timeout | Scope | Duration | Action |
-|---|---|---|---|
-| **Session hard timeout** | All agents | 5 minutes | Kill session, reopen task |
-| **Token stall** | All agents | 2 minutes no tokens | Kill session, reopen task |
-| **Verification step** | Verification commands | 5 minutes | Kill command, count as verification failure |
-| **Verifying orphan** | Tasks in `verifying` | 1 minute with no session | Re-trigger verification |
-
-All timeouts enforced by coordinator (Scrum Master rules). Workers get the same 5-minute cap as everyone else — keeping attempts short and cheap, relying on verification + escalation to catch problems rather than giving agents more rope.
-
 ## Consequences
 
 ### Positive
@@ -234,9 +233,8 @@ All timeouts enforced by coordinator (Scrum Master rules). Workers get the same 
 - Complex work validated via spikes before worker decomposition
 - All agent work visible on kanban board (no invisible sessions)
 - Lead escalation has a ceiling (Architect)
-- Session timeouts prevent runaway LLM costs
 - Incremental decomposition (5 tasks at a time) prevents 88-task explosions
-- Scrum Master rules are deterministic — zero LLM cost for mechanical decisions
+- New coordinator rules are deterministic — zero LLM cost for mechanical decisions
 - Task types make the board self-documenting (spikes, reviews, decompositions visible)
 - No backlog state — simpler lifecycle, no unvalidated task queue
 - Humans only create epics via chat — cleaner separation of concerns
@@ -261,7 +259,7 @@ All timeouts enforced by coordinator (Scrum Master rules). Workers get the same 
 5. Implement Architect role (RoleConfig, prompt, tool schema, simple lifecycle)
 6. Implement simple lifecycle path for non-worker task types (open → in_progress → closed)
 7. Add epic_created trigger → Planner dispatch with `decomposition` task creation
-8. Add Scrum Master rules to coordinator tick (10-min timeout, 2nd-escalation routing, throughput tracking)
+8. Add new coordinator rules: 2nd-escalation routing, batch/spike completion → Planner re-dispatch, Architect patrol scheduling, throughput tracking
 9. Add `request_architect` tool for Lead
 10. Update Planner prompt: create spikes for complex work, max 5 tasks per batch
 11. Update Lead prompt: 10-min awareness, `request_architect` escalation, clear notes for Architect
@@ -273,3 +271,4 @@ All timeouts enforced by coordinator (Scrum Master rules). Workers get the same 
 - [[ADR-022: Outcome-Based Session Validation and Agent Role Redesign]] — complementary
 - [[ADR-033: Incremental Crate Extraction]] — motivated this ADR (past failure analysis)
 - [[ADR-023: Cognitive Memory Architecture]] — wave/batch flow integrates with session reflection (§7), confidence scoring (§4), implicit associations (§3), and contradiction detection (§5)
+- [[ADR-038: Configurable Agent Roles]] — extends this ADR with data-driven roles, domain specialists, and auto-improvement
