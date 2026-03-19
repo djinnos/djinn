@@ -6,24 +6,13 @@ import { fn } from "@storybook/test";
 
 const availableModels: ProviderModel[] = [
   {
-    id: "claude-sonnet-4-20250514",
-    name: "Claude Sonnet 4",
+    id: "claude-sonnet-4-6",
+    name: "Claude Sonnet 4.6",
     provider_id: "anthropic",
     attachment: false,
     context_window: 200000,
     output_limit: 16384,
     pricing: { input_per_million: 3, output_per_million: 15, cache_read_per_million: 0.3, cache_write_per_million: 3.75 },
-    reasoning: false,
-    tool_call: true,
-  },
-  {
-    id: "claude-opus-4-20250514",
-    name: "Claude Opus 4",
-    provider_id: "anthropic",
-    attachment: false,
-    context_window: 200000,
-    output_limit: 16384,
-    pricing: { input_per_million: 15, output_per_million: 75, cache_read_per_million: 1.5, cache_write_per_million: 18.75 },
     reasoning: false,
     tool_call: true,
   },
@@ -35,6 +24,17 @@ const availableModels: ProviderModel[] = [
     context_window: 128000,
     output_limit: 16384,
     pricing: { input_per_million: 2.5, output_per_million: 10, cache_read_per_million: 1.25, cache_write_per_million: 0 },
+    reasoning: false,
+    tool_call: true,
+  },
+  {
+    id: "deepseek-coder",
+    name: "DeepSeek Coder",
+    provider_id: "deepseek",
+    attachment: false,
+    context_window: 128000,
+    output_limit: 8192,
+    pricing: { input_per_million: 0.14, output_per_million: 0.28, cache_read_per_million: 0, cache_write_per_million: 0 },
     reasoning: false,
     tool_call: true,
   },
@@ -53,23 +53,23 @@ const availableModels: ProviderModel[] = [
 
 const threeModels: UnifiedModelEntry[] = [
   {
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-4-6",
     provider: "anthropic",
-    enabledRoles: ["worker", "task_reviewer", "groomer"],
+    enabledRoles: ["worker", "task_reviewer", "pm"],
     max_concurrent: 3,
     current_active: 0,
   },
   {
     model: "gpt-4o",
     provider: "openai",
-    enabledRoles: ["worker", "conflict_resolver"],
+    enabledRoles: ["worker"],
     max_concurrent: 2,
     current_active: 0,
   },
   {
-    model: "claude-opus-4-20250514",
-    provider: "anthropic",
-    enabledRoles: ["pm", "task_reviewer", "conflict_resolver"],
+    model: "deepseek-coder",
+    provider: "deepseek",
+    enabledRoles: ["worker", "groomer"],
     max_concurrent: 1,
     current_active: 0,
   },
@@ -103,9 +103,10 @@ const meta: Meta<typeof AgentConfig> = {
 export default meta;
 type Story = StoryObj<typeof AgentConfig>;
 
-export const WithModels: Story = {
+export const Loading: Story = {
   args: {
-    models: threeModels,
+    isLoading: true,
+    models: [],
   },
 };
 
@@ -115,23 +116,24 @@ export const Empty: Story = {
   },
 };
 
-export const Loading: Story = {
+export const WithModels: Story = {
   args: {
-    isLoading: true,
-    models: [],
+    models: threeModels,
   },
 };
 
 export const WithError: Story = {
   args: {
     models: threeModels,
-    error: "Failed to load settings: connection to server timed out after 30s",
+    error: "Failed to save configuration",
+    hasUnsavedChanges: true,
   },
 };
 
-export const UnsavedChanges: Story = {
+export const Saving: Story = {
   args: {
     models: threeModels,
+    isSaving: true,
     hasUnsavedChanges: true,
   },
 };
