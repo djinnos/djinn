@@ -319,6 +319,8 @@ impl AppState {
             self.events().clone(),
             self.cancel().clone(),
         );
+
+        crate::task_confidence::spawn_task_outcome_listener(self.clone());
     }
 
     async fn interrupt_stale_sessions_on_startup(&self) {
