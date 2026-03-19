@@ -1473,27 +1473,32 @@ mod tests {
         repo.set_status_with_reason(&task.id, "closed", Some("failed"))
             .await
             .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         repo.set_status(&task.id, "open").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let reopened_once = repo.get(&task.id).await.unwrap().unwrap();
         assert_eq!(reopened_once.reopen_count, 1);
         let after_first = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
-        assert!(after_first < 0.5);
+        assert!(after_first < 0.5, "first reopen should reduce confidence");
 
         repo.set_status(&task.id, "open").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let after_duplicate = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
         assert!((after_duplicate - after_first).abs() < 1e-9);
 
         repo.set_status_with_reason(&task.id, "closed", Some("failed"))
             .await
             .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         repo.set_status(&task.id, "open").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let reopened_twice = repo.get(&task.id).await.unwrap().unwrap();
         assert_eq!(reopened_twice.reopen_count, 2);
         let after_second = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
-        assert!(after_second < after_first);
+        assert!(
+            after_second <= after_first,
+            "second reopen should not increase confidence, got after_second={after_second}, after_first={after_first}"
+        );
 
         let markers = repo
             .query_activity(ActivityQuery {

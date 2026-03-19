@@ -267,6 +267,7 @@ mod tests {
             closed_at: None,
             close_reason: None,
             merge_commit_sha: None,
+            merge_conflict_metadata: None,
             memory_refs: "[]".into(),
             unresolved_blocker_count: 0,
         }
