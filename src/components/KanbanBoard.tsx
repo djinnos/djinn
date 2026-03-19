@@ -42,6 +42,16 @@ import { Search01Icon } from "@hugeicons/core-free-icons";
 
 type ColumnKey = "open" | "in_flight" | "done";
 
+const ISSUE_TYPES = [
+  { value: "task", label: "Task" },
+  { value: "feature", label: "Feature" },
+  { value: "bug", label: "Bug" },
+  { value: "spike", label: "Spike" },
+  { value: "research", label: "Research" },
+  { value: "decomposition", label: "Breakdown" },
+  { value: "review", label: "Review" },
+] as const;
+
 const STATUS_COLUMNS: Array<{
   key: ColumnKey;
   label: string;
@@ -174,6 +184,9 @@ export function KanbanBoard({
       })
       .filter((p) => p >= 0 && p <= 3)
   );
+  const [issueTypeFilters, setIssueTypeFilters] = useState<string[]>(
+    (searchParams.get("type") ?? "").split(",").filter(Boolean)
+  );
   const [searchInput, setSearchInput] = useState<string>(searchParams.get("q") ?? "");
   const [textFilter, setTextFilter] = useState<string>(searchParams.get("q") ?? "");
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
@@ -217,11 +230,14 @@ export function KanbanBoard({
     if (priorityFilters.length > 0) next.set("priority", priorityFilters.map((p) => `P${p}`).join(","));
     else next.delete("priority");
 
+    if (issueTypeFilters.length > 0) next.set("type", issueTypeFilters.join(","));
+    else next.delete("type");
+
     if (textFilter.trim()) next.set("q", textFilter.trim());
     else next.delete("q");
 
     setSearchParams(next, { replace: true });
-  }, [epicFilters, ownerFilters, priorityFilters, textFilter, searchParams, setSearchParams, disableSearchParamSync]);
+  }, [epicFilters, ownerFilters, priorityFilters, issueTypeFilters, textFilter, searchParams, setSearchParams, disableSearchParamSync]);
 
   const epicOptions = useMemo(
     () => Array.from(epics.values()).sort((a, b) => (a.title ?? "").localeCompare(b.title ?? "")),
@@ -243,10 +259,11 @@ export function KanbanBoard({
       if (epicFilters.length > 0 && !epicFilters.includes(task.epic_id ?? "")) return false;
       if (ownerFilters.length > 0 && !ownerFilters.includes(task.owner ?? "")) return false;
       if (priorityFilters.length > 0 && !priorityFilters.includes(task.priority)) return false;
+      if (issueTypeFilters.length > 0 && !issueTypeFilters.includes(task.issue_type ?? "task")) return false;
       if (q && !task.title.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [tasks, epicFilters, ownerFilters, priorityFilters, textFilter]);
+  }, [tasks, epicFilters, ownerFilters, priorityFilters, issueTypeFilters, textFilter]);
 
   const groupedByStatusThenEpic = useMemo(() => {
     const byColumn = new Map<ColumnKey, Map<string, Task[]>>();
@@ -348,6 +365,28 @@ export function KanbanBoard({
             </button>
           )}
         </div>
+
+        <Combobox
+          multiple
+          value={issueTypeFilters}
+          onValueChange={(v) => setIssueTypeFilters(v ?? [])}
+          itemToStringLabel={(val) => ISSUE_TYPES.find((t) => t.value === val)?.label ?? val}
+        >
+          <ComboboxInput
+            placeholder={issueTypeFilters.length > 0 ? `${issueTypeFilters.length} type${issueTypeFilters.length > 1 ? "s" : ""}` : "All types"}
+            className="w-28"
+          />
+          <ComboboxContent>
+            <ComboboxList>
+              <ComboboxEmpty>No types found</ComboboxEmpty>
+              {ISSUE_TYPES.map((type) => (
+                <ComboboxItem key={type.value} value={type.value}>
+                  {type.label}
+                </ComboboxItem>
+              ))}
+            </ComboboxList>
+          </ComboboxContent>
+        </Combobox>
 
         <Combobox
           multiple

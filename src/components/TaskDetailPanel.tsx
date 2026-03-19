@@ -218,6 +218,7 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
             <div className="grid grid-cols-2 gap-2 text-sm">
               <div><span className="font-medium">Status:</span> {STATUS_LABELS[task.status] ?? task.status}</div>
               <div><span className="font-medium">Priority:</span> {PRIORITY_LABELS[task.priority] ?? `P${task.priority}`}</div>
+              {task.issue_type && <div><span className="font-medium">Type:</span> {task.issue_type}</div>}
               <div><span className="font-medium">Epic:</span> {epic?.title ?? "No Epic"}</div>
               <div><span className="font-medium">Owner:</span> {task.owner ?? "Unassigned"}</div>
               <div><span className="font-medium">Created:</span> {formatRelative(task.created_at)}</div>
