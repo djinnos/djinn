@@ -630,27 +630,45 @@ pub(super) async fn run_reply_loop(
             }
 
             // ── Finalize-tool detection (ADR-036) ────────────────────────────
+            // The primary finalize tool (first in the list, e.g. submit_work) is
+            // a virtual tool — its payload is captured here and processed after
+            // the loop by finalize_handlers. We break immediately (no dispatch).
+            //
+            // Alternate finalize tools (e.g. request_pm) are real extension tools
+            // that must be dispatched to execute their side effects. We mark them
+            // but fall through to the dispatch section; a post-dispatch check
+            // breaks the loop after the tool results are collected.
+            let primary_finalize = finalize_tool_names.first().copied().unwrap_or("");
             if let Some(finalize_call) = turn_tool_calls
                 .iter()
-                .find(|tc| matches!(tc, ContentBlock::ToolUse { name, .. } if finalize_tool_names.contains(&name.as_str())))
+                .find(|tc| matches!(tc, ContentBlock::ToolUse { name, .. } if name == primary_finalize))
             {
-                let (matched_name, payload) = if let ContentBlock::ToolUse { name, input, .. } = finalize_call {
-                    (name.clone(), input.clone())
+                let payload = if let ContentBlock::ToolUse { input, .. } = finalize_call {
+                    input.clone()
                 } else {
-                    (String::from("?"), serde_json::Value::Null)
+                    serde_json::Value::Null
                 };
                 tracing::info!(
                     task_id = %task_id,
                     agent_type = %role_name,
-                    finalize_tool = %matched_name,
+                    finalize_tool = %primary_finalize,
                     turns,
                     assistant_message_count,
-                    "ReplyLoop: finalize tool called — session complete"
+                    "ReplyLoop: primary finalize tool called — session complete"
                 );
                 output.finalize_payload = Some(payload);
-                output.finalize_tool_name = Some(matched_name);
+                output.finalize_tool_name = Some(primary_finalize.to_string());
                 break;
             }
+            // Check for alternate finalize tools — mark but don't break yet.
+            let alternate_finalize = turn_tool_calls
+                .iter()
+                .find(|tc| matches!(tc, ContentBlock::ToolUse { name, .. } if finalize_tool_names[1..].contains(&name.as_str())))
+                .and_then(|tc| if let ContentBlock::ToolUse { name, input, .. } = tc {
+                    Some((name.clone(), input.clone()))
+                } else {
+                    None
+                });
 
             // ── Nudge loop: text-only without finalize ────────────────────────
             if turn_tool_calls.is_empty() {
@@ -920,6 +938,23 @@ pub(super) async fn run_reply_loop(
                 metadata: None,
             };
             conversation.push(tool_result_msg);
+
+            // ── Post-dispatch finalize check for alternate finalize tools ─────
+            // Alternate finalize tools (e.g. request_pm) were dispatched above
+            // so their side effects ran. Now break the loop.
+            if let Some((name, payload)) = alternate_finalize {
+                tracing::info!(
+                    task_id = %task_id,
+                    agent_type = %role_name,
+                    finalize_tool = %name,
+                    turns,
+                    assistant_message_count,
+                    "ReplyLoop: alternate finalize tool dispatched — session complete"
+                );
+                output.finalize_payload = Some(payload);
+                output.finalize_tool_name = Some(name);
+                break;
+            }
 
             // Continue to next turn.
         }
@@ -1495,6 +1530,103 @@ mod tests {
         assert_eq!(messages[4]["tool_call_id"], "tool_1");
         assert_eq!(messages[5]["role"], "user");
         assert_eq!(messages[5]["content"], "Second request");
+    }
+
+    #[test]
+    fn serialize_llm_input_preserves_parallel_tool_call_order() {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::system("You are a worker."));
+        conversation.push(Message::user("Do three things at once"));
+
+        // Assistant returns 3 parallel tool calls in a single message.
+        conversation.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "tc_a".into(),
+                    name: "shell".into(),
+                    input: serde_json::json!({"command": "echo A"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "tc_b".into(),
+                    name: "memory_search".into(),
+                    input: serde_json::json!({"query": "foo"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "tc_c".into(),
+                    name: "task_list".into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+            metadata: None,
+        });
+
+        // Tool results come back in a single user message (same order).
+        conversation.push(Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "tc_a".into(),
+                    content: vec![ContentBlock::text("A")],
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "tc_b".into(),
+                    content: vec![ContentBlock::text("found: bar")],
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "tc_c".into(),
+                    content: vec![ContentBlock::text("[]")],
+                    is_error: false,
+                },
+            ],
+            metadata: None,
+        });
+
+        conversation.push(Message::user("Now summarize"));
+
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "shell",
+                "description": "Run shell commands",
+                "parameters": {"type": "object"}
+            }
+        })];
+
+        let input = serialize_llm_input(&conversation, &tools);
+        let messages = input["messages"].as_array().expect("messages array");
+
+        // system, user, assistant(3 tool_calls), tool(A), tool(B), tool(C), user
+        assert_eq!(messages.len(), 7);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "Do three things at once");
+
+        // Assistant message with 3 tool_calls in order.
+        assert_eq!(messages[2]["role"], "assistant");
+        let tool_calls = messages[2]["tool_calls"].as_array().expect("tool_calls");
+        assert_eq!(tool_calls.len(), 3);
+        assert_eq!(tool_calls[0]["id"], "tc_a");
+        assert_eq!(tool_calls[1]["id"], "tc_b");
+        assert_eq!(tool_calls[2]["id"], "tc_c");
+
+        // Tool results in matching order.
+        assert_eq!(messages[3]["role"], "tool");
+        assert_eq!(messages[3]["tool_call_id"], "tc_a");
+        assert_eq!(messages[3]["content"], "A");
+
+        assert_eq!(messages[4]["role"], "tool");
+        assert_eq!(messages[4]["tool_call_id"], "tc_b");
+        assert_eq!(messages[4]["content"], "found: bar");
+
+        assert_eq!(messages[5]["role"], "tool");
+        assert_eq!(messages[5]["tool_call_id"], "tc_c");
+        assert_eq!(messages[5]["content"], "[]");
+
+        assert_eq!(messages[6]["role"], "user");
+        assert_eq!(messages[6]["content"], "Now summarize");
     }
 
     // ── Finalize tool + nudge loop tests ──────────────────────────────────────
