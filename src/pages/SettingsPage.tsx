@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input';
 import { InlineError } from '@/components/InlineError';
 import { EmptyState } from '@/components/EmptyState';
 import { AgentConfig } from '@/components/AgentConfig';
+import { AgentRoles } from '@/components/AgentRoles';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
@@ -17,12 +18,13 @@ import { selectDirectory } from '@/tauri/commands';
 import { toast } from 'sonner';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
-type SettingsCategory = 'providers' | 'projects' | 'agents';
+type SettingsCategory = 'providers' | 'projects' | 'agents' | 'roles';
 
 const categories: Array<{ key: SettingsCategory; label: string }> = [
   { key: 'providers', label: 'Providers' },
   { key: 'projects', label: 'Projects' },
   { key: 'agents', label: 'Agents' },
+  { key: 'roles', label: 'Roles' },
 ];
 
 function ProvidersSettings() {
@@ -430,6 +432,7 @@ export function SettingsPage() {
           {category === 'providers' && <ProvidersSettings />}
           {category === 'projects' && <ProjectsSettings />}
           {category === 'agents' && <AgentConfig {...agentConfig} />}
+          {category === 'roles' && <AgentRoles />}
         </section>
       </div>
     </div>
