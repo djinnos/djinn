@@ -102,7 +102,9 @@ pub mod helpers;
 mod lifecycle;
 mod pool;
 mod reply_loop;
-pub(crate) mod task_review;
+#[cfg(test)]
+mod reply_loop_tests;
+ pub(crate) mod task_review;
 pub(crate) mod verification;
 pub mod worktree;
 
