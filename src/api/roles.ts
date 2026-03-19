@@ -14,6 +14,21 @@ export interface Role {
   description: string;
   system_prompt_extensions: string[];
   is_default: boolean;
+  learned_prompt: string | null;
+}
+
+export interface LearnedPromptAmendment {
+  id: string;
+  proposed_text: string;
+  action: "keep" | "discard";
+  metrics_before: Record<string, number>;
+  metrics_after: Record<string, number>;
+  created_at: string;
+}
+
+export interface LearnedPromptHistory {
+  learned_prompt: string | null;
+  amendments: LearnedPromptAmendment[];
 }
 
 export interface CreateRoleRequest {
@@ -114,4 +129,24 @@ export async function fetchRoleMetrics(): Promise<RoleMetricsResponse> {
     throw new Error(`Failed to fetch role metrics: ${response.status}`);
   }
   return response.json() as Promise<RoleMetricsResponse>;
+}
+
+export async function fetchLearnedPromptHistory(id: string): Promise<LearnedPromptHistory> {
+  const baseUrl = await getBaseUrl();
+  const response = await fetch(`${baseUrl}/roles/${id}/learned-prompt/history`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch learned prompt history: ${response.status}`);
+  }
+  return response.json() as Promise<LearnedPromptHistory>;
+}
+
+export async function clearLearnedPrompt(id: string): Promise<void> {
+  const baseUrl = await getBaseUrl();
+  const response = await fetch(`${baseUrl}/roles/${id}/learned-prompt`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to clear learned prompt: ${text || response.status}`);
+  }
 }
