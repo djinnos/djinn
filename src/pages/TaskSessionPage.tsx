@@ -39,8 +39,8 @@ const STATUS_LABELS: Record<string, string> = {
   verifying: "Verifying",
   needs_task_review: "Needs Review",
   in_task_review: "In Review",
-  needs_pm_intervention: "PM Intervention",
-  in_pm_intervention: "PM Intervening",
+  needs_pm_intervention: "Lead Intervention",
+  in_pm_intervention: "Lead Intervening",
   closed: "Done",
 };
 

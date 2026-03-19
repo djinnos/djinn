@@ -206,15 +206,15 @@ function ProjectsReplica({
 const ROLE_LABELS: Record<string, string> = {
   worker: "W",
   task_reviewer: "R",
-  pm: "PM",
-  groomer: "G",
+  pm: "L",
+  groomer: "P",
 };
 
 const ROLE_FULL_LABELS: Record<string, string> = {
   worker: "Worker",
-  task_reviewer: "Task Reviewer",
-  pm: "PM",
-  groomer: "Groomer",
+  task_reviewer: "Reviewer",
+  pm: "Lead",
+  groomer: "Planner",
 };
 
 const ALL_ROLES = [

@@ -9,15 +9,15 @@ import { cn } from "@/lib/utils";
 const ROLE_LABELS: Record<AgentRole, string> = {
   worker: "W",
   task_reviewer: "R",
-  pm: "PM",
-  groomer: "G",
+  pm: "L",
+  groomer: "P",
 };
 
 const ROLE_FULL_LABELS: Record<AgentRole, string> = {
   worker: "Worker",
-  task_reviewer: "Task Reviewer",
-  pm: "PM",
-  groomer: "Groomer",
+  task_reviewer: "Reviewer",
+  pm: "Lead",
+  groomer: "Planner",
 };
 
 const ALL_ROLES: AgentRole[] = ["worker", "task_reviewer", "pm", "groomer"];
