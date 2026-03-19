@@ -43,12 +43,10 @@ impl GoogleProvider {
             match tool_choice.unwrap_or(ToolChoice::Auto) {
                 ToolChoice::Auto => {}
                 ToolChoice::Required => {
-                    body["toolConfig"] =
-                        json!({"functionCallingConfig": {"mode": "ANY"}})
+                    body["toolConfig"] = json!({"functionCallingConfig": {"mode": "ANY"}})
                 }
                 ToolChoice::None => {
-                    body["toolConfig"] =
-                        json!({"functionCallingConfig": {"mode": "NONE"}})
+                    body["toolConfig"] = json!({"functionCallingConfig": {"mode": "NONE"}})
                 }
             }
         }

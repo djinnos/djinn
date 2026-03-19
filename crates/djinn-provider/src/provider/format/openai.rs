@@ -672,12 +672,15 @@ mod tests {
         let events = parse_openai_line(line, &mut acc);
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], StreamEvent::Thinking(t) if t == "thinking"));
-        assert!(matches!(&events[1], StreamEvent::Delta(ContentBlock::Text { text }) if text == "hello"));
+        assert!(
+            matches!(&events[1], StreamEvent::Delta(ContentBlock::Text { text }) if text == "hello")
+        );
     }
 
     #[test]
     fn test_parse_empty_reasoning_content_skipped() {
-        let line = r#"{"choices":[{"delta":{"reasoning_content":""},"finish_reason":null,"index":0}]}"#;
+        let line =
+            r#"{"choices":[{"delta":{"reasoning_content":""},"finish_reason":null,"index":0}]}"#;
         let mut acc = None;
         let events = parse_openai_line(line, &mut acc);
         assert!(events.is_empty());

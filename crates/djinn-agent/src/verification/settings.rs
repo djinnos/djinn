@@ -15,9 +15,7 @@ pub struct DjinnSettings {
 /// Load commands from `.djinn/settings.json` in the worktree.
 ///
 /// Returns empty vecs when the file is absent. Errors on malformed JSON.
-pub fn load_commands(
-    worktree_path: &Path,
-) -> Result<(Vec<CommandSpec>, Vec<CommandSpec>), String> {
+pub fn load_commands(worktree_path: &Path) -> Result<(Vec<CommandSpec>, Vec<CommandSpec>), String> {
     let settings_path = worktree_path.join(".djinn/settings.json");
 
     match std::fs::read_to_string(&settings_path) {

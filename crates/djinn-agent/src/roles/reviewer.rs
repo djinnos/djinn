@@ -44,77 +44,77 @@ impl AgentRole for TaskReviewerRole {
                 && let Ok(review) = serde_json::from_value::<SubmitReview>(payload.clone())
             {
                 if review.verdict == "approved" {
-                        tracing::info!(
-                            task_id = %task_id,
-                            "task reviewer: submit_review verdict=approved → approve"
-                        );
-                        let gate_state = app_state.clone();
-                        let gate: VerificationGateFn =
-                            Box::new(move |task_id: String, project_path: String| {
-                                let s = gate_state.clone();
-                                Box::pin(async move {
-                                    crate::actors::slot::verification::run_verification_gate(
-                                        &task_id,
-                                        &project_path,
-                                        &s,
-                                    )
-                                    .await
-                                })
-                            });
-                        return merge_after_task_review(task_id, app_state, Some(gate)).await;
-                    } else {
-                        // Rejected — check staleness to pick the right reject action.
-                        tracing::info!(
-                            task_id = %task_id,
-                            "task reviewer: submit_review verdict=rejected"
-                        );
-                        let feedback = review.feedback.unwrap_or_else(|| {
-                            "reviewer found unmet acceptance criteria".to_string()
+                    tracing::info!(
+                        task_id = %task_id,
+                        "task reviewer: submit_review verdict=approved → approve"
+                    );
+                    let gate_state = app_state.clone();
+                    let gate: VerificationGateFn =
+                        Box::new(move |task_id: String, project_path: String| {
+                            let s = gate_state.clone();
+                            Box::pin(async move {
+                                crate::actors::slot::verification::run_verification_gate(
+                                    &task_id,
+                                    &project_path,
+                                    &s,
+                                )
+                                .await
+                            })
                         });
-                        let repo =
-                            TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-                        let (is_stale, continuation_count) =
-                            match repo.get(task_id).await.ok().flatten() {
-                                Some(t) => {
-                                    let stale = is_stale_review_cycle(
-                                        task_id,
-                                        &t.acceptance_criteria,
-                                        app_state,
-                                    )
-                                    .await;
-                                    (stale, t.continuation_count)
-                                }
-                                None => (false, 0),
-                            };
-                        if is_stale && continuation_count + 1 >= STALE_ESCALATION_THRESHOLD {
-                            tracing::info!(
-                                task_id = %task_id,
-                                continuation_count = continuation_count,
-                                "task reviewer: stale cycle limit reached → escalating to PM"
-                            );
-                            return Some((
-                                TransitionAction::Escalate,
-                                Some(format!(
-                                    "stale reopen limit reached after {} cycles: {}",
-                                    continuation_count + 1,
-                                    feedback
-                                )),
-                            ));
-                        } else if is_stale {
-                            tracing::info!(
-                                task_id = %task_id,
-                                continuation_count = continuation_count,
-                                "task reviewer: stale cycle detected → increment continuation"
-                            );
-                            return Some((TransitionAction::TaskReviewRejectStale, Some(feedback)));
-                        } else {
-                            tracing::info!(
-                                task_id = %task_id,
-                                "task reviewer: unmet AC, rejected → reject"
-                            );
-                            return Some((TransitionAction::TaskReviewReject, Some(feedback)));
-                        }
+                    return merge_after_task_review(task_id, app_state, Some(gate)).await;
+                } else {
+                    // Rejected — check staleness to pick the right reject action.
+                    tracing::info!(
+                        task_id = %task_id,
+                        "task reviewer: submit_review verdict=rejected"
+                    );
+                    let feedback = review
+                        .feedback
+                        .unwrap_or_else(|| "reviewer found unmet acceptance criteria".to_string());
+                    let repo =
+                        TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+                    let (is_stale, continuation_count) =
+                        match repo.get(task_id).await.ok().flatten() {
+                            Some(t) => {
+                                let stale = is_stale_review_cycle(
+                                    task_id,
+                                    &t.acceptance_criteria,
+                                    app_state,
+                                )
+                                .await;
+                                (stale, t.continuation_count)
+                            }
+                            None => (false, 0),
+                        };
+                    if is_stale && continuation_count + 1 >= STALE_ESCALATION_THRESHOLD {
+                        tracing::info!(
+                            task_id = %task_id,
+                            continuation_count = continuation_count,
+                            "task reviewer: stale cycle limit reached → escalating to PM"
+                        );
+                        return Some((
+                            TransitionAction::Escalate,
+                            Some(format!(
+                                "stale reopen limit reached after {} cycles: {}",
+                                continuation_count + 1,
+                                feedback
+                            )),
+                        ));
+                    } else if is_stale {
+                        tracing::info!(
+                            task_id = %task_id,
+                            continuation_count = continuation_count,
+                            "task reviewer: stale cycle detected → increment continuation"
+                        );
+                        return Some((TransitionAction::TaskReviewRejectStale, Some(feedback)));
+                    } else {
+                        tracing::info!(
+                            task_id = %task_id,
+                            "task reviewer: unmet AC, rejected → reject"
+                        );
+                        return Some((TransitionAction::TaskReviewReject, Some(feedback)));
                     }
+                }
             }
 
             // Fallback: read AC from DB (for sessions without a finalize payload).

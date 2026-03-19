@@ -1833,6 +1833,61 @@
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "comment": {
+            "description": "Optional reason for confirmation.",
+            "nullable": true,
+            "type": "string"
+          },
+          "identifier": {
+            "description": "Note permalink or note ID.",
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "identifier"
+        ],
+        "title": "MemoryConfirmParams",
+        "type": "object"
+      },
+      "name": "memory_confirm",
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "new_confidence": {
+            "format": "double",
+            "nullable": true,
+            "type": "number"
+          },
+          "note_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "permalink": {
+            "nullable": true,
+            "type": "string"
+          },
+          "previous_confidence": {
+            "format": "double",
+            "nullable": true,
+            "type": "number"
+          }
+        },
+        "title": "MemoryConfirmResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
           "identifier": {
             "type": "string"
           },

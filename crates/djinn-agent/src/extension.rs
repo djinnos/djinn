@@ -329,9 +329,10 @@ async fn call_task_show(
                                 if let Some(s) = value.as_str()
                                     && s.len() > MAX_PAYLOAD_CHARS
                                 {
-                                    *value = serde_json::json!(
-                                        crate::truncate::smart_truncate(s, MAX_PAYLOAD_CHARS)
-                                    );
+                                    *value = serde_json::json!(crate::truncate::smart_truncate(
+                                        s,
+                                        MAX_PAYLOAD_CHARS
+                                    ));
                                 }
                             }
                         }
@@ -392,9 +393,10 @@ async fn call_task_activity_list(
                     if let Some(s) = value.as_str()
                         && s.len() > MAX_PAYLOAD_CHARS
                     {
-                        *value = serde_json::json!(
-                            crate::truncate::smart_truncate(s, MAX_PAYLOAD_CHARS)
-                        );
+                        *value = serde_json::json!(crate::truncate::smart_truncate(
+                            s,
+                            MAX_PAYLOAD_CHARS
+                        ));
                     }
                 }
             }
@@ -2739,7 +2741,10 @@ mod tests {
     #[test]
     fn worker_cannot_use_pm_only_tool() {
         // submit_decision is PM-only (ADR-036: finalize tools are role-specific).
-        assert!(!is_tool_allowed_for_agent(AgentType::Worker, "submit_decision"));
+        assert!(!is_tool_allowed_for_agent(
+            AgentType::Worker,
+            "submit_decision"
+        ));
         assert!(is_tool_allowed_for_agent(AgentType::PM, "submit_decision"));
         // task_transition is not in the PM tool set (removed by ADR-036).
         assert!(!is_tool_allowed_for_agent(AgentType::PM, "task_transition"));

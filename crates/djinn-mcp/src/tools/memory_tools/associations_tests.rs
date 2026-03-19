@@ -141,7 +141,11 @@ mod tests {
         assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
         assert_eq!(resp.associations.len(), 2, "expected both directions");
 
-        let permalinks: Vec<&str> = resp.associations.iter().map(|a| a.note_permalink.as_str()).collect();
+        let permalinks: Vec<&str> = resp
+            .associations
+            .iter()
+            .map(|a| a.note_permalink.as_str())
+            .collect();
         assert!(
             permalinks.contains(&note_b.permalink.as_str()),
             "missing note_b"
@@ -193,7 +197,10 @@ mod tests {
         assert!(
             resp.associations[0].weight >= resp.associations[1].weight,
             "results not sorted descending: {:?}",
-            resp.associations.iter().map(|a| a.weight).collect::<Vec<_>>()
+            resp.associations
+                .iter()
+                .map(|a| a.weight)
+                .collect::<Vec<_>>()
         );
         assert_eq!(resp.associations[0].note_permalink, heavy.permalink);
     }

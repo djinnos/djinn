@@ -14,9 +14,9 @@ use crate::tools::execution_tools::{
 };
 use crate::tools::memory_tools::{
     AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
-    DiffParams, EditParams, GraphParams, HealthParams, HistoryParams, ListParams, MoveParams,
-    OrphansParams, ReadParams, RecentParams, ReindexParams, SearchParams, TaskRefsParams,
-    WriteParams,
+    DiffParams, EditParams, GraphParams, HealthParams, HistoryParams, ListParams,
+    MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecentParams, ReindexParams,
+    SearchParams, TaskRefsParams, WriteParams,
 };
 use crate::tools::project_tools::{
     ProjectAddParams, ProjectConfigGetParams, ProjectConfigSetParams, ProjectRemoveParams,
@@ -321,6 +321,11 @@ impl DjinnMcpServer {
             "memory_read" => map_json(
                 name,
                 self.memory_read(Parameters(decode_args::<ReadParams>(name, args)?))
+                    .await,
+            ),
+            "memory_confirm" => map_json(
+                name,
+                self.memory_confirm(Parameters(decode_args::<MemoryConfirmParams>(name, args)?))
                     .await,
             ),
             "memory_list" => map_json(

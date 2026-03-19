@@ -72,7 +72,10 @@ pub(crate) fn select_memory_model(
 ) -> Result<ResolvedMemoryModel> {
     let connected = catalog.connected_provider_ids(credentials);
 
-    if let Some(model_id) = selected_model_id.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(model_id) = selected_model_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         let model = catalog.find_model(model_id).ok_or_else(|| {
             anyhow!(
                 "memory.llm_model '{}' is not available in the provider catalog",
@@ -101,9 +104,7 @@ pub(crate) fn select_memory_model(
     });
 
     let model = candidates.into_iter().next().ok_or_else(|| {
-        anyhow!(
-            "no connected builtin provider models are available for memory.llm_model fallback"
-        )
+        anyhow!("no connected builtin provider models are available for memory.llm_model fallback")
     })?;
     let effective_provider_id = effective_provider_for_model(&model, credentials)?;
     Ok(ResolvedMemoryModel {
@@ -131,7 +132,10 @@ pub async fn complete(
             }
             Ok(Err(error)) => return Err(error),
             Err(_) if attempt == 0 => {
-                let error = anyhow!("completion timed out after {}s", COMPLETION_TIMEOUT.as_secs());
+                let error = anyhow!(
+                    "completion timed out after {}s",
+                    COMPLETION_TIMEOUT.as_secs()
+                );
                 if is_transient_error(&error) {
                     attempt += 1;
                 } else {
@@ -204,13 +208,9 @@ pub async fn resolve_memory_provider(db: &Database) -> Result<Box<dyn LlmProvide
 
     let credential_repo = CredentialRepository::new(db.clone(), event_bus);
     let credentials = credential_repo.list().await?;
-    let provider_config = resolve_memory_provider_config(
-        &catalog,
-        &credentials,
-        &credential_repo,
-        &settings_raw,
-    )
-    .await?;
+    let provider_config =
+        resolve_memory_provider_config(&catalog, &credentials, &credential_repo, &settings_raw)
+            .await?;
 
     Ok(create_provider(provider_config))
 }
@@ -232,26 +232,30 @@ pub(crate) async fn provider_config_for_model(
 ) -> Result<ProviderConfig> {
     match resolved.effective_provider_id.as_str() {
         "chatgpt_codex" => {
-            let tokens = CodexTokens::load_from_db(credential_repo).await.ok_or_else(|| {
-                anyhow!(
-                    "provider '{}' for memory model '{}' is missing OAuth tokens",
-                    resolved.effective_provider_id,
-                    resolved.model.id
-                )
-            })?;
+            let tokens = CodexTokens::load_from_db(credential_repo)
+                .await
+                .ok_or_else(|| {
+                    anyhow!(
+                        "provider '{}' for memory model '{}' is missing OAuth tokens",
+                        resolved.effective_provider_id,
+                        resolved.model.id
+                    )
+                })?;
             Ok(provider_config_with_model(
                 oauth::codex_provider_config(&tokens),
                 &resolved.model,
             ))
         }
         "githubcopilot" => {
-            let tokens = CopilotTokens::load_from_db(credential_repo).await.ok_or_else(|| {
-                anyhow!(
-                    "provider '{}' for memory model '{}' is missing OAuth tokens",
-                    resolved.effective_provider_id,
-                    resolved.model.id
-                )
-            })?;
+            let tokens = CopilotTokens::load_from_db(credential_repo)
+                .await
+                .ok_or_else(|| {
+                    anyhow!(
+                        "provider '{}' for memory model '{}' is missing OAuth tokens",
+                        resolved.effective_provider_id,
+                        resolved.model.id
+                    )
+                })?;
             Ok(provider_config_with_model(
                 oauth::copilot_provider_config(&tokens),
                 &resolved.model,
@@ -328,8 +332,12 @@ async fn api_key_provider_config(
     model: &Model,
     credential_repo: &CredentialRepository,
 ) -> Result<ProviderConfig> {
-    let builtin_provider = builtin::find_builtin_provider(provider_id)
-        .ok_or_else(|| anyhow!("provider '{}' is not supported by djinn-provider", provider_id))?;
+    let builtin_provider = builtin::find_builtin_provider(provider_id).ok_or_else(|| {
+        anyhow!(
+            "provider '{}' is not supported by djinn-provider",
+            provider_id
+        )
+    })?;
     let key_name = builtin_provider.required_env_vars.first().ok_or_else(|| {
         anyhow!(
             "provider '{}' for memory model '{}' does not support API-key auth",
@@ -337,14 +345,17 @@ async fn api_key_provider_config(
             model.id
         )
     })?;
-    let api_key = credential_repo.get_decrypted(key_name).await?.ok_or_else(|| {
-        anyhow!(
-            "provider '{}' for memory model '{}' is missing credential '{}'",
-            provider_id,
-            model.id,
-            key_name
-        )
-    })?;
+    let api_key = credential_repo
+        .get_decrypted(key_name)
+        .await?
+        .ok_or_else(|| {
+            anyhow!(
+                "provider '{}' for memory model '{}' is missing credential '{}'",
+                provider_id,
+                model.id,
+                key_name
+            )
+        })?;
 
     Ok(ProviderConfig {
         base_url: provider_base_url(provider_id),
@@ -495,12 +506,17 @@ mod tests {
             >,
         > {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let behavior = self.behaviors.lock().expect("mock behaviors lock").remove(0);
+            let behavior = self
+                .behaviors
+                .lock()
+                .expect("mock behaviors lock")
+                .remove(0);
             Box::pin(async move {
                 match behavior {
                     ProviderBehavior::Stream(events) => {
-                        let stream: Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>> =
-                            Box::pin(stream::iter(events));
+                        let stream: Pin<
+                            Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                        > = Box::pin(stream::iter(events));
                         Ok(stream)
                     }
                     ProviderBehavior::Error(message) => Err(anyhow!(message)),
@@ -560,7 +576,11 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error.to_string().contains("missing credential 'OPENAI_API_KEY'"));
+        assert!(
+            error
+                .to_string()
+                .contains("missing credential 'OPENAI_API_KEY'")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -630,14 +650,21 @@ mod tests {
         .await
         .expect_err("expected completion to fail");
 
-        assert!(error.to_string().contains("provider stream initialization failed"));
+        assert!(
+            error
+                .to_string()
+                .contains("provider stream initialization failed")
+        );
         assert_eq!(provider.call_count(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn complete_collects_usage() {
         let provider = MockProvider::new(vec![ProviderBehavior::Stream(vec![
-            Ok(StreamEvent::Usage(TokenUsage { input: 11, output: 7 })),
+            Ok(StreamEvent::Usage(TokenUsage {
+                input: 11,
+                output: 7,
+            })),
             Ok(StreamEvent::Delta(ContentBlock::text("ok"))),
             Ok(StreamEvent::Done),
         ])]);
@@ -689,7 +716,10 @@ mod tests {
         let settings = SettingsRepository::new(db.clone(), EventBus::noop());
         let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
         settings
-            .set(MEMORY_MODEL_SETTING_KEY, "anthropic/claude-3-5-haiku-latest")
+            .set(
+                MEMORY_MODEL_SETTING_KEY,
+                "anthropic/claude-3-5-haiku-latest",
+            )
             .await
             .unwrap();
         credentials
