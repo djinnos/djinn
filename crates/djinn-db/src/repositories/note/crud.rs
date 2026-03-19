@@ -233,13 +233,21 @@ impl NoteRepository {
         Ok(note)
     }
 
+    /// Update only abstract and overview summary fields for a note.
+    ///
+    /// This is used by the MCP-owned summary generation worker.
     pub async fn update_summaries(
         &self,
         id: &str,
-        abstract_: Option<&str>,
+        abstract_summary: Option<&str>,
         overview: Option<&str>,
     ) -> Result<Note> {
         self.db.ensure_initialized().await?;
+
+        // Ensure note exists first; this also guards against accidental no-op updates.
+        let id = id.to_owned();
+
+        let mut tx = self.db.pool().begin().await?;
 
         sqlx::query(
             "UPDATE notes SET
@@ -248,16 +256,18 @@ impl NoteRepository {
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1",
         )
-        .bind(id)
-        .bind(abstract_)
+        .bind(&id)
+        .bind(abstract_summary)
         .bind(overview)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await?;
 
-        let note = self
-            .get(id)
-            .await?
-            .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
+        let note: Note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
 
         self.events.send(DjinnEventEnvelope::note_updated(&note));
         Ok(note)

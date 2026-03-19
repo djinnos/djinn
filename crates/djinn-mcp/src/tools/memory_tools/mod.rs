@@ -18,6 +18,8 @@ mod associations;
 mod confirm;
 mod reads;
 mod search;
+pub(crate) mod summaries;
+pub use summaries::NoteSummaryService;
 mod writes;
 
 #[cfg(test)]
