@@ -76,6 +76,47 @@ fn push_fragment(fragments: &mut Vec<String>, value: String) {
     fragments.push(snippet);
 }
 
+/// Extract browsable content for the output stash.
+///
+/// For shell results, the LLM wants to browse raw stdout/stderr — not the
+/// `{"ok":true,"stdout":"..."}` JSON envelope.  For other tools the
+/// pretty-printed JSON is already useful, so we return `None` to let the
+/// caller fall back to the default.
+fn extract_stash_content(tool_name: &str, value: &serde_json::Value) -> Option<String> {
+    if tool_name != "shell" {
+        return None;
+    }
+    let obj = value.as_object()?;
+    let stdout = obj.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+    let stderr = obj.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+    let exit_code = obj
+        .get("exit_code")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
+
+    let mut out = String::with_capacity(stdout.len() + stderr.len() + 64);
+    if !stdout.is_empty() {
+        out.push_str(stdout);
+    }
+    if !stderr.is_empty() {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("--- stderr ---\n");
+        out.push_str(stderr);
+    }
+    if exit_code != 0 {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("[exit code: {exit_code}]"));
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
 /// Maximum reactive compaction attempts before giving up.
 const MAX_COMPACTION_RETRIES: u32 = 2;
 
@@ -792,11 +833,17 @@ pub(super) async fn run_reply_loop(
                                             .unwrap_or_else(|_| value.to_string())
                                     };
                                     if text.len() > MAX_TOOL_RESULT_CHARS {
-                                        // Stash full output before truncating.
+                                        // Stash the browsable content before truncating.
+                                        // For shell results, extract raw stdout+stderr
+                                        // (the LLM wants to browse command output, not
+                                        // the JSON envelope). For other tools, stash
+                                        // the pretty-printed JSON as-is.
+                                        let stash_text = extract_stash_content(&name, &value)
+                                            .unwrap_or_else(|| text.clone());
                                         stash.lock().unwrap().insert(
                                             id.clone(),
                                             name.clone(),
-                                            text.clone(),
+                                            stash_text,
                                         );
                                         let full_bytes = text.len();
                                         text = crate::truncate::smart_truncate(
@@ -1087,6 +1134,46 @@ mod tests {
             .await
             .map(|c| c.messages.len())
             .unwrap_or(0)
+    }
+
+    // ── extract_stash_content tests ────────────────────────────────────────────
+
+    #[test]
+    fn extract_stash_content_shell_extracts_stdout() {
+        let value = serde_json::json!({
+            "ok": true,
+            "exit_code": 0,
+            "stdout": "line 1\nline 2\nline 3\n",
+            "stderr": "",
+            "workdir": "/tmp"
+        });
+        let result = extract_stash_content("shell", &value).unwrap();
+        assert!(result.contains("line 1"));
+        assert!(result.contains("line 3"));
+        assert!(!result.contains("workdir"));
+        assert!(!result.contains("exit code"));
+    }
+
+    #[test]
+    fn extract_stash_content_shell_includes_stderr_and_exit_code() {
+        let value = serde_json::json!({
+            "ok": false,
+            "exit_code": 1,
+            "stdout": "building...\n",
+            "stderr": "error: failed\n",
+            "workdir": "/tmp"
+        });
+        let result = extract_stash_content("shell", &value).unwrap();
+        assert!(result.contains("building..."));
+        assert!(result.contains("--- stderr ---"));
+        assert!(result.contains("error: failed"));
+        assert!(result.contains("[exit code: 1]"));
+    }
+
+    #[test]
+    fn extract_stash_content_non_shell_returns_none() {
+        let value = serde_json::json!({"tasks": []});
+        assert!(extract_stash_content("task_list", &value).is_none());
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────────
