@@ -139,9 +139,40 @@ impl ProjectRepository {
         .fetch_one(self.db.pool())
         .await?;
 
+        self.seed_default_roles(&id).await?;
+
         self.events
             .send(DjinnEventEnvelope::project_created(&project));
         Ok(project)
+    }
+
+    /// Insert 6 default agent roles (one per base_role) for a newly created project.
+    /// Uses INSERT OR IGNORE so re-seeding is safe if called on an existing project.
+    async fn seed_default_roles(&self, project_id: &str) -> Result<()> {
+        const DEFAULT_ROLES: &[(&str, &str)] = &[
+            ("worker",    "Implements tasks: writes code, runs tests, resolves issues."),
+            ("lead",      "Technical lead: reviews plans, guides implementation, unblocks workers."),
+            ("planner",   "Decomposes epics into tasks and maintains the project board."),
+            ("architect", "Proactive health monitoring, strategic re-planning, epic oversight."),
+            ("reviewer",  "Reviews pull requests and verifies task quality."),
+            ("resolver",  "Resolves merge conflicts and integration failures."),
+        ];
+        for (base_role, description) in DEFAULT_ROLES {
+            let role_id = uuid::Uuid::now_v7().to_string();
+            sqlx::query(
+                "INSERT OR IGNORE INTO agent_roles
+                    (id, project_id, name, base_role, description, is_default)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            )
+            .bind(&role_id)
+            .bind(project_id)
+            .bind(base_role)   // name = base_role for defaults
+            .bind(base_role)
+            .bind(description)
+            .execute(self.db.pool())
+            .await?;
+        }
+        Ok(())
     }
 
     pub async fn update(&self, id: &str, name: &str, path: &str) -> Result<Project> {
@@ -406,5 +437,46 @@ mod tests {
 
         // Missing path returns None.
         assert!(repo.get_by_path("/nonexistent").await.unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_seeds_six_default_roles() {
+        let db = test_db();
+        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = repo.create("seeded", "/seeded").await.unwrap();
+
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT name, base_role, is_default FROM agent_roles WHERE project_id = ?1 ORDER BY base_role",
+        )
+        .bind(&project.id)
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+
+        let expected_base_roles = [
+            "architect", "lead", "planner", "resolver", "reviewer", "worker",
+        ];
+
+        assert_eq!(rows.len(), 6, "expected 6 default roles, got {}", rows.len());
+        for ((name, base_role, is_default), expected) in rows.iter().zip(expected_base_roles.iter()) {
+            assert_eq!(base_role, expected);
+            assert_eq!(name, expected, "default role name should equal base_role");
+            assert_eq!(*is_default, 1, "role {base_role} should be is_default=1");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seeding_is_idempotent_on_different_projects() {
+        let db = test_db();
+        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        repo.create("proj-a", "/proj-a").await.unwrap();
+        repo.create("proj-b", "/proj-b").await.unwrap();
+
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_roles WHERE is_default = 1")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(total, 12, "2 projects × 6 roles = 12 default rows");
     }
 }
