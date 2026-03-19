@@ -24,7 +24,6 @@ import type {
 const AGENT_CONFIG: Record<string, { label: string; color: string; border: string }> = {
   worker: { label: "Worker", color: "text-blue-400", border: "border-blue-500/30" },
   task_reviewer: { label: "Reviewer", color: "text-amber-400", border: "border-amber-500/30" },
-  conflict_resolver: { label: "Conflict Resolver", color: "text-rose-400", border: "border-rose-500/30" },
   pm: { label: "PM", color: "text-purple-400", border: "border-purple-500/30" },
   epic_reviewer: { label: "Epic Reviewer", color: "text-teal-400", border: "border-teal-500/30" },
 };

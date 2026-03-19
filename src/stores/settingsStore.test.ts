@@ -26,7 +26,7 @@ describe('settingsStore', () => {
   it('loads settings into unified models', async () => {
     vi.mocked(fetchSettings).mockResolvedValue({
       agents: {
-        model_priorities: { worker: [{ model: 'm1', provider: 'p1' }], task_reviewer: [], conflict_resolver: [], pm: [], groomer: [] },
+        model_priorities: { worker: [{ model: 'm1', provider: 'p1' }], task_reviewer: [], pm: [], groomer: [] },
         session_limits: [{ model: 'm1', provider: 'p1', max_concurrent: 3, current_active: 1 }],
       },
     } satisfies SettingsResponse);

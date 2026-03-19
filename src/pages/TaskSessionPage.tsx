@@ -89,7 +89,6 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
 const AGENT_COLORS: Record<string, string> = {
   worker: "text-blue-400",
   task_reviewer: "text-amber-400",
-  conflict_resolver: "text-rose-400",
   pm: "text-purple-400",
   epic_reviewer: "text-teal-400",
 };

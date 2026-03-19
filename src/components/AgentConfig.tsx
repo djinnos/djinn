@@ -9,7 +9,6 @@ import { cn } from "@/lib/utils";
 const ROLE_LABELS: Record<AgentRole, string> = {
   worker: "W",
   task_reviewer: "R",
-  conflict_resolver: "C",
   pm: "PM",
   groomer: "G",
 };
@@ -17,12 +16,11 @@ const ROLE_LABELS: Record<AgentRole, string> = {
 const ROLE_FULL_LABELS: Record<AgentRole, string> = {
   worker: "Worker",
   task_reviewer: "Task Reviewer",
-  conflict_resolver: "Conflict Resolver",
   pm: "PM",
   groomer: "Groomer",
 };
 
-const ALL_ROLES: AgentRole[] = ["worker", "task_reviewer", "conflict_resolver", "pm", "groomer"];
+const ALL_ROLES: AgentRole[] = ["worker", "task_reviewer", "pm", "groomer"];
 
 function ModelPicker({
   availableModels,

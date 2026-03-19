@@ -2,7 +2,6 @@ import type { Epic, Task } from "@/api/types";
 import workerAvatar from "@/assets/worker.png";
 import taskReviewerAvatar from "@/assets/task_reviewer.png";
 import pmAvatar from "@/assets/pm.png";
-import conflictResolverAvatar from "@/assets/conflict_resolver.png";
 
 import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { Card, CardContent } from "@/components/ui/card";
@@ -20,7 +19,7 @@ import {
   UnavailableIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Play, Square, RotateCcw, X } from "lucide-react";
+import { GitMerge, Play, Square, RotateCcw, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useState } from "react";
 import { useTaskActions } from "@/hooks/useTaskActions";
@@ -149,9 +148,7 @@ function getBacklogBadge(status: string): { label: string; className: string } |
 const AGENT_AVATARS: Record<string, string> = {
   worker: workerAvatar,
   task_reviewer: taskReviewerAvatar,
-  conflict_resolver: conflictResolverAvatar,
   pm: pmAvatar,
-
 };
 
 function agentAvatar(agentType?: string): string {
@@ -376,6 +373,21 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
             <span className="inline-flex items-center gap-0.5 rounded bg-red-500/15 px-1 py-px text-[10px] font-medium text-red-400">
               <HugeiconsIcon icon={UnavailableIcon} size={10} className="shrink-0" />
               {task.unresolved_blocker_count}
+            </span>
+          )}
+
+          {/* Merge conflict badge */}
+          {task.merge_conflict_metadata && (
+            <span
+              className="inline-flex items-center gap-0.5 rounded bg-rose-500/15 px-1 py-px text-[10px] font-medium text-rose-400"
+              title={
+                typeof task.merge_conflict_metadata === "object" && task.merge_conflict_metadata !== null
+                  ? (task.merge_conflict_metadata as { conflicting_files?: string[] }).conflicting_files?.join(", ") ?? "merge conflict"
+                  : "merge conflict"
+              }
+            >
+              <GitMerge className="h-2.5 w-2.5 shrink-0" />
+              conflict
             </span>
           )}
 

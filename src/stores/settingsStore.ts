@@ -39,7 +39,7 @@ export interface SettingsActions {
   resetError: () => void;
 }
 
-const ALL_ROLES: AgentRole[] = ['worker', 'task_reviewer', 'conflict_resolver', 'pm', 'groomer'];
+const ALL_ROLES: AgentRole[] = ['worker', 'task_reviewer', 'pm', 'groomer'];
 
 function mergeToUnified(
   priorities: Record<AgentRole, ModelPriorityItem[]>,
@@ -81,7 +81,6 @@ function splitFromUnified(models: UnifiedModelEntry[]): {
   const priorities: Record<AgentRole, ModelPriorityItem[]> = {
     worker: [],
     task_reviewer: [],
-    conflict_resolver: [],
     pm: [],
     groomer: [],
   };

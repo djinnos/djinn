@@ -1,7 +1,7 @@
 import { callMcpTool } from "@/api/mcpClient";
 import type { McpToolOutput, ProviderModelsConnectedOutputSchema } from "@/api/generated/mcp-tools.gen";
 
-export type AgentRole = "worker" | "task_reviewer" | "conflict_resolver" | "pm" | "groomer";
+export type AgentRole = "worker" | "task_reviewer" | "pm" | "groomer";
 
 export interface ModelPriorityItem {
   model: string;
@@ -89,7 +89,6 @@ export async function fetchSettings(): Promise<SettingsResponse> {
       model_priorities: {
         worker: toPriorityItems(modelPriority.worker),
         task_reviewer: toPriorityItems(modelPriority.task_reviewer),
-        conflict_resolver: toPriorityItems(modelPriority.conflict_resolver),
         pm: toPriorityItems(modelPriority.pm),
         groomer: toPriorityItems(modelPriority.groomer),
       },
@@ -112,9 +111,6 @@ export async function saveSettings(settings: SettingsResponse): Promise<void> {
       combineModelId(item.provider, item.model)
     ),
     model_priority_task_reviewer: settings.agents.model_priorities.task_reviewer.map((item) =>
-      combineModelId(item.provider, item.model)
-    ),
-    model_priority_conflict_resolver: settings.agents.model_priorities.conflict_resolver.map((item) =>
       combineModelId(item.provider, item.model)
     ),
     model_priority_pm: settings.agents.model_priorities.pm.map((item) =>
