@@ -14,7 +14,6 @@ import {
   ArrowRight01Icon,
   CheckmarkCircle03Icon,
   CircleIcon,
-  DashedLineCircleIcon,
   FullSignalIcon,
   Loading03Icon,
   LowSignalIcon,
@@ -25,7 +24,6 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/lib/utils";
-import scribeAvatar from "@/assets/scribe.png";
 import {
   Combobox,
   ComboboxContent,
@@ -42,7 +40,7 @@ import {
 } from "@/components/ui/input-group";
 import { Search01Icon } from "@hugeicons/core-free-icons";
 
-type ColumnKey = "backlog" | "open" | "in_flight" | "done";
+type ColumnKey = "open" | "in_flight" | "done";
 
 const STATUS_COLUMNS: Array<{
   key: ColumnKey;
@@ -51,7 +49,6 @@ const STATUS_COLUMNS: Array<{
   glowClass: string;
   icon: typeof UnavailableIcon;
 }> = [
-  { key: "backlog", label: "Backlog", colorClass: "bg-[#4B5563]", glowClass: "", icon: DashedLineCircleIcon },
   { key: "open", label: "Open", colorClass: "bg-[#4B5563]", glowClass: "", icon: CircleIcon },
   { key: "in_flight", label: "In Flight", colorClass: "bg-[#3B82F6]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#3B82F6]/40", icon: Progress02Icon },
   { key: "done", label: "Done", colorClass: "bg-[#10B981]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#10B981]/40", icon: CheckmarkCircle03Icon },
@@ -68,7 +65,6 @@ const PRIORITY_ICONS: Record<number, { icon: typeof FullSignalIcon; color: strin
 
 function taskToColumnKey(task: Task): ColumnKey {
   if (task.status === "closed") return "done";
-  if (task.status === "backlog" || task.status === "grooming") return "backlog";
   if (
     task.status === "in_progress" ||
     task.status === "verifying" ||
@@ -252,11 +248,6 @@ export function KanbanBoard({
     });
   }, [tasks, epicFilters, ownerFilters, priorityFilters, textFilter]);
 
-  const isGrooming = useMemo(
-    () => tasks.some((t) => t.status === "grooming"),
-    [tasks]
-  );
-
   const groupedByStatusThenEpic = useMemo(() => {
     const byColumn = new Map<ColumnKey, Map<string, Task[]>>();
 
@@ -418,9 +409,6 @@ export function KanbanBoard({
               <Card
                 className="relative min-h-0 flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
             >
-              {column.key === "backlog" && isGrooming && (
-                <img src={scribeAvatar} alt="Scribe" className="pointer-events-none absolute right-4 top-0 z-0 h-16 w-16" />
-              )}
               <div className="flex flex-col">
                 <div className="relative px-4 pb-2.5 pt-3.5 text-sm font-semibold">
                   <div className="flex items-center gap-2.5">
@@ -437,11 +425,6 @@ export function KanbanBoard({
                     )}
                     <span className="leading-none">{column.label}</span>
                     <span className="text-xs leading-none text-muted-foreground">{taskCount}</span>
-                    {column.key === "backlog" && isGrooming && (
-                      <span className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-amber-400 bg-amber-400/10 animate-pulse">
-                        grooming
-                      </span>
-                    )}
                   </div>
                 </div>
                 <div className="px-4">

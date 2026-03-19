@@ -66,11 +66,6 @@ const makeTask = (
 });
 
 const tasksFixture: Task[] = [
-  // Backlog
-  makeTask("t-10", "Plugin hot-reload support", "grooming", 2, "Alex", "epic-foundation", [], "2026-03-01T10:00:00.000Z"),
-  makeTask("t-11", "Session persistence layer", "grooming", 1, "Priya", "epic-auth", [], "2026-03-01T10:05:00.000Z"),
-  makeTask("t-12", "System tray menu config", "ready", 1, "Alex", "epic-foundation", [], "2026-03-01T10:10:00.000Z"),
-
   // Open
   makeTask("t-1", "Scaffold auth hooks", "open", 1, "Alex", "epic-foundation", ["auth"], "2026-03-01T11:00:00.000Z"),
   makeTask("t-13", "Setup config loader", "open", 1, "Alex", "epic-foundation", [], "2026-03-01T11:05:00.000Z"),
