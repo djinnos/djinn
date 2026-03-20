@@ -5,6 +5,7 @@ use djinn_core::events::EventBus;
 use djinn_core::models::ContradictionCandidate;
 use djinn_db::{CONTRADICTION, NoteRepository, STALE_CITATION};
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 const CLASSIFICATION_SYSTEM: &str =
@@ -65,9 +66,27 @@ fn render_classification_prompt(
 pub(crate) struct ContradictionAnalysisInput {
     pub note_id: String,
     pub note_title: String,
-    pub note_created_at: String,
     pub note_summary: String,
     pub candidates: Vec<ContradictionCandidate>,
+}
+
+const CONTRADICTION_WORKER_QUEUE: usize = 32;
+
+/// Spawn a background worker that processes contradiction analysis inputs from a channel.
+///
+/// The worker is triggered only when a `contradiction_candidates` event is emitted (stage 1),
+/// guaranteeing that LLM classification is never triggered on every write — only when
+/// structural candidates are detected.
+pub(crate) fn spawn_contradiction_analysis_worker(
+    db: djinn_db::Database,
+) -> mpsc::Sender<ContradictionAnalysisInput> {
+    let (tx, mut rx) = mpsc::channel::<ContradictionAnalysisInput>(CONTRADICTION_WORKER_QUEUE);
+    tokio::spawn(async move {
+        while let Some(input) = rx.recv().await {
+            run_contradiction_analysis(db.clone(), input).await;
+        }
+    });
+    tx
 }
 
 /// Run LLM-backed contradiction analysis for a note and its candidates.
@@ -79,8 +98,6 @@ pub(crate) async fn run_contradiction_analysis(
     db: djinn_db::Database,
     input: ContradictionAnalysisInput,
 ) {
-    let repo = NoteRepository::new(db.clone(), EventBus::noop());
-
     let provider = match resolve_memory_provider(&db).await {
         Ok(p) => p,
         Err(e) => {
@@ -88,6 +105,16 @@ pub(crate) async fn run_contradiction_analysis(
             return;
         }
     };
+    run_contradiction_analysis_with_provider(db, input, provider.as_ref()).await;
+}
+
+/// Inner analysis loop with an injectable LLM provider, used in tests.
+async fn run_contradiction_analysis_with_provider(
+    db: djinn_db::Database,
+    input: ContradictionAnalysisInput,
+    provider: &dyn djinn_provider::provider::LlmProvider,
+) {
+    let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
     for candidate in &input.candidates {
         let cand_note = match repo.get(&candidate.id).await {
@@ -112,7 +139,7 @@ pub(crate) async fn run_contradiction_analysis(
         );
 
         let response = match complete(
-            provider.as_ref(),
+            provider,
             CompletionRequest {
                 system: CLASSIFICATION_SYSTEM.to_string(),
                 prompt,
@@ -137,26 +164,23 @@ pub(crate) async fn run_contradiction_analysis(
                     candidate_id = %candidate.id,
                     "contradiction analysis: contradicts — applying CONTRADICTION signal to both"
                 );
+                // Both notes get a CONTRADICTION confidence signal.
                 let _ = repo.update_confidence(&input.note_id, CONTRADICTION).await;
                 let _ = repo.update_confidence(&candidate.id, CONTRADICTION).await;
+                // Bilateral association: stored as one canonical row, queryable from either direction.
                 let _ = repo
                     .upsert_association_min_weight(&input.note_id, &candidate.id, CONTRADICTS_WEIGHT)
                     .await;
             }
             Classification::Supersedes => {
-                // Note A (the new note) supersedes Note B (the candidate).
-                // Mark the older note (candidate) as stale.
+                // The LLM determined "Note A (input) supersedes Note B (candidate)".
+                // The candidate is the older/superseded note — it gets STALE_CITATION.
                 info!(
                     note_id = %input.note_id,
                     candidate_id = %candidate.id,
-                    "contradiction analysis: supersedes — applying STALE_CITATION to older note"
+                    "contradiction analysis: supersedes — applying STALE_CITATION to superseded candidate"
                 );
-                let older_id = if input.note_created_at <= cand_note.created_at {
-                    &candidate.id
-                } else {
-                    &input.note_id
-                };
-                let _ = repo.update_confidence(older_id, STALE_CITATION).await;
+                let _ = repo.update_confidence(&candidate.id, STALE_CITATION).await;
                 let _ = repo
                     .upsert_association_min_weight(&input.note_id, &candidate.id, SUPERSEDES_WEIGHT)
                     .await;

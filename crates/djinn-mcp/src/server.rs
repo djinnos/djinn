@@ -30,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::state::McpState;
+use crate::tools::memory_tools::contradiction::{ContradictionAnalysisInput, spawn_contradiction_analysis_worker};
 use crate::tools::memory_tools::summaries::spawn_summary_backfill_worker;
 
 const HIGH_CONFIDENCE_THRESHOLD: f64 = 0.8;
@@ -121,6 +122,7 @@ pub struct DjinnMcpServer {
     pub state: McpState,
     co_access_batch: Arc<RwLock<CoAccessBatch>>,
     summary_backfill_tx: mpsc::Sender<String>,
+    pub(crate) contradiction_analysis_tx: mpsc::Sender<ContradictionAnalysisInput>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -141,10 +143,12 @@ impl DjinnMcpServer {
 
     fn new_with_batch(state: McpState, co_access_batch: Arc<RwLock<CoAccessBatch>>) -> Self {
         let summary_backfill_tx = spawn_summary_backfill_worker(state.db().clone());
+        let contradiction_analysis_tx = spawn_contradiction_analysis_worker(state.db().clone());
         Self {
             state: state.clone(),
             co_access_batch,
             summary_backfill_tx,
+            contradiction_analysis_tx,
             tool_router: Self::system_tool_router()
                 + Self::project_tool_router()
                 + Self::memory_tool_router()
