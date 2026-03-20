@@ -95,8 +95,14 @@ impl CoordinatorActor {
                 self.db.clone(),
                 crate::events::event_bus_for(&self.events_tx),
             );
-            let has_token = cred_repo.exists(GITHUB_APP_OAUTH_DB_KEY).await.unwrap_or(false);
-            let has_installation = cred_repo.exists(GITHUB_INSTALLATION_ID_KEY).await.unwrap_or(false);
+            let has_token = cred_repo
+                .exists(GITHUB_APP_OAUTH_DB_KEY)
+                .await
+                .unwrap_or(false);
+            let has_installation = cred_repo
+                .exists(GITHUB_INSTALLATION_ID_KEY)
+                .await
+                .unwrap_or(false);
             has_token && has_installation
         }
     }
@@ -215,17 +221,17 @@ impl CoordinatorActor {
             // Look up the default DB role for this task's project + base_role.
             // If model_preference is set and resolves to a known model, prepend it
             // so the coordinator prefers it over the globally configured priorities.
-            let model_preference_ids =
-                self.resolve_role_model_preference(&task.project_id, role).await;
+            let model_preference_ids = self
+                .resolve_role_model_preference(&task.project_id, role)
+                .await;
             let combined_models: Vec<String>;
             let model_ids: &[String] = if model_preference_ids.is_empty() {
                 base_model_ids
             } else {
                 // Prepend model_preference; deduplicate while preserving order.
                 let mut seen = std::collections::HashSet::new();
-                let mut merged = Vec::with_capacity(
-                    model_preference_ids.len() + base_model_ids.len(),
-                );
+                let mut merged =
+                    Vec::with_capacity(model_preference_ids.len() + base_model_ids.len());
                 for id in model_preference_ids.iter().chain(base_model_ids.iter()) {
                     if seen.insert(id.clone()) {
                         merged.push(id.clone());
@@ -339,10 +345,8 @@ impl CoordinatorActor {
 
         // Collect active task IDs so we can prune stall_killed entries for
         // sessions that have finished cleaning up.
-        let active_task_ids: HashSet<String> = active
-            .iter()
-            .filter_map(|s| s.task_id.clone())
-            .collect();
+        let active_task_ids: HashSet<String> =
+            active.iter().filter_map(|s| s.task_id.clone()).collect();
         self.stall_killed.retain(|id| active_task_ids.contains(id));
 
         for session in active {
@@ -781,17 +785,13 @@ impl CoordinatorActor {
         let task_id = review_task.id.clone();
         let project_path_owned = project_path.clone();
         let outcome = self
-            .try_dispatch_to_pool(
-                &review_task.short_id,
-                &model_ids,
-                |pool, model_id| {
-                    let pool = pool.clone();
-                    let tid = task_id.clone();
-                    let pp = project_path_owned.clone();
-                    let mid = model_id.to_owned();
-                    async move { pool.dispatch(&tid, &pp, &mid).await }
-                },
-            )
+            .try_dispatch_to_pool(&review_task.short_id, &model_ids, |pool, model_id| {
+                let pool = pool.clone();
+                let tid = task_id.clone();
+                let pp = project_path_owned.clone();
+                let mid = model_id.to_owned();
+                async move { pool.dispatch(&tid, &pp, &mid).await }
+            })
             .await;
 
         match outcome {
@@ -814,9 +814,7 @@ impl CoordinatorActor {
                 );
             }
             DispatchOutcome::PoolDead => {
-                tracing::error!(
-                    "CoordinatorActor: architect escalation — slot pool actor dead"
-                );
+                tracing::error!("CoordinatorActor: architect escalation — slot pool actor dead");
             }
             DispatchOutcome::Failed => {
                 tracing::debug!(
@@ -845,16 +843,20 @@ impl CoordinatorActor {
                 return;
             }
         };
-        let architect_running = active_sessions
-            .iter()
-            .any(|s| s.agent_type == "architect");
+        let architect_running = active_sessions.iter().any(|s| s.agent_type == "architect");
         if architect_running {
             tracing::debug!("CoordinatorActor: patrol — Architect already running, skipping");
             return;
         }
-        tracing::debug!(sessions = active_sessions.len(), "CoordinatorActor: patrol — no architect session running");
+        tracing::debug!(
+            sessions = active_sessions.len(),
+            "CoordinatorActor: patrol — no architect session running"
+        );
         #[cfg(test)]
-        eprintln!("[patrol] step 1 passed: no architect session. Active sessions: {}", active_sessions.len());
+        eprintln!(
+            "[patrol] step 1 passed: no architect session. Active sessions: {}",
+            active_sessions.len()
+        );
 
         // Check if there are any open epics.
         let epic_repo = EpicRepository::new(
@@ -870,7 +872,10 @@ impl CoordinatorActor {
         };
         #[cfg(test)]
         eprintln!("[patrol] step 2: total epics: {}", all_epics.len());
-        tracing::debug!(total_epics = all_epics.len(), "CoordinatorActor: patrol — epic list");
+        tracing::debug!(
+            total_epics = all_epics.len(),
+            "CoordinatorActor: patrol — epic list"
+        );
         let open_epics: Vec<_> = all_epics
             .into_iter()
             .filter(|e| e.status == "open")
@@ -879,7 +884,10 @@ impl CoordinatorActor {
             tracing::debug!("CoordinatorActor: patrol — no open epics, skipping Architect patrol");
             return;
         }
-        tracing::debug!(open_epics = open_epics.len(), "CoordinatorActor: patrol — found open epics");
+        tracing::debug!(
+            open_epics = open_epics.len(),
+            "CoordinatorActor: patrol — found open epics"
+        );
         #[cfg(test)]
         eprintln!("[patrol] step 3: open epics: {}", open_epics.len());
 
@@ -963,17 +971,13 @@ impl CoordinatorActor {
         let task_id = review_task.id.clone();
         let project_path_owned = project_path.clone();
         let outcome = self
-            .try_dispatch_to_pool(
-                &review_task.short_id,
-                &model_ids,
-                |pool, model_id| {
-                    let pool = pool.clone();
-                    let tid = task_id.clone();
-                    let pp = project_path_owned.clone();
-                    let mid = model_id.to_owned();
-                    async move { pool.dispatch(&tid, &pp, &mid).await }
-                },
-            )
+            .try_dispatch_to_pool(&review_task.short_id, &model_ids, |pool, model_id| {
+                let pool = pool.clone();
+                let tid = task_id.clone();
+                let pp = project_path_owned.clone();
+                let mid = model_id.to_owned();
+                async move { pool.dispatch(&tid, &pp, &mid).await }
+            })
             .await;
 
         match outcome {

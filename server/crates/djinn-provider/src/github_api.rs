@@ -32,8 +32,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::oauth::github_app::{
-    CLIENT_ID, GITHUB_INSTALLATION_ID_KEY,
-    GitHubAppTokens, refresh_cached_token,
+    CLIENT_ID, GITHUB_INSTALLATION_ID_KEY, GitHubAppTokens, refresh_cached_token,
 };
 use crate::repos::CredentialRepository;
 
@@ -266,7 +265,9 @@ impl GitHubApiClient {
             .await
             .ok()
             .flatten()
-            .ok_or_else(|| anyhow!("No GitHub installation ID found — call store_installation_id first"))?;
+            .ok_or_else(|| {
+                anyhow!("No GitHub installation ID found — call store_installation_id first")
+            })?;
 
         let url = format!(
             "{}/app/installations/{}/access_tokens",
@@ -311,7 +312,9 @@ impl GitHubApiClient {
         let resp = build_request(token.token.clone()).await?;
 
         if resp.status() == StatusCode::UNAUTHORIZED {
-            tracing::warn!("GitHubApiClient: 401 received, invalidating installation token and retrying");
+            tracing::warn!(
+                "GitHubApiClient: 401 received, invalidating installation token and retrying"
+            );
             // Invalidate cached installation token so next call re-derives it.
             *self.installation_token.lock().await = None;
 
@@ -725,7 +728,10 @@ async fn handle_rate_limit(resp: Response) -> Result<Response> {
             sleep_secs
         );
         tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
-        return Err(anyhow!("GitHub rate limit exhausted — retry after {}s", sleep_secs));
+        return Err(anyhow!(
+            "GitHub rate limit exhausted — retry after {}s",
+            sleep_secs
+        ));
     }
 
     if status == StatusCode::TOO_MANY_REQUESTS && remaining.is_none() {
@@ -741,7 +747,10 @@ async fn handle_rate_limit(resp: Response) -> Result<Response> {
             tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
             attempts += 1;
             if attempts >= MAX_REFRESH_RETRIES || delay >= BACKOFF_MAX_SECS {
-                return Err(anyhow!("GitHub API returned 429 after {} retries", attempts));
+                return Err(anyhow!(
+                    "GitHub API returned 429 after {} retries",
+                    attempts
+                ));
             }
             delay = (delay * 2).min(BACKOFF_MAX_SECS);
         }
@@ -771,19 +780,21 @@ fn chrono_parse_iso8601(s: &str) -> Result<i64> {
     if parts.len() != 2 {
         return Err(anyhow!("invalid ISO-8601: {}", s));
     }
-    let date_parts: Vec<u32> = parts[0]
-        .split('-')
-        .filter_map(|p| p.parse().ok())
-        .collect();
-    let time_parts: Vec<u32> = parts[1]
-        .split(':')
-        .filter_map(|p| p.parse().ok())
-        .collect();
+    let date_parts: Vec<u32> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
+    let time_parts: Vec<u32> = parts[1].split(':').filter_map(|p| p.parse().ok()).collect();
     if date_parts.len() != 3 || time_parts.len() != 3 {
         return Err(anyhow!("invalid ISO-8601 parts: {}", s));
     }
-    let (y, mo, d) = (date_parts[0] as i64, date_parts[1] as i64, date_parts[2] as i64);
-    let (h, mi, sec) = (time_parts[0] as i64, time_parts[1] as i64, time_parts[2] as i64);
+    let (y, mo, d) = (
+        date_parts[0] as i64,
+        date_parts[1] as i64,
+        date_parts[2] as i64,
+    );
+    let (h, mi, sec) = (
+        time_parts[0] as i64,
+        time_parts[1] as i64,
+        time_parts[2] as i64,
+    );
 
     // Days since Unix epoch (1970-01-01).
     // Zeller-like calculation for simplicity.
@@ -863,7 +874,10 @@ mod tests {
         // Simple date reconstruction — good enough for test tokens.
         // Epoch day → Gregorian: reuse the algorithm in reverse.
         let (year, month, day) = epoch_days_to_ymd(days);
-        format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, h, m, s)
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            year, month, day, h, m, s
+        )
     }
 
     fn epoch_days_to_ymd(z: i64) -> (i64, i64, i64) {
@@ -898,10 +912,18 @@ mod tests {
         let m = (rem % 3600) / 60;
         let s = rem % 60;
         let (year, month, day) = epoch_days_to_ymd(days);
-        let formatted = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, h, m, s);
+        let formatted = format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            year, month, day, h, m, s
+        );
         let parsed = chrono_parse_iso8601(&formatted).unwrap();
         // Allow ±1 second for rounding.
-        assert!((parsed - ts).abs() <= 1, "round-trip failed: {} vs {}", parsed, ts);
+        assert!(
+            (parsed - ts).abs() <= 1,
+            "round-trip failed: {} vs {}",
+            parsed,
+            ts
+        );
     }
 
     #[test]
@@ -1090,7 +1112,9 @@ mod tests {
             .await;
 
         Mock::given(method("GET"))
-            .and(path_regex(r"/repos/djinnos/server/commits/abc123/check-runs"))
+            .and(path_regex(
+                r"/repos/djinnos/server/commits/abc123/check-runs",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "total_count": 1,
                 "check_runs": [{
@@ -1105,7 +1129,10 @@ mod tests {
             .await;
 
         let client = GitHubApiClient::with_base_url(repo, server.uri());
-        let (pr, checks) = client.get_pull_request("djinnos", "server", 42).await.unwrap();
+        let (pr, checks) = client
+            .get_pull_request("djinnos", "server", 42)
+            .await
+            .unwrap();
 
         assert_eq!(pr.number, 42);
         assert_eq!(checks.total_count, 1);
@@ -1209,7 +1236,11 @@ mod tests {
         let result = client.derive_installation_token().await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("No GitHub App tokens"), "unexpected error: {}", msg);
+        assert!(
+            msg.contains("No GitHub App tokens"),
+            "unexpected error: {}",
+            msg
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1239,6 +1270,10 @@ mod tests {
         let result = client.derive_installation_token().await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("rate limit"), "expected rate limit error: {}", msg);
+        assert!(
+            msg.contains("rate limit"),
+            "expected rate limit error: {}",
+            msg
+        );
     }
 }

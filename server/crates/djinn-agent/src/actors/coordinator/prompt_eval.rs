@@ -185,12 +185,7 @@ impl CoordinatorActor {
 
         // Fetch post-amendment metrics (tasks closed after amendment timestamp).
         let post_metrics = match role_repo
-            .get_windowed_metrics(
-                project_id,
-                agent_type,
-                Some(&amendment.created_at),
-                None,
-            )
+            .get_windowed_metrics(project_id, agent_type, Some(&amendment.created_at), None)
             .await
         {
             Ok(m) => m,

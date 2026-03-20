@@ -781,13 +781,13 @@ mod tests {
             (TransitionAction::LeadInterventionComplete, TaskStatus::InLeadIntervention) => {
                 Some(TaskStatus::Open)
             }
-            (TransitionAction::LeadApprove, TaskStatus::InLeadIntervention) => Some(TaskStatus::Closed),
+            (TransitionAction::LeadApprove, TaskStatus::InLeadIntervention) => {
+                Some(TaskStatus::Closed)
+            }
             (TransitionAction::LeadApproveConflict, TaskStatus::InLeadIntervention) => {
                 Some(TaskStatus::Open)
             }
-            (TransitionAction::MarkPrReady, TaskStatus::InTaskReview) => {
-                Some(TaskStatus::PrReady)
-            }
+            (TransitionAction::MarkPrReady, TaskStatus::InTaskReview) => Some(TaskStatus::PrReady),
             (TransitionAction::PrMerge, TaskStatus::PrReady) => Some(TaskStatus::Closed),
             (TransitionAction::PrChangesRequested, TaskStatus::PrReady) => Some(TaskStatus::Open),
             _ => None,
@@ -952,7 +952,8 @@ mod tests {
             &TransitionAction::TaskReviewRejectConflict,
             &TaskStatus::InTaskReview,
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(conflict_reject.set_merge_conflict_metadata);
         assert!(!conflict_reject.clear_merge_conflict_metadata);
 
@@ -960,7 +961,8 @@ mod tests {
             &TransitionAction::LeadApproveConflict,
             &TaskStatus::InLeadIntervention,
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(pm_conflict.set_merge_conflict_metadata);
         assert!(!pm_conflict.clear_merge_conflict_metadata);
 
@@ -969,7 +971,8 @@ mod tests {
             &TransitionAction::SubmitVerification,
             &TaskStatus::InProgress,
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(submit_verify.clear_merge_conflict_metadata);
         assert!(!submit_verify.set_merge_conflict_metadata);
 
@@ -977,36 +980,27 @@ mod tests {
             &TransitionAction::SubmitTaskReview,
             &TaskStatus::InProgress,
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(submit_review.clear_merge_conflict_metadata);
 
-        let close = compute_transition(
-            &TransitionAction::Close,
-            &TaskStatus::Open,
-            None,
-        ).unwrap();
+        let close = compute_transition(&TransitionAction::Close, &TaskStatus::Open, None).unwrap();
         assert!(close.clear_merge_conflict_metadata);
 
-        let force_close = compute_transition(
-            &TransitionAction::ForceClose,
-            &TaskStatus::Open,
-            None,
-        ).unwrap();
+        let force_close =
+            compute_transition(&TransitionAction::ForceClose, &TaskStatus::Open, None).unwrap();
         assert!(force_close.clear_merge_conflict_metadata);
 
         let user_override = compute_transition(
             &TransitionAction::UserOverride,
             &TaskStatus::InProgress,
             Some(&TaskStatus::Open),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(user_override.clear_merge_conflict_metadata);
 
         // Start does NOT clear
-        let start = compute_transition(
-            &TransitionAction::Start,
-            &TaskStatus::Open,
-            None,
-        ).unwrap();
+        let start = compute_transition(&TransitionAction::Start, &TaskStatus::Open, None).unwrap();
         assert!(!start.clear_merge_conflict_metadata);
         assert!(!start.set_merge_conflict_metadata);
     }

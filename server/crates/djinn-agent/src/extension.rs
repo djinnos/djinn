@@ -83,7 +83,9 @@ where
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments, session_task_id).await,
         "memory_list" => call_memory_list(state, &call.arguments).await,
-        "memory_build_context" => call_memory_build_context(state, &call.arguments, session_task_id).await,
+        "memory_build_context" => {
+            call_memory_build_context(state, &call.arguments, session_task_id).await
+        }
         "role_metrics" => call_role_metrics(state, &call.arguments).await,
         "role_amend_prompt" => call_role_amend_prompt(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
@@ -784,7 +786,10 @@ async fn call_request_lead(
     // On the 2nd+ escalation for the same task, auto-route to Architect.
     let coordinator = state.coordinator().await;
     let escalation_count = if let Some(ref coord) = coordinator {
-        coord.increment_escalation_count(&task.id).await.unwrap_or(1)
+        coord
+            .increment_escalation_count(&task.id)
+            .await
+            .unwrap_or(1)
     } else {
         1
     };
@@ -2918,7 +2923,8 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
     tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
     tool_values.push(serde_json::to_value(tool_apply_patch()).expect("serialize tool_apply_patch"));
-    tool_values.push(serde_json::to_value(tool_request_lead()).expect("serialize tool_request_lead"));
+    tool_values
+        .push(serde_json::to_value(tool_request_lead()).expect("serialize tool_request_lead"));
     tool_values.push(
         serde_json::to_value(crate::roles::finalize::tool_submit_work())
             .expect("serialize tool_submit_work"),
@@ -2960,8 +2966,7 @@ pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
         serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
         serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
-        serde_json::to_value(tool_request_architect())
-            .expect("serialize tool_request_architect"),
+        serde_json::to_value(tool_request_architect()).expect("serialize tool_request_architect"),
         serde_json::to_value(crate::roles::finalize::tool_submit_decision())
             .expect("serialize tool_submit_decision"),
     ] {
@@ -3237,9 +3242,15 @@ mod tests {
             AgentType::Worker,
             "submit_decision"
         ));
-        assert!(is_tool_allowed_for_agent(AgentType::Lead, "submit_decision"));
+        assert!(is_tool_allowed_for_agent(
+            AgentType::Lead,
+            "submit_decision"
+        ));
         // task_transition is not in the PM tool set (removed by ADR-036).
-        assert!(!is_tool_allowed_for_agent(AgentType::Lead, "task_transition"));
+        assert!(!is_tool_allowed_for_agent(
+            AgentType::Lead,
+            "task_transition"
+        ));
     }
 
     #[test]

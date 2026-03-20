@@ -233,7 +233,10 @@ fn worker_claims(task: &Task, _ctx: &DispatchContext) -> bool {
     !matches!(
         task.status.as_str(),
         "needs_task_review" | "in_task_review" | "needs_lead_intervention" | "in_lead_intervention"
-    ) && !matches!(task.issue_type.as_str(), "spike" | "review" | "decomposition")
+    ) && !matches!(
+        task.issue_type.as_str(),
+        "spike" | "review" | "decomposition"
+    )
 }
 
 fn worker_dispatch_rule() -> DispatchRule {

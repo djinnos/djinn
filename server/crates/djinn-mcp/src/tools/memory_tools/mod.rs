@@ -15,8 +15,8 @@ pub(crate) mod types;
 pub use types::*;
 
 mod associations;
-pub(crate) mod contradiction;
 mod confirm;
+pub(crate) mod contradiction;
 mod reads;
 mod search;
 pub(crate) mod summaries;

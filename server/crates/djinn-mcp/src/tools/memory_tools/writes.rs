@@ -5,10 +5,7 @@ use crate::tools::memory_tools::summaries::NoteSummaryService;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::{Note, NoteDedupCandidate};
 use djinn_db::{folder_for_type, is_singleton};
-use djinn_provider::{
-    CompletionRequest, CompletionResponse, complete,
-    provider::LlmProvider,
-};
+use djinn_provider::{CompletionRequest, CompletionResponse, complete, provider::LlmProvider};
 
 const DEDUP_CANDIDATE_LIMIT: usize = 5;
 const DEDUP_SYSTEM: &str = "You decide whether an incoming memory note should be skipped, merged into an existing note, or kept as a separate note. Respond with JSON only.";
@@ -59,7 +56,9 @@ struct MemoryWriteProviderRuntime {
                 &'a djinn_db::Database,
             ) -> std::pin::Pin<
                 Box<
-                    dyn std::future::Future<Output = Result<Box<dyn LlmProvider>, String>> + Send + 'a,
+                    dyn std::future::Future<Output = Result<Box<dyn LlmProvider>, String>>
+                        + Send
+                        + 'a,
                 >,
             > + Send
             + Sync,
@@ -70,7 +69,9 @@ struct MemoryWriteProviderRuntime {
                 CompletionRequest,
             ) -> std::pin::Pin<
                 Box<
-                    dyn std::future::Future<Output = Result<CompletionResponse, String>> + Send + 'a,
+                    dyn std::future::Future<Output = Result<CompletionResponse, String>>
+                        + Send
+                        + 'a,
                 >,
             > + Send
             + Sync,
@@ -89,7 +90,11 @@ impl Default for MemoryWriteProviderRuntime {
                 })
             }),
             complete: std::sync::Arc::new(|provider, request| {
-                Box::pin(async move { complete(provider, request).await.map_err(|error| error.to_string()) })
+                Box::pin(async move {
+                    complete(provider, request)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
             }),
         }
     }
@@ -218,9 +223,15 @@ async fn dedup_candidates_for_write(
     content: &str,
 ) -> Result<Vec<NoteDedupCandidate>, String> {
     let folder = folder_for_type(note_type);
-    repo.dedup_candidates(project_id, folder, note_type, content, DEDUP_CANDIDATE_LIMIT)
-        .await
-        .map_err(|error| error.to_string())
+    repo.dedup_candidates(
+        project_id,
+        folder,
+        note_type,
+        content,
+        DEDUP_CANDIDATE_LIMIT,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 struct PendingWriteDedup<'a> {
@@ -246,14 +257,10 @@ async fn maybe_apply_write_dedup(
         return None;
     }
 
-    let candidates = dedup_candidates_for_write(
-        repo,
-        pending.project_id,
-        pending.note_type,
-        pending.content,
-    )
-    .await
-    .ok()?;
+    let candidates =
+        dedup_candidates_for_write(repo, pending.project_id, pending.note_type, pending.content)
+            .await
+            .ok()?;
 
     // No candidates above threshold; proceed with normal write
     if candidates.is_empty() {
@@ -410,7 +417,8 @@ impl DjinnMcpServer {
         {
             Ok(note) => {
                 self.schedule_summary_regeneration(&note.id);
-                self.detect_emit_and_schedule_contradictions(&repo, &note).await;
+                self.detect_emit_and_schedule_contradictions(&repo, &note)
+                    .await;
                 Json(MemoryNoteResponse::from_note(&note))
             }
             Err(e) => Json(MemoryNoteResponse::error(e.to_string())),
@@ -600,11 +608,7 @@ impl DjinnMcpServer {
     ///
     /// The analysis worker is triggered only when stage 1 finds candidates and emits
     /// the `contradiction_candidates` event — never on every write.
-    async fn detect_emit_and_schedule_contradictions(
-        &self,
-        repo: &NoteRepository,
-        note: &Note,
-    ) {
+    async fn detect_emit_and_schedule_contradictions(&self, repo: &NoteRepository, note: &Note) {
         let folder = folder_for_type(&note.note_type);
         let Ok(candidates) = repo
             .detect_contradiction_candidates(&note.id, &note.note_type, folder, &note.content)
@@ -620,7 +624,10 @@ impl DjinnMcpServer {
         // Stage 1: emit event for SSE / external listeners
         self.state
             .event_bus()
-            .send(DjinnEventEnvelope::contradiction_candidates(note, &candidates));
+            .send(DjinnEventEnvelope::contradiction_candidates(
+                note,
+                &candidates,
+            ));
 
         // Stage 2: send to the contradiction analysis worker channel.
         // The worker is only active when stage 1 emits candidates — satisfying the
@@ -727,7 +734,15 @@ mod tests {
             Box<
                 dyn futures::Future<
                         Output = anyhow::Result<
-                            Pin<Box<dyn Stream<Item = anyhow::Result<djinn_provider::provider::StreamEvent>> + Send>>,
+                            Pin<
+                                Box<
+                                    dyn Stream<
+                                            Item = anyhow::Result<
+                                                djinn_provider::provider::StreamEvent,
+                                            >,
+                                        > + Send,
+                                >,
+                            >,
                         >,
                     > + Send
                     + 'a,
@@ -737,12 +752,18 @@ mod tests {
             let response_text = self.response_text.clone();
             Box::pin(async move {
                 let events: Vec<anyhow::Result<djinn_provider::provider::StreamEvent>> = vec![
-                    Ok(djinn_provider::provider::StreamEvent::Delta(ContentBlock::text(
-                        response_text,
-                    ))),
+                    Ok(djinn_provider::provider::StreamEvent::Delta(
+                        ContentBlock::text(response_text),
+                    )),
                     Ok(djinn_provider::provider::StreamEvent::Done),
                 ];
-                Ok(Box::pin(stream::iter(events)) as Pin<Box<dyn Stream<Item = anyhow::Result<djinn_provider::provider::StreamEvent>> + Send>>)
+                Ok(Box::pin(stream::iter(events))
+                    as Pin<
+                        Box<
+                            dyn Stream<Item = anyhow::Result<djinn_provider::provider::StreamEvent>>
+                                + Send,
+                        >,
+                    >)
             })
         }
     }
@@ -755,7 +776,11 @@ mod tests {
                 })
             }),
             complete: std::sync::Arc::new(|provider, request| {
-                Box::pin(async move { complete(provider, request).await.map_err(|error| error.to_string()) })
+                Box::pin(async move {
+                    complete(provider, request)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
             }),
         }
     }
@@ -766,7 +791,11 @@ mod tests {
                 Box::pin(async move { Err(message.to_string()) })
             }),
             complete: std::sync::Arc::new(|provider, request| {
-                Box::pin(async move { complete(provider, request).await.map_err(|error| error.to_string()) })
+                Box::pin(async move {
+                    complete(provider, request)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
             }),
         }
     }
@@ -932,12 +961,28 @@ mod tests {
         )
         .await;
 
-        assert!(response.error.is_none(), "Expected no error but got: {:?}", response.error);
+        assert!(
+            response.error.is_none(),
+            "Expected no error but got: {:?}",
+            response.error
+        );
         assert!(response.id.is_some(), "Expected response to have an id");
-        assert_eq!(response.id.as_deref(), existing_id.as_deref(), "Expected merged note to have same id as existing");
-        assert_eq!(note_count_for_project(&db, &project.id).await, 1, "Expected only 1 note after merge");
+        assert_eq!(
+            response.id.as_deref(),
+            existing_id.as_deref(),
+            "Expected merged note to have same id as existing"
+        );
+        assert_eq!(
+            note_count_for_project(&db, &project.id).await,
+            1,
+            "Expected only 1 note after merge"
+        );
 
-        let merged = repo.get(existing_id.as_deref().unwrap()).await.unwrap().unwrap();
+        let merged = repo
+            .get(existing_id.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(merged.content.contains("rust retry backoff strategy"));
     }
 
@@ -965,8 +1010,9 @@ mod tests {
             WriteParams {
                 project: tmp.path().to_str().unwrap().to_string(),
                 title: "Incoming Fallback".to_string(),
-                content: "database migration sequencing playbook for releases with rollback checklist"
-                    .to_string(),
+                content:
+                    "database migration sequencing playbook for releases with rollback checklist"
+                        .to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
             },
@@ -981,16 +1027,20 @@ mod tests {
 
     #[test]
     fn parse_dedup_decision_rejects_invalid_json_and_invalid_decision() {
-        assert!(parse_dedup_decision(&CompletionResponse {
-            text: "not json".to_string(),
-            ..CompletionResponse::default()
-        })
-        .is_err());
-        assert!(parse_dedup_decision(&CompletionResponse {
-            text: r#"{"decision":"other"}"#.to_string(),
-            ..CompletionResponse::default()
-        })
-        .is_err());
+        assert!(
+            parse_dedup_decision(&CompletionResponse {
+                text: "not json".to_string(),
+                ..CompletionResponse::default()
+            })
+            .is_err()
+        );
+        assert!(
+            parse_dedup_decision(&CompletionResponse {
+                text: r#"{"decision":"other"}"#.to_string(),
+                ..CompletionResponse::default()
+            })
+            .is_err()
+        );
     }
 
     #[test]

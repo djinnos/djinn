@@ -94,7 +94,13 @@ pub(crate) fn extract_worker_context(
                     if items.is_empty() {
                         None
                     } else {
-                        Some(items.iter().map(|c| format!("- {c}")).collect::<Vec<_>>().join("\n"))
+                        Some(
+                            items
+                                .iter()
+                                .map(|c| format!("- {c}"))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        )
                     }
                 } else {
                     v.as_str().filter(|s| !s.is_empty()).map(|s| s.to_owned())
@@ -152,10 +158,7 @@ pub(crate) async fn pr_review_feedback_context(
     let payload: serde_json::Value = serde_json::from_str(&entry.payload).ok()?;
 
     let round = payload.get("round").and_then(|v| v.as_u64()).unwrap_or(1);
-    let pr_url = payload
-        .get("pr_url")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let pr_url = payload.get("pr_url").and_then(|v| v.as_str()).unwrap_or("");
     let pull_number = payload
         .get("pull_number")
         .and_then(|v| v.as_u64())
@@ -167,7 +170,9 @@ pub(crate) async fn pr_review_feedback_context(
     ));
 
     // Top-level change-request reviews.
-    if let Some(reviews) = payload.get("change_request_reviews").and_then(|v| v.as_array())
+    if let Some(reviews) = payload
+        .get("change_request_reviews")
+        .and_then(|v| v.as_array())
         && !reviews.is_empty()
     {
         lines.push(String::new());
@@ -199,14 +204,8 @@ pub(crate) async fn pr_review_feedback_context(
                 .get("reviewer")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            let body = comment
-                .get("body")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let path = comment
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let body = comment.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let path = comment.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let line = comment.get("line").and_then(|v| v.as_u64());
             let location = if !path.is_empty() {
                 if let Some(l) = line {

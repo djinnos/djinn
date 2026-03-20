@@ -32,10 +32,7 @@ pub fn create_test_app() -> axum::Router {
 pub async fn create_test_app_with_github_creds() -> axum::Router {
     let db = create_test_db();
     // Seed a dummy GitHub App OAuth token so project_add validation passes.
-    let cred_repo = djinn_provider::repos::CredentialRepository::new(
-        db.clone(),
-        EventBus::noop(),
-    );
+    let cred_repo = djinn_provider::repos::CredentialRepository::new(db.clone(), EventBus::noop());
     let dummy_tokens = serde_json::json!({
         "access_token": "ghu_test_token",
         "refresh_token": "ghr_test_refresh",
@@ -44,7 +41,11 @@ pub async fn create_test_app_with_github_creds() -> axum::Router {
         "user_login": "test-user"
     });
     cred_repo
-        .set("github_app", "__OAUTH_GITHUB_APP", &dummy_tokens.to_string())
+        .set(
+            "github_app",
+            "__OAUTH_GITHUB_APP",
+            &dummy_tokens.to_string(),
+        )
         .await
         .expect("failed to seed GitHub credentials");
     // Also seed the installation ID.

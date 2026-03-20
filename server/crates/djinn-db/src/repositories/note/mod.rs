@@ -200,12 +200,27 @@ mod tests {
         assert_eq!(folder_for_type("case"), "cases");
         assert_eq!(folder_for_type("pitfall"), "pitfalls");
 
-        assert_eq!(permalink_for("case", "Task Recovery Example"), "cases/task-recovery-example");
-        assert_eq!(permalink_for("pitfall", "Retry Storm"), "pitfalls/retry-storm");
+        assert_eq!(
+            permalink_for("case", "Task Recovery Example"),
+            "cases/task-recovery-example"
+        );
+        assert_eq!(
+            permalink_for("pitfall", "Retry Storm"),
+            "pitfalls/retry-storm"
+        );
 
-        assert_eq!(file_helpers::infer_note_type("patterns/reusable-flow"), "pattern");
-        assert_eq!(file_helpers::infer_note_type("cases/task-recovery-example"), "case");
-        assert_eq!(file_helpers::infer_note_type("pitfalls/retry-storm"), "pitfall");
+        assert_eq!(
+            file_helpers::infer_note_type("patterns/reusable-flow"),
+            "pattern"
+        );
+        assert_eq!(
+            file_helpers::infer_note_type("cases/task-recovery-example"),
+            "case"
+        );
+        assert_eq!(
+            file_helpers::infer_note_type("pitfalls/retry-storm"),
+            "pitfall"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -546,7 +561,13 @@ mod tests {
         .unwrap();
 
         let results = repo
-            .dedup_candidates(&project.id, "decisions", "adr", "completely unrelated phrase", 10)
+            .dedup_candidates(
+                &project.id,
+                "decisions",
+                "adr",
+                "completely unrelated phrase",
+                10,
+            )
             .await
             .unwrap();
 
@@ -572,9 +593,13 @@ mod tests {
             )
             .await
             .unwrap();
-        repo.update_summaries(&matching.id, Some("matching abstract"), Some("matching overview"))
-            .await
-            .unwrap();
+        repo.update_summaries(
+            &matching.id,
+            Some("matching abstract"),
+            Some("matching overview"),
+        )
+        .await
+        .unwrap();
 
         repo.create(
             &project.id,

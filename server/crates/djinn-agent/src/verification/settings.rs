@@ -272,10 +272,7 @@ mod tests {
     #[test]
     fn load_mcp_server_registry_returns_empty_when_no_mcp_servers_key() {
         let dir = tempdir_in_tmp();
-        write_settings(
-            &dir,
-            r#"{"setup": [], "verification": []}"#,
-        );
+        write_settings(&dir, r#"{"setup": [], "verification": []}"#);
         let registry = load_mcp_server_registry(dir.path());
         assert!(registry.is_empty());
     }
@@ -293,7 +290,9 @@ mod tests {
         );
         let registry = load_mcp_server_registry(dir.path());
         assert_eq!(registry.len(), 1);
-        let cfg = registry.get("my-db-tool").expect("my-db-tool should be in registry");
+        let cfg = registry
+            .get("my-db-tool")
+            .expect("my-db-tool should be in registry");
         assert_eq!(cfg.url.as_deref(), Some("http://localhost:9000/mcp"));
         assert!(cfg.command.is_none());
     }
@@ -310,7 +309,9 @@ mod tests {
             }"#,
         );
         let registry = load_mcp_server_registry(dir.path());
-        let cfg = registry.get("github").expect("github should be in registry");
+        let cfg = registry
+            .get("github")
+            .expect("github should be in registry");
         assert!(cfg.url.is_none());
         assert_eq!(cfg.command.as_deref(), Some("github-mcp-server stdio"));
     }
@@ -358,7 +359,10 @@ mod tests {
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].0, "my-tool");
-        assert_eq!(resolved[0].1.url.as_deref(), Some("http://localhost:9000/mcp"));
+        assert_eq!(
+            resolved[0].1.url.as_deref(),
+            Some("http://localhost:9000/mcp")
+        );
     }
 
     #[test]
@@ -425,9 +429,18 @@ mod tests {
 
         let settings = load_settings(dir.path()).expect("load settings");
         assert_eq!(settings.verification_rules.len(), 2);
-        assert_eq!(settings.verification_rules[0].pattern, "crates/djinn-mcp/**");
-        assert_eq!(settings.verification_rules[0].commands, vec!["cargo test -p djinn-mcp"]);
-        assert_eq!(settings.verification_rules[1].pattern, "crates/djinn-core/**");
+        assert_eq!(
+            settings.verification_rules[0].pattern,
+            "crates/djinn-mcp/**"
+        );
+        assert_eq!(
+            settings.verification_rules[0].commands,
+            vec!["cargo test -p djinn-mcp"]
+        );
+        assert_eq!(
+            settings.verification_rules[1].pattern,
+            "crates/djinn-core/**"
+        );
         assert_eq!(settings.verification_rules[1].commands.len(), 2);
     }
 

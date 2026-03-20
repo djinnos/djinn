@@ -210,13 +210,17 @@ impl LlmProvider for GoogleProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Router, routing::post};
-    use futures::TryStreamExt;
     use crate::message::{Conversation, Message};
     use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
+    use axum::{Router, routing::post};
+    use futures::TryStreamExt;
     use std::sync::{Arc, Mutex};
 
-    fn spawn_sse_server(status: u16, body: &'static str, seen_auth: Arc<Mutex<Option<String>>>) -> String {
+    fn spawn_sse_server(
+        status: u16,
+        body: &'static str,
+        seen_auth: Arc<Mutex<Option<String>>>,
+    ) -> String {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .expect("bind local tcp listener");
         let addr = listener.local_addr().expect("local addr");
@@ -403,7 +407,10 @@ mod tests {
         let mut conv = Conversation::new();
         conv.push(Message::user("Hello"));
 
-        let stream = provider.stream(&conv, &[], None).await.expect("stream start");
+        let stream = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream start");
         let events: Vec<_> = stream.try_collect().await.expect("stream events");
 
         assert!(seen_auth.lock().expect("seen auth").is_none());
@@ -411,7 +418,13 @@ mod tests {
             &events[0],
             StreamEvent::Delta(ContentBlock::Text { text }) if text == "Hello from google"
         ));
-        assert!(matches!(&events[1], StreamEvent::Usage(TokenUsage { input: 7, output: 9 })));
+        assert!(matches!(
+            &events[1],
+            StreamEvent::Usage(TokenUsage {
+                input: 7,
+                output: 9
+            })
+        ));
         assert!(matches!(&events[2], StreamEvent::Done));
     }
 
@@ -426,7 +439,10 @@ mod tests {
         let mut conv = Conversation::new();
         conv.push(Message::user("Hello"));
 
-        let stream = provider.stream(&conv, &[], None).await.expect("stream start");
+        let stream = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream start");
         let result: Result<Vec<_>, _> = stream.try_collect().await;
         let err = match result {
             Ok(_) => panic!("expected provider error"),

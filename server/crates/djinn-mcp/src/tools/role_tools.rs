@@ -7,11 +7,11 @@ use crate::server::DjinnMcpServer;
 use crate::tools::json_object::AnyJson;
 use crate::tools::validation::{validate_limit, validate_offset};
 use djinn_core::models::AgentRole;
+use djinn_db::AgentRoleMetrics as DbRoleMetrics;
 use djinn_db::{
     AgentRoleCreateInput, AgentRoleListQuery, AgentRoleRepository, AgentRoleUpdateInput,
     VALID_BASE_ROLES,
 };
-use djinn_db::AgentRoleMetrics as DbRoleMetrics;
 
 // ── View model ───────────────────────────────────────────────────────────────
 
@@ -186,14 +186,27 @@ impl DjinnMcpServer {
     ) -> Json<RoleSingleResponse> {
         let name = match validate_role_name(&p.name) {
             Ok(n) => n,
-            Err(e) => return Json(RoleSingleResponse { role: None, error: Some(e) }),
+            Err(e) => {
+                return Json(RoleSingleResponse {
+                    role: None,
+                    error: Some(e),
+                });
+            }
         };
         if let Err(e) = validate_base_role(&p.base_role) {
-            return Json(RoleSingleResponse { role: None, error: Some(e) });
+            return Json(RoleSingleResponse {
+                role: None,
+                error: Some(e),
+            });
         }
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
-            Err(e) => return Json(RoleSingleResponse { role: None, error: Some(e) }),
+            Err(e) => {
+                return Json(RoleSingleResponse {
+                    role: None,
+                    error: Some(e),
+                });
+            }
         };
 
         let repo = AgentRoleRepository::new(self.state.db().clone(), self.state.event_bus());
@@ -203,10 +216,17 @@ impl DjinnMcpServer {
             Ok(Some(_)) => {
                 return Json(RoleSingleResponse {
                     role: None,
-                    error: Some(format!("a role named '{name}' already exists in this project")),
+                    error: Some(format!(
+                        "a role named '{name}' already exists in this project"
+                    )),
                 });
             }
-            Err(e) => return Json(RoleSingleResponse { role: None, error: Some(e.to_string()) }),
+            Err(e) => {
+                return Json(RoleSingleResponse {
+                    role: None,
+                    error: Some(e.to_string()),
+                });
+            }
             Ok(None) => {}
         }
 
@@ -226,10 +246,7 @@ impl DjinnMcpServer {
                     name: &name,
                     base_role: &p.base_role,
                     description: p.description.as_deref().unwrap_or(""),
-                    system_prompt_extensions: p
-                        .system_prompt_extensions
-                        .as_deref()
-                        .unwrap_or(""),
+                    system_prompt_extensions: p.system_prompt_extensions.as_deref().unwrap_or(""),
                     model_preference: p.model_preference.as_deref(),
                     verification_command: p.verification_command.as_deref(),
                     mcp_servers: mcp_servers_json.as_deref(),
@@ -251,16 +268,19 @@ impl DjinnMcpServer {
     }
 
     /// Show full details of an agent role by UUID or name.
-    #[tool(
-        description = "Show full details of an agent role. Accepts role UUID or name."
-    )]
+    #[tool(description = "Show full details of an agent role. Accepts role UUID or name.")]
     pub async fn role_show(
         &self,
         Parameters(p): Parameters<RoleShowParams>,
     ) -> Json<RoleSingleResponse> {
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
-            Err(e) => return Json(RoleSingleResponse { role: None, error: Some(e) }),
+            Err(e) => {
+                return Json(RoleSingleResponse {
+                    role: None,
+                    error: Some(e),
+                });
+            }
         };
         let repo = AgentRoleRepository::new(self.state.db().clone(), self.state.event_bus());
 
@@ -272,7 +292,12 @@ impl DjinnMcpServer {
                     error: Some(role_not_found_error(&p.id)),
                 });
             }
-            Err(e) => return Json(RoleSingleResponse { role: None, error: Some(e) }),
+            Err(e) => {
+                return Json(RoleSingleResponse {
+                    role: None,
+                    error: Some(e),
+                });
+            }
         };
 
         Json(RoleSingleResponse {
@@ -355,7 +380,12 @@ impl DjinnMcpServer {
     ) -> Json<RoleSingleResponse> {
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
-            Err(e) => return Json(RoleSingleResponse { role: None, error: Some(e) }),
+            Err(e) => {
+                return Json(RoleSingleResponse {
+                    role: None,
+                    error: Some(e),
+                });
+            }
         };
         let repo = AgentRoleRepository::new(self.state.db().clone(), self.state.event_bus());
 
@@ -367,14 +397,24 @@ impl DjinnMcpServer {
                     error: Some(role_not_found_error(&p.id)),
                 });
             }
-            Err(e) => return Json(RoleSingleResponse { role: None, error: Some(e) }),
+            Err(e) => {
+                return Json(RoleSingleResponse {
+                    role: None,
+                    error: Some(e),
+                });
+            }
         };
 
         // Determine new name; check uniqueness if changed.
         let new_name = if let Some(ref n) = p.name {
             match validate_role_name(n) {
                 Ok(v) => v,
-                Err(e) => return Json(RoleSingleResponse { role: None, error: Some(e) }),
+                Err(e) => {
+                    return Json(RoleSingleResponse {
+                        role: None,
+                        error: Some(e),
+                    });
+                }
             }
         } else {
             role.name.clone()
@@ -391,7 +431,10 @@ impl DjinnMcpServer {
                     });
                 }
                 Err(e) => {
-                    return Json(RoleSingleResponse { role: None, error: Some(e.to_string()) });
+                    return Json(RoleSingleResponse {
+                        role: None,
+                        error: Some(e.to_string()),
+                    });
                 }
                 Ok(None) => {}
             }

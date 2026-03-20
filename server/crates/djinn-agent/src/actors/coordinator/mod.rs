@@ -68,7 +68,6 @@ const TASK_OUTCOME_FAILED_CLOSE: &str = "failed_closed";
 /// (e.g. missing credential).  Prevents hot dispatch loops.
 const DISPATCH_COOLDOWN: Duration = Duration::from_secs(60);
 
-
 /// If a task becomes dispatch-ready again within this threshold of its last
 /// dispatch, it is considered a rapid failure and placed in cooldown.
 const RAPID_FAILURE_THRESHOLD: Duration = Duration::from_secs(10);
@@ -609,9 +608,7 @@ impl CoordinatorActor {
             }
             // Epic created → create a decomposition task for the Planner (wave 1).
             ("epic", "created") => {
-                let Some(epic) =
-                    envelope.parse_payload::<djinn_core::models::Epic>()
-                else {
+                let Some(epic) = envelope.parse_payload::<djinn_core::models::Epic>() else {
                     return;
                 };
                 self.maybe_create_decomposition_task(&epic).await;
@@ -703,22 +700,26 @@ impl CoordinatorActor {
         &self,
         task: &djinn_core::models::Task,
     ) -> djinn_db::Result<()> {
-        if task.status == "closed" && task.close_reason.as_deref() == Some("failed")
+        if task.status == "closed"
+            && task.close_reason.as_deref() == Some("failed")
             && !self
                 .task_outcome_marker_exists(task, TASK_OUTCOME_FAILED_CLOSE)
                 .await?
         {
-            self.apply_task_outcome_confidence_to_task_refs(task).await?;
+            self.apply_task_outcome_confidence_to_task_refs(task)
+                .await?;
             self.record_task_outcome_marker(task, TASK_OUTCOME_FAILED_CLOSE)
                 .await?;
         }
 
-        if task.status == "open" && task.reopen_count > 0
+        if task.status == "open"
+            && task.reopen_count > 0
             && !self
                 .task_outcome_marker_exists(task, TASK_OUTCOME_REOPEN_COUNT)
                 .await?
         {
-            self.apply_task_outcome_confidence_to_task_refs(task).await?;
+            self.apply_task_outcome_confidence_to_task_refs(task)
+                .await?;
             self.record_task_outcome_marker(task, TASK_OUTCOME_REOPEN_COUNT)
                 .await?;
         }
@@ -1132,10 +1133,7 @@ impl CoordinatorHandle {
     /// Increment the Lead escalation count for a task and return the new count.
     ///
     /// When the count reaches ≥ 2, the caller should route to Architect instead of Lead.
-    pub async fn increment_escalation_count(
-        &self,
-        task_id: &str,
-    ) -> Result<u32, CoordinatorError> {
+    pub async fn increment_escalation_count(&self, task_id: &str) -> Result<u32, CoordinatorError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.sender
             .send(CoordinatorMessage::IncrementEscalationCount {
@@ -1245,7 +1243,14 @@ mod tests {
             .unwrap();
         let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(tx));
         let note = note_repo
-            .create(&project.id, Path::new(&project.path), title, "body", "research", "[]")
+            .create(
+                &project.id,
+                Path::new(&project.path),
+                title,
+                "body",
+                "research",
+                "[]",
+            )
             .await
             .unwrap();
         let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
@@ -1627,8 +1632,16 @@ mod tests {
             .filter(|payload: &serde_json::Value| payload["kind"] == TASK_OUTCOME_REOPEN_COUNT)
             .collect();
         assert_eq!(reopen_markers.len(), 2);
-        assert!(reopen_markers.iter().any(|payload| payload["reopen_count"] == 1));
-        assert!(reopen_markers.iter().any(|payload| payload["reopen_count"] == 2));
+        assert!(
+            reopen_markers
+                .iter()
+                .any(|payload| payload["reopen_count"] == 1)
+        );
+        assert!(
+            reopen_markers
+                .iter()
+                .any(|payload| payload["reopen_count"] == 2)
+        );
     }
 
     // ── Architect patrol dispatch ─────────────────────────────────────────────
@@ -1751,10 +1764,7 @@ mod tests {
         // is not auto-paused (coordinator pauses projects only when it receives
         // a project_created event — but create_test_project uses noop bus).
         let project = test_helpers::create_test_project(&db).await;
-        let epic_repo = EpicRepository::new(
-            db.clone(),
-            crate::events::event_bus_for(&tx),
-        );
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
         // Spawn coordinator BEFORE creating epic so it receives the event.
         let _handle = spawn_coordinator_with_planner(&db, &tx);
         // Yield to give the coordinator task a chance to start.
@@ -1777,8 +1787,7 @@ mod tests {
 
         // Wait for the coordinator to process the epic_created event and create
         // the decomposition task (polling with 2s timeout).
-        let decomp_tasks =
-            wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
+        let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
 
         assert_eq!(
             decomp_tasks.len(),
@@ -1952,7 +1961,11 @@ mod tests {
 
         // Wait for the first decomposition task.
         let initial_decomp = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
-        assert_eq!(initial_decomp.len(), 1, "should have initial decomposition task");
+        assert_eq!(
+            initial_decomp.len(),
+            1,
+            "should have initial decomposition task"
+        );
         let decomp_task = &initial_decomp[0];
 
         // Manually close the decomposition task (simulating Planner completed wave 1).
@@ -1963,11 +1976,29 @@ mod tests {
 
         // Create 2 worker tasks under the epic.
         let w1 = task_repo
-            .create(&epic.id, "Worker Task 1", "", "", "task", 0, "", Some("open"))
+            .create(
+                &epic.id,
+                "Worker Task 1",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                Some("open"),
+            )
             .await
             .unwrap();
         let w2 = task_repo
-            .create(&epic.id, "Worker Task 2", "", "", "task", 0, "", Some("open"))
+            .create(
+                &epic.id,
+                "Worker Task 2",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                Some("open"),
+            )
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

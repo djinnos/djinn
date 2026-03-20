@@ -27,10 +27,7 @@ fn compute_pipeline_timeout(project_path: &str) -> std::time::Duration {
     let path = std::path::Path::new(project_path);
     let sum = match crate::verification::settings::load_setup_commands(path) {
         Ok(setup) => {
-            let total: u64 = setup
-                .iter()
-                .map(|c| c.timeout_secs.unwrap_or(300))
-                .sum();
+            let total: u64 = setup.iter().map(|c| c.timeout_secs.unwrap_or(300)).sum();
             total
         }
         Err(_) => 0,
@@ -188,14 +185,17 @@ async fn run_verification_pipeline(
     // Resolve scoped verification commands (AC-1 through AC-7).
     let role_cmd_override = role_verification_command_for_task(&task, app_state).await;
     let target_branch = default_target_branch(&task.project_id, app_state).await;
-    let scoped_commands = resolve_scoped_commands(
-        &worktree_path,
-        &target_branch,
-        role_cmd_override.as_deref(),
-    );
+    let scoped_commands =
+        resolve_scoped_commands(&worktree_path, &target_branch, role_cmd_override.as_deref());
 
-    let result =
-        verify_commit(&task.project_id, &commit_sha, &worktree_path, &app_state.db, &scoped_commands).await?;
+    let result = verify_commit(
+        &task.project_id,
+        &commit_sha,
+        &worktree_path,
+        &app_state.db,
+        &scoped_commands,
+    )
+    .await?;
     emit_verification_steps(&task.project_id, Some(task_id), &result, app_state).await;
 
     if !result.passed {
@@ -271,15 +271,18 @@ pub(crate) async fn run_verification_gate(
     // Resolve scoped verification commands (AC-1 through AC-7).
     let role_cmd_override = role_verification_command_for_task(&task, app_state).await;
     let target_branch = default_target_branch(&task.project_id, app_state).await;
-    let scoped_commands = resolve_scoped_commands(
-        &worktree_path,
-        &target_branch,
-        role_cmd_override.as_deref(),
-    );
+    let scoped_commands =
+        resolve_scoped_commands(&worktree_path, &target_branch, role_cmd_override.as_deref());
 
-    let result = verify_commit(&task.project_id, &commit_sha, &worktree_path, &app_state.db, &scoped_commands)
-        .await
-        .map_err(|e| format!("verification execution failed: {e}"))?;
+    let result = verify_commit(
+        &task.project_id,
+        &commit_sha,
+        &worktree_path,
+        &app_state.db,
+        &scoped_commands,
+    )
+    .await
+    .map_err(|e| format!("verification execution failed: {e}"))?;
     emit_verification_steps(&task.project_id, Some(task_id), &result, app_state).await;
 
     cleanup_worktree(task_id, &worktree_path, app_state).await;
@@ -471,12 +474,12 @@ mod tests {
         agent_context_from_db, create_test_db, create_test_epic, create_test_project,
         create_test_task, test_events,
     };
-    use std::time::Duration;
     use crate::verification::service::VerificationResult;
     use crate::verification::settings::load_setup_commands;
     use djinn_core::commands::CommandResult;
     use djinn_core::models::TransitionAction;
     use djinn_db::TaskRepository;
+    use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
     fn tempdir_in_tmp() -> tempfile::TempDir {
@@ -551,7 +554,9 @@ mod tests {
         assert!(feedback.len() < 7_000);
     }
 
-    fn setup_verifying_task_with_count_blocking(count: i64) -> (TaskRepository, String, AgentContext) {
+    fn setup_verifying_task_with_count_blocking(
+        count: i64,
+    ) -> (TaskRepository, String, AgentContext) {
         std::thread::scope(|s| {
             s.spawn(|| {
                 let rt = tokio::runtime::Builder::new_current_thread()
@@ -590,17 +595,21 @@ mod tests {
                         .expect("transition to verifying");
 
                     if count > 0 {
-                        sqlx::query("UPDATE tasks SET verification_failure_count = ?1 WHERE id = ?2")
-                            .bind(count)
-                            .bind(&task.id)
-                            .execute(db.pool())
-                            .await
-                            .expect("set verification_failure_count");
+                        sqlx::query(
+                            "UPDATE tasks SET verification_failure_count = ?1 WHERE id = ?2",
+                        )
+                        .bind(count)
+                        .bind(&task.id)
+                        .execute(db.pool())
+                        .await
+                        .expect("set verification_failure_count");
                     }
 
                     (task_repo, task.id, app_state)
                 })
-            }).join().expect("thread panicked")
+            })
+            .join()
+            .expect("thread panicked")
         })
     }
 
@@ -661,13 +670,10 @@ mod tests {
         let setup = load_setup_commands(dir.path()).expect("load settings commands");
         let configured_timeout_secs: u64 =
             setup.iter().map(|c| c.timeout_secs.unwrap_or(300)).sum();
-        let expected_timeout_secs =
-            (configured_timeout_secs + PIPELINE_TIMEOUT_OVERHEAD_SECS).max(MIN_PIPELINE_TIMEOUT_SECS);
+        let expected_timeout_secs = (configured_timeout_secs + PIPELINE_TIMEOUT_OVERHEAD_SECS)
+            .max(MIN_PIPELINE_TIMEOUT_SECS);
 
-        assert_eq!(
-            timeout,
-            Duration::from_secs(expected_timeout_secs)
-        );
+        assert_eq!(timeout, Duration::from_secs(expected_timeout_secs));
     }
 
     #[tokio::test(start_paused = true)]
@@ -697,13 +703,19 @@ mod tests {
 
         tokio::time::advance(timeout - Duration::from_secs(1)).await;
         tick_spawned_verification().await;
-        assert!(app_state.has_verification(&task_id), "should still be verifying before timeout");
+        assert!(
+            app_state.has_verification(&task_id),
+            "should still be verifying before timeout"
+        );
 
         tokio::time::advance(Duration::from_secs(1)).await;
         tick_spawned_verification().await;
         background.await.expect("background task completed");
 
-        assert!(!app_state.has_verification(&task_id), "verification should be released after timeout");
+        assert!(
+            !app_state.has_verification(&task_id),
+            "verification should be released after timeout"
+        );
     }
 
     #[tokio::test(start_paused = true)]

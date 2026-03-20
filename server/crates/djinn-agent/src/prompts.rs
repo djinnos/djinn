@@ -273,7 +273,10 @@ pub(crate) fn render_prompt_for_role(
         ),
         _ => String::new(),
     };
-    out = out.replace("{{verification_rules_section}}", &verification_rules_section);
+    out = out.replace(
+        "{{verification_rules_section}}",
+        &verification_rules_section,
+    );
 
     // Hard cap: truncate the rendered system prompt to prevent context window
     // blowout when individual sections escape their soft limits.

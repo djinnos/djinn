@@ -30,7 +30,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::state::McpState;
-use crate::tools::memory_tools::contradiction::{ContradictionAnalysisInput, spawn_contradiction_analysis_worker};
+use crate::tools::memory_tools::contradiction::{
+    ContradictionAnalysisInput, spawn_contradiction_analysis_worker,
+};
 use crate::tools::memory_tools::summaries::spawn_summary_backfill_worker;
 
 const HIGH_CONFIDENCE_THRESHOLD: f64 = 0.8;

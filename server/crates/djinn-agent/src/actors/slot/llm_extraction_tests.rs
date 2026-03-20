@@ -21,7 +21,7 @@ use djinn_db::{
 
 use crate::actors::slot::llm_extraction::{run_llm_extraction, run_llm_extraction_with_provider};
 use crate::actors::slot::session_extraction::{SessionTaxonomy, extract_session_signals};
-use crate::test_helpers::{FakeProvider, FailingProvider, agent_context_from_db, create_test_db};
+use crate::test_helpers::{FailingProvider, FakeProvider, agent_context_from_db, create_test_db};
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
@@ -200,7 +200,10 @@ fn structural_extraction_produces_correct_taxonomy() {
     assert_eq!(taxonomy.git_ops, 2, "should count git_commit + git_push");
     assert_eq!(taxonomy.errors, 1, "should count 1 tool error");
     assert_eq!(taxonomy.files_changed, 1, "should count 1 unique file");
-    assert_eq!(taxonomy.tasks_transitioned, 1, "should count 1 task_transition");
+    assert_eq!(
+        taxonomy.tasks_transitioned, 1,
+        "should count 1 task_transition"
+    );
     assert_eq!(taxonomy.tools_used, 5, "should count 5 unique tool names");
     assert_eq!(notes_read.len(), 2);
     assert!(notes_read.contains(&"decisions/adr-001".to_string()));
@@ -327,19 +330,13 @@ async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
 
     // Verify notes were written to DB
-    let note_repo = NoteRepository::new(
-        fixture.db.clone(),
-        djinn_core::events::EventBus::noop(),
-    );
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let all_notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
 
-    let cases: Vec<_> = all_notes
-        .iter()
-        .filter(|n| n.note_type == "case")
-        .collect();
+    let cases: Vec<_> = all_notes.iter().filter(|n| n.note_type == "case").collect();
     let patterns: Vec<_> = all_notes
         .iter()
         .filter(|n| n.note_type == "pattern")
@@ -377,18 +374,9 @@ async fn llm_extracted_notes_have_confidence_0_5() {
     };
 
     let provider = fake_extraction_provider();
-    run_llm_extraction_with_provider(
-        fixture.session_id.clone(),
-        taxonomy,
-        ctx,
-        provider,
-    )
-    .await;
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
 
-    let note_repo = NoteRepository::new(
-        fixture.db.clone(),
-        djinn_core::events::EventBus::noop(),
-    );
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let all_notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -420,10 +408,7 @@ async fn llm_extracted_notes_contain_session_id_provenance() {
 
     run_llm_extraction_with_provider(session_id.clone(), taxonomy, ctx, provider).await;
 
-    let note_repo = NoteRepository::new(
-        fixture.db.clone(),
-        djinn_core::events::EventBus::noop(),
-    );
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -469,19 +454,10 @@ async fn llm_extraction_graceful_degradation_failing_provider_no_notes_written()
     // FailingProvider always returns an error from stream()
     let provider = Arc::new(FailingProvider::new("injected LLM failure for test"));
     // Should complete without panicking
-    run_llm_extraction_with_provider(
-        fixture.session_id.clone(),
-        taxonomy,
-        ctx,
-        provider,
-    )
-    .await;
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
 
     // No notes should have been written
-    let note_repo = NoteRepository::new(
-        fixture.db.clone(),
-        djinn_core::events::EventBus::noop(),
-    );
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -513,10 +489,7 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
     // No credentials configured — resolve_memory_provider will fail → graceful skip
     run_llm_extraction(fixture.session_id.clone(), taxonomy, ctx).await;
 
-    let note_repo = NoteRepository::new(
-        fixture.db.clone(),
-        djinn_core::events::EventBus::noop(),
-    );
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -565,17 +538,17 @@ async fn llm_extraction_repeated_sessions_produce_no_duplicate_notes() {
         .await;
     }
 
-    let note_repo = NoteRepository::new(
-        fixture.db.clone(),
-        djinn_core::events::EventBus::noop(),
-    );
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
 
     // Only 1 note should exist despite running extraction twice
-    let dedup_notes: Vec<_> = notes.iter().filter(|n| n.title == "Duplicate Note Title").collect();
+    let dedup_notes: Vec<_> = notes
+        .iter()
+        .filter(|n| n.title == "Duplicate Note Title")
+        .collect();
     assert_eq!(
         dedup_notes.len(),
         1,
@@ -655,7 +628,11 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
 
     // Verify taxonomy was also stored on the session record (queried directly
     // since the SessionRecord model does not surface event_taxonomy as a field)
-    fixture.db.ensure_initialized().await.expect("db initialized");
+    fixture
+        .db
+        .ensure_initialized()
+        .await
+        .expect("db initialized");
     let stored_json: Option<String> =
         sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?1")
             .bind(&fixture.session_id)
@@ -668,26 +645,16 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
         "event_taxonomy should be stored on session record after structural extraction"
     );
     let stored_taxonomy: SessionTaxonomy =
-        serde_json::from_str(stored_json.as_deref().unwrap())
-            .expect("deserialize stored taxonomy");
+        serde_json::from_str(stored_json.as_deref().unwrap()).expect("deserialize stored taxonomy");
     assert_eq!(stored_taxonomy.files_changed, 1);
     assert_eq!(stored_taxonomy.git_ops, 1);
 
     // Step 2: LLM extraction
     let provider = fake_extraction_provider();
-    run_llm_extraction_with_provider(
-        fixture.session_id.clone(),
-        taxonomy,
-        ctx_llm,
-        provider,
-    )
-    .await;
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx_llm, provider).await;
 
     // Verify notes were written with correct types
-    let note_repo = NoteRepository::new(
-        fixture.db.clone(),
-        djinn_core::events::EventBus::noop(),
-    );
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let all_notes = note_repo
         .list(&fixture.project.id, None)
         .await

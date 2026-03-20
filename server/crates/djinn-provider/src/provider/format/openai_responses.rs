@@ -371,9 +371,9 @@ impl LlmProvider for OpenAIResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Router, routing::post};
     use crate::message::{Message, Role};
     use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities};
+    use axum::{Router, routing::post};
     use futures::TryStreamExt;
     use std::sync::{Arc, Mutex};
 
@@ -769,16 +769,29 @@ mod tests {
         let mut conv = Conversation::new();
         conv.push(Message::user("Hello"));
 
-        let stream = provider.stream(&conv, &[], None).await.expect("stream start");
+        let stream = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream start");
         let events: Vec<_> = stream.try_collect().await.expect("stream events");
 
         assert_eq!(
             seen_auth.lock().expect("seen auth").as_deref(),
             Some("Bearer test")
         );
-        assert!(matches!(&events[0], StreamEvent::Delta(ContentBlock::Text { text }) if text == "Hello"));
-        assert!(matches!(&events[1], StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }) if id == "call_stream" && name == "bash" && input["cmd"] == "pwd"));
-        assert!(matches!(&events[2], StreamEvent::Usage(TokenUsage { input: 11, output: 13 })));
+        assert!(
+            matches!(&events[0], StreamEvent::Delta(ContentBlock::Text { text }) if text == "Hello")
+        );
+        assert!(
+            matches!(&events[1], StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }) if id == "call_stream" && name == "bash" && input["cmd"] == "pwd")
+        );
+        assert!(matches!(
+            &events[2],
+            StreamEvent::Usage(TokenUsage {
+                input: 11,
+                output: 13
+            })
+        ));
         assert!(matches!(&events[3], StreamEvent::Done));
     }
 
@@ -791,7 +804,10 @@ mod tests {
         let mut conv = Conversation::new();
         conv.push(Message::user("Hello"));
 
-        let stream = provider.stream(&conv, &[], None).await.expect("stream start");
+        let stream = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream start");
         let result: Result<Vec<_>, _> = stream.try_collect().await;
         let err = match result {
             Ok(_) => panic!("expected provider error"),
@@ -812,7 +828,10 @@ mod tests {
         let mut conv = Conversation::new();
         conv.push(Message::user("Hello"));
 
-        let stream = provider.stream(&conv, &[], None).await.expect("stream start");
+        let stream = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream start");
         let result: Result<Vec<_>, _> = stream.try_collect().await;
         let err = match result {
             Ok(_) => panic!("expected provider error"),

@@ -4,10 +4,10 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use djinn_provider::message::{ContentBlock, Conversation, Message};
+use djinn_provider::provider::format::openai::OpenAIProvider;
 use djinn_provider::provider::{
     AuthMethod, FormatFamily, LlmProvider, ProviderCapabilities, ProviderConfig, StreamEvent,
 };
-use djinn_provider::provider::format::openai::OpenAIProvider;
 
 fn provider_config(base_url: &str) -> ProviderConfig {
     ProviderConfig {
@@ -30,7 +30,10 @@ fn one_turn_user_conversation() -> Conversation {
 }
 
 fn sse_line_from_json(payload: &serde_json::Value) -> String {
-    format!("data: {}\n\n", serde_json::to_string(payload).expect("json payload"))
+    format!(
+        "data: {}\n\n",
+        serde_json::to_string(payload).expect("json payload")
+    )
 }
 
 fn raw_data_line(payload: &str) -> String {
@@ -85,7 +88,7 @@ async fn test_stream_emits_text_and_usage_events() {
         })),
     ]
     .join("")
-    + &done_sse_line();
+        + &done_sse_line();
 
     let server = mount_chat_completion_mock(200, body).await;
     let provider = OpenAIProvider::new(provider_config(&server.uri()));
@@ -187,7 +190,7 @@ async fn test_stream_tool_call_argument_accumulation_from_split_chunks() {
         })),
     ]
     .join("")
-    + &done_sse_line();
+        + &done_sse_line();
 
     let server = mount_chat_completion_mock(200, body).await;
     let provider = OpenAIProvider::new(provider_config(&server.uri()));
@@ -246,7 +249,7 @@ async fn test_stream_finish_reason_tool_calls_emits_tool_use() {
         })),
     ]
     .join("")
-    + &done_sse_line();
+        + &done_sse_line();
 
     let server = mount_chat_completion_mock(200, body).await;
     let provider = OpenAIProvider::new(provider_config(&server.uri()));
@@ -349,10 +352,12 @@ async fn test_stream_ignores_malformed_sse_lines_and_continues() {
         })),
         "data: {not-json\n\n".to_string(),
         "event: ping\n\n".to_string(),
-        raw_data_line(r#"{"choices":[{"delta":{"content":" recovered"},"finish_reason":null,"index":0}]}"#),
+        raw_data_line(
+            r#"{"choices":[{"delta":{"content":" recovered"},"finish_reason":null,"index":0}]}"#,
+        ),
     ]
     .join("")
-    + &done_sse_line();
+        + &done_sse_line();
 
     let server = mount_chat_completion_mock(200, body).await;
     let provider = OpenAIProvider::new(provider_config(&server.uri()));
@@ -406,8 +411,7 @@ async fn test_stream_targets_local_mock_without_real_network_calls() {
             "index": 0,
             "finish_reason": null,
         }],
-    }))
-    + &done_sse_line();
+    })) + &done_sse_line();
 
     let server = mount_chat_completion_mock(200, body).await;
     let provider = OpenAIProvider::new(provider_config(&server.uri()));

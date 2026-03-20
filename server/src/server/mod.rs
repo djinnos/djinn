@@ -566,7 +566,9 @@ mod tests {
         let app = test_helpers::create_test_app();
         let session_id = test_helpers::initialize_mcp_session(&app).await;
         let list_event = mcp_jsonrpc(&app, &session_id, 2, "tools/list", json!({})).await;
-        let tools = list_event["result"]["tools"].as_array().expect("tools array");
+        let tools = list_event["result"]["tools"]
+            .as_array()
+            .expect("tools array");
 
         let mut signatures: Vec<Value> = tools
             .iter()
@@ -775,7 +777,10 @@ mod tests {
             serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "group_by": "priority" }),
         )
         .await;
-        assert_json_snapshot!("task_count_grouped_by_priority_response", task_count_priority);
+        assert_json_snapshot!(
+            "task_count_grouped_by_priority_response",
+            task_count_priority
+        );
 
         let _comment = test_helpers::mcp_call_tool(
             &app,

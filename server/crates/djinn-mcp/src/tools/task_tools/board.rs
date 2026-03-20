@@ -1,6 +1,8 @@
 use super::*;
 use djinn_db::ProjectRepository;
-use djinn_provider::oauth::github_app::{GITHUB_APP_OAUTH_DB_KEY, GITHUB_INSTALLATION_ID_KEY, refresh_installation_id};
+use djinn_provider::oauth::github_app::{
+    GITHUB_APP_OAUTH_DB_KEY, GITHUB_INSTALLATION_ID_KEY, refresh_installation_id,
+};
 
 pub(super) async fn board_health_impl(
     server: &DjinnMcpServer,

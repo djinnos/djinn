@@ -40,9 +40,7 @@ impl VerificationRule {
 }
 
 /// Validate a slice of verification rules. Returns `Err` with the first error found.
-pub fn validate_verification_rules(
-    rules: &[VerificationRule],
-) -> std::result::Result<(), String> {
+pub fn validate_verification_rules(rules: &[VerificationRule]) -> std::result::Result<(), String> {
     for rule in rules {
         rule.validate()?;
     }
@@ -197,12 +195,30 @@ impl ProjectRepository {
     /// Uses INSERT OR IGNORE so re-seeding is safe if called on an existing project.
     async fn seed_default_roles(&self, project_id: &str) -> Result<()> {
         const DEFAULT_ROLES: &[(&str, &str)] = &[
-            ("worker",    "Implements tasks: writes code, runs tests, resolves issues."),
-            ("lead",      "Technical lead: reviews plans, guides implementation, unblocks workers."),
-            ("planner",   "Decomposes epics into tasks and maintains the project board."),
-            ("architect", "Proactive health monitoring, strategic re-planning, epic oversight."),
-            ("reviewer",  "Reviews pull requests and verifies task quality."),
-            ("resolver",  "Resolves merge conflicts and integration failures."),
+            (
+                "worker",
+                "Implements tasks: writes code, runs tests, resolves issues.",
+            ),
+            (
+                "lead",
+                "Technical lead: reviews plans, guides implementation, unblocks workers.",
+            ),
+            (
+                "planner",
+                "Decomposes epics into tasks and maintains the project board.",
+            ),
+            (
+                "architect",
+                "Proactive health monitoring, strategic re-planning, epic oversight.",
+            ),
+            (
+                "reviewer",
+                "Reviews pull requests and verifies task quality.",
+            ),
+            (
+                "resolver",
+                "Resolves merge conflicts and integration failures.",
+            ),
         ];
         for (base_role, description) in DEFAULT_ROLES {
             let role_id = uuid::Uuid::now_v7().to_string();
@@ -213,7 +229,7 @@ impl ProjectRepository {
             )
             .bind(&role_id)
             .bind(project_id)
-            .bind(base_role)   // name = base_role for defaults
+            .bind(base_role) // name = base_role for defaults
             .bind(base_role)
             .bind(description)
             .execute(self.db.pool())
@@ -293,10 +309,12 @@ impl ProjectRepository {
             }
             "verification_rules" => {
                 // Parse the incoming JSON and validate each rule before persisting.
-                let rules: Vec<VerificationRule> = serde_json::from_str(value)
-                    .map_err(|e| crate::error::DbError::InvalidData(format!("verification_rules: invalid JSON: {e}")))?;
-                validate_verification_rules(&rules)
-                    .map_err(crate::error::DbError::InvalidData)?;
+                let rules: Vec<VerificationRule> = serde_json::from_str(value).map_err(|e| {
+                    crate::error::DbError::InvalidData(format!(
+                        "verification_rules: invalid JSON: {e}"
+                    ))
+                })?;
+                validate_verification_rules(&rules).map_err(crate::error::DbError::InvalidData)?;
                 sqlx::query("UPDATE projects SET verification_rules = ?2 WHERE id = ?1")
                     .bind(id)
                     .bind(value)
@@ -513,11 +531,22 @@ mod tests {
         .unwrap();
 
         let expected_base_roles = [
-            "architect", "lead", "planner", "resolver", "reviewer", "worker",
+            "architect",
+            "lead",
+            "planner",
+            "resolver",
+            "reviewer",
+            "worker",
         ];
 
-        assert_eq!(rows.len(), 6, "expected 6 default roles, got {}", rows.len());
-        for ((name, base_role, is_default), expected) in rows.iter().zip(expected_base_roles.iter()) {
+        assert_eq!(
+            rows.len(),
+            6,
+            "expected 6 default roles, got {}",
+            rows.len()
+        );
+        for ((name, base_role, is_default), expected) in rows.iter().zip(expected_base_roles.iter())
+        {
             assert_eq!(base_role, expected);
             assert_eq!(name, expected, "default role name should equal base_role");
             assert_eq!(*is_default, 1, "role {base_role} should be is_default=1");
@@ -659,13 +688,19 @@ mod tests {
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("verification_rules") || err.contains("invalid"), "got: {err}");
+        assert!(
+            err.contains("verification_rules") || err.contains("invalid"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_config_verification_rules_empty_commands_returns_error() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo.create("cfg-empty-cmds", "/cfg-empty-cmds").await.unwrap();
+        let project = repo
+            .create("cfg-empty-cmds", "/cfg-empty-cmds")
+            .await
+            .unwrap();
 
         let rules_json = r#"[{"match_pattern":"**","commands":[]}]"#;
         let result = repo
@@ -673,19 +708,13 @@ mod tests {
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("commands must not be empty"),
-            "got: {err}"
-        );
+        assert!(err.contains("commands must not be empty"), "got: {err}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_config_verification_rules_invalid_glob_returns_error() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo
-            .create("cfg-bad-glob", "/cfg-bad-glob")
-            .await
-            .unwrap();
+        let project = repo.create("cfg-bad-glob", "/cfg-bad-glob").await.unwrap();
 
         let rules_json = r#"[{"match_pattern":"[invalid","commands":["echo ok"]}]"#;
         let result = repo

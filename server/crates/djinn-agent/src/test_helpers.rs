@@ -115,11 +115,7 @@ impl FakeProvider {
         ]])
     }
 
-    pub fn tool_call(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        input: Value,
-    ) -> Self {
+    pub fn tool_call(id: impl Into<String>, name: impl Into<String>, input: Value) -> Self {
         Self::script(vec![vec![
             StreamEvent::Delta(ContentBlock::ToolUse {
                 id: id.into(),
@@ -173,7 +169,9 @@ impl LlmProvider for FakeProvider {
                 )
             });
             Ok(Box::pin(stream::iter(turn))
-                as Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>)
+                as Pin<
+                    Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                >)
         })
     }
 }
@@ -256,11 +254,8 @@ mod tests {
             ] if text == "hello"
         ));
 
-        let tool_provider = FakeProvider::tool_call(
-            "tool-1",
-            "submit_work",
-            json!({"summary": "done"}),
-        );
+        let tool_provider =
+            FakeProvider::tool_call("tool-1", "submit_work", json!({"summary": "done"}));
         assert_eq!(tool_provider.remaining(), 1);
 
         let tool_stream = tool_provider
@@ -374,8 +369,9 @@ mod tests {
         });
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _stream = futures::executor::block_on(provider.stream(&Conversation::new(), &[], None))
-                .expect("second stream should panic before returning");
+            let _stream =
+                futures::executor::block_on(provider.stream(&Conversation::new(), &[], None))
+                    .expect("second stream should panic before returning");
         }))
         .expect_err("expected script exhaustion panic");
 

@@ -5,7 +5,12 @@ use crate::database::Database;
 use crate::{Error, Result};
 
 pub const VALID_BASE_ROLES: &[&str] = &[
-    "worker", "lead", "planner", "architect", "reviewer", "resolver",
+    "worker",
+    "lead",
+    "planner",
+    "architect",
+    "reviewer",
+    "resolver",
 ];
 
 pub struct AgentRoleCreateInput<'a> {
@@ -204,7 +209,8 @@ impl AgentRoleRepository {
             .get(&id)
             .await?
             .ok_or_else(|| Error::InvalidData("agent_role insert failed".into()))?;
-        self.events.send(DjinnEventEnvelope::agent_role_created(&role));
+        self.events
+            .send(DjinnEventEnvelope::agent_role_created(&role));
         Ok(role)
     }
 
@@ -234,7 +240,8 @@ impl AgentRoleRepository {
             .get(id)
             .await?
             .ok_or_else(|| Error::InvalidData(format!("agent_role not found: {id}")))?;
-        self.events.send(DjinnEventEnvelope::agent_role_updated(&role));
+        self.events
+            .send(DjinnEventEnvelope::agent_role_updated(&role));
         Ok(role)
     }
 
@@ -270,10 +277,9 @@ impl AgentRoleRepository {
         .execute(self.db.pool())
         .await?;
 
-        let updated = self
-            .get(id)
-            .await?
-            .ok_or_else(|| Error::InvalidData(format!("agent_role not found after set_default: {id}")))?;
+        let updated = self.get(id).await?.ok_or_else(|| {
+            Error::InvalidData(format!("agent_role not found after set_default: {id}"))
+        })?;
         self.events
             .send(DjinnEventEnvelope::agent_role_updated(&updated));
         Ok(updated)
@@ -602,11 +608,11 @@ impl AgentRoleRepository {
         .execute(self.db.pool())
         .await?;
 
-        let updated = self
-            .get(role_id)
-            .await?
-            .ok_or_else(|| Error::InvalidData(format!("agent_role not found after revert: {role_id}")))?;
-        self.events.send(DjinnEventEnvelope::agent_role_updated(&updated));
+        let updated = self.get(role_id).await?.ok_or_else(|| {
+            Error::InvalidData(format!("agent_role not found after revert: {role_id}"))
+        })?;
+        self.events
+            .send(DjinnEventEnvelope::agent_role_updated(&updated));
         Ok(updated)
     }
 
@@ -663,11 +669,11 @@ impl AgentRoleRepository {
         .execute(self.db.pool())
         .await?;
 
-        let updated = self
-            .get(role_id)
-            .await?
-            .ok_or_else(|| Error::InvalidData(format!("agent_role not found after update: {role_id}")))?;
-        self.events.send(DjinnEventEnvelope::agent_role_updated(&updated));
+        let updated = self.get(role_id).await?.ok_or_else(|| {
+            Error::InvalidData(format!("agent_role not found after update: {role_id}"))
+        })?;
+        self.events
+            .send(DjinnEventEnvelope::agent_role_updated(&updated));
         Ok(updated)
     }
 }
@@ -826,10 +832,7 @@ mod tests {
 
         assert_eq!(updated.description, "updated");
         assert_eq!(updated.system_prompt_extensions, "extra prompt");
-        assert_eq!(
-            updated.model_preference.as_deref(),
-            Some("claude-opus-4-6")
-        );
+        assert_eq!(updated.model_preference.as_deref(), Some("claude-opus-4-6"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

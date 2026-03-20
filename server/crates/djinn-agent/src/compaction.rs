@@ -875,8 +875,7 @@ mod tests {
     fn compaction_prompt_varies_by_context() {
         let worker_resume = compaction_prompt(&CompactionContext::PreResume("worker".to_string()));
         let worker_mid = compaction_prompt(&CompactionContext::MidSession("worker".to_string()));
-        let reviewer =
-            compaction_prompt(&CompactionContext::MidSession("reviewer".to_string()));
+        let reviewer = compaction_prompt(&CompactionContext::MidSession("reviewer".to_string()));
 
         // Each context gets a different prompt
         assert!(worker_resume.contains("rejected or needs fixes"));

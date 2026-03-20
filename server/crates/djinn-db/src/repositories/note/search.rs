@@ -47,16 +47,19 @@ impl NoteRepository {
         };
 
         let limit = limit as i64;
-        let rows = sqlx::query_as::<_, (
-            String,
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            f64,
-        )>(
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                f64,
+            ),
+        >(
             "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,
                     -bm25(notes_fts, 3.0, 1.0, 2.0) as score
              FROM notes_fts
@@ -439,9 +442,16 @@ mod contradiction_tests {
             "webpack bundling tree shaking code splitting lazy loading module federation",
         ];
         for (i, content) in noise_content.iter().enumerate() {
-            repo.create(&project_id, tmp.path(), &format!("Noise {i}"), content, "adr", "[]")
-                .await
-                .unwrap();
+            repo.create(
+                &project_id,
+                tmp.path(),
+                &format!("Noise {i}"),
+                content,
+                "adr",
+                "[]",
+            )
+            .await
+            .unwrap();
         }
 
         // Existing pattern note with specific rare content
@@ -449,13 +459,27 @@ mod contradiction_tests {
                       rust_xqz service_xqz pattern_xqz distributed_xqz systems_xqz \
                       architectural_xqz decision_xqz record_xqz implementation_xqz guide_xqz";
         let existing = repo
-            .create(&project_id, tmp.path(), "Existing Pattern", shared, "pattern", "[]")
+            .create(
+                &project_id,
+                tmp.path(),
+                "Existing Pattern",
+                shared,
+                "pattern",
+                "[]",
+            )
             .await
             .unwrap();
 
         // New note with identical content — should be detected
         let new_note = repo
-            .create(&project_id, tmp.path(), "New Pattern", shared, "pattern", "[]")
+            .create(
+                &project_id,
+                tmp.path(),
+                "New Pattern",
+                shared,
+                "pattern",
+                "[]",
+            )
             .await
             .unwrap();
 
@@ -469,7 +493,11 @@ mod contradiction_tests {
             "existing note should be a candidate"
         );
         let cand = candidates.iter().find(|c| c.id == existing.id).unwrap();
-        assert_eq!(cand.risk, TypeRisk::High, "same type+folder should be High risk");
+        assert_eq!(
+            cand.risk,
+            TypeRisk::High,
+            "same type+folder should be High risk"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

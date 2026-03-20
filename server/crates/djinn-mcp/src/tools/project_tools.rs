@@ -680,8 +680,7 @@ mod tests {
 
     #[test]
     fn parse_https_remote_with_dot_git() {
-        let (owner, repo) =
-            parse_github_owner_repo("https://github.com/acme/widgets.git").unwrap();
+        let (owner, repo) = parse_github_owner_repo("https://github.com/acme/widgets.git").unwrap();
         assert_eq!(owner, "acme");
         assert_eq!(repo, "widgets");
     }
@@ -695,8 +694,7 @@ mod tests {
 
     #[test]
     fn parse_http_remote() {
-        let (owner, repo) =
-            parse_github_owner_repo("http://github.com/acme/widgets.git").unwrap();
+        let (owner, repo) = parse_github_owner_repo("http://github.com/acme/widgets.git").unwrap();
         assert_eq!(owner, "acme");
         assert_eq!(repo, "widgets");
     }

@@ -15,7 +15,16 @@ impl TaskRepository {
         reason: Option<&str>,
         target_override: Option<TaskStatus>,
     ) -> Result<Task> {
-        self.transition_with_conflict_metadata(id, action, actor_id, actor_role, reason, target_override, None).await
+        self.transition_with_conflict_metadata(
+            id,
+            action,
+            actor_id,
+            actor_role,
+            reason,
+            target_override,
+            None,
+        )
+        .await
     }
 
     /// Transition with optional conflict metadata.
@@ -96,13 +105,11 @@ impl TaskRepository {
         // but no explicit metadata was provided. The reason has the format:
         // "merge_conflict:{JSON}" — extract the JSON portion.
         let effective_conflict_metadata: Option<String> = if apply.set_merge_conflict_metadata {
-            conflict_metadata
-                .map(|s| s.to_owned())
-                .or_else(|| {
-                    reason_str
-                        .strip_prefix("merge_conflict:")
-                        .map(|s| s.to_owned())
-                })
+            conflict_metadata.map(|s| s.to_owned()).or_else(|| {
+                reason_str
+                    .strip_prefix("merge_conflict:")
+                    .map(|s| s.to_owned())
+            })
         } else {
             None
         };
@@ -211,7 +218,11 @@ impl TaskRepository {
             ""
         };
         // Only increment reopen_count on actual reopen transitions (not open->open)
-        let reopen_inc: i64 = if status == "open" && from_task.status != "open" { 1 } else { 0 };
+        let reopen_inc: i64 = if status == "open" && from_task.status != "open" {
+            1
+        } else {
+            0
+        };
         sqlx::query(&format!(
             "UPDATE tasks SET status = ?2, {closed_at_sql}
                 reopen_count = reopen_count + ?3,
@@ -268,7 +279,11 @@ impl TaskRepository {
             .await?;
 
         // Only increment reopen_count on actual reopen transitions (not open->open)
-        let reopen_inc: i64 = if status == "open" && from_task.status != "open" { 1 } else { 0 };
+        let reopen_inc: i64 = if status == "open" && from_task.status != "open" {
+            1
+        } else {
+            0
+        };
         sqlx::query(
             "UPDATE tasks SET
                 status = ?2,

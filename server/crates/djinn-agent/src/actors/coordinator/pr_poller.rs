@@ -86,18 +86,17 @@ impl CoordinatorActor {
             };
 
             // Fetch current PR state + CI check runs.
-            let (pr, checks) =
-                match gh_client.get_pull_request(&owner, &repo, pull_number).await {
-                    Ok(result) => result,
-                    Err(e) => {
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            error = %e,
-                            "PR poller: failed to fetch PR status"
-                        );
-                        continue;
-                    }
-                };
+            let (pr, checks) = match gh_client.get_pull_request(&owner, &repo, pull_number).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "PR poller: failed to fetch PR status"
+                    );
+                    continue;
+                }
+            };
 
             // ── Merged? ───────────────────────────────────────────────────────
             if pr.merged == Some(true) {
@@ -424,8 +423,7 @@ impl CoordinatorActor {
                 threshold = PR_REVIEW_ROUND_THRESHOLD,
                 pr_url = feedback.pr_url
             );
-            let escalation_payload =
-                serde_json::json!({ "body": escalation_body }).to_string();
+            let escalation_payload = serde_json::json!({ "body": escalation_body }).to_string();
             if let Err(e) = task_repo
                 .log_activity(
                     Some(task_id),
@@ -520,29 +518,26 @@ impl CoordinatorActor {
             })
             .await
         {
-            Ok(entries) => {
-                entries
-                    .into_iter()
-                    .flat_map(|entry| {
-                        let payload: serde_json::Value =
-                            serde_json::from_str(&entry.payload).ok()?;
-                        let reviews = payload
-                            .get("change_request_reviews")?
-                            .as_array()?
-                            .iter()
-                            .filter_map(|r| {
-                                r.get("reviewer")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_owned())
-                            })
-                            .collect::<Vec<_>>();
-                        Some(reviews)
-                    })
-                    .flatten()
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect()
-            }
+            Ok(entries) => entries
+                .into_iter()
+                .flat_map(|entry| {
+                    let payload: serde_json::Value = serde_json::from_str(&entry.payload).ok()?;
+                    let reviews = payload
+                        .get("change_request_reviews")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|r| {
+                            r.get("reviewer")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_owned())
+                        })
+                        .collect::<Vec<_>>();
+                    Some(reviews)
+                })
+                .flatten()
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect(),
             Err(_) => return,
         };
 
@@ -688,18 +683,12 @@ mod tests {
     #[test]
     fn parses_pr_url_with_trailing_fragment() {
         let result = parse_pr_url("https://github.com/owner/repo/pull/7#discussion");
-        assert_eq!(
-            result,
-            Some(("owner".to_string(), "repo".to_string(), 7))
-        );
+        assert_eq!(result, Some(("owner".to_string(), "repo".to_string(), 7)));
     }
 
     #[test]
     fn rejects_non_pr_url() {
-        assert_eq!(
-            parse_pr_url("https://github.com/owner/repo/issues/1"),
-            None
-        );
+        assert_eq!(parse_pr_url("https://github.com/owner/repo/issues/1"), None);
     }
 
     #[test]

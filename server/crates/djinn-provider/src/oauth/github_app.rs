@@ -143,11 +143,20 @@ pub async fn refresh_cached_token(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("GitHub App token refresh failed ({}): {}", status, text));
+        return Err(anyhow!(
+            "GitHub App token refresh failed ({}): {}",
+            status,
+            text
+        ));
     }
     let body = resp.text().await?;
-    let tr: TokenResponse = serde_json::from_str(&body)
-        .map_err(|e| anyhow!("GitHub App token refresh: failed to decode response ({}): {}", e, body))?;
+    let tr: TokenResponse = serde_json::from_str(&body).map_err(|e| {
+        anyhow!(
+            "GitHub App token refresh: failed to decode response ({}): {}",
+            e,
+            body
+        )
+    })?;
     let tokens = token_response_to_tokens(tr, cached.user_login.clone());
     tokens.save_to_db(repo).await?;
     tracing::info!("GitHubApp: token refreshed successfully");
@@ -221,7 +230,10 @@ pub async fn start_device_flow() -> Result<DeviceCodeSession> {
 
 /// Poll GitHub until the user authorizes, then store tokens. Public so the MCP
 /// layer can spawn this as a background task after returning the device code.
-pub async fn poll_and_store(session: &DeviceCodeSession, repo: &CredentialRepository) -> Result<GitHubAppTokens> {
+pub async fn poll_and_store(
+    session: &DeviceCodeSession,
+    repo: &CredentialRepository,
+) -> Result<GitHubAppTokens> {
     let tr = poll_device_flow(session).await?;
     let user_login = fetch_user_login(&tr.access_token).await;
     let tokens = token_response_to_tokens(tr, user_login);
@@ -236,7 +248,9 @@ pub async fn poll_and_store(session: &DeviceCodeSession, repo: &CredentialReposi
             tracing::info!(installation_id = %id, "GitHubApp: installation ID stored");
         }
         Err(e) => {
-            tracing::warn!("GitHubApp: failed to fetch installation ID (install the app on your org): {e}");
+            tracing::warn!(
+                "GitHubApp: failed to fetch installation ID (install the app on your org): {e}"
+            );
         }
     }
 
@@ -299,8 +313,13 @@ async fn poll_device_flow(session: &DeviceCodeSession) -> Result<TokenResponse> 
         }
 
         // Parse the successful token response from the JSON value.
-        let tr: TokenResponse = serde_json::from_value(body.clone())
-            .map_err(|e| anyhow!("GitHubApp: failed to decode token response ({}): {}", e, body))?;
+        let tr: TokenResponse = serde_json::from_value(body.clone()).map_err(|e| {
+            anyhow!(
+                "GitHubApp: failed to decode token response ({}): {}",
+                e,
+                body
+            )
+        })?;
         return Ok(tr);
     }
 
@@ -362,7 +381,10 @@ pub async fn run_github_app_flow(repo: &CredentialRepository) -> Result<GitHubAp
         match refresh_cached_token(&cached, CLIENT_ID, repo).await {
             Ok(tokens) => return Ok(tokens),
             Err(e) => {
-                tracing::warn!("GitHubApp: token refresh failed, starting device flow: {}", e);
+                tracing::warn!(
+                    "GitHubApp: token refresh failed, starting device flow: {}",
+                    e
+                );
             }
         }
     }
@@ -397,7 +419,9 @@ pub async fn run_github_app_flow(repo: &CredentialRepository) -> Result<GitHubAp
             tracing::info!(installation_id = %id, "GitHubApp: installation ID stored");
         }
         Err(e) => {
-            tracing::warn!("GitHubApp: failed to fetch installation ID (install the app on your org): {e}");
+            tracing::warn!(
+                "GitHubApp: failed to fetch installation ID (install the app on your org): {e}"
+            );
         }
     }
 
@@ -434,9 +458,7 @@ pub async fn fetch_installation_id(access_token: &str) -> Result<String> {
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!(
-            "GET /user/installations failed ({status}): {body}"
-        ));
+        return Err(anyhow!("GET /user/installations failed ({status}): {body}"));
     }
 
     let body: InstallationsResponse = resp
@@ -487,7 +509,10 @@ pub async fn store_installation_id(
 
 /// Load the stored GitHub App installation ID from the credential vault.
 pub async fn load_installation_id(repo: &CredentialRepository) -> Option<String> {
-    repo.get_decrypted(GITHUB_INSTALLATION_ID_KEY).await.ok().flatten()
+    repo.get_decrypted(GITHUB_INSTALLATION_ID_KEY)
+        .await
+        .ok()
+        .flatten()
 }
 
 #[cfg(test)]

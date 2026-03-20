@@ -106,8 +106,7 @@ impl CoordinatorActor {
         // Check for an existing open/in-progress decomposition task — if one
         // exists we don't create another.
         let has_open_decomp = all_tasks.iter().any(|t| {
-            t.issue_type == "decomposition"
-                && matches!(t.status.as_str(), "open" | "in_progress")
+            t.issue_type == "decomposition" && matches!(t.status.as_str(), "open" | "in_progress")
         });
         if has_open_decomp {
             return;

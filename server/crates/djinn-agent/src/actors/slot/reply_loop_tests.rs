@@ -44,7 +44,12 @@ async fn run_with_provider(
     project_path: &str,
     task_id: &str,
     cancel: &CancellationToken,
-) -> (anyhow::Result<()>, crate::output_parser::ParsedAgentOutput, i64, i64) {
+) -> (
+    anyhow::Result<()>,
+    crate::output_parser::ParsedAgentOutput,
+    i64,
+    i64,
+) {
     let worktree_path = std::path::Path::new("/tmp");
     run_reply_loop(
         ReplyLoopContext {
@@ -91,7 +96,10 @@ async fn text_only_completion_path_ends_without_nudge_when_no_tools_exist() {
     )
     .await;
 
-    assert!(result.is_ok(), "expected text-only completion to succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "expected text-only completion to succeed: {result:?}"
+    );
     assert!(output.finalize_payload.is_none());
     assert_eq!(provider.remaining(), 0);
     assert_eq!(conversation.messages.len(), 3);
@@ -141,7 +149,11 @@ async fn tool_call_execution_adds_tool_result_and_continues_to_next_turn() {
     .await;
 
     assert!(result.is_ok(), "tool-call path should succeed: {result:?}");
-    assert_eq!(provider.remaining(), 0, "second provider turn should be consumed");
+    assert_eq!(
+        provider.remaining(),
+        0,
+        "second provider turn should be consumed"
+    );
     assert_eq!(conversation.messages.len(), 5);
     assert!(matches!(
         &conversation.messages[2].content[..],
@@ -183,11 +195,22 @@ async fn finalize_tool_detection_ends_loop_without_extra_provider_turn() {
     )
     .await;
 
-    assert!(result.is_ok(), "finalize tool turn should succeed: {result:?}");
-    assert_eq!(provider.remaining(), 0, "reply loop should not request another provider turn");
+    assert!(
+        result.is_ok(),
+        "finalize tool turn should succeed: {result:?}"
+    );
+    assert_eq!(
+        provider.remaining(),
+        0,
+        "reply loop should not request another provider turn"
+    );
     assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
     assert_eq!(output.finalize_payload.as_ref().unwrap()["summary"], "done");
-    assert_eq!(conversation.messages.len(), 3, "finalize should not append tool-result turn");
+    assert_eq!(
+        conversation.messages.len(),
+        3,
+        "finalize should not append tool-result turn"
+    );
 }
 
 #[tokio::test]
@@ -224,7 +247,10 @@ async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
     )
     .await;
 
-    assert!(result.is_ok(), "empty-turn retry + nudge path should succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "empty-turn retry + nudge path should succeed: {result:?}"
+    );
     assert_eq!(provider.remaining(), 0);
     assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
     assert!(conversation.messages.iter().any(|message| {
@@ -248,7 +274,9 @@ async fn max_nudge_abort_returns_clean_error_path() {
             StreamEvent::Done,
         ],
         vec![
-            StreamEvent::Delta(ContentBlock::Text { text: "three".into() }),
+            StreamEvent::Delta(ContentBlock::Text {
+                text: "three".into(),
+            }),
             StreamEvent::Done,
         ],
     ]);
@@ -267,7 +295,11 @@ async fn max_nudge_abort_returns_clean_error_path() {
     .await;
 
     let error = result.expect_err("expected clean nudge exhaustion error");
-    assert!(error.to_string().contains("consecutive text-only responses"));
+    assert!(
+        error
+            .to_string()
+            .contains("consecutive text-only responses")
+    );
     assert_eq!(provider.remaining(), 0);
 }
 
@@ -289,7 +321,9 @@ async fn provider_error_propagates_from_shared_failing_provider() {
     .await;
 
     let error = result.expect_err("provider failure should propagate");
-    assert!(error
-        .to_string()
-        .contains("scripted provider failure for reply loop"));
+    assert!(
+        error
+            .to_string()
+            .contains("scripted provider failure for reply loop")
+    );
 }

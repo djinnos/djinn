@@ -103,10 +103,16 @@ fn parse_skill_file(fallback_name: &str, content: &str) -> Option<ResolvedSkill>
     }
 
     // Find the closing `---`
-    let after_open = content.get(3..)?.trim_start_matches('\n').trim_start_matches('\r');
+    let after_open = content
+        .get(3..)?
+        .trim_start_matches('\n')
+        .trim_start_matches('\r');
     let close_pos = after_open.find("\n---")?;
     let frontmatter = &after_open[..close_pos];
-    let body = after_open.get(close_pos + 4..)?.trim_start_matches('\n').trim_start_matches('\r');
+    let body = after_open
+        .get(close_pos + 4..)?
+        .trim_start_matches('\n')
+        .trim_start_matches('\r');
 
     // Parse frontmatter lines for `name:` and `description:`
     let mut fm_name: Option<String> = None;

@@ -49,11 +49,7 @@ fn is_orphaned_tool_call_error(e: &anyhow::Error) -> bool {
 /// Providers confirmed to handle `tool_choice: "required"` correctly,
 /// even with reasoning/thinking enabled.
 fn supports_tool_choice_required(model_id: &str) -> bool {
-    let provider = model_id
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let provider = model_id.split('/').next().unwrap_or("").to_lowercase();
     matches!(
         provider.as_str(),
         "openai" | "anthropic" | "chatgpt_codex" | "github_copilot"
@@ -189,7 +185,8 @@ pub(super) async fn run_reply_loop(
     // The agent can navigate stashed outputs via `output_view` and `output_grep`.
     let output_stash = Arc::new(Mutex::new(OutputStash::new()));
 
-    let mut output = ParsedAgentOutput::new(role_name == "reviewer" || role_name == "task_reviewer");
+    let mut output =
+        ParsedAgentOutput::new(role_name == "reviewer" || role_name == "task_reviewer");
 
     // Token counts and last assistant text are declared outside the async block
     // so they survive the borrow and can be used for telemetry/return values.
@@ -1872,10 +1869,7 @@ mod tests {
                         + 'a,
                 >,
             > {
-                self.recorded_choices
-                    .lock()
-                    .unwrap()
-                    .push(tool_choice);
+                self.recorded_choices.lock().unwrap().push(tool_choice);
                 self.inner.stream(conversation, tools, tool_choice)
             }
         }

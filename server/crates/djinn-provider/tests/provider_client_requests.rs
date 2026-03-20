@@ -2,10 +2,12 @@ use djinn_core::message::{Conversation, Message};
 use djinn_provider::provider::client::ApiClient;
 use djinn_provider::provider::format::anthropic::AnthropicProvider;
 use djinn_provider::provider::format::openai::OpenAIProvider;
-use djinn_provider::provider::{AuthMethod, FormatFamily, LlmProvider, ProviderCapabilities, ProviderConfig, ToolChoice};
+use djinn_provider::provider::{
+    AuthMethod, FormatFamily, LlmProvider, ProviderCapabilities, ProviderConfig, ToolChoice,
+};
 use futures::StreamExt;
 use reqwest::header::HeaderMap;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -68,7 +70,11 @@ fn conversation() -> Conversation {
     conversation
 }
 
-async fn drain_provider_stream(provider: &dyn LlmProvider, tools: &[Value], tool_choice: Option<ToolChoice>) {
+async fn drain_provider_stream(
+    provider: &dyn LlmProvider,
+    tools: &[Value],
+    tool_choice: Option<ToolChoice>,
+) {
     let conversation = conversation();
     let mut stream = provider
         .stream(&conversation, tools, tool_choice)
@@ -123,7 +129,13 @@ async fn post_json_emits_json_post_without_auth_header() {
     let request = &requests[0];
     assert_eq!(request.method.as_str(), "POST");
     assert_eq!(request.url.path(), "/json");
-    assert_eq!(request.headers.get("content-type").and_then(|v| v.to_str().ok()), Some("application/json"));
+    assert_eq!(
+        request
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
     assert!(request.headers.get("authorization").is_none());
     let parsed_body: Value = serde_json::from_slice(&request.body).expect("json request body");
     assert_eq!(parsed_body["hello"], "world");
@@ -154,8 +166,20 @@ async fn stream_sse_sends_bearer_auth_header() {
     let requests = server.received_requests().await.expect("captured requests");
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
-    assert_eq!(request.headers.get("authorization").and_then(|v| v.to_str().ok()), Some("Bearer secret-token"));
-    assert_eq!(request.headers.get("content-type").and_then(|v| v.to_str().ok()), Some("application/json"));
+    assert_eq!(
+        request
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer secret-token")
+    );
+    assert_eq!(
+        request
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
     let parsed_body: Value = serde_json::from_slice(&request.body).expect("json request body");
     assert_eq!(parsed_body["message"], "ping");
 }
@@ -187,9 +211,21 @@ async fn stream_sse_sends_custom_api_key_header() {
     let requests = server.received_requests().await.expect("captured requests");
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
-    assert_eq!(request.headers.get("x-api-key").and_then(|v| v.to_str().ok()), Some("anthropic-secret"));
+    assert_eq!(
+        request
+            .headers
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok()),
+        Some("anthropic-secret")
+    );
     assert!(request.headers.get("authorization").is_none());
-    assert_eq!(request.headers.get("content-type").and_then(|v| v.to_str().ok()), Some("application/json"));
+    assert_eq!(
+        request
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
 }
 
 #[tokio::test]
@@ -211,22 +247,43 @@ async fn openai_provider_serializes_required_tool_choice_in_request_body() {
     let requests = server.received_requests().await.expect("captured requests");
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
-    assert_eq!(request.headers.get("authorization").and_then(|v| v.to_str().ok()), Some("Bearer provider-token"));
-    assert_eq!(request.headers.get("content-type").and_then(|v| v.to_str().ok()), Some("application/json"));
+    assert_eq!(
+        request
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer provider-token")
+    );
+    assert_eq!(
+        request
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
 
     let body: Value = serde_json::from_slice(&request.body).expect("json body");
     assert_eq!(body["model"], "gpt-4o-mini");
     assert_eq!(body["stream"], true);
     assert_eq!(body["tool_choice"], "required");
     assert_eq!(body["messages"][0]["role"], "system");
-    assert_eq!(body["messages"][0]["content"], "You are a helpful assistant.");
+    assert_eq!(
+        body["messages"][0]["content"],
+        "You are a helpful assistant."
+    );
     assert_eq!(body["messages"][1]["role"], "user");
     assert_eq!(body["messages"][1]["content"], "List files");
     assert_eq!(body["tools"][0]["type"], "function");
     assert_eq!(body["tools"][0]["function"]["name"], "shell");
-    assert_eq!(body["tools"][0]["function"]["description"], "Run a shell command");
+    assert_eq!(
+        body["tools"][0]["function"]["description"],
+        "Run a shell command"
+    );
     assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
-    assert_eq!(body["tools"][0]["function"]["parameters"]["properties"]["cmd"]["type"], "string");
+    assert_eq!(
+        body["tools"][0]["function"]["parameters"]["properties"]["cmd"]["type"],
+        "string"
+    );
 }
 
 #[tokio::test]
@@ -270,9 +327,27 @@ async fn anthropic_provider_serializes_required_tool_choice_and_headers() {
     let requests = server.received_requests().await.expect("captured requests");
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
-    assert_eq!(request.headers.get("x-api-key").and_then(|v| v.to_str().ok()), Some("anthropic-key"));
-    assert_eq!(request.headers.get("anthropic-version").and_then(|v| v.to_str().ok()), Some("2023-06-01"));
-    assert_eq!(request.headers.get("content-type").and_then(|v| v.to_str().ok()), Some("application/json"));
+    assert_eq!(
+        request
+            .headers
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok()),
+        Some("anthropic-key")
+    );
+    assert_eq!(
+        request
+            .headers
+            .get("anthropic-version")
+            .and_then(|v| v.to_str().ok()),
+        Some("2023-06-01")
+    );
+    assert_eq!(
+        request
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
 
     let body: Value = serde_json::from_slice(&request.body).expect("json body");
     assert_eq!(body["model"], "claude-3-5-sonnet");

@@ -193,10 +193,7 @@ pub fn extract_session_signals(
             let read_at = *note_first_read_order.get(*note_id).unwrap_or(&0);
             // Check if this note identifier appears in any tool input *after* it was read
             let referenced_later = tool_inputs_after.iter().any(|(call_idx, strings)| {
-                *call_idx > read_at
-                    && strings
-                        .iter()
-                        .any(|s| s.contains(note_id.as_str()))
+                *call_idx > read_at && strings.iter().any(|s| s.contains(note_id.as_str()))
             });
             !referenced_later
         })
@@ -293,11 +290,7 @@ pub(crate) async fn run_structural_extraction(
 
 /// Resolve note identifiers to DB IDs via project context, then flush all
 /// co-access pairs to `note_associations`.
-async fn flush_co_access(
-    session_id: &str,
-    notes_read: &[String],
-    app_state: &AgentContext,
-) {
+async fn flush_co_access(session_id: &str, notes_read: &[String], app_state: &AgentContext) {
     if notes_read.len() < 2 {
         tracing::debug!(
             session_id = %session_id,
@@ -328,15 +321,13 @@ async fn flush_co_access(
         }
     };
 
-    let note_repo = djinn_db::NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let note_repo =
+        djinn_db::NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
     // Resolve note identifiers → note IDs (UUID strings)
     let mut resolved_ids: Vec<String> = Vec::new();
     for identifier in notes_read {
-        match note_repo
-            .resolve(&session.project_id, identifier)
-            .await
-        {
+        match note_repo.resolve(&session.project_id, identifier).await {
             Ok(Some(note)) => resolved_ids.push(note.id),
             Ok(None) => {
                 tracing::debug!(
@@ -546,8 +537,14 @@ mod tests {
     #[test]
     fn tools_used_counts_unique_tool_names() {
         let msgs = vec![
-            tool_use("memory_read", serde_json::json!({"identifier": "x", "project": "/tmp"})),
-            tool_use("memory_read", serde_json::json!({"identifier": "y", "project": "/tmp"})),
+            tool_use(
+                "memory_read",
+                serde_json::json!({"identifier": "x", "project": "/tmp"}),
+            ),
+            tool_use(
+                "memory_read",
+                serde_json::json!({"identifier": "y", "project": "/tmp"}),
+            ),
             tool_use("git_commit", serde_json::json!({"message": "msg"})),
             tool_use("write_file", serde_json::json!({"path": "a.rs"})),
         ];

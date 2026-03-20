@@ -707,7 +707,8 @@ impl DjinnMcpServer {
             use djinn_provider::oauth::github_app;
 
             // If we already have a valid cached token, return success immediately.
-            if let Some(cached) = github_app::GitHubAppTokens::load_from_db(&credential_repo).await {
+            if let Some(cached) = github_app::GitHubAppTokens::load_from_db(&credential_repo).await
+            {
                 if !cached.is_expired() {
                     return Json(ProviderOauthStartResponse {
                         ok: true,
@@ -724,7 +725,13 @@ impl DjinnMcpServer {
                     });
                 }
                 // Try refresh before falling through to device flow
-                if let Ok(tokens) = github_app::refresh_cached_token(&cached, github_app::CLIENT_ID, &credential_repo).await {
+                if let Ok(tokens) = github_app::refresh_cached_token(
+                    &cached,
+                    github_app::CLIENT_ID,
+                    &credential_repo,
+                )
+                .await
+                {
                     let _ = tokens; // already saved by refresh_cached_token
                     return Json(ProviderOauthStartResponse {
                         ok: true,
@@ -745,7 +752,8 @@ impl DjinnMcpServer {
             return match github_app::start_device_flow().await {
                 Ok(session) => {
                     let user_code = session.user_code.clone();
-                    let verification_uri = session.verification_uri_complete
+                    let verification_uri = session
+                        .verification_uri_complete
                         .clone()
                         .unwrap_or_else(|| session.verification_uri.clone());
 

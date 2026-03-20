@@ -5,7 +5,7 @@
 /// the project's `verification_rules` glob patterns.
 use std::path::Path;
 
-use super::settings::{load_settings, VerificationRule};
+use super::settings::{VerificationRule, load_settings};
 
 /// Resolve the set of verification commands to run for the current branch.
 ///
@@ -228,11 +228,7 @@ mod tests {
     #[test]
     fn role_override_returns_single_command_immediately() {
         let dir = tempdir_in_tmp();
-        let result = resolve_scoped_commands(
-            dir.path(),
-            "main",
-            Some("cargo test --workspace"),
-        );
+        let result = resolve_scoped_commands(dir.path(), "main", Some("cargo test --workspace"));
         assert_eq!(result, vec!["cargo test --workspace"]);
     }
 

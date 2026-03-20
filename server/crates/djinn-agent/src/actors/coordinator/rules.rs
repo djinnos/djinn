@@ -50,24 +50,25 @@ impl CoordinatorActor {
         let task_repo = self.task_repo();
 
         // Rule 1: Spike or Research closure.
-        let is_spike_or_research = matches!(
-            task.issue_type.as_str(),
-            "spike" | "research"
-        );
+        let is_spike_or_research = matches!(task.issue_type.as_str(), "spike" | "research");
 
         if is_spike_or_research {
             if !self.open_decomposition_exists(&task_repo, epic_id).await {
-                self.create_decomposition_task_by_ids(&task_repo, epic_id, &task.project_id, "spike_research_complete").await;
+                self.create_decomposition_task_by_ids(
+                    &task_repo,
+                    epic_id,
+                    &task.project_id,
+                    "spike_research_complete",
+                )
+                .await;
             }
             return; // Rule 1 fires; skip rule 2 for this event.
         }
 
         // Rule 2: Batch completion — all non-decomposition/review tasks closed.
         // (Decomposition tasks themselves don't trigger further decomposition.)
-        let is_decomposition_or_review = matches!(
-            task.issue_type.as_str(),
-            "decomposition" | "review"
-        );
+        let is_decomposition_or_review =
+            matches!(task.issue_type.as_str(), "decomposition" | "review");
         if is_decomposition_or_review {
             return;
         }
@@ -88,9 +89,7 @@ impl CoordinatorActor {
         // Worker tasks = not decomposition / review.
         let worker_tasks: Vec<_> = all_tasks
             .iter()
-            .filter(|t| {
-                !matches!(t.issue_type.as_str(), "decomposition" | "review")
-            })
+            .filter(|t| !matches!(t.issue_type.as_str(), "decomposition" | "review"))
             .collect();
 
         if worker_tasks.is_empty() {
@@ -102,15 +101,26 @@ impl CoordinatorActor {
         let any_in_progress = all_tasks.iter().any(|t| {
             matches!(
                 t.status.as_str(),
-                "in_progress" | "in_task_review" | "in_lead_intervention"
-                    | "needs_task_review" | "needs_lead_intervention" | "verifying"
+                "in_progress"
+                    | "in_task_review"
+                    | "in_lead_intervention"
+                    | "needs_task_review"
+                    | "needs_lead_intervention"
+                    | "verifying"
             )
         });
 
-        if all_closed && !any_in_progress
+        if all_closed
+            && !any_in_progress
             && !self.open_decomposition_exists(&task_repo, epic_id).await
         {
-            self.create_decomposition_task_by_ids(&task_repo, epic_id, &task.project_id, "batch_complete").await;
+            self.create_decomposition_task_by_ids(
+                &task_repo,
+                epic_id,
+                &task.project_id,
+                "batch_complete",
+            )
+            .await;
         }
     }
 
@@ -121,10 +131,9 @@ impl CoordinatorActor {
         epic_id: &str,
     ) -> bool {
         match task_repo.list_by_epic(epic_id).await {
-            Ok(tasks) => tasks.iter().any(|t| {
-                t.issue_type == IssueType::Decomposition.as_str()
-                    && t.status != "closed"
-            }),
+            Ok(tasks) => tasks
+                .iter()
+                .any(|t| t.issue_type == IssueType::Decomposition.as_str() && t.status != "closed"),
             Err(_) => false,
         }
     }
@@ -176,7 +185,10 @@ impl CoordinatorActor {
 
     /// Record a task merge event for the given epic (updates in-memory rolling window).
     pub(super) fn record_merge_event(&mut self, epic_id: &str) {
-        let events = self.throughput_events.entry(epic_id.to_owned()).or_default();
+        let events = self
+            .throughput_events
+            .entry(epic_id.to_owned())
+            .or_default();
         events.push(StdInstant::now());
         // Eagerly evict events outside the rolling window to bound memory.
         events.retain(|t| t.elapsed() < THROUGHPUT_WINDOW);
@@ -195,7 +207,10 @@ impl CoordinatorActor {
         self.throughput_events
             .iter()
             .map(|(epic_id, events)| {
-                let count = events.iter().filter(|t| t.elapsed() < THROUGHPUT_WINDOW).count();
+                let count = events
+                    .iter()
+                    .filter(|t| t.elapsed() < THROUGHPUT_WINDOW)
+                    .count();
                 (epic_id.clone(), count)
             })
             .collect()
@@ -251,7 +266,11 @@ mod tests {
         })
     }
 
-    async fn make_epic(db: &Database, project_id: &str, tx: &broadcast::Sender<DjinnEventEnvelope>) -> djinn_core::models::Epic {
+    async fn make_epic(
+        db: &Database,
+        project_id: &str,
+        tx: &broadcast::Sender<DjinnEventEnvelope>,
+    ) -> djinn_core::models::Epic {
         EpicRepository::new(db.clone(), crate::events::event_bus_for(tx))
             .create_for_project(
                 project_id,
@@ -277,20 +296,40 @@ mod tests {
         tx: &broadcast::Sender<DjinnEventEnvelope>,
     ) -> djinn_core::models::Task {
         TaskRepository::new(db.clone(), crate::events::event_bus_for(tx))
-            .create_in_project(project_id, Some(epic_id), title, "", "", issue_type, 0, "", Some("open"))
+            .create_in_project(
+                project_id,
+                Some(epic_id),
+                title,
+                "",
+                "",
+                issue_type,
+                0,
+                "",
+                Some("open"),
+            )
             .await
             .unwrap()
     }
 
     async fn close_task(db: &Database, task_id: &str, tx: &broadcast::Sender<DjinnEventEnvelope>) {
         TaskRepository::new(db.clone(), crate::events::event_bus_for(tx))
-            .transition(task_id, djinn_core::models::TransitionAction::Close, "test", "system", None, None)
+            .transition(
+                task_id,
+                djinn_core::models::TransitionAction::Close,
+                "test",
+                "system",
+                None,
+                None,
+            )
             .await
             .unwrap();
     }
 
     fn decomposition_count(tasks: &[djinn_core::models::Task]) -> usize {
-        tasks.iter().filter(|t| t.issue_type == "decomposition" && t.status != "closed").count()
+        tasks
+            .iter()
+            .filter(|t| t.issue_type == "decomposition" && t.status != "closed")
+            .count()
     }
 
     // ── AC1: Spike/research closure → decomposition task ──────────────────────
@@ -329,7 +368,8 @@ mod tests {
 
         let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
-        let research = create_task(&db, &epic.id, &project.id, "Research task", "research", &tx).await;
+        let research =
+            create_task(&db, &epic.id, &project.id, "Research task", "research", &tx).await;
 
         let _handle = spawn_coordinator(&db, &tx);
 
@@ -337,7 +377,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
-        assert_eq!(decomposition_count(&tasks), 1, "research closure should create one decomposition task");
+        assert_eq!(
+            decomposition_count(&tasks),
+            1,
+            "research closure should create one decomposition task"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -349,7 +393,15 @@ mod tests {
         let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
         // Pre-create an open decomposition task.
-        create_task(&db, &epic.id, &project.id, "Existing plan", "decomposition", &tx).await;
+        create_task(
+            &db,
+            &epic.id,
+            &project.id,
+            "Existing plan",
+            "decomposition",
+            &tx,
+        )
+        .await;
 
         let spike = create_task(&db, &epic.id, &project.id, "Spike", "spike", &tx).await;
 
@@ -413,7 +465,15 @@ mod tests {
 
         let t1 = create_task(&db, &epic.id, &project.id, "Task 1", "task", &tx).await;
         // Pre-existing open decomposition task.
-        create_task(&db, &epic.id, &project.id, "Existing plan", "decomposition", &tx).await;
+        create_task(
+            &db,
+            &epic.id,
+            &project.id,
+            "Existing plan",
+            "decomposition",
+            &tx,
+        )
+        .await;
 
         let _handle = spawn_coordinator(&db, &tx);
         close_task(&db, &t1.id, &tx).await;
@@ -568,7 +628,10 @@ mod tests {
         );
 
         // Manually insert an expired event into the throughput map.
-        actor.throughput_events.entry("epic-1".to_owned()).or_default()
+        actor
+            .throughput_events
+            .entry("epic-1".to_owned())
+            .or_default()
             .push(StdInstant::now() - THROUGHPUT_WINDOW - Duration::from_secs(1));
 
         // Add a fresh event.
@@ -576,6 +639,10 @@ mod tests {
 
         actor.evict_throughput_events();
         let snap = actor.throughput_snapshot();
-        assert_eq!(snap.get("epic-1"), Some(&1), "expired events should be evicted");
+        assert_eq!(
+            snap.get("epic-1"),
+            Some(&1),
+            "expired events should be evicted"
+        );
     }
 }

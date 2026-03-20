@@ -126,12 +126,25 @@ fn closed_at_set_on_close_cleared_on_reopen() {
                 .transition(&id, TransitionAction::Close, "", "system", None, None)
                 .await
                 .unwrap_or_else(|_| panic!("Close failed from {status_str}"));
-            assert!(after_close.closed_at.is_some(), "closed_at must be set after Close from {status_str}");
+            assert!(
+                after_close.closed_at.is_some(),
+                "closed_at must be set after Close from {status_str}"
+            );
             let after_reopen = repo
-                .transition(&id, TransitionAction::Reopen, "", "system", Some("test"), None)
+                .transition(
+                    &id,
+                    TransitionAction::Reopen,
+                    "",
+                    "system",
+                    Some("test"),
+                    None,
+                )
                 .await
                 .unwrap_or_else(|_| panic!("Reopen failed from closed (was {status_str})"));
-            assert!(after_reopen.closed_at.is_none(), "closed_at must be None after Reopen (was {status_str})");
+            assert!(
+                after_reopen.closed_at.is_none(),
+                "closed_at must be None after Reopen (was {status_str})"
+            );
         }
     });
 }
@@ -146,10 +159,21 @@ fn reopen_count_monotonically_increases() {
                 .await
                 .unwrap_or_else(|_| panic!("Close failed on cycle {cycle}"));
             let t = repo
-                .transition(&id, TransitionAction::Reopen, "", "system", Some("cycle"), None)
+                .transition(
+                    &id,
+                    TransitionAction::Reopen,
+                    "",
+                    "system",
+                    Some("cycle"),
+                    None,
+                )
                 .await
                 .unwrap_or_else(|_| panic!("Reopen failed on cycle {cycle}"));
-            assert!(t.reopen_count > prev, "reopen_count must increase: {prev} -> {}", t.reopen_count);
+            assert!(
+                t.reopen_count > prev,
+                "reopen_count must increase: {prev} -> {}",
+                t.reopen_count
+            );
             prev = t.reopen_count;
         }
     });

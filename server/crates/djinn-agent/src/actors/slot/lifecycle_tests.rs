@@ -14,13 +14,13 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::actors::slot::lifecycle::{TaskLifecycleParams, run_task_lifecycle};
+use crate::AgentType;
 use crate::actors::slot::SlotEvent;
+use crate::actors::slot::lifecycle::{TaskLifecycleParams, run_task_lifecycle};
 use crate::roles::role_impl_for;
 use crate::test_helpers::{
     FailingProvider, FakeProvider, agent_context_from_db, create_test_db, create_test_epic,
 };
-use crate::AgentType;
 use djinn_core::models::SessionStatus;
 use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
 
@@ -61,14 +61,15 @@ async fn create_git_repo() -> TempDir {
 }
 
 /// Registers a project in the DB pointing to `repo_path`.
-async fn register_project(db: &djinn_db::Database, repo_path: &Path) -> djinn_core::models::Project {
+async fn register_project(
+    db: &djinn_db::Database,
+    repo_path: &Path,
+) -> djinn_core::models::Project {
     let repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
     let id = uuid::Uuid::now_v7();
     let path = repo_path.to_str().unwrap().to_string();
     let name = format!("lc-test-{id}");
-    repo.create(&name, &path)
-        .await
-        .expect("create project")
+    repo.create(&name, &path).await.expect("create project")
 }
 
 /// Creates a task in `open` status (valid for WorkerRole dispatch).
@@ -162,7 +163,9 @@ async fn lifecycle_success_path_session_reaches_paused_and_slot_freed() {
         provider_override: Some(provider),
     };
 
-    run_task_lifecycle(params).await.expect("lifecycle should succeed");
+    run_task_lifecycle(params)
+        .await
+        .expect("lifecycle should succeed");
 
     // ── Assert: slot event is Free ─────────────────────────────────────────
     let event = recv_slot_event(&mut event_rx).await;
@@ -234,7 +237,9 @@ async fn lifecycle_provider_failure_session_reaches_failed_and_slot_freed() {
         provider_override: Some(provider),
     };
 
-    run_task_lifecycle(params).await.expect("lifecycle itself should not error");
+    run_task_lifecycle(params)
+        .await
+        .expect("lifecycle itself should not error");
 
     // ── Assert: slot event is Free ─────────────────────────────────────────
     let event = recv_slot_event(&mut event_rx).await;
@@ -299,7 +304,9 @@ async fn lifecycle_provider_failure_cleans_up_worktree() {
         provider_override: Some(provider),
     };
 
-    run_task_lifecycle(params).await.expect("lifecycle should not propagate errors");
+    run_task_lifecycle(params)
+        .await
+        .expect("lifecycle should not propagate errors");
 
     // Drain the slot event (ensures lifecycle is fully done)
     recv_slot_event(&mut event_rx).await;

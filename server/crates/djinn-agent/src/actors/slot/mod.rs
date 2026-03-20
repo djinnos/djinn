@@ -100,13 +100,13 @@ mod conversation_store;
 pub(crate) mod finalize_handlers;
 pub mod helpers;
 mod lifecycle;
+pub(crate) mod llm_extraction;
 mod pool;
 mod reply_loop;
 #[cfg(test)]
 mod reply_loop_tests;
-pub(crate) mod llm_extraction;
 pub(crate) mod session_extraction;
- pub(crate) mod task_review;
+pub(crate) mod task_review;
 pub(crate) mod verification;
 pub mod worktree;
 

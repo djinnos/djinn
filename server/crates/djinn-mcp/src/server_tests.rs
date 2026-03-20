@@ -27,8 +27,14 @@ mod tests {
     ) -> djinn_core::models::Note {
         for _ in 0..40 {
             let note = repo.get(note_id).await.unwrap().unwrap();
-            if note.abstract_.as_deref().is_some_and(|v| !v.trim().is_empty())
-                && note.overview.as_deref().is_some_and(|v| !v.trim().is_empty())
+            if note
+                .abstract_
+                .as_deref()
+                .is_some_and(|v| !v.trim().is_empty())
+                && note
+                    .overview
+                    .as_deref()
+                    .is_some_and(|v| !v.trim().is_empty())
                 && note.overview != previous_overview
             {
                 return note;
@@ -64,8 +70,18 @@ mod tests {
         assert!(created_note.overview.is_none());
 
         let generated = wait_for_summaries_change(&repo, &note_id, None).await;
-        assert!(generated.abstract_.as_deref().is_some_and(|v| v.contains("Sentence one")));
-        assert!(generated.overview.as_deref().is_some_and(|v| v.contains("Sentence one")));
+        assert!(
+            generated
+                .abstract_
+                .as_deref()
+                .is_some_and(|v| v.contains("Sentence one"))
+        );
+        assert!(
+            generated
+                .overview
+                .as_deref()
+                .is_some_and(|v| v.contains("Sentence one"))
+        );
 
         let previous_overview = generated.overview.clone();
 
@@ -83,7 +99,12 @@ mod tests {
 
         assert!(edited.error.is_none());
         let regenerated = wait_for_summaries_change(&repo, &note_id, previous_overview).await;
-        assert!(regenerated.overview.as_deref().is_some_and(|v| v.contains("Fresh closing details.")));
+        assert!(
+            regenerated
+                .overview
+                .as_deref()
+                .is_some_and(|v| v.contains("Fresh closing details."))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -115,8 +136,18 @@ mod tests {
 
         assert!(response.error.is_none());
         let updated = wait_for_summaries_change(&repo, &legacy.id, None).await;
-        assert!(updated.abstract_.as_deref().is_some_and(|v| !v.trim().is_empty()));
-        assert!(updated.overview.as_deref().is_some_and(|v| !v.trim().is_empty()));
+        assert!(
+            updated
+                .abstract_
+                .as_deref()
+                .is_some_and(|v| !v.trim().is_empty())
+        );
+        assert!(
+            updated
+                .overview
+                .as_deref()
+                .is_some_and(|v| !v.trim().is_empty())
+        );
         assert_ne!(updated.abstract_.as_deref(), Some(""));
         assert_ne!(updated.overview.as_deref(), Some(""));
     }
@@ -148,7 +179,10 @@ mod tests {
             .unwrap();
 
         let manager = Arc::new(SessionEndHookSessionManager::new(state));
-        let (session_id, _transport) = rmcp::transport::streamable_http_server::SessionManager::create_session(&*manager).await.unwrap();
+        let (session_id, _transport) =
+            rmcp::transport::streamable_http_server::SessionManager::create_session(&*manager)
+                .await
+                .unwrap();
 
         let server = manager.server_for_session(&session_id).await.unwrap();
         server.record_memory_read(&note_a.id).await;
@@ -158,7 +192,12 @@ mod tests {
             vec![note_a.id.clone(), note_b.id.clone()]
         );
 
-        rmcp::transport::streamable_http_server::SessionManager::close_session(&*manager, &session_id).await.unwrap();
+        rmcp::transport::streamable_http_server::SessionManager::close_session(
+            &*manager,
+            &session_id,
+        )
+        .await
+        .unwrap();
 
         let associations = repo.get_associations_for_note(&note_a.id).await.unwrap();
         assert_eq!(associations.len(), 1);

@@ -303,7 +303,8 @@ pub(crate) async fn try_rebase_existing_task_branch(
     // If we're resuming a task with an existing worktree, sync directly in that
     // worktree so conflicts can be left in place for the worker to resolve.
     if let Some(resumed_path) = resumed_worktree_path {
-        return sync_in_resumed_worktree(project_dir, branch, &upstream, resumed_path, app_state).await;
+        return sync_in_resumed_worktree(project_dir, branch, &upstream, resumed_path, app_state)
+            .await;
     }
 
     // Fresh task: use a temporary sync worktree approach.

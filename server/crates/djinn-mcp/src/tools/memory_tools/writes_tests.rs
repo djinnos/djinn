@@ -8,9 +8,7 @@ mod tests {
     use tokio::time::sleep;
 
     use crate::{
-        server::DjinnMcpServer,
-        state::stubs::test_mcp_state,
-        tools::memory_tools::WriteParams,
+        server::DjinnMcpServer, state::stubs::test_mcp_state, tools::memory_tools::WriteParams,
     };
 
     async fn create_project(db: &Database, root: &std::path::Path) -> djinn_core::models::Project {
@@ -75,7 +73,8 @@ mod tests {
             .memory_write(Parameters(WriteParams {
                 project: tmp.path().to_str().unwrap().to_string(),
                 title: "Async Pattern".to_string(),
-                content: "Use tokio::spawn for concurrent task execution in Rust async code.".to_string(),
+                content: "Use tokio::spawn for concurrent task execution in Rust async code."
+                    .to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
             }))
@@ -99,7 +98,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!candidates.is_empty(), "dedup_candidates should find the existing pattern");
+        assert!(
+            !candidates.is_empty(),
+            "dedup_candidates should find the existing pattern"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -142,7 +144,13 @@ mod tests {
 
         // Query for pattern candidates - should only find pattern, not ADR
         let pattern_candidates = repo
-            .dedup_candidates(&project.id, "patterns", "pattern", "Error Handling Result Rust", 5)
+            .dedup_candidates(
+                &project.id,
+                "patterns",
+                "pattern",
+                "Error Handling Result Rust",
+                5,
+            )
             .await
             .unwrap();
 
@@ -151,7 +159,13 @@ mod tests {
 
         // Query for adr candidates - should only find adr, not pattern
         let adr_candidates = repo
-            .dedup_candidates(&project.id, "decisions", "adr", "Error Handling Result Rust", 5)
+            .dedup_candidates(
+                &project.id,
+                "decisions",
+                "adr",
+                "Error Handling Result Rust",
+                5,
+            )
             .await
             .unwrap();
 
@@ -172,7 +186,9 @@ mod tests {
             .memory_write(Parameters(WriteParams {
                 project: tmp.path().to_str().unwrap().to_string(),
                 title: "Unique Pattern XYZ123".to_string(),
-                content: "This content is completely unique and should not match anything. XYZ123ABC".to_string(),
+                content:
+                    "This content is completely unique and should not match anything. XYZ123ABC"
+                        .to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
             }))
@@ -185,12 +201,23 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mergeable_note_type_returns_correct_values() {
         // Test the mergeable_note_type helper function
-        let mergeable_types = ["pattern", "case", "pitfall", "adr", "research", "design", "reference",
-            "requirement", "session", "persona", "journey",
-            "design_spec", "competitive", "tech_spike"];
-        let non_mergeable_types = [
-            "brief", "roadmap",
+        let mergeable_types = [
+            "pattern",
+            "case",
+            "pitfall",
+            "adr",
+            "research",
+            "design",
+            "reference",
+            "requirement",
+            "session",
+            "persona",
+            "journey",
+            "design_spec",
+            "competitive",
+            "tech_spike",
         ];
+        let non_mergeable_types = ["brief", "roadmap"];
 
         for note_type in mergeable_types {
             assert!(

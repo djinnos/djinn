@@ -1394,9 +1394,13 @@ async fn blocker_swap_atomic_no_race_window() {
     repo.add_blocker(&task.id, &blocker_a.id).await.unwrap();
 
     // Atomic swap: remove blocker_a and add blocker_b in one transaction.
-    repo.update_blockers_atomic(&task.id, std::slice::from_ref(&blocker_b.id), std::slice::from_ref(&blocker_a.id))
-        .await
-        .unwrap();
+    repo.update_blockers_atomic(
+        &task.id,
+        std::slice::from_ref(&blocker_b.id),
+        std::slice::from_ref(&blocker_a.id),
+    )
+    .await
+    .unwrap();
 
     // Task should still be blocked (by blocker_b now).
     let ready = repo.list_ready(ReadyQuery::default()).await.unwrap();
@@ -1459,9 +1463,10 @@ async fn blocker_swap_atomic_no_race_concurrent() {
         tokio::spawn(async move {
             for _ in 0..iterations * 2 {
                 if let Ok(Some(t)) = repo.claim(ReadyQuery::default(), "test", "system").await
-                    && t.id == task_id {
-                        claimed.store(true, Ordering::SeqCst);
-                        return;
+                    && t.id == task_id
+                {
+                    claimed.store(true, Ordering::SeqCst);
+                    return;
                 }
                 tokio::task::yield_now().await;
             }
@@ -1530,23 +1535,53 @@ async fn blocker_swap_atomic_no_race_concurrent() {
 // reopen is valid from closed
 #[case("closed", TransitionAction::Reopen, "open", Some("needed again"))]
 // submit_task_review is valid from in_progress
-#[case("in_progress", TransitionAction::SubmitTaskReview, "needs_task_review", None)]
+#[case(
+    "in_progress",
+    TransitionAction::SubmitTaskReview,
+    "needs_task_review",
+    None
+)]
 // task_review_start is valid from needs_task_review
-#[case("needs_task_review", TransitionAction::TaskReviewStart, "in_task_review", None)]
+#[case(
+    "needs_task_review",
+    TransitionAction::TaskReviewStart,
+    "in_task_review",
+    None
+)]
 // task_review_approve closes the task
 #[case("in_task_review", TransitionAction::TaskReviewApprove, "closed", None)]
 // task_review_reject returns to open (requires reason)
-#[case("in_task_review", TransitionAction::TaskReviewReject, "open", Some("needs more work"))]
+#[case(
+    "in_task_review",
+    TransitionAction::TaskReviewReject,
+    "open",
+    Some("needs more work")
+)]
 // release returns in_progress to open (requires reason)
-#[case("in_progress", TransitionAction::Release, "open", Some("releasing slot"))]
+#[case(
+    "in_progress",
+    TransitionAction::Release,
+    "open",
+    Some("releasing slot")
+)]
 // release_task_review returns in_task_review to needs_task_review (requires reason)
-#[case("in_task_review", TransitionAction::ReleaseTaskReview, "needs_task_review", Some("releasing review"))]
+#[case(
+    "in_task_review",
+    TransitionAction::ReleaseTaskReview,
+    "needs_task_review",
+    Some("releasing review")
+)]
 // mark_pr_ready transitions in_task_review → pr_ready
 #[case("in_task_review", TransitionAction::MarkPrReady, "pr_ready", None)]
 // pr_merge transitions pr_ready → closed
 #[case("pr_ready", TransitionAction::PrMerge, "closed", None)]
 // pr_changes_requested transitions pr_ready → open (requires reason)
-#[case("pr_ready", TransitionAction::PrChangesRequested, "open", Some("changes requested by reviewer"))]
+#[case(
+    "pr_ready",
+    TransitionAction::PrChangesRequested,
+    "open",
+    Some("changes requested by reviewer")
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn valid_transition(
     #[case] from_status: &str,
@@ -1656,14 +1691,7 @@ async fn invalid_transition(#[case] from_status: &str, #[case] action: Transitio
 
     // Supply a reason so the requires_reason guard never fires first.
     let err = repo
-        .transition(
-            &task.id,
-            action,
-            "",
-            "system",
-            Some("stub-reason"),
-            None,
-        )
+        .transition(&task.id, action, "", "system", Some("stub-reason"), None)
         .await
         .expect_err("expected InvalidTransition");
 
@@ -1745,23 +1773,23 @@ async fn task_list_filter(#[case] filter_kind: &str) {
         .await
         .unwrap();
     let beta = repo
-        .create(&epic.id, "beta feature", "", "", "feature", 1, "", Some("open"))
+        .create(
+            &epic.id,
+            "beta feature",
+            "",
+            "",
+            "feature",
+            1,
+            "",
+            Some("open"),
+        )
         .await
         .unwrap();
 
     // Apply a label to the second task.
-    repo.update(
-        &beta.id,
-        "beta feature",
-        "",
-        "",
-        1,
-        "",
-        r#"["urgent"]"#,
-        "",
-    )
-    .await
-    .unwrap();
+    repo.update(&beta.id, "beta feature", "", "", 1, "", r#"["urgent"]"#, "")
+        .await
+        .unwrap();
 
     // Transition beta to in_progress (bypassing AC check via set_status).
     repo.set_status(&beta.id, "in_progress").await.unwrap();

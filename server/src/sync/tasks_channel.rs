@@ -806,10 +806,7 @@ mod tests {
         );
 
         let fetched_bob = task_repo.get(&task_bob.id).await.unwrap().unwrap();
-        assert_eq!(
-            fetched_bob.status, "open",
-            "bob's task should remain open"
-        );
+        assert_eq!(fetched_bob.status, "open", "bob's task should remain open");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

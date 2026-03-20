@@ -141,10 +141,8 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     if let Some(ref specialist_name) = task.agent_type
         && !specialist_name.is_empty()
     {
-        let role_repo = djinn_db::AgentRoleRepository::new(
-            app_state.db.clone(),
-            app_state.event_bus.clone(),
-        );
+        let role_repo =
+            djinn_db::AgentRoleRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         let specialist = role_repo
             .get_by_name_for_project(&task.project_id, specialist_name)
             .await
@@ -286,7 +284,10 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     "Lifecycle: paused session model mismatch; starting fresh session"
                 );
                 match prepare_worktree(&project_dir, &task, &app_state).await {
-                    Ok((p, cf)) => { worktree_conflict_files = cf; p },
+                    Ok((p, cf)) => {
+                        worktree_conflict_files = cf;
+                        p
+                    }
                     Err(e) => {
                         tracing::error!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed; leaving task in_progress for stuck-detector recovery");
                         return_free!();
@@ -300,7 +301,10 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     "Lifecycle: paused session agent type mismatch; starting fresh session"
                 );
                 match prepare_worktree(&project_dir, &task, &app_state).await {
-                    Ok((p, cf)) => { worktree_conflict_files = cf; p },
+                    Ok((p, cf)) => {
+                        worktree_conflict_files = cf;
+                        p
+                    }
                     Err(e) => {
                         tracing::error!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed; leaving task in_progress for stuck-detector recovery");
                         return_free!();
@@ -324,7 +328,10 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     "Lifecycle: paused session worktree missing; finalized as interrupted"
                 );
                 match prepare_worktree(&project_dir, &task, &app_state).await {
-                    Ok((p, cf)) => { worktree_conflict_files = cf; p },
+                    Ok((p, cf)) => {
+                        worktree_conflict_files = cf;
+                        p
+                    }
                     Err(e) => {
                         tracing::error!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed; leaving task in_progress for stuck-detector recovery");
                         return_free!();
@@ -344,7 +351,10 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         } else {
             tracing::warn!(task_id = %task_id, session_record_id = %paused.id, "Lifecycle: paused session missing worktree; starting fresh session");
             match prepare_worktree(&project_dir, &task, &app_state).await {
-                Ok((p, cf)) => { worktree_conflict_files = cf; p },
+                Ok((p, cf)) => {
+                    worktree_conflict_files = cf;
+                    p
+                }
                 Err(e) => {
                     tracing::error!(task_id = %task_id, error = %e, "Lifecycle: prepare_worktree failed; leaving task in_progress for stuck-detector recovery");
                     return_free!();
@@ -353,7 +363,10 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         }
     } else {
         match prepare_worktree(&project_dir, &task, &app_state).await {
-            Ok((p, cf)) => { worktree_conflict_files = cf; p },
+            Ok((p, cf)) => {
+                worktree_conflict_files = cf;
+                p
+            }
             Err(e) => {
                 // Do NOT call transition_interrupted here — that would release
                 // the task back to "open" immediately, and return_free!() would
@@ -630,7 +643,11 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                 .join("\n");
             Some(formatted)
         };
-        (prompt_setup_commands, prompt_verification_commands, prompt_verification_rules)
+        (
+            prompt_setup_commands,
+            prompt_verification_commands,
+            prompt_verification_rules,
+        )
     };
 
     let conflict_files = conflict_ctx.as_ref().map(|m| {
@@ -770,10 +787,8 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         learned_prompt.as_deref(),
     );
     // Append skills section after all other extensions.
-    let system_prompt = crate::prompts::apply_skills(
-        &system_prompt_with_extensions,
-        &resolved_skills,
-    );
+    let system_prompt =
+        crate::prompts::apply_skills(&system_prompt_with_extensions, &resolved_skills);
 
     let context_window = app_state
         .catalog
@@ -796,17 +811,32 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     let provider: Box<dyn LlmProvider> = if let Some(p) = provider_override {
         // Wrap the Arc in a Box so the type matches the non-test path.
         struct ArcProvider(Arc<dyn LlmProvider>);
-        use std::pin::Pin;
         use crate::provider::{StreamEvent, ToolChoice};
+        use std::pin::Pin;
         impl LlmProvider for ArcProvider {
-            fn name(&self) -> &str { self.0.name() }
+            fn name(&self) -> &str {
+                self.0.name()
+            }
             fn stream<'a>(
                 &'a self,
                 conv: &'a djinn_provider::message::Conversation,
                 tools: &'a [serde_json::Value],
                 tool_choice: Option<ToolChoice>,
-            ) -> Pin<Box<dyn futures::Future<Output = anyhow::Result<Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>>> + Send + 'a>>
-            {
+            ) -> Pin<
+                Box<
+                    dyn futures::Future<
+                            Output = anyhow::Result<
+                                Pin<
+                                    Box<
+                                        dyn futures::Stream<Item = anyhow::Result<StreamEvent>>
+                                            + Send,
+                                    >,
+                                >,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
                 self.0.stream(conv, tools, tool_choice)
             }
         }
@@ -851,8 +881,8 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     #[cfg(not(test))]
     let provider: Box<dyn LlmProvider> = {
         let telemetry_meta = build_telemetry_meta(role.config().name, &task_id);
-        let cred = provider_credential
-            .expect("provider_credential must be Some in non-test builds");
+        let cred =
+            provider_credential.expect("provider_credential must be Some in non-test builds");
         let provider_config = match cred {
             ProviderCredential::OAuthConfig(mut cfg) => {
                 cfg.model_id = model_name.clone();
@@ -1654,10 +1684,8 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
 
     // ── Build specialist roster for planner prompt ────────────────────────
     let specialist_roster = {
-        let role_repo = djinn_db::AgentRoleRepository::new(
-            app_state.db.clone(),
-            app_state.event_bus.clone(),
-        );
+        let role_repo =
+            djinn_db::AgentRoleRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         match role_repo.all_for_project(&project_id).await {
             Ok(roles) if !roles.is_empty() => {
                 let mut lines = Vec::new();
@@ -1758,9 +1786,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     let tools = (role.config().tool_schemas)();
     let mut conversation = Conversation::new();
     conversation.push(Message::system(system_prompt));
-    conversation.push(Message::user(
-        "Begin planning for this project.",
-    ));
+    conversation.push(Message::user("Begin planning for this project."));
 
     let project_dir = PathBuf::from(&project_path);
 

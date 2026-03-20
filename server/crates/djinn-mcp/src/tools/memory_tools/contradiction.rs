@@ -172,7 +172,11 @@ async fn run_contradiction_analysis_with_provider(
                 let _ = repo.update_confidence(&candidate.id, CONTRADICTION).await;
                 // AC2: bilateral association (one canonical row, queryable from either direction).
                 let _ = repo
-                    .upsert_association_min_weight(&input.note_id, &candidate.id, CONTRADICTS_WEIGHT)
+                    .upsert_association_min_weight(
+                        &input.note_id,
+                        &candidate.id,
+                        CONTRADICTS_WEIGHT,
+                    )
                     .await;
             }
             Classification::Supersedes => {
@@ -253,11 +257,7 @@ mod tests {
                 dyn futures::Future<
                         Output = anyhow::Result<
                             Pin<
-                                Box<
-                                    dyn futures::Stream<
-                                            Item = anyhow::Result<StreamEvent>,
-                                        > + Send,
-                                >,
+                                Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
                             >,
                         >,
                     > + Send
@@ -272,7 +272,9 @@ mod tests {
                     Ok(StreamEvent::Done),
                 ];
                 Ok(Box::pin(stream::iter(events))
-                    as Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>)
+                    as Pin<
+                        Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                    >)
             })
         }
     }
@@ -293,12 +295,26 @@ mod tests {
                               authorization role permission scope grant deny policy enforcement";
 
         let note1 = repo
-            .create(&project.id, tmp.path(), "Auth Token A", shared_content, "pattern", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Auth Token A",
+                shared_content,
+                "pattern",
+                "[]",
+            )
             .await
             .unwrap();
 
         let note2 = repo
-            .create(&project.id, tmp.path(), "Auth Token B", shared_content, "pattern", "[]")
+            .create(
+                &project.id,
+                tmp.path(),
+                "Auth Token B",
+                shared_content,
+                "pattern",
+                "[]",
+            )
             .await
             .unwrap();
 
@@ -411,13 +427,19 @@ mod tests {
 
         // AC2: bilateral association at CONTRADICTS_WEIGHT, reachable from both sides
         let assocs1 = repo.get_associations_for_note(&id1).await.unwrap();
-        assert!(!assocs1.is_empty(), "bilateral association must exist for note1");
+        assert!(
+            !assocs1.is_empty(),
+            "bilateral association must exist for note1"
+        );
         assert!(
             assocs1.iter().any(|a| a.weight >= CONTRADICTS_WEIGHT),
             "association weight must be >= {CONTRADICTS_WEIGHT}"
         );
         let assocs2 = repo.get_associations_for_note(&id2).await.unwrap();
-        assert!(!assocs2.is_empty(), "bilateral association must be reachable from note2");
+        assert!(
+            !assocs2.is_empty(),
+            "bilateral association must be reachable from note2"
+        );
     }
 
     /// AC3: when the LLM classifies as `supersedes`, only the candidate (superseded note)
@@ -534,6 +556,9 @@ mod tests {
         assert!((note2_after.confidence - note2_before.confidence).abs() < 1e-9);
 
         let assocs = repo.get_associations_for_note(&id1).await.unwrap();
-        assert!(assocs.is_empty(), "compatible: no association should be created");
+        assert!(
+            assocs.is_empty(),
+            "compatible: no association should be created"
+        );
     }
 }

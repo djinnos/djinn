@@ -17,8 +17,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use djinn_db::{NoteRepository, ProjectRepository, SessionRepository, TaskRepository};
-use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
 use djinn_provider::provider::LlmProvider;
+use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
 use serde::Deserialize;
 
 use super::session_extraction::SessionTaxonomy;
@@ -86,8 +86,7 @@ async fn run_llm_extraction_inner(
     provider_override: Option<Arc<dyn LlmProvider>>,
 ) {
     // ── Load session ───────────────────────────────────────────────────────
-    let session_repo =
-        SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let session = match session_repo.get(&session_id).await {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -292,7 +291,9 @@ async fn run_llm_extraction_inner(
     // ── Write notes ────────────────────────────────────────────────────────
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let project_path = Path::new(&project.path);
-    let provenance = format!("\n\n---\n*Extracted from session {session_id}. Confidence: 0.5 (session-extracted).*");
+    let provenance = format!(
+        "\n\n---\n*Extracted from session {session_id}. Confidence: 0.5 (session-extracted).*"
+    );
 
     let note_pairs: Vec<(&str, &[ExtractedNote])> = vec![
         ("case", extracted.cases.as_slice()),
@@ -376,8 +377,7 @@ fn parse_extraction_response(text: &str) -> Result<ExtractionResponse, String> {
         text
     };
 
-    serde_json::from_str::<ExtractionResponse>(text)
-        .map_err(|e| format!("JSON parse error: {e}"))
+    serde_json::from_str::<ExtractionResponse>(text).map_err(|e| format!("JSON parse error: {e}"))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

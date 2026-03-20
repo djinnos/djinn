@@ -1149,7 +1149,12 @@ mod project_tools {
             .output()
             .expect("git init");
         std::process::Command::new("git")
-            .args(["remote", "add", "origin", "git@github.com:test-owner/test-repo.git"])
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:test-owner/test-repo.git",
+            ])
             .current_dir(dir)
             .output()
             .expect("git remote add");
@@ -1633,7 +1638,6 @@ mod task_tools {
     };
     use djinn_db::TaskRepository;
 
-
     #[tokio::test]
     async fn task_create_success_shape() {
         let db = create_test_db();
@@ -1746,7 +1750,10 @@ mod task_tools {
             }),
         )
         .await;
-        assert!(result["error"].as_str().is_some(), "should return error for invalid blocker");
+        assert!(
+            result["error"].as_str().is_some(),
+            "should return error for invalid blocker"
+        );
 
         // Verify no task was created (the task should not be in the DB).
         let list = mcp_call_tool(
@@ -1957,7 +1964,10 @@ mod task_tools {
         assert_eq!(ok["status"], "in_progress");
 
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
-        assert_eq!(repo.get(&task.id).await.unwrap().unwrap().status, "in_progress");
+        assert_eq!(
+            repo.get(&task.id).await.unwrap().unwrap().status,
+            "in_progress"
+        );
 
         let bad = mcp_call_tool(&app, &sid, "task_transition", json!({"project": project.path, "id": task.id, "action": "not_real", "actor_id": "u1", "actor_role": "user"})).await;
         assert!(bad["error"].as_str().is_some());
