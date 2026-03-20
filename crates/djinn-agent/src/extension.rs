@@ -2472,6 +2472,21 @@ fn tool_task_kill_session() -> RmcpTool {
     )
 }
 
+fn tool_task_comment_add() -> RmcpTool {
+    RmcpTool::new(
+        "task_comment_add".to_string(),
+        "Add a comment or strategic observation to a task's activity log.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id", "body"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"},
+                "body": {"type": "string", "description": "Comment body to add to the activity log"}
+            }
+        }),
+    )
+}
+
 fn from_value<T>(value: serde_json::Value) -> Result<T, serde_json::Error>
 where
     T: DeserializeOwned,
@@ -2614,6 +2629,27 @@ pub(crate) fn tool_schemas_groomer() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
         serde_json::to_value(crate::roles::finalize::tool_submit_grooming())
             .expect("serialize tool_submit_grooming"),
+    ] {
+        tool_values.push(value);
+    }
+    tool_values
+}
+
+/// Tool schemas for Architect: read-only tools + task/epic management + submit_work.
+/// No write/edit/apply_patch — the Architect diagnoses and directs but does not write code.
+pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    for value in [
+        serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
+        serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
+        serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
+        serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
+        serde_json::to_value(tool_task_blocked_list()).expect("serialize tool_task_blocked_list"),
+        serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
+        serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
+        serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
+        serde_json::to_value(crate::roles::finalize::tool_submit_work())
+            .expect("serialize tool_submit_work"),
     ] {
         tool_values.push(value);
     }
@@ -2818,6 +2854,19 @@ mod tests {
         assert!(planner.iter().any(|n| n == "task_transition"));
         assert!(planner.iter().any(|n| n == "submit_grooming"));
         assert!(!planner.iter().any(|n| n == "task_comment_add"));
+
+        let architect = schema_names(tool_schemas_architect());
+        assert!(architect.iter().any(|n| n == "shell"));
+        assert!(architect.iter().any(|n| n == "read"));
+        assert!(architect.iter().any(|n| n == "task_create"));
+        assert!(architect.iter().any(|n| n == "task_comment_add"));
+        assert!(architect.iter().any(|n| n == "task_transition"));
+        assert!(architect.iter().any(|n| n == "task_kill_session"));
+        assert!(architect.iter().any(|n| n == "submit_work"));
+        // Architect must NOT have code-writing tools.
+        assert!(!architect.iter().any(|n| n == "write"));
+        assert!(!architect.iter().any(|n| n == "edit"));
+        assert!(!architect.iter().any(|n| n == "apply_patch"));
     }
 
     #[test]
@@ -2936,6 +2985,18 @@ mod tests {
     #[test]
     fn snapshot_planner_tool_schemas() {
         insta::assert_json_snapshot!("planner_tool_schemas", tool_schemas_planner());
+    }
+
+    #[test]
+    fn snapshot_architect_tool_names() {
+        let schemas = tool_schemas_architect();
+        let names = tool_names(&schemas);
+        insta::assert_json_snapshot!("architect_tool_names", names);
+    }
+
+    #[test]
+    fn snapshot_architect_tool_schemas() {
+        insta::assert_json_snapshot!("architect_tool_schemas", tool_schemas_architect());
     }
 }
 

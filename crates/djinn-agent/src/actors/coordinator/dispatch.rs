@@ -296,11 +296,22 @@ impl CoordinatorActor {
             }
         };
 
+        /// Default stall timeout: 5 minutes for all agent types.
         const STALL_TIMEOUT_SECS: u64 = 5 * 60;
+        /// Architect sessions get a longer timeout (10 minutes) because patrol
+        /// reviews involve reading many files and epics sequentially.
+        const ARCHITECT_STALL_TIMEOUT_SECS: u64 = 10 * 60;
 
         for session in active {
             let Some(task_id) = session.task_id.as_deref() else {
                 continue;
+            };
+
+            // Use role-specific stall timeout: Architect gets 10 minutes.
+            let stall_threshold = if session.agent_type == "architect" {
+                ARCHITECT_STALL_TIMEOUT_SECS
+            } else {
+                STALL_TIMEOUT_SECS
             };
 
             // Query the activity tracker for idle time.  If the task has no
@@ -321,7 +332,7 @@ impl CoordinatorActor {
                 }
             };
 
-            if idle <= STALL_TIMEOUT_SECS {
+            if idle <= stall_threshold {
                 continue;
             }
 
@@ -334,7 +345,7 @@ impl CoordinatorActor {
             let payload = serde_json::json!({
                 "message": format!(
                     "Coordinator stall timeout: {} session idle for {}s (threshold {}s). Session was cancelled for redispatch.",
-                    session.agent_type, idle, STALL_TIMEOUT_SECS
+                    session.agent_type, idle, stall_threshold
                 )
             })
             .to_string();
@@ -633,4 +644,183 @@ impl CoordinatorActor {
         }
     }
 
+    /// Dispatch an Architect patrol session every 5 minutes when:
+    ///   - At least one open epic exists (there is active work to review).
+    ///   - No Architect session is currently running.
+    ///   - At least one project is not paused/unhealthy (dispatch is enabled).
+    ///
+    /// Creates a "review" task for visibility, then dispatches the Architect to it.
+    pub(super) async fn maybe_dispatch_architect_patrol(&mut self) {
+        // Check if any Architect session is already running.
+        let session_repo = SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let active_sessions = match session_repo.list_active().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: patrol — failed to list active sessions");
+                return;
+            }
+        };
+        let architect_running = active_sessions
+            .iter()
+            .any(|s| s.agent_type == "architect");
+        if architect_running {
+            tracing::debug!("CoordinatorActor: patrol — Architect already running, skipping");
+            return;
+        }
+        tracing::debug!(sessions = active_sessions.len(), "CoordinatorActor: patrol — no architect session running");
+        #[cfg(test)]
+        eprintln!("[patrol] step 1 passed: no architect session. Active sessions: {}", active_sessions.len());
+
+        // Check if there are any open epics.
+        let epic_repo = EpicRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let all_epics = match epic_repo.list().await {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: patrol — failed to list epics");
+                return;
+            }
+        };
+        #[cfg(test)]
+        eprintln!("[patrol] step 2: total epics: {}", all_epics.len());
+        tracing::debug!(total_epics = all_epics.len(), "CoordinatorActor: patrol — epic list");
+        let open_epics: Vec<_> = all_epics
+            .into_iter()
+            .filter(|e| e.status == "open")
+            .collect();
+        if open_epics.is_empty() {
+            tracing::debug!("CoordinatorActor: patrol — no open epics, skipping Architect patrol");
+            return;
+        }
+        tracing::debug!(open_epics = open_epics.len(), "CoordinatorActor: patrol — found open epics");
+        #[cfg(test)]
+        eprintln!("[patrol] step 3: open epics: {}", open_epics.len());
+
+        // Find a project with dispatch enabled to attach the patrol task to.
+        // Use the first open epic's project_id.
+        let Some(project_epic) = open_epics.first() else {
+            return;
+        };
+        let project_id = &project_epic.project_id;
+        tracing::debug!(project_id = %project_id, "CoordinatorActor: patrol — using project");
+
+        if !self.is_project_dispatch_enabled(project_id) {
+            tracing::debug!(
+                project_id = %project_id,
+                "CoordinatorActor: patrol — project paused or unhealthy, skipping"
+            );
+            return;
+        }
+        tracing::debug!(project_id = %project_id, "CoordinatorActor: patrol — project dispatch enabled");
+        #[cfg(test)]
+        eprintln!("[patrol] step 5: project dispatch enabled, project_id={project_id}");
+
+        // Resolve models for the "architect" role.
+        let model_ids = self.resolve_dispatch_models_for_role("architect").await;
+        tracing::debug!(model_ids = ?model_ids, "CoordinatorActor: patrol — resolved models");
+        #[cfg(test)]
+        eprintln!("[patrol] step 6: resolved models: {:?}", model_ids);
+        if model_ids.is_empty() {
+            tracing::debug!("CoordinatorActor: patrol — no model configured for architect role");
+            return;
+        }
+
+        // Create a review task for the patrol session.
+        let task_repo = TaskRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let review_task = match task_repo
+            .create_in_project(
+                project_id,
+                None,
+                "Architect patrol: board health review",
+                "Automated patrol session to review board health, epic progress, and approach viability.",
+                "Review open epics and tasks for stuck work, missing blockers, and strategic issues.",
+                "review",
+                0,
+                "system",
+                Some("open"),
+            )
+            .await
+        {
+            Ok(t) => {
+                #[cfg(test)]
+                eprintln!("[patrol] step 7: review task created: {}", t.id);
+                t
+            }
+            Err(e) => {
+                #[cfg(test)]
+                eprintln!("[patrol] step 7: FAILED to create review task: {e}");
+                tracing::warn!(
+                    error = %e,
+                    project_id = %project_id,
+                    "CoordinatorActor: patrol — failed to create review task"
+                );
+                return;
+            }
+        };
+
+        let Some(project_path) = self.project_path_for_id(project_id).await else {
+            #[cfg(test)]
+            eprintln!("[patrol] step 8: FAILED to get project path");
+            tracing::warn!(
+                project_id = %project_id,
+                "CoordinatorActor: patrol — project path not found"
+            );
+            return;
+        };
+        #[cfg(test)]
+        eprintln!("[patrol] step 8: project_path={project_path}");
+
+        let task_id = review_task.id.clone();
+        let project_path_owned = project_path.clone();
+        let outcome = self
+            .try_dispatch_to_pool(
+                &review_task.short_id,
+                &model_ids,
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = task_id.clone();
+                    let pp = project_path_owned.clone();
+                    let mid = model_id.to_owned();
+                    async move { pool.dispatch(&tid, &pp, &mid).await }
+                },
+            )
+            .await;
+
+        match outcome {
+            DispatchOutcome::Dispatched => {
+                tracing::info!(
+                    task_id = %review_task.short_id,
+                    task_uuid = %review_task.id,
+                    project_id = %project_id,
+                    open_epics = open_epics.len(),
+                    "CoordinatorActor: Architect patrol dispatched"
+                );
+                self.last_dispatched
+                    .insert(review_task.id.clone(), StdInstant::now());
+                self.dispatched += 1;
+                self.publish_status();
+            }
+            DispatchOutcome::AtCapacity => {
+                tracing::debug!(
+                    "CoordinatorActor: patrol — Architect model at capacity, will retry next cycle"
+                );
+            }
+            DispatchOutcome::PoolDead => {
+                tracing::error!("CoordinatorActor: patrol — slot pool actor dead");
+            }
+            DispatchOutcome::Failed => {
+                tracing::debug!(
+                    "CoordinatorActor: patrol — no model could accept Architect dispatch"
+                );
+            }
+        }
+    }
 }
