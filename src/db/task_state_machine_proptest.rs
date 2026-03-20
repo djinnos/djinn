@@ -56,6 +56,7 @@ fn arb_status() -> impl Strategy<Value = TaskStatus> {
     ]
 }
 
+#[allow(dead_code)]
 fn arb_non_closed_status() -> impl Strategy<Value = TaskStatus> {
     prop_oneof![
         Just(TaskStatus::Open),
