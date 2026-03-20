@@ -210,6 +210,7 @@ function ProjectListItem({
   healthRun,
   onClick,
   toggleSlot,
+  hotkey,
 }: {
   name: string;
   icon?: React.ReactNode;
@@ -219,6 +220,7 @@ function ProjectListItem({
   healthRun: VerificationRun | null;
   onClick: () => void;
   toggleSlot?: React.ReactNode;
+  hotkey?: string;
 }) {
   const isActive = execState === "active";
   const [healthPanelOpen, setHealthPanelOpen] = useState(false);
@@ -281,6 +283,11 @@ function ProjectListItem({
               {toggleSlot && (
                 <span className="shrink-0">{toggleSlot}</span>
               )}
+              {hotkey && (
+                <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono text-[10px] text-muted-foreground/50 shrink-0">
+                  {hotkey}
+                </kbd>
+              )}
             </>
           )}
         </div>
@@ -303,6 +310,7 @@ function ProjectRow({
   isSelected,
   isCollapsed,
   onClick,
+  hotkey,
 }: {
   projectPath: string | null;
   label: string;
@@ -310,6 +318,7 @@ function ProjectRow({
   isSelected: boolean;
   isCollapsed: boolean;
   onClick: () => void;
+  hotkey?: string;
 }) {
   const { state, refresh } = useExecutionStatus(projectPath);
   const { start, pause, resume } = useExecutionControl(refresh);
@@ -346,6 +355,7 @@ function ProjectRow({
       execState={execState}
       healthRun={healthRun}
       onClick={onClick}
+      hotkey={hotkey}
       toggleSlot={
         <ProjectExecToggle
           label={label}
@@ -445,6 +455,18 @@ export function Sidebar() {
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target as HTMLElement).isContentEditable) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
 
+    // Number keys: 0 = All Projects, 1-9 = project by position
+    if (e.key >= '0' && e.key <= '9') {
+      e.preventDefault();
+      const idx = Number(e.key);
+      if (idx === 0) {
+        navigateToProject(ALL_PROJECTS);
+      } else if (idx <= projects.length) {
+        navigateToProject(projects[idx - 1].id);
+      }
+      return;
+    }
+
     switch (e.key.toLowerCase()) {
       case 'c':
         e.preventDefault();
@@ -467,7 +489,7 @@ export function Sidebar() {
         navigate('/settings');
         break;
     }
-  }, [toggleCollapse, navigate, navigateToView]);
+  }, [toggleCollapse, navigate, navigateToView, navigateToProject, projects]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
@@ -591,10 +613,11 @@ export function Sidebar() {
                 isSelected={isAll}
                 isCollapsed={isCollapsed}
                 onClick={() => navigateToProject(ALL_PROJECTS)}
+                hotkey="0"
               />
 
               {/* Individual project rows */}
-              {projects.map((project) => (
+              {projects.map((project, idx) => (
                 <ProjectRow
                   key={project.id}
                   projectPath={project.path ?? null}
@@ -603,6 +626,7 @@ export function Sidebar() {
                   isSelected={selectedProjectId === project.id}
                   isCollapsed={isCollapsed}
                   onClick={() => navigateToProject(project.id)}
+                  hotkey={idx < 9 ? String(idx + 1) : undefined}
                 />
               ))}
             </div>
