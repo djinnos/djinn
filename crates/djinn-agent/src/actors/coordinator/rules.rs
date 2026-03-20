@@ -57,7 +57,7 @@ impl CoordinatorActor {
 
         if is_spike_or_research {
             if !self.open_decomposition_exists(&task_repo, epic_id).await {
-                self.create_decomposition_task(&task_repo, epic_id, &task.project_id, "spike_research_complete").await;
+                self.create_decomposition_task_by_ids(&task_repo, epic_id, &task.project_id, "spike_research_complete").await;
             }
             return; // Rule 1 fires; skip rule 2 for this event.
         }
@@ -110,7 +110,7 @@ impl CoordinatorActor {
         if all_closed && !any_in_progress
             && !self.open_decomposition_exists(&task_repo, epic_id).await
         {
-            self.create_decomposition_task(&task_repo, epic_id, &task.project_id, "batch_complete").await;
+            self.create_decomposition_task_by_ids(&task_repo, epic_id, &task.project_id, "batch_complete").await;
         }
     }
 
@@ -129,8 +129,9 @@ impl CoordinatorActor {
         }
     }
 
-    /// Create a decomposition task for the Planner under the given epic.
-    async fn create_decomposition_task(
+    /// Create a decomposition task for the Planner under the given epic (by ID).
+    /// Used by spike/research and batch-completion rules that already hold the IDs.
+    async fn create_decomposition_task_by_ids(
         &self,
         task_repo: &djinn_db::TaskRepository,
         epic_id: &str,
