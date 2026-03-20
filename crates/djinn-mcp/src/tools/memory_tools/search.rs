@@ -50,6 +50,7 @@ impl DjinnMcpServer {
                 folder: r.folder,
                 note_type: r.note_type,
                 snippet: r.snippet,
+                score: r.score,
             })
             .collect();
 

@@ -85,6 +85,8 @@ pub struct NoteSearchResult {
     pub note_type: String,
     /// HTML snippet with `<b>…</b>` highlights around matched terms.
     pub snippet: String,
+    /// RRF fusion score (higher = more relevant).
+    pub score: f64,
 }
 
 /// Compact near-duplicate candidate returned by pre-write dedup lookup.
