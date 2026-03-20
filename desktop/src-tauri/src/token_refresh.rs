@@ -231,6 +231,20 @@ pub async fn perform_silent_refresh() -> RefreshResult {
 
     set_token_state(token_state.clone());
 
+    // Sync refreshed tokens to server credential vault
+    crate::token_sync::sync_tokens_to_server(
+        &token_state.access_token,
+        &token_state.refresh_token,
+        expires_at_unix,
+        // user_login not available during refresh; use stored value if present
+        if updated_stored.user_login.is_empty() {
+            None
+        } else {
+            Some(updated_stored.user_login.as_str())
+        },
+    )
+    .await;
+
     log::info!("Silent token refresh successful, token expires in {}s", expires_in);
 
     RefreshResult::Success(token_state)

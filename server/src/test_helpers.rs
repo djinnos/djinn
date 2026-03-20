@@ -27,6 +27,34 @@ pub fn create_test_app() -> axum::Router {
     create_test_app_with_db(db)
 }
 
+/// Create an Axum router with pre-seeded GitHub credentials (for contract tests
+/// that call `project_add` which requires GitHub validation).
+pub async fn create_test_app_with_github_creds() -> axum::Router {
+    let db = create_test_db();
+    // Seed a dummy GitHub App OAuth token so project_add validation passes.
+    let cred_repo = djinn_provider::repos::CredentialRepository::new(
+        db.clone(),
+        EventBus::noop(),
+    );
+    let dummy_tokens = serde_json::json!({
+        "access_token": "ghu_test_token",
+        "refresh_token": "ghr_test_refresh",
+        "expires_at": 9999999999_i64,
+        "refresh_token_expires_at": null,
+        "user_login": "test-user"
+    });
+    cred_repo
+        .set("github_app", "__OAUTH_GITHUB_APP", &dummy_tokens.to_string())
+        .await
+        .expect("failed to seed GitHub credentials");
+    // Also seed the installation ID.
+    cred_repo
+        .set("github_app", "__GITHUB_INSTALLATION_ID", "12345678")
+        .await
+        .expect("failed to seed installation ID");
+    create_test_app_with_db(db)
+}
+
 /// Create an Axum router wired to the given database (for tests that seed data externally).
 pub fn create_test_app_with_db(db: Database) -> axum::Router {
     let cancel = CancellationToken::new();

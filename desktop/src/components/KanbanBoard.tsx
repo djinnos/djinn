@@ -9,6 +9,7 @@ import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 import { GitRemoteSetupBanner, useGitRemoteCheck } from "@/components/GitRemoteSetupBanner";
 import { BoardHealthBanner } from "@/components/BoardHealthBanner";
+import { GitHubAppBanner } from "@/components/GitHubAppBanner";
 import {
   ArrowDown01Icon,
   ArrowRight01Icon,
@@ -425,6 +426,14 @@ export function KanbanBoard({
       </div>
 
       <BoardHealthBanner
+        projectPaths={
+          selectedProject?.path
+            ? [selectedProject.path]
+            : projects.map((p) => p.path)
+        }
+      />
+
+      <GitHubAppBanner
         projectPaths={
           selectedProject?.path
             ? [selectedProject.path]

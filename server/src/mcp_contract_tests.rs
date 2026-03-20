@@ -1141,8 +1141,28 @@ mod project_tools {
 
     use crate::test_helpers::{create_test_app, initialize_mcp_session, mcp_call_tool};
 
+    /// Initialise a temp directory as a git repo with a GitHub origin remote.
+    fn init_git_with_github_remote(dir: &std::path::Path) {
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", "git@github.com:test-owner/test-repo.git"])
+            .current_dir(dir)
+            .output()
+            .expect("git remote add");
+        // Create an initial commit so HEAD is valid.
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(dir)
+            .output()
+            .expect("git commit");
+    }
+
     #[tokio::test]
-    async fn project_add_and_list_success_shape() {
+    async fn project_add_rejects_dir_without_github_remote() {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let dir = tempdir().expect("tempdir");
@@ -1152,37 +1172,92 @@ mod project_tools {
             &app,
             &session_id,
             "project_add",
-            json!({"name": "proj-a", "path": path.clone()}),
+            json!({"name": "proj-no-remote", "path": path.clone()}),
         )
         .await;
-        assert_eq!(added["status"], "ok");
-        assert!(added["project"]["id"].as_str().unwrap_or_default().len() > 8);
-        assert_eq!(added["project"]["path"], json!(path));
+        let status = added["status"].as_str().unwrap_or_default();
+        assert!(
+            status.starts_with("error:"),
+            "expected error for missing remote, got: {status}"
+        );
+        assert!(
+            status.contains("GitHub remote"),
+            "expected GitHub remote error message, got: {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_add_rejects_when_github_not_connected() {
+        let app = create_test_app();
+        let session_id = initialize_mcp_session(&app).await;
+        let dir = tempdir().expect("tempdir");
+        init_git_with_github_remote(dir.path());
+        let path = dir.path().to_string_lossy().to_string();
+
+        let added = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            json!({"name": "proj-no-token", "path": path.clone()}),
+        )
+        .await;
+        let status = added["status"].as_str().unwrap_or_default();
+        assert!(
+            status.starts_with("error:"),
+            "expected error for missing GitHub token, got: {status}"
+        );
+        assert!(
+            status.contains("Connect GitHub first"),
+            "expected 'Connect GitHub first' error, got: {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_add_and_list_success_shape() {
+        // Use DB-level project creation to bypass GitHub validation
+        // (the MCP tool now requires a connected GitHub App).
+        let db = crate::test_helpers::create_test_db();
+        let (project, _dir) = crate::test_helpers::create_test_project_with_dir(&db).await;
+        let app = crate::test_helpers::create_test_app_with_db(db);
+        let session_id = initialize_mcp_session(&app).await;
 
         let listed = mcp_call_tool(&app, &session_id, "project_list", json!({})).await;
+        let projects = listed["projects"].as_array().expect("projects array");
         assert!(
-            listed["projects"]
-                .as_array()
-                .expect("projects array")
+            projects.iter().any(|p| p["path"] == json!(project.path)),
+            "project_list must include the registered project"
+        );
+        assert!(
+            projects
                 .iter()
-                .any(|p| p["path"] == json!(path))
+                .any(|p| p["id"].as_str().unwrap_or_default().len() > 8),
+            "project must have a non-trivial id"
         );
     }
 
     #[tokio::test]
     async fn project_add_duplicate_path_errors() {
+        // Both calls will hit the GitHub validation error, which is itself
+        // an error status — the test still verifies that the second call
+        // returns an error (just a different one than before).
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
         let dir = tempdir().expect("tempdir");
         let path = dir.path().to_string_lossy().to_string();
 
-        mcp_call_tool(
+        let first = mcp_call_tool(
             &app,
             &session_id,
             "project_add",
             json!({"name": "proj-a", "path": path.clone()}),
         )
         .await;
+        assert!(
+            first["status"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("error:")
+        );
         let dup = mcp_call_tool(
             &app,
             &session_id,
@@ -1200,24 +1275,17 @@ mod project_tools {
 
     #[tokio::test]
     async fn project_remove_success_and_missing() {
-        let app = create_test_app();
+        // Create project directly in DB to bypass GitHub validation.
+        let db = crate::test_helpers::create_test_db();
+        let (project, _dir) = crate::test_helpers::create_test_project_with_dir(&db).await;
+        let app = crate::test_helpers::create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().to_string_lossy().to_string();
-
-        mcp_call_tool(
-            &app,
-            &session_id,
-            "project_add",
-            json!({"name": "proj-remove", "path": path.clone()}),
-        )
-        .await;
 
         let removed = mcp_call_tool(
             &app,
             &session_id,
             "project_remove",
-            json!({"name": "proj-remove", "path": path.clone()}),
+            json!({"name": project.name, "path": project.path.clone()}),
         )
         .await;
         assert_eq!(removed["status"], "ok");
@@ -1226,7 +1294,7 @@ mod project_tools {
             &app,
             &session_id,
             "project_remove",
-            json!({"name": "proj-remove", "path": path}),
+            json!({"name": project.name, "path": project.path}),
         )
         .await;
         assert!(
@@ -1239,24 +1307,17 @@ mod project_tools {
 
     #[tokio::test]
     async fn project_remove_wrong_path_is_rejected() {
-        let app = create_test_app();
+        // Create project directly in DB to bypass GitHub validation.
+        let db = crate::test_helpers::create_test_db();
+        let (project, _dir) = crate::test_helpers::create_test_project_with_dir(&db).await;
+        let app = crate::test_helpers::create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().to_string_lossy().to_string();
-
-        mcp_call_tool(
-            &app,
-            &session_id,
-            "project_add",
-            json!({"name": "proj-guard", "path": path.clone()}),
-        )
-        .await;
 
         let rejected = mcp_call_tool(
             &app,
             &session_id,
             "project_remove",
-            json!({"name": "proj-guard", "path": "/wrong/path"}),
+            json!({"name": project.name.clone(), "path": "/wrong/path"}),
         )
         .await;
         assert!(
@@ -1272,30 +1333,23 @@ mod project_tools {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|p| p["name"] == "proj-guard")
+                .any(|p| p["name"] == project.name)
         );
     }
 
     #[tokio::test]
     async fn project_config_get_set_round_trip() {
-        let app = create_test_app();
+        // Create project directly in DB to bypass GitHub validation.
+        let db = crate::test_helpers::create_test_db();
+        let (project, _dir) = crate::test_helpers::create_test_project_with_dir(&db).await;
+        let app = crate::test_helpers::create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().to_string_lossy().to_string();
-
-        mcp_call_tool(
-            &app,
-            &session_id,
-            "project_add",
-            json!({"name": "proj-config", "path": path.clone()}),
-        )
-        .await;
 
         let set = mcp_call_tool(
             &app,
             &session_id,
             "project_config_set",
-            json!({"project": path.clone(), "key": "target_branch", "value": "develop"}),
+            json!({"project": project.path.clone(), "key": "target_branch", "value": "develop"}),
         )
         .await;
         assert_eq!(set["status"], "ok");
@@ -1304,7 +1358,7 @@ mod project_tools {
             &app,
             &session_id,
             "project_config_get",
-            json!({"project": path}),
+            json!({"project": project.path}),
         )
         .await;
         assert_eq!(got["status"], "ok");
@@ -1313,24 +1367,17 @@ mod project_tools {
 
     #[tokio::test]
     async fn project_config_get_returns_empty_verification_rules_by_default() {
-        let app = create_test_app();
+        // Create project directly in DB to bypass GitHub validation.
+        let db = crate::test_helpers::create_test_db();
+        let (project, _dir) = crate::test_helpers::create_test_project_with_dir(&db).await;
+        let app = crate::test_helpers::create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().to_string_lossy().to_string();
-
-        mcp_call_tool(
-            &app,
-            &session_id,
-            "project_add",
-            json!({"name": "proj-vr-default", "path": path.clone()}),
-        )
-        .await;
 
         let got = mcp_call_tool(
             &app,
             &session_id,
             "project_config_get",
-            json!({"project": path}),
+            json!({"project": project.path}),
         )
         .await;
         assert_eq!(got["status"], "ok");
@@ -1339,18 +1386,11 @@ mod project_tools {
 
     #[tokio::test]
     async fn project_config_set_verification_rules_round_trip() {
-        let app = create_test_app();
+        // Create project directly in DB to bypass GitHub validation.
+        let db = crate::test_helpers::create_test_db();
+        let (project, _dir) = crate::test_helpers::create_test_project_with_dir(&db).await;
+        let app = crate::test_helpers::create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().to_string_lossy().to_string();
-
-        mcp_call_tool(
-            &app,
-            &session_id,
-            "project_add",
-            json!({"name": "proj-vr-set", "path": path.clone()}),
-        )
-        .await;
 
         let rules = json!([
             {"match_pattern": "src/**/*.rs", "commands": ["cargo test"]},
@@ -1361,7 +1401,7 @@ mod project_tools {
             &session_id,
             "project_config_set",
             json!({
-                "project": path.clone(),
+                "project": project.path.clone(),
                 "key": "verification_rules",
                 "value": rules.to_string()
             }),
@@ -1373,7 +1413,7 @@ mod project_tools {
             &app,
             &session_id,
             "project_config_get",
-            json!({"project": path}),
+            json!({"project": project.path}),
         )
         .await;
         assert_eq!(got["status"], "ok");
@@ -1386,18 +1426,11 @@ mod project_tools {
 
     #[tokio::test]
     async fn project_config_set_verification_rules_invalid_glob_returns_error() {
-        let app = create_test_app();
+        // Create project directly in DB to bypass GitHub validation.
+        let db = crate::test_helpers::create_test_db();
+        let (project, _dir) = crate::test_helpers::create_test_project_with_dir(&db).await;
+        let app = crate::test_helpers::create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().to_string_lossy().to_string();
-
-        mcp_call_tool(
-            &app,
-            &session_id,
-            "project_add",
-            json!({"name": "proj-vr-badglob", "path": path.clone()}),
-        )
-        .await;
 
         let bad_rules = json!([{"match_pattern": "[invalid", "commands": ["echo ok"]}]);
         let set = mcp_call_tool(
@@ -1405,7 +1438,7 @@ mod project_tools {
             &session_id,
             "project_config_set",
             json!({
-                "project": path,
+                "project": project.path,
                 "key": "verification_rules",
                 "value": bad_rules.to_string()
             }),
@@ -1420,18 +1453,11 @@ mod project_tools {
 
     #[tokio::test]
     async fn project_config_set_verification_rules_empty_commands_returns_error() {
-        let app = create_test_app();
+        // Create project directly in DB to bypass GitHub validation.
+        let db = crate::test_helpers::create_test_db();
+        let (project, _dir) = crate::test_helpers::create_test_project_with_dir(&db).await;
+        let app = crate::test_helpers::create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().to_string_lossy().to_string();
-
-        mcp_call_tool(
-            &app,
-            &session_id,
-            "project_add",
-            json!({"name": "proj-vr-emptycmds", "path": path.clone()}),
-        )
-        .await;
 
         let bad_rules = json!([{"match_pattern": "**", "commands": []}]);
         let set = mcp_call_tool(
@@ -1439,7 +1465,7 @@ mod project_tools {
             &session_id,
             "project_config_set",
             json!({
-                "project": path,
+                "project": project.path,
                 "key": "verification_rules",
                 "value": bad_rules.to_string()
             }),

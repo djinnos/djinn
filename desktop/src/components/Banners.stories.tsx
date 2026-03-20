@@ -9,6 +9,8 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { AlertCircle } from "lucide-react";
 import { GitRemoteSetupBanner } from "./GitRemoteSetupBanner";
+import { Button } from "@/components/ui/button";
+import { Loader2Icon } from "lucide-react";
 
 /* ---------------------------------------------------------------------------
  * BoardHealthBanner — presentational mock
@@ -346,4 +348,126 @@ export const SuccessState: StoryObj = {
       </Card>
     );
   },
+};
+
+/* ---- GitHubAppBanner stories ---- */
+
+function GitHubAppBannerMock() {
+  const [dismissed, setDismissed] = useState(false);
+  if (dismissed) return null;
+
+  return (
+    <Card className="mx-4 border-amber-500/30 bg-amber-500/10">
+      <CardContent className="py-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-500/20">
+              <HugeiconsIcon
+                icon={Alert02Icon}
+                className="size-4 text-amber-400"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <h3 className="text-sm font-semibold text-amber-200">
+                GitHub App Not Installed
+              </h3>
+              <p className="text-sm text-muted-foreground">
+                Install the Djinn app on your GitHub organization to enable PR
+                creation and review feedback.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            aria-label="Dismiss GitHub App banner"
+            onClick={() => setDismissed(true)}
+            className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+          >
+            <HugeiconsIcon icon={Cancel01Icon} className="size-4" />
+          </button>
+        </div>
+
+        <div className="mt-3 flex items-center gap-2 pl-11">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1.5 px-3 text-xs"
+            onClick={() =>
+              window.open(
+                "https://github.com/apps/djinn-ai-bot/installations/new",
+                "_blank"
+              )
+            }
+          >
+            Install on GitHub
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1.5 px-3 text-xs"
+            disabled={false}
+          >
+            Check again
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+export const GitHubAppNotInstalled: StoryObj = {
+  render: () => <GitHubAppBannerMock />,
+};
+
+export const GitHubAppChecking: StoryObj = {
+  render: () => (
+    <Card className="mx-4 border-amber-500/30 bg-amber-500/10">
+      <CardContent className="py-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-500/20">
+              <HugeiconsIcon
+                icon={Alert02Icon}
+                className="size-4 text-amber-400"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <h3 className="text-sm font-semibold text-amber-200">
+                GitHub App Not Installed
+              </h3>
+              <p className="text-sm text-muted-foreground">
+                Install the Djinn app on your GitHub organization to enable PR
+                creation and review feedback.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            aria-label="Dismiss GitHub App banner"
+            className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+          >
+            <HugeiconsIcon icon={Cancel01Icon} className="size-4" />
+          </button>
+        </div>
+
+        <div className="mt-3 flex items-center gap-2 pl-11">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1.5 px-3 text-xs"
+          >
+            Install on GitHub
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1.5 px-3 text-xs"
+            disabled
+          >
+            <Loader2Icon className="h-3.5 w-3.5 animate-spin" />
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  ),
 };

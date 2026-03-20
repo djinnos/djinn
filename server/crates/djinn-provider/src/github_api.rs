@@ -607,6 +607,39 @@ impl GitHubApiClient {
         })
     }
 
+    /// Check whether the installation token can access a repository.
+    ///
+    /// Calls `GET /repos/{owner}/{repo}` and returns `Ok(())` on 200.
+    /// Returns a descriptive error on 404/403 or any other failure.
+    pub async fn check_repo_access(&self, owner: &str, repo: &str) -> Result<()> {
+        let url = format!("{}/repos/{}/{}", self.base_url, owner, repo);
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if resp.status().is_success() {
+            return Ok(());
+        }
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(anyhow!("check_repo_access failed ({}): {}", status, body))
+    }
+
     /// Re-request review on a pull request from all reviewers who previously
     /// submitted a `CHANGES_REQUESTED` review.
     ///

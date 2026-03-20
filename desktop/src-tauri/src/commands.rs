@@ -128,6 +128,20 @@ pub async fn start_github_login(app: AppHandle) -> Result<DeviceCodeInfo, String
                     }
                 }
 
+                // Sync tokens to server credential vault
+                {
+                    let at = token_response.access_token.clone();
+                    let rt = refresh_token.clone();
+                    let ul = github_user.as_ref().map(|u| u.login.clone());
+                    crate::token_sync::sync_tokens_to_server(
+                        &at,
+                        &rt,
+                        expires_at_unix,
+                        ul.as_deref(),
+                    )
+                    .await;
+                }
+
                 // Update token refresh state
                 let token_state = TokenState {
                     access_token: token_response.access_token.clone(),

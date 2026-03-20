@@ -5,6 +5,7 @@ mod auth;
 mod commands;
 mod server;
 mod token_refresh;
+mod token_sync;
 
 pub use server::ServerState;
 

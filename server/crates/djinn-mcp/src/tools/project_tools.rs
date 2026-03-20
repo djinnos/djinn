@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
@@ -7,6 +8,9 @@ use tokio::fs;
 
 use crate::server::DjinnMcpServer;
 use djinn_db::{ProjectRepository, VerificationRule};
+use djinn_provider::github_api::GitHubApiClient;
+use djinn_provider::oauth::github_app::GitHubAppTokens;
+use djinn_provider::repos::CredentialRepository;
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
 
@@ -82,6 +86,96 @@ async fn ensure_git_repo_ready(path: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Parse `owner` and `repo` from a GitHub remote URL.
+///
+/// Supports both HTTPS (`https://github.com/owner/repo.git`) and SSH
+/// (`git@github.com:owner/repo.git`) formats.
+fn parse_github_owner_repo(remote_url: &str) -> Option<(String, String)> {
+    // SSH: git@github.com:owner/repo.git
+    if let Some(path) = remote_url.strip_prefix("git@github.com:") {
+        return split_owner_repo(path);
+    }
+    // HTTPS: https://github.com/owner/repo.git or http://
+    for prefix in &["https://github.com/", "http://github.com/"] {
+        if let Some(path) = remote_url.strip_prefix(prefix) {
+            return split_owner_repo(path);
+        }
+    }
+    None
+}
+
+fn split_owner_repo(path: &str) -> Option<(String, String)> {
+    let path = path.trim_end_matches(".git");
+    let mut parts = path.splitn(2, '/');
+    let owner = parts.next()?.to_string();
+    let repo = parts.next()?.to_string();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner, repo))
+}
+
+/// Validate that the project has a GitHub origin remote and that the Djinn
+/// GitHub App can access the repository.
+///
+/// Returns `Ok((owner, repo))` on success or `Err(message)` with a
+/// user-facing error.
+async fn validate_github_remote(
+    path: &str,
+    cred_repo: Arc<CredentialRepository>,
+) -> Result<(String, String), String> {
+    // 1. Read the origin remote URL.
+    let project_path = std::path::PathBuf::from(path);
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["remote", "get-url", "origin"])
+        .current_dir(&project_path);
+    let output = crate::process::output(cmd)
+        .await
+        .map_err(|e| format!("git remote get-url origin failed: {e}"))?;
+
+    if !output.status.success() {
+        return Err(
+            "Project must have a GitHub remote. Add one with `git remote add origin git@github.com:owner/repo.git`"
+                .to_string(),
+        );
+    }
+
+    let remote_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // 2. Parse owner/repo from the URL.
+    let (owner, repo) = parse_github_owner_repo(&remote_url).ok_or_else(|| {
+        "Project must have a GitHub remote. Add one with `git remote add origin git@github.com:owner/repo.git`"
+            .to_string()
+    })?;
+
+    // 3. Check that we have GitHub tokens.
+    let has_tokens = GitHubAppTokens::load_from_db(&cred_repo).await.is_some();
+    if !has_tokens {
+        return Err("Connect GitHub first".to_string());
+    }
+
+    // 4. Validate the GitHub App can access the repo (best-effort).
+    // This may fail if the installation token cannot be derived yet (e.g. app
+    // not installed on the org). We log a warning but still allow the project
+    // to be added — the board_health check will surface the issue later.
+    let github_client = GitHubApiClient::new(cred_repo);
+    match github_client.check_repo_access(&owner, &repo).await {
+        Ok(()) => {
+            tracing::info!(owner = %owner, repo = %repo, "project_add: GitHub access verified");
+        }
+        Err(e) => {
+            tracing::warn!(
+                owner = %owner,
+                repo = %repo,
+                error = %e,
+                "project_add: GitHub repo access check failed — install the Djinn app on {owner} at https://github.com/apps/djinn-ai-bot/installations/new",
+            );
+        }
+    }
+
+    Ok((owner, repo))
 }
 
 // ── Param structs ────────────────────────────────────────────────────────────
@@ -246,6 +340,22 @@ impl DjinnMcpServer {
         // Ensure the project is a git repo with at least one commit.
         if let Err(e) = ensure_git_repo_ready(path).await {
             tracing::warn!(path, error = %e, "project_add: git bootstrap failed");
+        }
+
+        // Validate GitHub remote: origin must point to a GitHub repo the App can access.
+        let cred_repo = Arc::new(CredentialRepository::new(
+            self.state.db().clone(),
+            self.state.event_bus(),
+        ));
+        if let Err(msg) = validate_github_remote(path, cred_repo).await {
+            return Json(ProjectAddResponse {
+                status: format!("error: {msg}"),
+                project: ProjectInfo {
+                    id: String::new(),
+                    name: input.name,
+                    path: path.to_string(),
+                },
+            });
         }
 
         // Idempotent: if same name+path already exists, return it
@@ -554,5 +664,52 @@ impl DjinnMcpServer {
             valid: true,
             errors,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ssh_remote() {
+        let (owner, repo) = parse_github_owner_repo("git@github.com:acme/widgets.git").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    #[test]
+    fn parse_https_remote_with_dot_git() {
+        let (owner, repo) =
+            parse_github_owner_repo("https://github.com/acme/widgets.git").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    #[test]
+    fn parse_https_remote_without_dot_git() {
+        let (owner, repo) = parse_github_owner_repo("https://github.com/acme/widgets").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    #[test]
+    fn parse_http_remote() {
+        let (owner, repo) =
+            parse_github_owner_repo("http://github.com/acme/widgets.git").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    #[test]
+    fn parse_non_github_remote_returns_none() {
+        assert!(parse_github_owner_repo("git@gitlab.com:acme/widgets.git").is_none());
+        assert!(parse_github_owner_repo("https://gitlab.com/acme/widgets.git").is_none());
+    }
+
+    #[test]
+    fn parse_empty_owner_or_repo_returns_none() {
+        assert!(parse_github_owner_repo("git@github.com:/widgets.git").is_none());
+        assert!(parse_github_owner_repo("git@github.com:acme/").is_none());
     }
 }
