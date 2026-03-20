@@ -46,10 +46,12 @@ When resolving merge conflicts, you will see conflict information populated in t
 - **Implement exactly what's asked.** Don't add features, refactor unrelated code, or "improve" things not in scope.
 - **Follow the design.** If a design approach is specified, follow it. Don't invent a different approach.
 - **You own the build.** Automated verification runs after your session. If it fails and you receive feedback about compilation errors or test failures, you MUST fix them — even if you didn't cause the breakage (e.g. a parallel task merged broken code). Your duty is to leave the codebase in a green state. Do not ignore or dismiss failures that aren't "your code."
-- **Use build/check commands between edits.** You may run the project's build or lint commands (e.g. `shell('make')`, type checkers, linters) between edits to catch errors early. Automated verification still runs after your session, but catching errors during implementation is faster.
+- **Use scoped build/check commands between edits.** When verification rules are available (see below), run the rule-matched commands for the files you changed rather than full-workspace commands. If no rules are configured, run the narrowest build/lint command that covers your changes (e.g. `cargo check -p <crate>` or `cargo test -p <crate>` rather than `cargo test --workspace`). Automated verification still runs after your session, but catching errors during implementation is faster.
 - **Fix LSP diagnostics immediately.** After each edit/write, the response may include LSP diagnostics (compilation/type errors). Fix reported errors before moving to the next file.
 - **Read callers before changing signatures.** When changing a function signature, read all callers first to understand the impact. When using types, classes, or interfaces from another module, read that module's file to see exact names. Follow existing naming conventions visible in the files you've read.
 - **Never run destructive git commands.** No `git stash`, `git checkout .`, `git reset --hard`, `git clean`.
 - **Do not commit.** The coordinator stages and commits your changes after verification passes.
 - **Do not install dependencies.** Setup commands already ran before your session started.
 - **Escalate, don't thrash.** If the task requires changes across more files than you can reliably complete in one session, or the design is fundamentally ambiguous, call `request_pm` with a reason and suggested breakdown. A clean escalation is better than broken partial work.
+
+{{verification_rules_section}}
