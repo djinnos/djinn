@@ -171,43 +171,6 @@ impl CoordinatorActor {
         }
     }
 
-    // ── Architect patrol ──────────────────────────────────────────────────────
-
-    /// Schedule an Architect patrol pass.
-    ///
-    /// Skips if there are no open epics (pre-check, avoids unnecessary work).
-    /// Called from the main tick when `architect_tick_counter` reaches
-    /// `ARCHITECT_PATROL_TICKS`.
-    pub(super) async fn maybe_run_architect_patrol(&self) {
-        let epic_repo = EpicRepository::new(
-            self.db.clone(),
-            crate::events::event_bus_for(&self.events_tx),
-        );
-        let open_epics = match epic_repo.list().await {
-            Ok(epics) => epics.into_iter().filter(|e| e.status == "open").count(),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "CoordinatorActor: failed to list epics for Architect patrol pre-check"
-                );
-                return;
-            }
-        };
-
-        if open_epics == 0 {
-            tracing::debug!("CoordinatorActor: Architect patrol skipped — no open epics");
-            return;
-        }
-
-        tracing::info!(
-            open_epics,
-            "CoordinatorActor: Architect patrol scheduled ({open_epics} open epics)"
-        );
-
-        // TODO: dispatch an Architect patrol task once the Architect role is fully wired.
-        // For now, log the intent — the scheduling logic is in place.
-    }
-
     // ── Throughput tracking ───────────────────────────────────────────────────
 
     /// Record a task merge event for the given epic (updates in-memory rolling window).

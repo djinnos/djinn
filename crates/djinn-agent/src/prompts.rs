@@ -24,6 +24,7 @@ pub(crate) const DEV_TEMPLATE: &str = include_str!("prompts/dev.md");
 pub(crate) const REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.md");
 pub(crate) const PM_TEMPLATE: &str = include_str!("prompts/pm.md");
 pub(crate) const PLANNER_TEMPLATE: &str = include_str!("prompts/groomer.md");
+pub(crate) const ARCHITECT_TEMPLATE: &str = include_str!("prompts/architect.md");
 
 // ─── Context ───────────────────────────────────────────────────────────────────
 
