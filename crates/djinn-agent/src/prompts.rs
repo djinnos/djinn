@@ -245,6 +245,21 @@ pub fn apply_role_extensions(
     out
 }
 
+/// Append the skills section to a system prompt.
+///
+/// Called after `apply_role_extensions`. Appends the formatted "## Available Skills"
+/// section when any skills were resolved. Returns the prompt unchanged when empty.
+pub fn apply_skills(prompt: &str, skills: &[crate::skills::ResolvedSkill]) -> String {
+    let section = crate::skills::format_skills_section(skills);
+    if section.is_empty() {
+        return prompt.to_string();
+    }
+    let mut out = prompt.to_string();
+    out.push_str("\n\n");
+    out.push_str(&section);
+    out
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Format a JSON acceptance-criteria array as a markdown checklist.

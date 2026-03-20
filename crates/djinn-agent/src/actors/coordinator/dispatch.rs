@@ -1,6 +1,7 @@
 use super::*;
 use crate::roles::DispatchContext;
 use djinn_core::models::{TaskStatus, TransitionAction};
+#[cfg(not(test))]
 use djinn_db::AgentRoleRepository;
 
 /// Result of a single `try_dispatch_to_pool` attempt.
