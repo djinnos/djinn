@@ -364,6 +364,67 @@ impl AgentRoleRepository {
             avg_time_seconds: session_row.1,
         })
     }
+
+    /// Append an amendment to a role's `learned_prompt` and log the proposal to
+    /// `learned_prompt_history`.  The amendment is appended with a separator; it
+    /// never replaces any existing content.
+    ///
+    /// `metrics_snapshot` is a JSON string capturing role metrics at proposal time.
+    pub async fn append_learned_prompt(
+        &self,
+        role_id: &str,
+        amendment: &str,
+        metrics_snapshot: Option<&str>,
+    ) -> Result<AgentRole> {
+        self.db.ensure_initialized().await?;
+
+        // Load current role.
+        let role = self
+            .get(role_id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("agent_role not found: {role_id}")))?;
+
+        // Build the new learned_prompt by appending the amendment.
+        let new_learned_prompt = match role.learned_prompt.as_deref() {
+            Some(existing) if !existing.trim().is_empty() => {
+                format!("{}\n\n---\n\n{}", existing.trim(), amendment.trim())
+            }
+            _ => amendment.trim().to_string(),
+        };
+
+        // Persist the updated learned_prompt.
+        sqlx::query(
+            "UPDATE agent_roles
+             SET learned_prompt = ?2,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(role_id)
+        .bind(&new_learned_prompt)
+        .execute(self.db.pool())
+        .await?;
+
+        // Log to learned_prompt_history.
+        let history_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO learned_prompt_history
+                (id, role_id, proposed_text, action, metrics_before)
+             VALUES (?1, ?2, ?3, 'keep', ?4)",
+        )
+        .bind(&history_id)
+        .bind(role_id)
+        .bind(amendment.trim())
+        .bind(metrics_snapshot)
+        .execute(self.db.pool())
+        .await?;
+
+        let updated = self
+            .get(role_id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("agent_role not found after update: {role_id}")))?;
+        self.events.send(DjinnEventEnvelope::agent_role_updated(&updated));
+        Ok(updated)
+    }
 }
 
 fn build_where(project_id: &str, base_role: &Option<String>) -> (String, Vec<String>) {
