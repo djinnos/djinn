@@ -235,4 +235,3 @@ Two options for receiving GitHub webhooks when running locally:
 
 - [[ADR-030: Repo-Committed Verification and Commit Hash Caching]] — current verification model being extended
 - [[ADR-009: No Phases/Stacked Branches]] — task branches merge to target; PR is the merge mechanism now
-- [[ADR-031: Djinn Cloud Metered Inference Proxy]] — Cloud relay for webhooks in Phase 4
