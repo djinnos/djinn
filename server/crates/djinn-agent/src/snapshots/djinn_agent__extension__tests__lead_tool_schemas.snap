@@ -170,7 +170,7 @@ expression: tool_schemas_lead()
           "type": "string"
         },
         "timeout_ms": {
-          "description": "Timeout in milliseconds (default 120000)",
+          "description": "Timeout in milliseconds (default 120000, max 600000)",
           "type": "integer"
         }
       },

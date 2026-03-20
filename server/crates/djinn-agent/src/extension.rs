@@ -1195,7 +1195,7 @@ async fn call_shell(
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
     let p: ShellParams = parse_args(arguments)?;
-    let timeout_ms = p.timeout_ms.unwrap_or(120_000).max(1000);
+    let timeout_ms = p.timeout_ms.unwrap_or(120_000).clamp(1000, 600_000);
 
     let mut cmd = if cfg!(windows) {
         let mut c = std::process::Command::new("cmd");
@@ -2659,7 +2659,7 @@ fn tool_shell() -> RmcpTool {
             "required": ["command"],
             "properties": {
                 "command": {"type": "string", "description": "Shell command to execute"},
-                "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (default 120000)"}
+                "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (default 120000, max 600000)"}
             }
         }),
     )
@@ -3245,10 +3245,11 @@ mod tests {
     #[test]
     fn shell_timeout_defaults_and_minimum() {
         fn resolve_timeout(t: Option<u64>) -> u64 {
-            t.unwrap_or(120_000).max(1000)
+            t.unwrap_or(120_000).clamp(1000, 600_000)
         }
         assert_eq!(resolve_timeout(None), 120_000);
         assert_eq!(resolve_timeout(Some(0)), 1000);
+        assert_eq!(resolve_timeout(Some(1_200_000)), 600_000);
     }
 
     #[test]
