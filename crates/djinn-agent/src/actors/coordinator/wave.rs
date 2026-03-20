@@ -19,7 +19,7 @@ use djinn_db::EpicRepository;
 
 /// Worker issue_types that count toward batch-completion.  Any `issue_type`
 /// not in this list is treated as a planner/meta task and excluded.
-const WORKER_ISSUE_TYPES: &[&str] = &["task", "research"];
+const WORKER_ISSUE_TYPES: &[&str] = &["task", "research", "feature"];
 
 impl CoordinatorActor {
     /// Called when an epic is created.  Creates the first decomposition task
