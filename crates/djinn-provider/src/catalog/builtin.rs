@@ -77,6 +77,14 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         merge_into: None,
     },
     BuiltinProvider {
+        id: "github_app",
+        display_name: "GitHub App",
+        required_env_vars: &[],
+        oauth_keys: &["GITHUB_APP_TOKEN"],
+        docs_url: "https://docs.github.com/en/apps",
+        merge_into: None,
+    },
+    BuiltinProvider {
         id: "gcp_vertex_ai",
         display_name: "Google Cloud Vertex AI",
         required_env_vars: &["GCP_VERTEX_PROJECT_ID"],
@@ -188,10 +196,12 @@ pub fn resolve_oauth_provider(provider_id: &str) -> Option<&'static str> {
 pub fn is_oauth_key_present(oauth_keys: &[String], credential_key_names: &HashSet<String>) -> bool {
     const CODEX_OAUTH_DB_KEY: &str = "__OAUTH_CHATGPT_CODEX";
     const COPILOT_OAUTH_DB_KEY: &str = "__OAUTH_GITHUB_COPILOT";
+    const GITHUB_APP_OAUTH_DB_KEY: &str = "__OAUTH_GITHUB_APP";
 
     oauth_keys.iter().any(|key| match key.as_str() {
         "CHATGPT_CODEX_TOKEN" => credential_key_names.contains(CODEX_OAUTH_DB_KEY),
         "GITHUB_COPILOT_TOKEN" => credential_key_names.contains(COPILOT_OAUTH_DB_KEY),
+        "GITHUB_APP_TOKEN" => credential_key_names.contains(GITHUB_APP_OAUTH_DB_KEY),
         _ => false,
     })
 }

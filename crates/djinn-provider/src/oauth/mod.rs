@@ -1,5 +1,6 @@
 pub mod codex;
 pub mod copilot;
+pub mod github_app;
 
 use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
 
@@ -7,6 +8,7 @@ use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderCo
 pub enum OAuthFlowKind {
     Codex,
     Copilot,
+    GitHubApp,
 }
 
 impl OAuthFlowKind {
@@ -15,6 +17,7 @@ impl OAuthFlowKind {
         match id {
             "chatgpt-codex" | "chatgpt_codex" | "codex" | "openai-codex" => Some(Self::Codex),
             "github-copilot" | "github_copilot" | "copilot" => Some(Self::Copilot),
+            "github-app" | "github_app" | "githubapp" => Some(Self::GitHubApp),
             _ => None,
         }
     }
