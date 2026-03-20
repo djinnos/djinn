@@ -249,6 +249,12 @@ struct CoordinatorActor {
     /// Used by the PR poller to skip redundant CI check-run queries when the
     /// PR's head commit has not changed since the previous poll cycle.
     pr_status_cache: HashMap<String, String>,
+    /// Task IDs for which a stall-kill has already been issued.  Prevents
+    /// repeated kill + activity-log spam while the async lifecycle cleanup
+    /// is still in progress (the DB session record stays `running` until
+    /// the lifecycle finishes).  Entries are removed when the session
+    /// disappears from `list_active()`.
+    stall_killed: HashSet<String>,
     // Metrics
     dispatched: u64,
     recovered: u64,
@@ -303,6 +309,7 @@ impl CoordinatorActor {
             throughput_events: HashMap::new(),
             escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),
+            stall_killed: HashSet::new(),
             dispatched: 0,
             recovered: 0,
         }

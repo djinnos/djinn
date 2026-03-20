@@ -248,9 +248,12 @@ pub(crate) fn render_prompt_for_role(
         {
             parts.push(format!(
                 "### Previous verification failure\n\n{failure}\n\n\
-                 **Important:** If the worker made changes to fix this verification failure, \
-                 those changes are IN SCOPE even if they touch files outside the task's primary \
-                 scope. Build/lint fixes required to pass verification are always acceptable."
+                 **Important:** Fix this verification failure ONLY by changing files \
+                 within this task's scope (as defined by the task description and design). \
+                 If the failure is caused by code outside your task's scope (e.g. a \
+                 pre-existing compile error in an unrelated module), do NOT modify those \
+                 files. Instead, note it as a remaining concern when you submit — the \
+                 lead will handle out-of-scope issues separately."
             ));
         }
         if parts.is_empty() {

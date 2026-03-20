@@ -3,8 +3,9 @@ use crate::roles::DispatchContext;
 use djinn_core::models::{TaskStatus, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRoleRepository;
+use djinn_provider::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
 #[cfg(not(test))]
-use djinn_provider::oauth::github_app::{GITHUB_APP_OAUTH_DB_KEY, GITHUB_INSTALLATION_ID_KEY};
+use djinn_provider::oauth::github_app::GITHUB_INSTALLATION_ID_KEY;
 
 /// Result of a single `try_dispatch_to_pool` attempt.
 enum DispatchOutcome {
@@ -336,10 +337,24 @@ impl CoordinatorActor {
         /// reviews involve reading many files and epics sequentially.
         const ARCHITECT_STALL_TIMEOUT_SECS: u64 = 10 * 60;
 
+        // Collect active task IDs so we can prune stall_killed entries for
+        // sessions that have finished cleaning up.
+        let active_task_ids: HashSet<String> = active
+            .iter()
+            .filter_map(|s| s.task_id.clone())
+            .collect();
+        self.stall_killed.retain(|id| active_task_ids.contains(id));
+
         for session in active {
             let Some(task_id) = session.task_id.as_deref() else {
                 continue;
             };
+
+            // Skip sessions we've already killed — the DB record stays
+            // `running` until the async lifecycle cleanup finishes.
+            if self.stall_killed.contains(task_id) {
+                continue;
+            }
 
             // Use role-specific stall timeout: Architect gets 10 minutes.
             let stall_threshold = if session.agent_type == "architect" {
@@ -374,6 +389,9 @@ impl CoordinatorActor {
                 tracing::warn!(task_id = %task_id, session_id = %session.id, error = %e, "CoordinatorActor: failed to kill stalled session");
                 continue;
             }
+
+            // Mark as killed so we don't re-kill and re-log on subsequent ticks.
+            self.stall_killed.insert(task_id.to_owned());
 
             let task_repo = self.task_repo();
             let payload = serde_json::json!({
