@@ -138,6 +138,17 @@ impl CredentialRepository {
         Ok(result.rows_affected())
     }
 
+    /// Check whether a credential with the given `key_name` exists (without decrypting).
+    pub async fn exists(&self, key_name: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let found: Option<String> =
+            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?1")
+                .bind(key_name)
+                .fetch_optional(self.db.pool())
+                .await?;
+        Ok(found.is_some())
+    }
+
     /// Decrypt and return the raw API key for `key_name`.
     ///
     /// Called by `AgentSupervisor` at dispatch time to obtain the key for

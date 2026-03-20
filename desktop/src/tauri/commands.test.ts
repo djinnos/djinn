@@ -9,9 +9,7 @@ import {
   authGetState,
   authLogin,
   authLogout,
-  exchangeAuthCode,
-  getOAuthConfig,
-  CLERK_DOMAIN,
+  startGithubLogin,
 } from "./commands";
 
 const mockInvoke = vi.mocked(invoke);
@@ -21,21 +19,21 @@ describe("tauri/commands", () => {
     mockInvoke.mockReset();
   });
 
-  describe("constants", () => {
-    it("exports correct CLERK_DOMAIN", () => {
-      expect(CLERK_DOMAIN).toBe("clerk.djinnai.io");
+  describe("startGithubLogin", () => {
+    it("invokes start_github_login and returns device code info", async () => {
+      const info = { userCode: "ABCD-1234", verificationUri: "https://github.com/login/device" };
+      mockInvoke.mockResolvedValueOnce(info);
+
+      const result = await startGithubLogin();
+
+      expect(mockInvoke).toHaveBeenCalledWith("start_github_login");
+      expect(result).toEqual(info);
     });
-  });
 
-  describe("getOAuthConfig", () => {
-    it("invokes get_oauth_config command", async () => {
-      const config = { clientId: "test_id", redirectUri: "http://localhost/callback" };
-      mockInvoke.mockResolvedValueOnce(config);
+    it("propagates errors", async () => {
+      mockInvoke.mockRejectedValueOnce(new Error("device flow failed"));
 
-      const result = await getOAuthConfig();
-
-      expect(mockInvoke).toHaveBeenCalledWith("get_oauth_config");
-      expect(result).toEqual(config);
+      await expect(startGithubLogin()).rejects.toThrow("device flow failed");
     });
   });
 
@@ -220,36 +218,6 @@ describe("tauri/commands", () => {
       mockInvoke.mockRejectedValueOnce(new Error("revoke failed"));
 
       await expect(authLogout()).rejects.toThrow("revoke failed");
-    });
-  });
-
-  describe("exchangeAuthCode", () => {
-    it("invokes exchange_auth_code with correct params", async () => {
-      const user = { sub: "user_1", name: "User" };
-      mockInvoke.mockResolvedValueOnce(user);
-
-      const result = await exchangeAuthCode(
-        "code_abc",
-        "verifier_xyz",
-        "djinn://auth/callback",
-        "rXf6AlZNrHOcJ2HV",
-      );
-
-      expect(mockInvoke).toHaveBeenCalledWith("exchange_auth_code", {
-        code: "code_abc",
-        codeVerifier: "verifier_xyz",
-        redirectUri: "djinn://auth/callback",
-        clientId: "rXf6AlZNrHOcJ2HV",
-      });
-      expect(result).toEqual(user);
-    });
-
-    it("propagates exchange errors", async () => {
-      mockInvoke.mockRejectedValueOnce(new Error("invalid_grant"));
-
-      await expect(
-        exchangeAuthCode("bad", "bad", "uri", "client"),
-      ).rejects.toThrow("invalid_grant");
     });
   });
 });

@@ -1,7 +1,5 @@
-use crate::auth::{build_authorize_url, clear_token, generate_pkce, retrieve_token, store_token, PkceParams};
-use crate::auth_callback::AuthCallbackManager;
+use crate::auth::{clear_token, retrieve_token, store_token};
 use crate::server::ServerState;
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
@@ -22,29 +20,10 @@ struct AuthSession {
     user_profile: Option<UserProfile>,
 }
 
-#[derive(Debug, Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    id_token: Option<String>,
-    expires_in: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct IdTokenClaims {
-    sub: String,
-    name: Option<String>,
-    email: Option<String>,
-    picture: Option<String>,
-}
-
 use serde::Deserialize;
-use std::sync::{Arc, Mutex as StdMutex};
-use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_opener::OpenerExt;
+use std::sync::Mutex as StdMutex;
+use tauri::{AppHandle, Emitter, State};
 
-/// Global storage for PKCE params during OAuth flow
-static PKCE_PARAMS: Lazy<StdMutex<Option<PkceParams>>> = Lazy::new(|| StdMutex::new(None));
 static AUTH_SESSION: Lazy<StdMutex<Option<AuthSession>>> = Lazy::new(|| StdMutex::new(None));
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -67,21 +46,123 @@ fn emit_auth_state_changed(app: &AppHandle, state: &AuthStateResponse) {
     }
 }
 
-/// OAuth configuration returned to the frontend.
-/// Single source of truth — the frontend MUST NOT duplicate these values.
-#[derive(Debug, Clone, serde::Serialize)]
+/// Response from start_github_login containing the device code info for the frontend
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OAuthConfig {
-    pub client_id: String,
-    pub redirect_uri: String,
+pub struct DeviceCodeInfo {
+    pub user_code: String,
+    pub verification_uri: String,
 }
 
+/// Start GitHub device code login flow.
+///
+/// Returns { userCode, verificationUri } for the frontend to display.
+/// Spawns a background task that polls for authorization, stores tokens,
+/// fetches user profile, populates AUTH_SESSION, and emits auth:state-changed.
 #[tauri::command]
-pub fn get_oauth_config() -> OAuthConfig {
-    OAuthConfig {
-        client_id: crate::auth::CLIENT_ID.to_string(),
-        redirect_uri: crate::auth::redirect_uri().to_string(),
-    }
+pub async fn start_github_login(app: AppHandle) -> Result<DeviceCodeInfo, String> {
+    let device_resp = crate::auth::start_device_flow().await?;
+
+    let info = DeviceCodeInfo {
+        user_code: device_resp.user_code.clone(),
+        verification_uri: device_resp.verification_uri.clone(),
+    };
+
+    // Spawn background polling task
+    let device_code = device_resp.device_code.clone();
+    let interval = device_resp.interval;
+    tauri::async_runtime::spawn(async move {
+        match crate::auth::poll_device_flow(&device_code, interval).await {
+            Ok(token_response) => {
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let expires_in = token_response.expires_in.unwrap_or(28800);
+                let expires_at_unix = now_unix + expires_in;
+
+                // Fetch user profile
+                let github_user = match crate::auth::fetch_github_user(&token_response.access_token).await {
+                    Ok(user) => Some(user),
+                    Err(e) => {
+                        log::warn!("Failed to fetch GitHub user profile: {}", e);
+                        None
+                    }
+                };
+
+                let user_profile = github_user.as_ref().map(|u| UserProfile {
+                    sub: u.id.to_string(),
+                    name: u.name.clone().or_else(|| Some(u.login.clone())),
+                    email: u.email.clone(),
+                    picture: Some(u.avatar_url.clone()),
+                });
+
+                // Store tokens as JSON blob in keyring
+                let refresh_token = token_response.refresh_token.clone().unwrap_or_default();
+                if let Some(ref gh_user) = github_user {
+                    let stored = crate::auth::StoredTokens {
+                        access_token: token_response.access_token.clone(),
+                        refresh_token: refresh_token.clone(),
+                        expires_at: expires_at_unix,
+                        user_login: gh_user.login.clone(),
+                        avatar_url: gh_user.avatar_url.clone(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&stored) {
+                        if let Err(e) = store_token(&json).await {
+                            log::error!("Failed to store tokens in keyring: {}", e);
+                        }
+                    }
+                } else if !refresh_token.is_empty() {
+                    // Store minimal token data
+                    let stored = crate::auth::StoredTokens {
+                        access_token: token_response.access_token.clone(),
+                        refresh_token: refresh_token.clone(),
+                        expires_at: expires_at_unix,
+                        user_login: String::new(),
+                        avatar_url: String::new(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&stored) {
+                        if let Err(e) = store_token(&json).await {
+                            log::error!("Failed to store tokens in keyring: {}", e);
+                        }
+                    }
+                }
+
+                // Update token refresh state
+                let token_state = TokenState {
+                    access_token: token_response.access_token.clone(),
+                    refresh_token,
+                    expires_at_unix,
+                    user_id: github_user.as_ref().map(|u| u.id.to_string()),
+                };
+                token_refresh::set_token_state(token_state);
+
+                // Populate AUTH_SESSION
+                let session = {
+                    let mut auth_session = AUTH_SESSION.lock().unwrap();
+                    let session = AuthSession {
+                        access_token: token_response.access_token,
+                        user_profile: user_profile.clone(),
+                    };
+                    *auth_session = Some(session.clone());
+                    session
+                };
+
+                let state = build_auth_state_response(Some(&session));
+                emit_auth_state_changed(&app, &state);
+
+                log::info!("GitHub device flow login successful");
+            }
+            Err(e) => {
+                log::error!("GitHub device flow polling failed: {}", e);
+                let _ = app.emit("auth:login-failed", serde_json::json!({
+                    "reason": e,
+                }));
+            }
+        }
+    });
+
+    Ok(info)
 }
 
 /// Greet command - sample command for testing
@@ -136,7 +217,7 @@ pub fn get_auth_token() -> Result<Option<String>, String> {
     if let Some(token) = token_refresh::get_valid_access_token() {
         return Ok(Some(token));
     }
-    
+
     // Fallback to legacy session
     let session = AUTH_SESSION
         .lock()
@@ -219,14 +300,36 @@ pub async fn populate_session_after_silent_refresh(
     let token_state = token_refresh::get_token_state()
         .ok_or_else(|| "No token state available from silent refresh".to_string())?;
 
-    // Try to fetch user profile from /userinfo endpoint
-    let user_profile = match fetch_user_profile_from_userinfo(&token_state.access_token).await {
-        Ok(profile) => Some(profile),
+    // Try to fetch user profile from GitHub API
+    let user_profile = match crate::auth::fetch_github_user(&token_state.access_token).await {
+        Ok(github_user) => Some(UserProfile {
+            sub: github_user.id.to_string(),
+            name: github_user.name.or_else(|| Some(github_user.login.clone())),
+            email: github_user.email,
+            picture: Some(github_user.avatar_url),
+        }),
         Err(e) => {
-            log::warn!("Failed to fetch user profile from userinfo: {}, falling back to id_token decode", e);
-            // Try to decode from id_token if available in stored state (from previous login)
-            // For now, we'll proceed without profile - the frontend can trigger a profile fetch
-            None
+            log::warn!("Failed to fetch GitHub user profile after silent refresh: {}", e);
+            // Try to get user info from stored tokens
+            match retrieve_token().await {
+                Ok(Some(stored_json)) => {
+                    if let Ok(stored) = serde_json::from_str::<crate::auth::StoredTokens>(&stored_json) {
+                        if !stored.user_login.is_empty() {
+                            Some(UserProfile {
+                                sub: stored.user_login.clone(),
+                                name: Some(stored.user_login),
+                                email: None,
+                                picture: if stored.avatar_url.is_empty() { None } else { Some(stored.avatar_url) },
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
         }
     };
 
@@ -252,7 +355,10 @@ pub async fn populate_session_after_silent_refresh(
 
 #[tauri::command]
 pub async fn auth_login(app: AppHandle) -> Result<(), String> {
-    initiate_oauth_login(app).await
+    // Start GitHub device flow - the frontend should use start_github_login instead,
+    // but this wrapper maintains backwards compatibility with the auth store
+    let _info = start_github_login(app).await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -276,204 +382,6 @@ pub async fn auth_logout(app: AppHandle) -> Result<(), String> {
     };
     emit_auth_state_changed(&app, &state);
 
-    Ok(())
-}
-
-/// Initiate OAuth login with Clerk
-///
-/// Generates PKCE parameters, stores them for later verification,
-/// and opens the system browser to the Clerk authorization URL.
-#[tauri::command]
-pub async fn initiate_oauth_login(app: tauri::AppHandle) -> Result<(), String> {
-    // Generate PKCE parameters
-    let pkce = generate_pkce();
-
-    // Store PKCE params for later verification during callback
-    let mut stored = PKCE_PARAMS
-        .lock()
-        .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
-    *stored = Some(pkce.clone());
-    drop(stored);
-
-    // Store state + code_verifier in AuthCallbackManager for CSRF validation
-    // (used by both deep link handler and dev server)
-    let manager: tauri::State<'_, Arc<AuthCallbackManager>> = app.state();
-    manager.set_pending_state(pkce.state.clone(), pkce.code_verifier.clone());
-
-    // Build authorization URL
-    let auth_url = build_authorize_url(&pkce);
-
-    // Open system browser
-    app.opener()
-        .open_url(&auth_url, None::<&str>)
-        .map_err(|e| format!("Failed to open browser: {}", e))?;
-
-    Ok(())
-}
-
-
-
-/// Exchange authorization code for tokens at Clerk token endpoint
-#[tauri::command]
-pub async fn exchange_auth_code(
-    app: AppHandle,
-    code: String,
-    code_verifier: String,
-    redirect_uri: String,
-    client_id: String,
-) -> Result<UserProfile, String> {
-    let client = reqwest::Client::new();
-    let token_url = format!("https://{}/oauth/token", crate::auth::CLERK_DOMAIN);
-
-    let resp = client
-        .post(&token_url)
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", code.as_str()),
-            ("code_verifier", code_verifier.as_str()),
-            ("redirect_uri", redirect_uri.as_str()),
-            ("client_id", client_id.as_str()),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("Token request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_string());
-        return Err(format!("Token endpoint returned {}: {}", status, body));
-    }
-
-    let token_response: TokenResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse token response: {}", e))?;
-
-    let user_profile = token_response
-        .id_token
-        .as_deref()
-        .map(decode_id_token)
-        .transpose()?;
-
-    // Store in legacy session
-    let session = {
-        let mut auth_session = AUTH_SESSION
-            .lock()
-            .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
-        let session = AuthSession {
-            access_token: token_response.access_token.clone(),
-            user_profile: user_profile.clone(),
-        };
-        *auth_session = Some(session.clone());
-        session
-    };
-
-    // Store refresh token
-    if let Some(refresh_token) = token_response.refresh_token.as_deref() {
-        store_token(refresh_token).await?;
-        log::info!("Stored refresh token in secure storage ({} chars)", refresh_token.len());
-    } else {
-        log::warn!("Clerk did NOT return a refresh_token — session will not persist across restarts. Verify offline_access scope is enabled in the Clerk dashboard.");
-    }
-
-    // Update new token state with expiry tracking
-    let expires_at_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        + token_response.expires_in;
-    let token_state = TokenState {
-        access_token: token_response.access_token,
-        refresh_token: token_response.refresh_token.unwrap_or_default(),
-        expires_at_unix,
-        user_id: user_profile.as_ref().map(|p| p.sub.clone()),
-    };
-    token_refresh::set_token_state(token_state);
-
-    let state = build_auth_state_response(Some(&session));
-    emit_auth_state_changed(&app, &state);
-
-    user_profile.ok_or_else(|| "Missing id_token in token response".to_string())
-}
-
-/// Fetch user profile from Clerk /userinfo endpoint using access token
-async fn fetch_user_profile_from_userinfo(access_token: &str) -> Result<UserProfile, String> {
-    let client = reqwest::Client::new();
-    let userinfo_url = format!("https://{}/userinfo", crate::auth::CLERK_DOMAIN);
-
-    let resp = client
-        .get(&userinfo_url)
-        .header("Authorization", format!("Bearer {}", access_token))
-        .send()
-        .await
-        .map_err(|e| format!("Userinfo request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_string());
-        return Err(format!("Userinfo endpoint returned {}: {}", status, body));
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct UserInfoResponse {
-        sub: String,
-        name: Option<String>,
-        email: Option<String>,
-        picture: Option<String>,
-    }
-
-    let user_info: UserInfoResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse userinfo response: {}", e))?;
-
-    Ok(UserProfile {
-        sub: user_info.sub,
-        name: user_info.name,
-        email: user_info.email,
-        picture: user_info.picture,
-    })
-}
-
-/// Decode id_token to extract user profile
-fn decode_id_token(id_token: &str) -> Result<UserProfile, String> {
-    let mut parts = id_token.split('.');
-    let _header = parts.next().ok_or("Invalid id_token format")?;
-    let payload = parts.next().ok_or("Invalid id_token format")?;
-
-    let payload_bytes = URL_SAFE_NO_PAD
-        .decode(payload)
-        .map_err(|e| format!("Failed to decode id_token payload: {}", e))?;
-
-    let claims: IdTokenClaims = serde_json::from_slice(&payload_bytes)
-        .map_err(|e| format!("Failed to parse id_token claims: {}", e))?;
-
-    Ok(UserProfile {
-        sub: claims.sub,
-        name: claims.name,
-        email: claims.email,
-        picture: claims.picture,
-    })
-}
-/// Get stored PKCE code_verifier (for token exchange)
-///
-/// This should be called during the OAuth callback to retrieve
-/// the code_verifier for exchanging the authorization code.
-#[tauri::command]
-pub fn get_pkce_code_verifier() -> Result<Option<String>, String> {
-    let stored = PKCE_PARAMS
-        .lock()
-        .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
-    Ok(stored.as_ref().map(|p| p.code_verifier.clone()))
-}
-
-/// Clear stored PKCE params after successful authentication
-#[tauri::command]
-pub fn clear_pkce_params() -> Result<(), String> {
-    let mut stored = PKCE_PARAMS
-        .lock()
-        .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
-    *stored = None;
     Ok(())
 }
 

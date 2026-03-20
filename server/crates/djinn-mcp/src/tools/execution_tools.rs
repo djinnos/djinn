@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use crate::server::DjinnMcpServer;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
+use djinn_provider::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ExecutionStartParams {
@@ -192,6 +193,34 @@ impl DjinnMcpServer {
                 error: Some("coordinator actor not initialized".to_string()),
             });
         };
+
+        // Gate: require GitHub OAuth credentials before starting execution (ADR-039).
+        // Without a token, PR creation will fail for every completed task.
+        {
+            let cred_repo = djinn_provider::repos::CredentialRepository::new(
+                self.state.db().clone(),
+                self.state.event_bus(),
+            );
+            let github_connected = cred_repo
+                .exists(GITHUB_APP_OAUTH_DB_KEY)
+                .await
+                .unwrap_or(false);
+            if !github_connected {
+                return Json(ExecutionStartResponse {
+                    ok: false,
+                    state: None,
+                    resumed: None,
+                    scope: None,
+                    project_id,
+                    error: Some(
+                        "GitHub is not connected. Connect GitHub first via Settings > Providers \
+                         before starting execution. Without GitHub credentials, PR creation will \
+                         fail for completed tasks."
+                            .to_string(),
+                    ),
+                });
+            }
+        }
 
         // Purge all worktrees so stale leftovers from previous runs don't
         // cause git2 errors or test failures in health checks / verification.

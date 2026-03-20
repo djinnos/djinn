@@ -4,7 +4,6 @@ import { cn } from '@/lib/utils';
 import { NavLink, Navigate, useParams } from 'react-router-dom';
 import {
   fetchProjects, addProject, removeProject, updateProject,
-  startProviderOAuth, fetchProviderConfigStatus,
   type Project,
 } from '@/api/server';
 import { Input } from '@/components/ui/input';
@@ -19,13 +18,12 @@ import { selectDirectory } from '@/tauri/commands';
 import { toast } from 'sonner';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
-type SettingsCategory = 'providers' | 'projects' | 'models' | 'github';
+type SettingsCategory = 'providers' | 'projects' | 'models';
 
 const categories: Array<{ key: SettingsCategory; label: string }> = [
   { key: 'providers', label: 'Providers' },
   { key: 'projects', label: 'Projects' },
   { key: 'models', label: 'Models' },
-  { key: 'github', label: 'GitHub' },
 ];
 
 function ProvidersSettings() {
@@ -212,147 +210,6 @@ function ProvidersSettings() {
           </div>
         ))}
         {configuredProviders.length === 0 && <p className="text-sm text-muted-foreground">No providers configured yet.</p>}
-      </div>
-    </div>
-  );
-}
-
-function GitHubSettings() {
-  const [connecting, setConnecting] = useState(false);
-  const [connected, setConnected] = useState(false);
-  const [connectedAccount, setConnectedAccount] = useState<string | null>(null);
-  const [deviceCode, setDeviceCode] = useState<{ userCode: string; verificationUri: string } | null>(null);
-
-  useEffect(() => {
-    fetchProviderConfigStatus().then((status) => {
-      if (status.providers.includes('github_app')) {
-        setConnected(true);
-      }
-    }).catch(() => {});
-  }, []);
-
-  const pollForCompletion = async () => {
-    // Poll provider_connected every 3s until github_app shows up or timeout
-    for (let i = 0; i < 100; i++) {
-      await new Promise((r) => setTimeout(r, 3000));
-      try {
-        const status = await fetchProviderConfigStatus();
-        if (status.providers.includes('github_app')) {
-          setConnected(true);
-          setDeviceCode(null);
-          setConnecting(false);
-          toast.success('GitHub connected');
-          return;
-        }
-      } catch { /* keep polling */ }
-    }
-    setDeviceCode(null);
-    setConnecting(false);
-    toast.error('GitHub connection timed out');
-  };
-
-  const handleConnect = async () => {
-    setConnecting(true);
-    setDeviceCode(null);
-    try {
-      const result = await startProviderOAuth('github_app');
-      if (result.success) {
-        setConnected(true);
-        toast.success('GitHub connected');
-        setConnecting(false);
-      } else if (result.pending && result.user_code) {
-        setDeviceCode({ userCode: result.user_code, verificationUri: result.verification_uri ?? 'https://github.com/login/device' });
-        void pollForCompletion();
-      } else {
-        toast.error('Could not connect GitHub', { description: result.error });
-        setConnecting(false);
-      }
-    } catch (err) {
-      toast.error('Could not connect GitHub', { description: err instanceof Error ? err.message : String(err) });
-      setConnecting(false);
-    }
-  };
-
-  const handleDisconnect = () => {
-    setConnected(false);
-    setConnectedAccount(null);
-    setDeviceCode(null);
-    toast.success('GitHub disconnected');
-  };
-
-  return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-lg font-semibold">GitHub App</h2>
-        <p className="text-sm text-muted-foreground">Connect your GitHub account to enable PR status, review feedback, and CI integration.</p>
-      </div>
-
-      <div className="rounded-lg border border-border bg-card p-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="font-medium">Connection Status</p>
-            <p className={cn('text-sm', connected ? 'text-emerald-500' : 'text-muted-foreground')}>
-              {connected ? (connectedAccount ? `Connected as ${connectedAccount}` : 'Connected') : 'Not connected'}
-            </p>
-          </div>
-          {connected ? (
-            <ConfirmButton
-              title="Disconnect GitHub"
-              description="Disconnect your GitHub account? PR status and review feedback will no longer sync."
-              confirmLabel="Disconnect"
-              onConfirm={handleDisconnect}
-              size="sm"
-              variant="outline"
-            >
-              Disconnect
-            </ConfirmButton>
-          ) : (
-            <Button onClick={() => void handleConnect()} disabled={connecting}>
-              {connecting ? (deviceCode ? 'Waiting for authorization...' : 'Starting...') : 'Connect GitHub'}
-            </Button>
-          )}
-        </div>
-
-        {deviceCode && (
-          <div className="border-t border-border pt-4 space-y-3">
-            <p className="text-sm text-muted-foreground">
-              Enter this code on GitHub to connect your account:
-            </p>
-            <div className="flex items-center gap-3">
-              <code className="rounded bg-muted px-4 py-2 text-2xl font-bold tracking-widest">{deviceCode.userCode}</code>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  void navigator.clipboard.writeText(deviceCode.userCode);
-                  toast.success('Code copied');
-                }}
-              >
-                Copy
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              A browser window should have opened. If not, visit{' '}
-              <a href={deviceCode.verificationUri} target="_blank" rel="noopener noreferrer" className="underline text-foreground">
-                {deviceCode.verificationUri}
-              </a>
-            </p>
-          </div>
-        )}
-
-        {connected && (
-          <div className="border-t border-border pt-4 text-sm text-muted-foreground space-y-1">
-            <p>PR status will appear on task cards in the <strong className="text-foreground">PR Ready</strong> kanban column.</p>
-            <p>Review comments will be visible in the task detail panel.</p>
-          </div>
-        )}
-
-        {!connected && (
-          <p className="text-xs text-muted-foreground border-t border-border pt-4">
-            Clicking "Connect GitHub" will open GitHub in your browser to authorize the Djinn App.
-            After authorizing, return here — the connection will be confirmed automatically.
-          </p>
-        )}
       </div>
     </div>
   );
@@ -727,7 +584,6 @@ export function SettingsPage() {
           {category === 'providers' && <ProvidersSettings />}
           {category === 'projects' && <ProjectsSettings />}
           {category === 'models' && <AgentConfig {...agentConfig} />}
-          {category === 'github' && <GitHubSettings />}
         </section>
       </div>
     </div>

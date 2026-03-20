@@ -7,21 +7,6 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-export const CLERK_DOMAIN = "clerk.djinnai.io";
-
-export interface OAuthConfig {
-  clientId: string;
-  redirectUri: string;
-}
-
-/**
- * Get OAuth configuration from the Rust backend.
- * Single source of truth — never hardcode CLIENT_ID or REDIRECT_URI in TS.
- */
-export async function getOAuthConfig(): Promise<OAuthConfig> {
-  return invoke<OAuthConfig>("get_oauth_config");
-}
-
 export interface AuthUser {
   sub: string;
   name?: string;
@@ -32,6 +17,20 @@ export interface AuthUser {
 export interface AuthState {
   isAuthenticated: boolean;
   user: AuthUser | null;
+}
+
+export interface DeviceCodeInfo {
+  userCode: string;
+  verificationUri: string;
+}
+
+/**
+ * Start GitHub device code login flow.
+ * Returns the user code and verification URI for the user to enter on github.com.
+ * The backend will poll in the background and emit auth:state-changed when done.
+ */
+export async function startGithubLogin(): Promise<DeviceCodeInfo> {
+  return invoke<DeviceCodeInfo>("start_github_login");
 }
 
 /**
@@ -102,7 +101,7 @@ export async function authGetState(): Promise<AuthState> {
 }
 
 /**
- * Start OAuth login flow.
+ * Start OAuth login flow (backwards-compatible wrapper for authStore).
  */
 export async function authLogin(): Promise<void> {
   await invoke("auth_login");
@@ -113,26 +112,4 @@ export async function authLogin(): Promise<void> {
  */
 export async function authLogout(): Promise<void> {
   await invoke("auth_logout");
-}
-
-/**
- * Exchange OAuth authorization code for user profile.
- * @param code Authorization code from OAuth callback
- * @param codeVerifier PKCE code_verifier used in the auth request
- * @param redirectUri Redirect URI used in the auth request
- * @param clientId OAuth client ID
- * @returns User profile information
- */
-export async function exchangeAuthCode(
-  code: string,
-  codeVerifier: string,
-  redirectUri: string,
-  clientId: string
-): Promise<AuthUser> {
-  return invoke("exchange_auth_code", {
-    code,
-    codeVerifier,
-    redirectUri,
-    clientId,
-  });
 }

@@ -41,11 +41,6 @@
       "entitlements": "./Entitlements.plist"
     }
   },
-  "plugins": {
-    "deep-link": {
-      "desktop": {
-        "schemes": ["djinn"]
-      }
-    }
-  }
+  "plugins": {}
+
 }

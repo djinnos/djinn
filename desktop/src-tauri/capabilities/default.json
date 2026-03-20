@@ -19,8 +19,6 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "core:window:allow-set-focus",
-    "deep-link:default",
-    "deep-link:allow-get-current",
     "dialog:default"
   ]
 }

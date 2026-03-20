@@ -3,7 +3,7 @@
 //! Implements:
 //! - Mutex-based serialization of concurrent refresh calls
 //! - 30-second expiry buffer before refreshing
-//! - Token rotation handling (Clerk may return new refresh token)
+//! - Token rotation handling (GitHub returns new refresh token)
 //! - Automatic cleanup on refresh failure
 
 use once_cell::sync::Lazy;
@@ -12,20 +12,20 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::auth::{clear_token, retrieve_token, store_token, CLIENT_ID, CLERK_DOMAIN};
-
-/// Token endpoint path
-const TOKEN_ENDPOINT: &str = "/oauth/token";
+use crate::auth::{clear_token, retrieve_token, store_token, StoredTokens,
+    GITHUB_CLIENT_ID, ACCESS_TOKEN_URL};
 
 /// Expiry buffer: refresh tokens 30 seconds before actual expiry
 const EXPIRY_BUFFER_SECONDS: u64 = 30;
 
-/// Response from Clerk token endpoint
+/// Response from GitHub token endpoint
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
+    #[serde(default)]
     refresh_token: Option<String>,
-    expires_in: u64,
+    #[serde(default)]
+    expires_in: Option<u64>,
 }
 
 /// Current authentication state with expiry tracking
@@ -98,13 +98,13 @@ pub fn clear_token_state() {
 }
 
 /// Perform silent token refresh using stored refresh token
-/// 
+///
 /// This function is serialized via a global mutex to prevent concurrent
 /// refresh calls from causing race conditions or token rotation issues.
 pub async fn perform_silent_refresh() -> RefreshResult {
     // Acquire mutex to serialize concurrent refresh calls
     let _guard = REFRESH_MUTEX.lock().await;
-    
+
     // Double-check after acquiring lock - another thread may have refreshed
     if let Some(_token) = get_valid_access_token() {
         log::debug!("Token still valid after acquiring refresh lock, skipping refresh");
@@ -114,8 +114,8 @@ pub async fn perform_silent_refresh() -> RefreshResult {
         }
     }
 
-    // Retrieve stored refresh token
-    let refresh_token = match retrieve_token().await {
+    // Retrieve stored token blob from keyring
+    let stored_json = match retrieve_token().await {
         Ok(Some(token)) => token,
         Ok(None) => {
             log::info!("No refresh token found in storage");
@@ -127,18 +127,34 @@ pub async fn perform_silent_refresh() -> RefreshResult {
         }
     };
 
-    // Call Clerk token endpoint
-    let client = reqwest::Client::new();
-    let token_url = format!("https://{}{}", CLERK_DOMAIN, TOKEN_ENDPOINT);
+    // Parse stored tokens JSON
+    let stored_tokens: StoredTokens = match serde_json::from_str(&stored_json) {
+        Ok(t) => t,
+        Err(e) => {
+            log::error!("Failed to parse stored tokens: {}", e);
+            let _ = clear_token().await;
+            clear_token_state();
+            return RefreshResult::Failed(format!("Invalid stored token format: {}", e));
+        }
+    };
 
-    log::info!("Performing silent token refresh");
+    if stored_tokens.refresh_token.is_empty() {
+        log::info!("No refresh token in stored data");
+        return RefreshResult::NoToken;
+    }
+
+    // Call GitHub token endpoint
+    let client = reqwest::Client::new();
+
+    log::info!("Performing silent token refresh via GitHub");
 
     let resp = match client
-        .post(&token_url)
+        .post(ACCESS_TOKEN_URL)
+        .header("Accept", "application/json")
         .form(&[
             ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token.as_str()),
-            ("client_id", CLIENT_ID),
+            ("refresh_token", stored_tokens.refresh_token.as_str()),
+            ("client_id", GITHUB_CLIENT_ID),
         ])
         .send()
         .await
@@ -146,7 +162,6 @@ pub async fn perform_silent_refresh() -> RefreshResult {
         Ok(resp) => resp,
         Err(e) => {
             log::error!("Token refresh request failed: {}", e);
-            // Clear token on network failure
             let _ = clear_token().await;
             clear_token_state();
             return RefreshResult::Failed(format!("Network error: {}", e));
@@ -179,21 +194,31 @@ pub async fn perform_silent_refresh() -> RefreshResult {
     };
 
     // Calculate expiry time as unix timestamp
-    let expires_at_unix = now_unix() + token_response.expires_in;
+    let expires_in = token_response.expires_in.unwrap_or(28800);
+    let expires_at_unix = now_unix() + expires_in;
 
-    // Handle token rotation: Clerk may return a new refresh token
-    let had_new_refresh_token = token_response.refresh_token.is_some();
+    // Handle token rotation: GitHub returns a new refresh token
     let new_refresh_token = token_response.refresh_token.unwrap_or_else(|| {
-        log::warn!("Clerk did not return new refresh token, reusing existing");
-        refresh_token.clone()
+        log::warn!("GitHub did not return new refresh token, reusing existing");
+        stored_tokens.refresh_token.clone()
     });
 
-    // Store the new refresh token (handles rotation)
-    if let Err(e) = store_token(&new_refresh_token).await {
-        log::error!("Failed to store rotated refresh token: {}", e);
-        // Continue anyway - we have a valid access token for now
-    } else if had_new_refresh_token {
-        log::info!("Stored rotated refresh token");
+    // Update stored tokens in keyring
+    let updated_stored = StoredTokens {
+        access_token: token_response.access_token.clone(),
+        refresh_token: new_refresh_token.clone(),
+        expires_at: expires_at_unix,
+        user_login: stored_tokens.user_login,
+        avatar_url: stored_tokens.avatar_url,
+    };
+
+    if let Ok(json) = serde_json::to_string(&updated_stored) {
+        if let Err(e) = store_token(&json).await {
+            log::error!("Failed to store refreshed tokens: {}", e);
+            // Continue anyway - we have a valid access token for now
+        } else {
+            log::info!("Stored refreshed tokens");
+        }
     }
 
     // Update token state
@@ -201,18 +226,18 @@ pub async fn perform_silent_refresh() -> RefreshResult {
         access_token: token_response.access_token.clone(),
         refresh_token: new_refresh_token,
         expires_at_unix,
-        user_id: None, // Extracted from id_token if needed
+        user_id: None,
     };
 
     set_token_state(token_state.clone());
 
-    log::info!("Silent token refresh successful, token expires in {}s", token_response.expires_in);
+    log::info!("Silent token refresh successful, token expires in {}s", expires_in);
 
     RefreshResult::Success(token_state)
 }
 
 /// Check for stored refresh token on startup and attempt silent refresh
-/// 
+///
 /// This should be called during app initialization to restore the user's
 /// session without requiring re-authentication.
 pub async fn attempt_silent_auth_on_startup() -> RefreshResult {
@@ -238,10 +263,10 @@ pub async fn attempt_silent_auth_on_startup() -> RefreshResult {
 /// Clear all authentication state (logout)
 pub async fn logout() -> Result<(), String> {
     let _guard = REFRESH_MUTEX.lock().await;
-    
+
     clear_token_state();
     clear_token().await?;
-    
+
     log::info!("User logged out, all tokens cleared");
     Ok(())
 }

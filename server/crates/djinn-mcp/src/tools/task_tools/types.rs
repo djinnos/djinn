@@ -502,6 +502,10 @@ pub struct BoardHealthResponse {
     /// Exposed to the Architect for board health assessment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub epic_throughput: Option<HashMap<String, usize>>,
+    /// Health warnings (e.g. "github_not_connected") that do not block the
+    /// query but indicate degraded operational readiness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]

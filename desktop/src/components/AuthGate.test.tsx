@@ -191,12 +191,15 @@ describe("AuthGate", () => {
       });
 
       await waitFor(() => {
-        expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Sign in with GitHub" })).toBeInTheDocument();
       });
     });
 
-    it("calls login when sign-in button is clicked", async () => {
-      mockInvoke.mockResolvedValueOnce(undefined); // login
+    it("starts device flow when sign-in button is clicked", async () => {
+      mockInvoke.mockResolvedValueOnce({
+        userCode: "ABCD-1234",
+        verificationUri: "https://github.com/login/device",
+      });
 
       const user = userEvent.setup();
       renderAuthGate();
@@ -206,22 +209,29 @@ describe("AuthGate", () => {
       });
 
       await waitFor(() => {
-        expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Sign in with GitHub" })).toBeInTheDocument();
       });
 
-      await user.click(screen.getByRole("button", { name: "Sign in" }));
+      await user.click(screen.getByRole("button", { name: "Sign in with GitHub" }));
 
-      expect(mockInvoke).toHaveBeenCalledWith("auth_login");
+      expect(mockInvoke).toHaveBeenCalledWith("start_github_login");
+
+      // Should show device code UI
+      await waitFor(() => {
+        expect(screen.getByText("ABCD-1234")).toBeInTheDocument();
+        expect(screen.getByText("Waiting for authorization...")).toBeInTheDocument();
+      });
     });
   });
 
-  describe("callback handling", () => {
-    it("handles auth:callback-received by exchanging code", async () => {
-      const MOCK_CONFIG = { clientId: "test_client", redirectUri: "http://localhost:19876/auth/callback" };
-      mockInvoke
-        .mockResolvedValueOnce(MOCK_CONFIG) // getOAuthConfig
-        .mockResolvedValueOnce(MOCK_USER); // exchangeAuthCode
+  describe("device code flow", () => {
+    it("shows device code after starting login and transitions on auth:state-changed", async () => {
+      mockInvoke.mockResolvedValueOnce({
+        userCode: "WXYZ-5678",
+        verificationUri: "https://github.com/login/device",
+      });
 
+      const user = userEvent.setup();
       renderAuthGate();
 
       act(() => {
@@ -229,33 +239,35 @@ describe("AuthGate", () => {
       });
 
       await waitFor(() => {
-        expect(screen.getByText("Sign in required")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Sign in with GitHub" })).toBeInTheDocument();
       });
 
+      await user.click(screen.getByRole("button", { name: "Sign in with GitHub" }));
+
+      await waitFor(() => {
+        expect(screen.getByText("WXYZ-5678")).toBeInTheDocument();
+      });
+
+      // Backend completes polling and emits auth:state-changed
       act(() => {
-        emitTauriEvent("auth:callback-received", {
-          code: "auth_code_123",
-          state: "random_state",
-          code_verifier: "verifier_456",
+        emitTauriEvent("auth:state-changed", {
+          isAuthenticated: true,
+          user: MOCK_USER,
         });
       });
 
       await waitFor(() => {
-        expect(mockInvoke).toHaveBeenCalledWith("exchange_auth_code", {
-          code: "auth_code_123",
-          codeVerifier: "verifier_456",
-          redirectUri: MOCK_CONFIG.redirectUri,
-          clientId: MOCK_CONFIG.clientId,
-        });
+        expect(screen.getByTestId("protected")).toBeInTheDocument();
       });
     });
 
-    it("sets error on auth:callback-received exchange failure", async () => {
-      mockInvoke
-        .mockResolvedValueOnce({ clientId: "c", redirectUri: "r" }) // getOAuthConfig
-        .mockRejectedValueOnce(new Error("invalid_grant")); // exchangeAuthCode
+    it("shows error on auth:login-failed", async () => {
+      mockInvoke.mockResolvedValueOnce({
+        userCode: "FAIL-0000",
+        verificationUri: "https://github.com/login/device",
+      });
 
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const user = userEvent.setup();
       renderAuthGate();
 
       act(() => {
@@ -263,21 +275,24 @@ describe("AuthGate", () => {
       });
 
       await waitFor(() => {
-        expect(screen.getByText("Sign in required")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Sign in with GitHub" })).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole("button", { name: "Sign in with GitHub" }));
+
+      await waitFor(() => {
+        expect(screen.getByText("FAIL-0000")).toBeInTheDocument();
       });
 
       act(() => {
-        emitTauriEvent("auth:callback-received", {
-          code: "bad_code",
-          state: "state",
-          code_verifier: "verifier",
-        });
+        emitTauriEvent("auth:login-failed", { reason: "Device code expired" });
       });
 
       await waitFor(() => {
-        expect(useAuthStore.getState().error).toContain("Authentication failed");
+        // Should go back to sign-in state with error
+        expect(screen.getByRole("button", { name: "Sign in with GitHub" })).toBeInTheDocument();
+        expect(screen.getByText("Login failed: Device code expired")).toBeInTheDocument();
       });
-      consoleSpy.mockRestore();
     });
   });
 

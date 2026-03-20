@@ -1,5 +1,6 @@
 use super::*;
 use djinn_db::ProjectRepository;
+use djinn_provider::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
 
 pub(super) async fn board_health_impl(
     server: &DjinnMcpServer,
@@ -23,6 +24,22 @@ pub(super) async fn board_health_impl(
                     // Surface epic throughput data for the Architect.
                     if !status.epic_throughput.is_empty() {
                         parsed.epic_throughput = Some(status.epic_throughput);
+                    }
+                }
+
+                // Check for GitHub OAuth credential existence (ADR-039).
+                {
+                    let cred_repo = djinn_provider::repos::CredentialRepository::new(
+                        server.state.db().clone(),
+                        server.state.event_bus(),
+                    );
+                    let github_connected = cred_repo
+                        .exists(GITHUB_APP_OAUTH_DB_KEY)
+                        .await
+                        .unwrap_or(false);
+                    if !github_connected {
+                        let warnings = parsed.warnings.get_or_insert_with(Vec::new);
+                        warnings.push("github_not_connected".to_string());
                     }
                 }
 

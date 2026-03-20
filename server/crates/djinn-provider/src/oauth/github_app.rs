@@ -227,6 +227,19 @@ pub async fn poll_and_store(session: &DeviceCodeSession, repo: &CredentialReposi
     let tokens = token_response_to_tokens(tr, user_login);
     tokens.save_to_db(repo).await?;
     tracing::info!(user = ?tokens.user_login, "GitHubApp: authentication successful");
+
+    // Fetch and persist the GitHub App installation ID so that downstream
+    // callers (e.g. derive_installation_token) can create PRs.
+    match fetch_installation_id(&tokens.access_token).await {
+        Ok(id) => {
+            store_installation_id(&id, repo).await?;
+            tracing::info!(installation_id = %id, "GitHubApp: installation ID stored");
+        }
+        Err(e) => {
+            tracing::warn!("GitHubApp: failed to fetch installation ID (install the app on your org): {e}");
+        }
+    }
+
     Ok(tokens)
 }
 
@@ -376,7 +389,89 @@ pub async fn run_github_app_flow(repo: &CredentialRepository) -> Result<GitHubAp
     let tokens = token_response_to_tokens(tr, user_login);
     tokens.save_to_db(repo).await?;
     tracing::info!(user = ?tokens.user_login, "GitHubApp: authentication successful");
+
+    // Fetch and persist the installation ID (same as poll_and_store).
+    match fetch_installation_id(&tokens.access_token).await {
+        Ok(id) => {
+            store_installation_id(&id, repo).await?;
+            tracing::info!(installation_id = %id, "GitHubApp: installation ID stored");
+        }
+        Err(e) => {
+            tracing::warn!("GitHubApp: failed to fetch installation ID (install the app on your org): {e}");
+        }
+    }
+
     Ok(tokens)
+}
+
+/// Fetch the GitHub App installation ID for the authenticated user.
+///
+/// Calls `GET /user/installations` and returns the `id` of the first
+/// installation whose `app_slug` matches our GitHub App.
+pub async fn fetch_installation_id(access_token: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Installation {
+        id: u64,
+        app_slug: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct InstallationsResponse {
+        installations: Vec<Installation>,
+    }
+
+    let client = Client::new();
+    let resp = client
+        .get("https://api.github.com/user/installations")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "djinn-server")
+        .send()
+        .await
+        .map_err(|e| anyhow!("failed to fetch user installations: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "GET /user/installations failed ({status}): {body}"
+        ));
+    }
+
+    let body: InstallationsResponse = resp
+        .json()
+        .await
+        .map_err(|e| anyhow!("failed to parse installations response: {e}"))?;
+
+    let installation = body
+        .installations
+        .iter()
+        .find(|i| i.app_slug.as_deref() == Some("djinn-ai-bot"))
+        .or_else(|| body.installations.first())
+        .ok_or_else(|| {
+            anyhow!(
+                "No GitHub App installation found. \
+                 Install the Djinn app at https://github.com/apps/djinn-ai-bot/installations/new"
+            )
+        })?;
+
+    Ok(installation.id.to_string())
+}
+
+/// Re-check for the GitHub App installation ID using the stored user token.
+///
+/// Called when the user installs the app after initial auth and clicks
+/// "retry" in the UI.
+pub async fn refresh_installation_id(repo: &CredentialRepository) -> Result<String> {
+    let tokens = GitHubAppTokens::load_from_db(repo)
+        .await
+        .ok_or_else(|| anyhow!("No GitHub App tokens found — authenticate first"))?;
+
+    let id = fetch_installation_id(&tokens.access_token).await?;
+    store_installation_id(&id, repo).await?;
+    tracing::info!(installation_id = %id, "GitHubApp: installation ID refreshed");
+    Ok(id)
 }
 
 /// Store the GitHub App installation ID in the credential vault.

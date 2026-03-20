@@ -1,21 +1,15 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use tauri::{Emitter, Manager};
-use tauri_plugin_deep_link::DeepLinkExt;
 
 mod auth;
-mod auth_callback;
 mod commands;
-mod dev_server;
 mod server;
 mod token_refresh;
 
-pub use auth_callback::AuthCallbackManager;
 pub use server::ServerState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let auth_callback_manager = Arc::new(AuthCallbackManager::new());
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
@@ -25,13 +19,10 @@ pub fn run() {
                 .expect("no main window")
                 .set_focus();
         }))
-        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(server::init_server_state()))
-        .manage(auth_callback_manager.clone())
         .setup(move |app| {
             let app_handle = app.handle().clone();
-            let auth_manager = auth_callback_manager.clone();
 
             // Spawn server in background
             tauri::async_runtime::spawn(async move {
@@ -82,46 +73,6 @@ pub fn run() {
                 }
             });
 
-            // Register deep link handler for djinn:// protocol
-            let deep_link_app = app.handle().clone();
-            let deep_link_manager = auth_manager.clone();
-            app.deep_link().on_open_url(move |event| {
-                for url in event.urls() {
-                    let url_str = url.as_str();
-                    log::info!("Received deep link: {}", url_str);
-                    
-                    if url_str.starts_with("djinn://auth/callback") {
-                        match deep_link_manager.handle_callback_url(url_str) {
-                            Ok(data) => {
-                                if let Err(e) = deep_link_manager.process_callback(&deep_link_app, data) {
-                                    log::error!("Failed to process deep link callback: {}", e);
-                                }
-                            }
-                            Err(e) => {
-                                log::error!("Failed to handle deep link: {}", e);
-                            }
-                        }
-
-                        // Show the main window so the frontend can render error/retry UI
-                        if let Some(window) = deep_link_app.get_webview_window("main") {
-                            let _ = window.show();
-                        }
-                    }
-                }
-            });
-
-            // Spawn dev-mode callback server (only in dev builds)
-            #[cfg(debug_assertions)]
-            {
-                let dev_app = app.handle().clone();
-                let dev_manager = auth_manager.clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Err(e) = dev_server::spawn_dev_server(dev_app, dev_manager).await {
-                        log::error!("Failed to spawn dev callback server: {}", e);
-                    }
-                });
-            }
-
             // Attempt silent authentication on startup
             let silent_auth_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -170,7 +121,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            commands::get_oauth_config,
+            commands::start_github_login,
             commands::greet,
             commands::get_server_port,
             commands::get_server_status,
@@ -184,10 +135,6 @@ pub fn run() {
             commands::auth_get_state,
             commands::auth_login,
             commands::auth_logout,
-            commands::exchange_auth_code,
-            commands::initiate_oauth_login,
-            commands::get_pkce_code_verifier,
-            commands::clear_pkce_params,
             commands::perform_token_refresh,
             commands::get_auth_state,
             commands::is_token_expired,
