@@ -494,6 +494,10 @@ pub struct BoardHealthResponse {
     /// Missing LSP servers that should be installed for diagnostics to work.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_warnings: Option<Vec<BoardHealthLspWarning>>,
+    /// Tasks merged per hour per epic in the past hour (epic_id → count).
+    /// Exposed to the Architect for board health assessment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epic_throughput: Option<HashMap<String, usize>>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
