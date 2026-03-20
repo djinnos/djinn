@@ -252,8 +252,9 @@ pub(crate) fn render_prompt_for_role(
                  within this task's scope (as defined by the task description and design). \
                  If the failure is caused by code outside your task's scope (e.g. a \
                  pre-existing compile error in an unrelated module), do NOT modify those \
-                 files. Instead, note it as a remaining concern when you submit — the \
-                 lead will handle out-of-scope issues separately."
+                 files. Instead, call `request_lead` to escalate — the lead can either \
+                 expand your task's scope or create a separate blocking task to fix the \
+                 out-of-scope issue first."
             ));
         }
         if parts.is_empty() {
