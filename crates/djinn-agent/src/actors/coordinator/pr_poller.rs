@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use djinn_core::models::TransitionAction;
-use djinn_provider::github_api::{GitHubApiClient, PrState};
+use djinn_provider::github_api::{CheckRun, GitHubApiClient, PrState};
 use djinn_provider::repos::CredentialRepository;
 
 use super::*;
@@ -14,8 +14,13 @@ impl CoordinatorActor {
     ///
     /// On each task:
     /// - **Merged PR** → `PrMerge` transition (pr_ready → closed), unblocking dependents.
+    ///   Dependent tasks that were blocked by this task are automatically unblocked via the
+    ///   event system (`emit_unblocked_tasks` fires on close, coordinator dispatches them).
     /// - **CI check failure** → `PrChangesRequested` (pr_ready → open) for agent rework.
+    ///   CI failure details are logged as a task comment so the worker has context on re-dispatch.
     ///   CI results are cached by head SHA so unchanged commits are not re-checked.
+    /// - **PR closed without merge** → `ForceClose` (pr_ready → closed/force_closed).
+    ///   The PR was manually closed without merging; task is force-closed.
     /// - **Changes requested review** → `PrChangesRequested` (pr_ready → open).
     pub(super) async fn poll_pr_statuses(&mut self) {
         let task_repo = self.task_repo();
@@ -88,16 +93,16 @@ impl CoordinatorActor {
             }
 
             // PR is closed but not merged (e.g. manually closed without merge).
-            // Treat like changes-requested so the task re-enters the work queue.
+            // Force-close the task — it cannot be merged via this PR anymore.
             if pr.state == PrState::Closed {
                 tracing::info!(
                     task_id = %task.short_id,
                     pr = pull_number,
-                    "PR poller: PR closed without merge → reopening task"
+                    "PR poller: PR closed without merge → force-closing task"
                 );
                 self.apply_pr_transition(
                     &task.id,
-                    TransitionAction::PrChangesRequested,
+                    TransitionAction::ForceClose,
                     Some("PR was closed without merging"),
                 )
                 .await;
@@ -120,18 +125,23 @@ impl CoordinatorActor {
                     .insert(task.id.clone(), current_sha.clone());
 
                 if !checks.check_runs.is_empty() {
-                    let any_failed = checks.check_runs.iter().any(|cr| {
-                        matches!(
-                            cr.conclusion.as_deref(),
-                            Some("failure") | Some("timed_out") | Some("cancelled")
-                        )
-                    });
+                    let failed_checks: Vec<&CheckRun> = checks
+                        .check_runs
+                        .iter()
+                        .filter(|cr| {
+                            matches!(
+                                cr.conclusion.as_deref(),
+                                Some("failure") | Some("timed_out") | Some("cancelled")
+                            )
+                        })
+                        .collect();
 
-                    if any_failed {
+                    if !failed_checks.is_empty() {
                         tracing::info!(
                             task_id = %task.short_id,
                             pr = pull_number,
                             sha = %current_sha,
+                            failed_count = failed_checks.len(),
                             "PR poller: CI check failed → reopening task for rework"
                         );
                         self.apply_pr_transition(
@@ -140,6 +150,10 @@ impl CoordinatorActor {
                             Some("CI checks failed on PR"),
                         )
                         .await;
+                        // Log CI failure details as a comment so the re-dispatched worker
+                        // has full context on which checks failed and where to look.
+                        self.log_ci_failure_comment(&task.id, &failed_checks, pr_url, &current_sha)
+                            .await;
                         self.pr_status_cache.remove(&task.id);
                         continue;
                     }
@@ -199,6 +213,49 @@ impl CoordinatorActor {
                 task_id,
                 error = %e,
                 "PR poller: failed to apply task transition"
+            );
+        }
+    }
+
+    /// Log a comment on the task with details about which CI checks failed.
+    ///
+    /// This comment becomes part of the activity log that the re-dispatched worker
+    /// reads in its system prompt, giving it context about what needs to be fixed.
+    async fn log_ci_failure_comment(
+        &self,
+        task_id: &str,
+        failed_checks: &[&CheckRun],
+        pr_url: &str,
+        sha: &str,
+    ) {
+        let check_lines: Vec<String> = failed_checks
+            .iter()
+            .map(|cr| {
+                let conclusion = cr.conclusion.as_deref().unwrap_or("unknown");
+                format!("- **{}** ({}): {}", cr.name, conclusion, cr.html_url)
+            })
+            .collect();
+
+        let body = format!(
+            "**CI checks failed on PR** (commit `{sha}`)\n\n\
+             The following CI checks failed. Review the logs and fix the failures before the PR can merge.\n\n\
+             {checks}\n\n\
+             PR: {pr_url}",
+            sha = &sha[..sha.len().min(12)],
+            checks = check_lines.join("\n"),
+            pr_url = pr_url,
+        );
+
+        let payload = serde_json::json!({ "body": body }).to_string();
+        let task_repo = self.task_repo();
+        if let Err(e) = task_repo
+            .log_activity(Some(task_id), "pr_poller", "system", "comment", &payload)
+            .await
+        {
+            tracing::warn!(
+                task_id,
+                error = %e,
+                "PR poller: failed to log CI failure comment"
             );
         }
     }
