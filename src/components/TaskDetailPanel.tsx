@@ -271,6 +271,88 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{task.design || "No design notes"}</ReactMarkdown>
             </div>
           </SectionCard>
+
+          {(task.review_feedback?.length > 0 || task.pr_url) && (
+            <SectionCard title="PR Review Feedback">
+              <div className="space-y-3">
+                {task.pr_url && (
+                  <div>
+                    <a
+                      href={task.pr_url as string}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-400 hover:underline"
+                    >
+                      View PR on GitHub
+                    </a>
+                  </div>
+                )}
+                {(task.review_cycle_count != null || task.review_feedback?.length > 0) && (
+                  <div className="text-muted-foreground">
+                    Review cycles:{" "}
+                    <span className="font-medium text-foreground">
+                      {task.review_cycle_count ?? task.review_feedback?.length ?? 0}
+                    </span>
+                  </div>
+                )}
+                {task.review_feedback?.length > 0 ? (
+                  <div className="space-y-4">
+                    {(task.review_feedback as Array<{ cycle?: number; comments?: Array<{ file?: string; line_start?: number; line_end?: number; body?: string; suggestion?: string; reviewer?: string }> }>).map(
+                      (reviewCycle, cycleIdx) => (
+                        <div key={cycleIdx} className="space-y-3">
+                          <div className="flex items-center gap-2">
+                            <div className="h-px flex-1 bg-border" />
+                            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                              Cycle {reviewCycle.cycle ?? cycleIdx + 1}
+                            </span>
+                            <div className="h-px flex-1 bg-border" />
+                          </div>
+                          {reviewCycle.comments?.length ? (
+                            <div className="space-y-3">
+                              {reviewCycle.comments.map((comment, commentIdx) => (
+                                <div key={commentIdx} className="rounded border bg-muted/40 p-3 space-y-1.5">
+                                  {(comment.file || comment.line_start != null) && (
+                                    <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono">
+                                      {comment.file && <span>{comment.file}</span>}
+                                      {comment.line_start != null && (
+                                        <span className="text-muted-foreground/70">
+                                          L{comment.line_start}
+                                          {comment.line_end != null && comment.line_end !== comment.line_start
+                                            ? `–L${comment.line_end}`
+                                            : ""}
+                                        </span>
+                                      )}
+                                      {comment.reviewer && (
+                                        <span className="ml-auto italic">{comment.reviewer}</span>
+                                      )}
+                                    </div>
+                                  )}
+                                  {comment.body && (
+                                    <p className="text-sm text-foreground">{comment.body}</p>
+                                  )}
+                                  {comment.suggestion && (
+                                    <pre className="mt-1 overflow-x-auto rounded bg-muted px-3 py-2 text-xs font-mono text-muted-foreground whitespace-pre-wrap">
+                                      {comment.suggestion}
+                                    </pre>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-sm text-muted-foreground">No comments in this cycle.</p>
+                          )}
+                        </div>
+                      )
+                    )}
+                  </div>
+                ) : (
+                  !task.pr_url && (
+                    <p className="text-sm text-muted-foreground">No review feedback yet.</p>
+                  )
+                )}
+              </div>
+            </SectionCard>
+          )}
         </div>
       </aside>
     </div>

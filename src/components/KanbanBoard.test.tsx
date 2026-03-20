@@ -113,6 +113,6 @@ describe("KanbanBoard", () => {
   it("shows empty board state when no tasks", () => {
     render(<KanbanBoard tasks={[]} epics={new Map()} disableSearchParamSync />);
 
-    expect(screen.getAllByText("No tasks")).toHaveLength(3);
+    expect(screen.getAllByText("No tasks")).toHaveLength(4);
   });
 });

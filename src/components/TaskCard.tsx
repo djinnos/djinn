@@ -405,6 +405,20 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
             </span>
           )}
 
+          {/* PR URL badge */}
+          {task.pr_url && (
+            <a
+              href={task.pr_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-0.5 rounded bg-violet-500/15 px-1 py-px text-[10px] font-medium text-violet-400 hover:text-violet-300"
+              title={task.pr_url}
+            >
+              PR
+            </a>
+          )}
+
           {/* Reopen badge */}
           {task.reopen_count > 0 && (
             <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/15 px-1 py-px text-[10px] font-medium text-amber-400">

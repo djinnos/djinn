@@ -15,6 +15,8 @@ export type Task = Omit<TaskShowOutputSchema.TaskShowOutput, "owner"> & {
   owner: string | null;
   // Stamped by the desktop app when fetching from a specific project
   project_id?: string | null;
+  // URL of the associated pull request (populated when server supports it)
+  pr_url?: string | null;
 };
 
 export type Epic = Omit<EpicListOutputSchema.EpicModel, "owner"> & {

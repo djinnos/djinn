@@ -40,7 +40,7 @@ import {
 } from "@/components/ui/input-group";
 import { Search01Icon } from "@hugeicons/core-free-icons";
 
-type ColumnKey = "open" | "in_flight" | "done";
+type ColumnKey = "open" | "in_flight" | "pr_ready" | "done";
 
 const ISSUE_TYPES = [
   { value: "task", label: "Task" },
@@ -61,6 +61,7 @@ const STATUS_COLUMNS: Array<{
 }> = [
   { key: "open", label: "Open", colorClass: "bg-[#4B5563]", glowClass: "", icon: CircleIcon },
   { key: "in_flight", label: "In Flight", colorClass: "bg-[#3B82F6]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#3B82F6]/40", icon: Progress02Icon },
+  { key: "pr_ready", label: "PR Ready", colorClass: "bg-[#8B5CF6]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#8B5CF6]/40", icon: ArrowRight01Icon },
   { key: "done", label: "Done", colorClass: "bg-[#10B981]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#10B981]/40", icon: CheckmarkCircle03Icon },
 ];
 
@@ -75,6 +76,7 @@ const PRIORITY_ICONS: Record<number, { icon: typeof FullSignalIcon; color: strin
 
 function taskToColumnKey(task: Task): ColumnKey {
   if (task.status === "closed") return "done";
+  if (task.status === "pr_ready") return "pr_ready";
   if (
     task.status === "in_progress" ||
     task.status === "verifying" ||
@@ -459,7 +461,12 @@ export function KanbanBoard({
                     ) : (
                       <HugeiconsIcon
                         icon={column.icon}
-                        className={cn("size-4 shrink-0", column.key === "done" ? "text-[#10B981]" : "text-muted-foreground")}
+                        className={cn(
+                          "size-4 shrink-0",
+                          column.key === "done" ? "text-[#10B981]" :
+                          column.key === "pr_ready" ? "text-[#8B5CF6]" :
+                          "text-muted-foreground"
+                        )}
                       />
                     )}
                     <span className="leading-none">{column.label}</span>
