@@ -183,6 +183,9 @@ pub async fn start_device_flow() -> Result<DeviceCodeSession> {
     #[derive(Serialize)]
     struct DeviceCodeRequest {
         client_id: &'static str,
+        /// OAuth Apps require explicit scopes (GitHub Apps derive them from
+        /// the app's configured permissions, but OAuth Apps do not).
+        scope: &'static str,
     }
 
     #[derive(Deserialize)]
@@ -199,6 +202,7 @@ pub async fn start_device_flow() -> Result<DeviceCodeSession> {
         .header("Accept", "application/json")
         .json(&DeviceCodeRequest {
             client_id: CLIENT_ID,
+            scope: "repo",
         })
         .send()
         .await
