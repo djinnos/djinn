@@ -69,6 +69,7 @@ where
         "task_update_ac" => call_task_update_ac(state, &call.arguments).await,
         "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
         "request_pm" => call_request_pm(state, &call.arguments).await,
+        "request_architect" => call_request_architect(state, &call.arguments).await,
         "task_transition" => call_task_transition(state, &call.arguments).await,
         "task_delete_branch" => call_task_delete_branch(state, &call.arguments).await,
         "task_archive_activity" => call_task_archive_activity(state, &call.arguments).await,
@@ -779,7 +780,28 @@ async fn call_request_pm(
     .await
     .map_err(|e| e.to_string())?;
 
-    // Escalate to Lead intervention queue.
+    // Check escalation count via coordinator.
+    // On the 2nd+ escalation for the same task, auto-route to Architect.
+    let coordinator = state.coordinator().await;
+    let escalation_count = if let Some(ref coord) = coordinator {
+        coord.increment_escalation_count(&task.id).await.unwrap_or(1)
+    } else {
+        1
+    };
+
+    if escalation_count >= 2 {
+        let architect_reason = format!(
+            "Auto-escalated to Architect after {} Lead escalations. Latest reason: {}",
+            escalation_count, p.reason
+        );
+        if let Some(ref coord) = coordinator {
+            let _ = coord
+                .dispatch_architect_escalation(&task.id, &architect_reason, &task.project_id)
+                .await;
+        }
+    }
+
+    // Escalate the task to needs_pm_intervention in all cases.
     let updated = repo
         .transition(
             &task.id,
@@ -792,11 +814,65 @@ async fn call_request_pm(
         .await
         .map_err(|e| e.to_string())?;
 
+    if escalation_count >= 2 {
+        Ok(serde_json::json!({
+            "status": "architect_escalated",
+            "task_id": updated.id,
+            "new_status": updated.status,
+            "escalation_count": escalation_count,
+            "message": "Task has been escalated multiple times. Routing to Architect for review. Your session should end now."
+        }))
+    } else {
+        Ok(serde_json::json!({
+            "status": "escalated",
+            "task_id": updated.id,
+            "new_status": updated.status,
+            "escalation_count": escalation_count,
+            "message": "Task escalated to Lead. Your session should end now."
+        }))
+    }
+}
+
+async fn call_request_architect(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    #[derive(Deserialize)]
+    struct RequestArchitectParams {
+        id: String,
+        reason: String,
+    }
+
+    let p: RequestArchitectParams = parse_args(arguments)?;
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
+
+    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
+    };
+
+    let body = format!(
+        "[ARCHITECT_REQUEST] Lead escalating to Architect. {}",
+        p.reason
+    );
+    let payload = serde_json::json!({ "body": body }).to_string();
+    repo.log_activity(Some(&task.id), "lead-agent", "lead", "comment", &payload)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let Some(coordinator) = state.coordinator().await else {
+        return Ok(serde_json::json!({
+            "error": "coordinator not available — cannot dispatch Architect"
+        }));
+    };
+
+    let _ = coordinator
+        .dispatch_architect_escalation(&task.id, &p.reason, &task.project_id)
+        .await;
+
     Ok(serde_json::json!({
-        "status": "escalated",
-        "task_id": updated.id,
-        "new_status": updated.status,
-        "message": "Task escalated to Lead. Your session should end now."
+        "status": "architect_dispatched",
+        "task_id": task.id,
+        "message": "Architect has been dispatched to review this task. Your session should end now."
     }))
 }
 
@@ -2456,6 +2532,22 @@ fn tool_request_pm() -> RmcpTool {
     )
 }
 
+fn tool_request_architect() -> RmcpTool {
+    RmcpTool::new(
+        "request_architect".to_string(),
+        "Escalate to the Architect when the task requires strategic technical review that is beyond Lead intervention scope. Use when the problem is architectural, requires codebase-wide analysis, or has failed multiple Lead interventions. Adds a comment and dispatches the Architect. Your session should end after this call."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["id", "reason"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short_id"},
+                "reason": {"type": "string", "description": "Why Architect escalation is needed (e.g. architectural ambiguity, repeated Lead failures, codebase-wide impact)"}
+            }
+        }),
+    )
+}
+
 fn tool_memory_read() -> RmcpTool {
     RmcpTool::new(
         "memory_read".to_string(),
@@ -2868,6 +2960,8 @@ pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
         serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
         serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
+        serde_json::to_value(tool_request_architect())
+            .expect("serialize tool_request_architect"),
         serde_json::to_value(crate::roles::finalize::tool_submit_decision())
             .expect("serialize tool_submit_decision"),
     ] {
