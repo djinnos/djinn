@@ -1,4 +1,5 @@
 # Djinn task management
-.djinn/*
-!.djinn/memory/
+.djinn/worktrees/
+.djinn/.obsidian/
+.djinn/settings.json
 .planning/
