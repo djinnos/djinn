@@ -586,6 +586,27 @@ expression: tool_schemas_lead()
     "name": "epic_tasks"
   },
   {
+    "description": "Escalate to the Architect when the task requires strategic technical review that is beyond Lead intervention scope. Use when the problem is architectural, requires codebase-wide analysis, or has failed multiple Lead interventions. Adds a comment and dispatches the Architect. Your session should end after this call.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short_id",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why Architect escalation is needed (e.g. architectural ambiguity, repeated Lead failures, codebase-wide impact)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "name": "request_architect"
+  },
+  {
     "description": "Submit the Lead intervention decision and release the task back to the worker queue. Your session ends after this call.",
     "inputSchema": {
       "properties": {
