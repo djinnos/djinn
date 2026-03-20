@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use crate::actors::coordinator::pr_poller::PR_REVIEW_FEEDBACK_EVENT;
 use crate::context::AgentContext;
 use djinn_core::models::Task;
 use djinn_core::models::{SessionRecord, SessionStatus, TransitionAction};
+use djinn_db::ActivityQuery;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
@@ -15,6 +17,9 @@ use super::*;
 /// Max characters for verification output included in user messages.
 /// Keeps the user-message payload reasonable (clippy stderr can be huge).
 const MAX_VERIFICATION_CHARS: usize = 3000;
+
+/// Max characters for a single inline PR review comment included in the prompt.
+const MAX_PR_COMMENT_CHARS: usize = 500;
 
 /// Return the most recent N high-signal comments (PM, reviewer, verification)
 /// from the activity log, in chronological order (oldest first).
@@ -58,6 +63,114 @@ pub(crate) fn recent_feedback(
             Some(format!("**{label}:**\n{trimmed}"))
         })
         .collect()
+}
+
+/// Build a formatted PR review feedback section for the worker prompt.
+///
+/// Queries the task activity log for the most recent `pr_review_feedback` entry
+/// (stored by the PR poller when CHANGES_REQUESTED is detected) and formats it
+/// as a structured section with inline code comments so the worker knows exactly
+/// what to fix.
+///
+/// Returns `None` when no PR review feedback exists for the task.
+pub(crate) async fn pr_review_feedback_context(
+    task_id: &str,
+    app_state: &AgentContext,
+) -> Option<String> {
+    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let entries = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task_id.to_owned()),
+            event_type: Some(PR_REVIEW_FEEDBACK_EVENT.to_string()),
+            actor_role: Some("system".to_string()),
+            project_id: None,
+            from_time: None,
+            to_time: None,
+            limit: 1,
+            offset: 0,
+        })
+        .await
+        .ok()?;
+
+    let entry = entries.into_iter().next()?;
+    let payload: serde_json::Value = serde_json::from_str(&entry.payload).ok()?;
+
+    let round = payload.get("round").and_then(|v| v.as_u64()).unwrap_or(1);
+    let pr_url = payload
+        .get("pr_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let pull_number = payload
+        .get("pull_number")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "**PR Review Feedback (Round {round})** — [{pr_url}]({pr_url})"
+    ));
+
+    // Top-level change-request reviews.
+    if let Some(reviews) = payload.get("change_request_reviews").and_then(|v| v.as_array())
+        && !reviews.is_empty()
+    {
+        lines.push(String::new());
+        lines.push("**Review summaries (CHANGES_REQUESTED):**".to_string());
+        for review in reviews {
+            let reviewer = review
+                .get("reviewer")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let html_url = review
+                .get("html_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            lines.push(format!("- @{reviewer} — {html_url}"));
+        }
+    }
+
+    // Inline code comments.
+    if let Some(comments) = payload.get("inline_comments").and_then(|v| v.as_array())
+        && !comments.is_empty()
+    {
+        lines.push(String::new());
+        lines.push(format!(
+            "**Inline review comments on PR #{}:**",
+            pull_number
+        ));
+        for comment in comments {
+            let reviewer = comment
+                .get("reviewer")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let body = comment
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let path = comment
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let line = comment.get("line").and_then(|v| v.as_u64());
+            let location = if !path.is_empty() {
+                if let Some(l) = line {
+                    format!("`{path}:{l}`")
+                } else {
+                    format!("`{path}`")
+                }
+            } else {
+                "(general comment)".to_string()
+            };
+            let truncated = truncate_feedback(body, MAX_PR_COMMENT_CHARS);
+            lines.push(format!("- {location} (@{reviewer}): {truncated}"));
+        }
+    }
+
+    if lines.len() <= 1 {
+        return None;
+    }
+
+    Some(lines.join("\n"))
 }
 
 // ─── Utility functions ────────────────────────────────────────────────────────
@@ -301,6 +414,16 @@ reviewer determined it was NOT. You MUST use your tools (shell, editor, etc.) \
 to make concrete changes before stopping. A text-only response with no tool \
 calls will be treated as a failure.\n\n";
 
+    // PR review feedback takes priority — it's the most actionable signal.
+    // When a human reviewer has left specific inline comments on the PR, include
+    // them prominently so the worker addresses each one.
+    if let Some(pr_feedback) = pr_review_feedback_context(task_id, app_state).await {
+        return format!(
+            "{RESUME_PREAMBLE}{pr_feedback}\n\nAddress every reviewer comment listed above. \
+            Push fixup commits to the same branch. Do not open a new PR."
+        );
+    }
+
     // Last 3 high-signal comments (PM, reviewer, verification) in
     // chronological order. Simple and gives the worker full recent context.
     let sections = recent_feedback(&activity, 3);
@@ -356,10 +479,22 @@ calls will be treated as a failure.\n\n";
 /// Build an initial user message for a fresh worker session. If the activity
 /// log contains PM or reviewer feedback, include it prominently so the worker
 /// acts on it immediately rather than discovering it buried in the system prompt.
+///
+/// PR review feedback (from GitHub reviewer inline comments) is surfaced first
+/// when present — this is the most specific, actionable signal available.
 pub(crate) async fn initial_user_message_for_task(
     task_id: &str,
     app_state: &AgentContext,
 ) -> String {
+    // PR review feedback takes priority over generic activity log comments.
+    if let Some(pr_feedback) = pr_review_feedback_context(task_id, app_state).await {
+        return format!(
+            "A human reviewer has requested changes on the PR. Address every reviewer comment below:\n\n\
+            {pr_feedback}\n\n\
+            Push fixup commits to the same branch. Do not open a new PR."
+        );
+    }
+
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
 

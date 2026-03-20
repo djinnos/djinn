@@ -10,6 +10,8 @@
 //! - [`GitHubApiClient::get_pull_request`] — fetch PR status and CI checks
 //! - [`GitHubApiClient::list_pull_request_reviews`] — list inline review comments
 //! - [`GitHubApiClient::list_pr_review_states`] — list top-level review states (APPROVED, CHANGES_REQUESTED, etc.)
+//! - [`GitHubApiClient::fetch_pr_review_feedback`] — aggregate CHANGES_REQUESTED reviews + inline comments into [`PrReviewFeedback`]
+//! - [`GitHubApiClient::re_request_review`] — re-request review from previous reviewers after fixup commits
 //!
 //! # Token lifecycle
 //! On every API call the client checks whether the cached user token is
@@ -152,50 +154,6 @@ pub struct PrReview {
     pub body: String,
 }
 
-/// Structured feedback extracted from a PR review with 'changes requested'.
-///
-/// Aggregates both inline (line-specific) comments and top-level (general)
-/// review body text into a single agent-consumable context payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrReviewFeedback {
-    /// Inline review comments — each anchored to a specific file/line.
-    pub inline_comments: Vec<InlineReviewComment>,
-    /// General review comments (non-line-specific body text from reviewers).
-    pub general_comments: Vec<GeneralReviewComment>,
-}
-
-/// A single inline review comment on a specific file/line range.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InlineReviewComment {
-    /// GitHub comment ID.
-    pub id: u64,
-    /// Reviewer login.
-    pub reviewer: Option<String>,
-    /// Path to the file being commented on.
-    pub file_path: String,
-    /// Line number in the diff (original `line` from GitHub).
-    pub line: Option<u32>,
-    /// The reviewer's comment text.
-    pub body: String,
-    /// URL to the comment on GitHub.
-    pub url: String,
-}
-
-/// A general (non-line-specific) review comment from the review body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GeneralReviewComment {
-    /// GitHub review ID.
-    pub id: u64,
-    /// Reviewer login.
-    pub reviewer: Option<String>,
-    /// The review body text.
-    pub body: String,
-    /// Review state (always `"CHANGES_REQUESTED"` in this context).
-    pub state: String,
-    /// URL to the review on GitHub.
-    pub url: String,
-}
-
 /// A review comment on a pull request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewComment {
@@ -215,6 +173,24 @@ pub struct ReviewComment {
 pub struct GitHubUser {
     pub login: String,
     pub id: u64,
+}
+
+/// Aggregated PR review feedback used to prime worker sessions during the
+/// review-feedback dispatch loop (ADR-037 Phase 4).
+///
+/// Combines top-level review states (CHANGES_REQUESTED) and inline review
+/// comments into a single structured payload that is stored as a
+/// `pr_review_feedback` activity log entry and surfaced in the worker prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrReviewFeedback {
+    /// PR number on GitHub.
+    pub pull_number: u64,
+    /// GitHub PR URL.
+    pub pr_url: String,
+    /// Top-level reviews that have `CHANGES_REQUESTED` state.
+    pub change_request_reviews: Vec<PrReview>,
+    /// Inline code comments from all reviewers.
+    pub inline_comments: Vec<ReviewComment>,
 }
 
 // ─── Client ───────────────────────────────────────────────────────────────────
@@ -572,59 +548,6 @@ impl GitHubApiClient {
         Ok(resp.json().await?)
     }
 
-    /// Fetch all review feedback for a PR and map it to a structured format.
-    ///
-    /// Calls both `/pulls/{number}/comments` (inline) and `/pulls/{number}/reviews`
-    /// (general), then aggregates them into a [`PrReviewFeedback`] payload.
-    ///
-    /// Only includes general review bodies that are non-empty.  Multiple reviews
-    /// from different reviewers are all included.
-    pub async fn fetch_pr_review_feedback(
-        &self,
-        owner: &str,
-        repo: &str,
-        pull_number: u64,
-    ) -> Result<PrReviewFeedback> {
-        // Fetch inline (line-specific) comments.
-        let raw_inline = self
-            .list_pull_request_reviews(owner, repo, pull_number)
-            .await?;
-
-        let inline_comments: Vec<InlineReviewComment> = raw_inline
-            .into_iter()
-            .map(|c| InlineReviewComment {
-                id: c.id,
-                reviewer: c.user.map(|u| u.login),
-                file_path: c.path.unwrap_or_default(),
-                line: c.line,
-                body: c.body,
-                url: c.html_url,
-            })
-            .collect();
-
-        // Fetch top-level reviews for general (non-line-specific) review bodies.
-        let raw_reviews = self
-            .list_pr_review_states(owner, repo, pull_number)
-            .await?;
-
-        let general_comments: Vec<GeneralReviewComment> = raw_reviews
-            .into_iter()
-            .filter(|r| !r.body.is_empty())
-            .map(|r| GeneralReviewComment {
-                id: r.id,
-                reviewer: r.user.map(|u| u.login),
-                body: r.body,
-                state: r.state,
-                url: r.html_url,
-            })
-            .collect();
-
-        Ok(PrReviewFeedback {
-            inline_comments,
-            general_comments,
-        })
-    }
-
     /// List top-level reviews submitted on a pull request.
     ///
     /// Returns each review's state (`"APPROVED"`, `"CHANGES_REQUESTED"`, etc.).
@@ -667,6 +590,84 @@ impl GitHubApiClient {
             ));
         }
         Ok(resp.json().await?)
+    }
+
+    /// Fetch aggregated PR review feedback for a pull request.
+    ///
+    /// Combines top-level review states (filtering to `CHANGES_REQUESTED`) and
+    /// all inline review comments into a [`PrReviewFeedback`] payload.
+    pub async fn fetch_pr_review_feedback(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+        pr_url: &str,
+    ) -> Result<PrReviewFeedback> {
+        let reviews = self.list_pr_review_states(owner, repo, pull_number).await?;
+        let inline_comments = self
+            .list_pull_request_reviews(owner, repo, pull_number)
+            .await?;
+
+        let change_request_reviews = reviews
+            .into_iter()
+            .filter(|r| r.state == "CHANGES_REQUESTED")
+            .collect();
+
+        Ok(PrReviewFeedback {
+            pull_number,
+            pr_url: pr_url.to_owned(),
+            change_request_reviews,
+            inline_comments,
+        })
+    }
+
+    /// Re-request review on a pull request from all reviewers who previously
+    /// submitted a `CHANGES_REQUESTED` review.
+    ///
+    /// Uses `POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers`.
+    /// Non-fatal: logs a warning if the API call fails.
+    pub async fn re_request_review(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+        reviewer_logins: &[String],
+    ) -> Result<()> {
+        if reviewer_logins.is_empty() {
+            return Ok(());
+        }
+
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{}/requested_reviewers",
+            self.base_url, owner, repo, pull_number
+        );
+        let body = serde_json::json!({ "reviewers": reviewer_logins });
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let body = body.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .post(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("re_request_review failed ({}): {}", status, body));
+        }
+        Ok(())
     }
 }
 

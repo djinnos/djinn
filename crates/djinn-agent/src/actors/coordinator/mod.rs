@@ -51,7 +51,7 @@ pub struct CoordinatorDeps {
 
 mod dispatch;
 mod health;
-mod pr_poller;
+pub(crate) mod pr_poller;
 mod prompt_eval;
 mod rules;
 mod wave;
