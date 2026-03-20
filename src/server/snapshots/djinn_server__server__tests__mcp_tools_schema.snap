@@ -6770,7 +6770,7 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "action": {
-          "description": "Transition action: start, submit_verification,\nverification_pass, verification_fail, release_verification,\nsubmit_task_review, task_review_start,\ntask_review_reject, task_review_reject_conflict, task_review_approve,\nreopen, close, release, release_task_review, force_close,\nuser_override.",
+          "description": "Transition action: start, submit_verification,\nverification_pass, verification_fail, release_verification,\nsubmit_task_review, task_review_start,\ntask_review_reject, task_review_reject_conflict, task_review_approve,\nmark_pr_ready, pr_merge, pr_changes_requested,\nreopen, close, release, release_task_review, force_close,\nuser_override.",
           "type": "string"
         },
         "actor_id": {
@@ -6790,12 +6790,12 @@ expression: signatures
           "type": "string"
         },
         "reason": {
-          "description": "Required for: verification_fail, release_verification,\ntask_review_reject, task_review_reject_conflict,\nreopen, release, release_task_review, force_close.",
+          "description": "Required for: verification_fail, release_verification,\ntask_review_reject, task_review_reject_conflict,\npr_changes_requested,\nreopen, release, release_task_review, force_close.",
           "nullable": true,
           "type": "string"
         },
         "target_status": {
-          "description": "Required when action = \"user_override\". Allowed values: draft, open, verifying,\nneeds_task_review, in_task_review, in_progress, closed.",
+          "description": "Required when action = \"user_override\". Allowed values: open, in_progress,\nverifying, needs_task_review, in_task_review, pr_ready, closed.",
           "nullable": true,
           "type": "string"
         }
