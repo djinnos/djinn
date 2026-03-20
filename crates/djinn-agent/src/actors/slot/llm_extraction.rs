@@ -14,9 +14,11 @@
 //! All errors are logged as warnings; nothing propagates to the caller.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use djinn_db::{NoteRepository, ProjectRepository, SessionRepository, TaskRepository};
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
+use djinn_provider::provider::LlmProvider;
 use serde::Deserialize;
 
 use super::session_extraction::SessionTaxonomy;
@@ -57,6 +59,31 @@ pub(crate) async fn run_llm_extraction(
     session_id: String,
     taxonomy: SessionTaxonomy,
     app_state: AgentContext,
+) {
+    run_llm_extraction_inner(session_id, taxonomy, app_state, None).await;
+}
+
+/// Test-only entry point that injects a pre-built LLM provider, bypassing
+/// credential loading and `resolve_memory_provider`.
+#[cfg(test)]
+pub(crate) async fn run_llm_extraction_with_provider(
+    session_id: String,
+    taxonomy: SessionTaxonomy,
+    app_state: AgentContext,
+    provider: Arc<dyn LlmProvider>,
+) {
+    run_llm_extraction_inner(session_id, taxonomy, app_state, Some(provider)).await;
+}
+
+/// Inner implementation that accepts an optional provider override for test injection.
+///
+/// When `provider_override` is `Some`, the given provider is used directly
+/// instead of calling `resolve_memory_provider`.
+async fn run_llm_extraction_inner(
+    session_id: String,
+    taxonomy: SessionTaxonomy,
+    app_state: AgentContext,
+    provider_override: Option<Arc<dyn LlmProvider>>,
 ) {
     // ── Load session ───────────────────────────────────────────────────────
     let session_repo =
@@ -139,15 +166,52 @@ pub(crate) async fn run_llm_extraction(
     };
 
     // ── Resolve provider ───────────────────────────────────────────────────
-    let provider = match resolve_memory_provider(&app_state.db).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(
-                session_id = %session_id,
-                error = %e,
-                "llm_extraction: no LLM provider available; skipping extraction"
-            );
-            return;
+    // In tests, a provider_override bypasses credential loading entirely.
+    let provider: Box<dyn LlmProvider> = if let Some(p) = provider_override {
+        struct ArcProvider(Arc<dyn LlmProvider>);
+        use std::pin::Pin;
+        impl LlmProvider for ArcProvider {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            fn stream<'a>(
+                &'a self,
+                conv: &'a djinn_provider::message::Conversation,
+                tools: &'a [serde_json::Value],
+                tool_choice: Option<djinn_provider::provider::ToolChoice>,
+            ) -> Pin<
+                Box<
+                    dyn futures::Future<
+                            Output = anyhow::Result<
+                                Pin<
+                                    Box<
+                                        dyn futures::Stream<
+                                                Item = anyhow::Result<
+                                                    djinn_provider::provider::StreamEvent,
+                                                >,
+                                            > + Send,
+                                    >,
+                                >,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                self.0.stream(conv, tools, tool_choice)
+            }
+        }
+        Box::new(ArcProvider(p))
+    } else {
+        match resolve_memory_provider(&app_state.db).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "llm_extraction: no LLM provider available; skipping extraction"
+                );
+                return;
+            }
         }
     };
 
