@@ -61,6 +61,33 @@ pub struct AgentRoleMetrics {
     pub avg_time_seconds: f64,
 }
 
+/// A pending amendment in `learned_prompt_history` that has not yet been
+/// evaluated (action = 'keep', no metrics_after recorded).
+pub struct PendingAmendmentEvaluation {
+    /// History record ID.
+    pub history_id: String,
+    /// Role the amendment applies to.
+    pub role_id: String,
+    /// ISO-8601 timestamp when the amendment was first applied.
+    pub created_at: String,
+    /// The amendment text (same as `proposed_text`).
+    pub proposed_text: String,
+    /// Metrics snapshot at proposal time (JSON string, may be None).
+    pub metrics_before: Option<String>,
+}
+
+/// Windowed metrics for a role: task counts and averages over a time range.
+pub struct WindowedRoleMetrics {
+    /// Number of closed tasks completed in the window.
+    pub completed_task_count: i64,
+    /// Number of closed tasks that failed in the window.
+    pub failed_task_count: i64,
+    /// Success rate = completed / (completed + failed).
+    pub success_rate: f64,
+    /// Average total tokens per completed session in the window.
+    pub avg_tokens: f64,
+}
+
 pub struct AgentRoleRepository {
     db: Database,
     events: EventBus,
@@ -363,6 +390,224 @@ impl AgentRoleRepository {
             avg_tokens: session_row.0,
             avg_time_seconds: session_row.1,
         })
+    }
+
+    /// Return pending (action='keep', metrics_after IS NULL) history entries for
+    /// all roles in the project.  These are amendments that have been applied but
+    /// not yet evaluated.
+    pub async fn get_pending_evaluations(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<PendingAmendmentEvaluation>> {
+        self.db.ensure_initialized().await?;
+        let rows: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT h.id, h.role_id, h.created_at, h.proposed_text, h.metrics_before
+             FROM learned_prompt_history h
+             JOIN agent_roles r ON r.id = h.role_id
+             WHERE r.project_id = ?1
+               AND h.action = 'keep'
+               AND h.metrics_after IS NULL
+             ORDER BY h.created_at ASC",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(history_id, role_id, created_at, proposed_text, metrics_before)| {
+                    PendingAmendmentEvaluation {
+                        history_id,
+                        role_id,
+                        created_at,
+                        proposed_text,
+                        metrics_before,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    /// Count closed tasks for a role (by agent_type) that completed (or failed)
+    /// strictly after `since_timestamp` (ISO-8601 string).
+    ///
+    /// Returns `(completed_count, failed_count)` — tasks closed after the given
+    /// timestamp whose sessions used the given agent_type.
+    pub async fn count_closed_tasks_since(
+        &self,
+        project_id: &str,
+        agent_type: &str,
+        since_timestamp: &str,
+    ) -> Result<(i64, i64)> {
+        self.db.ensure_initialized().await?;
+        let row: (i64, i64) = sqlx::query_as(
+            "SELECT
+                COALESCE(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN t.close_reason != 'completed' OR t.close_reason IS NULL THEN 1 ELSE 0 END), 0)
+             FROM tasks t
+             WHERE t.project_id = ?1
+               AND t.status = 'closed'
+               AND t.closed_at > ?3
+               AND EXISTS (
+                   SELECT 1 FROM sessions s
+                   WHERE s.task_id = t.id AND s.agent_type = ?2
+               )",
+        )
+        .bind(project_id)
+        .bind(agent_type)
+        .bind(since_timestamp)
+        .fetch_one(self.db.pool())
+        .await
+        .unwrap_or((0, 0));
+        Ok(row)
+    }
+
+    /// Return windowed metrics for a role over tasks closed in a time range.
+    ///
+    /// `from_timestamp` and `to_timestamp` are ISO-8601 strings (exclusive on
+    /// from, inclusive on to).  Pass `None` for open-ended bounds.
+    pub async fn get_windowed_metrics(
+        &self,
+        project_id: &str,
+        agent_type: &str,
+        from_timestamp: Option<&str>,
+        to_timestamp: Option<&str>,
+    ) -> Result<WindowedRoleMetrics> {
+        self.db.ensure_initialized().await?;
+
+        // Default open bounds to sentinel values that cover all time.
+        let from = from_timestamp.unwrap_or("1970-01-01T00:00:00.000Z");
+        let to = to_timestamp.unwrap_or("9999-12-31T23:59:59.999Z");
+
+        let row: (i64, i64, f64) = sqlx::query_as(
+            "SELECT
+                COALESCE(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN t.close_reason != 'completed' THEN 1 ELSE 0 END), 0),
+                COALESCE(AVG(
+                    CASE WHEN t.close_reason = 'completed'
+                        THEN (
+                            SELECT COALESCE(AVG(CAST(s.tokens_in + s.tokens_out AS REAL)), 0.0)
+                            FROM sessions s
+                            WHERE s.task_id = t.id AND s.agent_type = ?2
+                        )
+                        ELSE NULL
+                    END
+                ), 0.0)
+             FROM tasks t
+             WHERE t.project_id = ?1
+               AND t.status = 'closed'
+               AND t.closed_at > ?3
+               AND t.closed_at <= ?4
+               AND EXISTS (
+                   SELECT 1 FROM sessions s
+                   WHERE s.task_id = t.id AND s.agent_type = ?2
+               )",
+        )
+        .bind(project_id)
+        .bind(agent_type)
+        .bind(from)
+        .bind(to)
+        .fetch_one(self.db.pool())
+        .await
+        .unwrap_or((0, 0, 0.0));
+
+        let completed = row.0;
+        let failed = row.1;
+        let total = completed + failed;
+        let success_rate = if total > 0 {
+            completed as f64 / total as f64
+        } else {
+            0.0
+        };
+
+        Ok(WindowedRoleMetrics {
+            completed_task_count: completed,
+            failed_task_count: failed,
+            success_rate,
+            avg_tokens: row.2,
+        })
+    }
+
+    /// Update a `learned_prompt_history` record with the evaluation outcome.
+    ///
+    /// `action` must be `'confirmed'` (metrics improved — keep the amendment) or
+    /// `'discard'` (metrics did not improve — revert).
+    /// `metrics_after` is a JSON snapshot of the post-amendment metrics.
+    pub async fn resolve_pending_amendment(
+        &self,
+        history_id: &str,
+        action: &str,
+        metrics_after: &str,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE learned_prompt_history
+             SET action = ?2, metrics_after = ?3
+             WHERE id = ?1",
+        )
+        .bind(history_id)
+        .bind(action)
+        .bind(metrics_after)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Revert a role's `learned_prompt` to the state it had before the given
+    /// amendment was appended.
+    ///
+    /// If the amendment appears in `learned_prompt` it is removed (along with its
+    /// separator).  If the amendment was the only content the field is set to NULL.
+    pub async fn revert_learned_prompt(
+        &self,
+        role_id: &str,
+        amendment_text: &str,
+    ) -> Result<AgentRole> {
+        self.db.ensure_initialized().await?;
+
+        let role = self
+            .get(role_id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("agent_role not found: {role_id}")))?;
+
+        let current = role.learned_prompt.as_deref().unwrap_or("").trim();
+        let amendment = amendment_text.trim();
+
+        // Build new learned_prompt by stripping the amendment.
+        let new_learned_prompt: Option<String> = if current == amendment {
+            // Entire learned_prompt was this one amendment — clear it.
+            None
+        } else if let Some(prefix) = current.strip_suffix(amendment) {
+            // Amendment is at the end; also strip the separator that preceded it.
+            let trimmed = prefix.trim_end_matches('\n').trim_end_matches("---").trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        } else {
+            // Fallback: leave unchanged (we can't safely strip from mid-string).
+            role.learned_prompt.clone()
+        };
+
+        sqlx::query(
+            "UPDATE agent_roles
+             SET learned_prompt = ?2,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(role_id)
+        .bind(new_learned_prompt.as_deref())
+        .execute(self.db.pool())
+        .await?;
+
+        let updated = self
+            .get(role_id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("agent_role not found after revert: {role_id}")))?;
+        self.events.send(DjinnEventEnvelope::agent_role_updated(&updated));
+        Ok(updated)
     }
 
     /// Append an amendment to a role's `learned_prompt` and log the proposal to
