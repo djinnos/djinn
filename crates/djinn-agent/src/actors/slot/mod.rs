@@ -125,4 +125,7 @@ mod helpers_tests;
 mod lifecycle_tests;
 
 #[cfg(test)]
+mod llm_extraction_tests;
+
+#[cfg(test)]
 mod worktree_tests;
