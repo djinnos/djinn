@@ -17,12 +17,34 @@ pub struct McpServerConfig {
     pub command: Option<String>,
 }
 
+/// A single verification rule: a glob pattern matched against changed file paths,
+/// and the commands to run when any changed file matches the pattern.
+///
+/// Example entry in `.djinn/settings.json`:
+/// ```json
+/// {"match": "crates/djinn-mcp/**", "commands": ["cargo test -p djinn-mcp", "cargo clippy -p djinn-mcp -- -D warnings"]}
+/// ```
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct VerificationRule {
+    /// Glob pattern matched against changed file paths (e.g. `"crates/djinn-mcp/**"`).
+    #[serde(rename = "match")]
+    pub pattern: String,
+    /// Commands to run when a changed file matches `pattern`.
+    pub commands: Vec<String>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct DjinnSettings {
     #[serde(default)]
     pub setup: Vec<CommandSpec>,
     #[serde(default)]
     pub verification: Vec<CommandSpec>,
+    /// File-pattern-to-command rules for scoped verification.
+    ///
+    /// When populated, the agent should match changed files against these rules and run
+    /// only the matching commands rather than the full `verification` suite.
+    #[serde(default)]
+    pub verification_rules: Vec<VerificationRule>,
     /// Named MCP server registry for this project.
     ///
     /// Keys are server names (referenced by `agent_roles.mcp_servers`).
@@ -41,17 +63,17 @@ pub struct DjinnSettings {
     pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
-/// Load commands from `.djinn/settings.json` in the worktree.
+/// Load the full project settings from `.djinn/settings.json` in the worktree.
 ///
-/// Returns empty vecs when the file is absent. Errors on malformed JSON.
-pub fn load_commands(worktree_path: &Path) -> Result<(Vec<CommandSpec>, Vec<CommandSpec>), String> {
+/// Returns a default (empty) `DjinnSettings` when the file is absent. Errors on malformed JSON.
+pub fn load_settings(worktree_path: &Path) -> Result<DjinnSettings, String> {
     let settings_path = worktree_path.join(".djinn/settings.json");
 
     match std::fs::read_to_string(&settings_path) {
         Ok(content) => match serde_json::from_str::<DjinnSettings>(&content) {
             Ok(settings) => {
-                tracing::info!(path = %settings_path.display(), "Loaded commands from .djinn/settings.json");
-                Ok((settings.setup, settings.verification))
+                tracing::info!(path = %settings_path.display(), "Loaded .djinn/settings.json");
+                Ok(settings)
             }
             Err(e) => Err(format!(
                 "invalid .djinn/settings.json at {}: {e}",
@@ -59,14 +81,21 @@ pub fn load_commands(worktree_path: &Path) -> Result<(Vec<CommandSpec>, Vec<Comm
             )),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::debug!(path = %settings_path.display(), "No .djinn/settings.json found; using empty commands");
-            Ok((Vec::new(), Vec::new()))
+            tracing::debug!(path = %settings_path.display(), "No .djinn/settings.json found; using defaults");
+            Ok(DjinnSettings::default())
         }
         Err(e) => Err(format!(
             "failed to read .djinn/settings.json at {}: {e}",
             settings_path.display()
         )),
     }
+}
+
+/// Load commands from `.djinn/settings.json` in the worktree.
+///
+/// Returns empty vecs when the file is absent. Errors on malformed JSON.
+pub fn load_commands(worktree_path: &Path) -> Result<(Vec<CommandSpec>, Vec<CommandSpec>), String> {
+    load_settings(worktree_path).map(|s| (s.setup, s.verification))
 }
 
 /// Load the MCP server registry from `.djinn/settings.json` in the worktree.
@@ -369,5 +398,47 @@ mod tests {
         // Empty role server list → nothing resolved even when registry is populated.
         let resolved = resolve_mcp_servers("t3", "worker", &[], &registry);
         assert!(resolved.is_empty());
+    }
+
+    // ── verification_rules tests ──────────────────────────────────────────────
+
+    #[test]
+    fn load_settings_parses_verification_rules() {
+        let dir = tempdir_in_tmp();
+        write_settings(
+            &dir,
+            r#"{
+                "verification_rules": [
+                    {"match": "crates/djinn-mcp/**", "commands": ["cargo test -p djinn-mcp"]},
+                    {"match": "crates/djinn-core/**", "commands": ["cargo test -p djinn-core", "cargo clippy -p djinn-core -- -D warnings"]}
+                ]
+            }"#,
+        );
+
+        let settings = load_settings(dir.path()).expect("load settings");
+        assert_eq!(settings.verification_rules.len(), 2);
+        assert_eq!(settings.verification_rules[0].pattern, "crates/djinn-mcp/**");
+        assert_eq!(settings.verification_rules[0].commands, vec!["cargo test -p djinn-mcp"]);
+        assert_eq!(settings.verification_rules[1].pattern, "crates/djinn-core/**");
+        assert_eq!(settings.verification_rules[1].commands.len(), 2);
+    }
+
+    #[test]
+    fn load_settings_defaults_verification_rules_to_empty() {
+        let dir = tempdir_in_tmp();
+        write_settings(&dir, r#"{"setup": [], "verification": []}"#);
+
+        let settings = load_settings(dir.path()).expect("load settings");
+        assert!(settings.verification_rules.is_empty());
+    }
+
+    #[test]
+    fn load_settings_returns_default_when_file_missing() {
+        let dir = tempdir_in_tmp();
+        let settings = load_settings(dir.path()).expect("load settings on missing file");
+        assert!(settings.setup.is_empty());
+        assert!(settings.verification.is_empty());
+        assert!(settings.verification_rules.is_empty());
+        assert!(settings.mcp_servers.is_empty());
     }
 }
