@@ -13,11 +13,11 @@ pub struct AgentRole {
     pub system_prompt_extensions: String,
     pub model_preference: Option<String>,
     pub verification_command: Option<String>,
-    /// JSON array of MCP server refs
+    /// JSON array of MCP server references (`[]` when none).
     pub mcp_servers: String,
-    /// JSON array of skill refs
+    /// JSON array of skill names assigned to this role, e.g. `'["rust-expert","tdd"]'`.
     pub skills: String,
-    /// Whether this is the default instance for its base_role
+    /// `true` when this is the project-level default for its `base_role`.
     pub is_default: bool,
     /// Auto-improvement loop amendments — never modified by users directly.
     /// Appended after system_prompt_extensions in the session prompt.
