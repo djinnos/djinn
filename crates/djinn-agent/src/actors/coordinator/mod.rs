@@ -184,6 +184,18 @@ enum CoordinatorMessage {
     /// Trigger an immediate Architect patrol dispatch (for testing).
     #[cfg(test)]
     TriggerArchitectPatrol,
+    /// Lead requests Architect escalation for a task.
+    /// Creates a review task and dispatches Architect to it.
+    DispatchArchitectEscalation {
+        source_task_id: String,
+        reason: String,
+        project_id: String,
+    },
+    /// Increment the Lead escalation count for a task; reply with new count.
+    IncrementEscalationCount {
+        task_id: String,
+        reply: tokio::sync::oneshot::Sender<u32>,
+    },
 }
 
 // ─── Actor (≤20 fields — AGENT-11) ───────────────────────────────────────────
@@ -227,6 +239,9 @@ struct CoordinatorActor {
     architect_tick_counter: u32,
     /// Rolling-window throughput tracking: epic_id → Vec of merge event instants.
     throughput_events: HashMap<String, Vec<StdInstant>>,
+    /// Per-task Lead escalation count (request_pm call count per task UUID).
+    /// When a task accumulates ≥ 2 escalations, the next request_pm routes to Architect.
+    escalation_counts: HashMap<String, u32>,
     // Metrics
     dispatched: u64,
     recovered: u64,
@@ -279,6 +294,7 @@ impl CoordinatorActor {
             prune_tick_counter: 0,
             architect_tick_counter: 0,
             throughput_events: HashMap::new(),
+            escalation_counts: HashMap::new(),
             dispatched: 0,
             recovered: 0,
         }
@@ -515,6 +531,19 @@ impl CoordinatorActor {
             #[cfg(test)]
             CoordinatorMessage::TriggerArchitectPatrol => {
                 self.maybe_dispatch_architect_patrol().await;
+            }
+            CoordinatorMessage::DispatchArchitectEscalation {
+                source_task_id,
+                reason,
+                project_id,
+            } => {
+                self.dispatch_architect_escalation(&source_task_id, &reason, &project_id)
+                    .await;
+            }
+            CoordinatorMessage::IncrementEscalationCount { task_id, reply } => {
+                let count = self.escalation_counts.entry(task_id).or_insert(0);
+                *count += 1;
+                let _ = reply.send(*count);
             }
         }
     }
@@ -1063,6 +1092,42 @@ impl CoordinatorHandle {
     #[cfg(test)]
     pub async fn trigger_architect_patrol(&self) -> Result<(), CoordinatorError> {
         self.send(CoordinatorMessage::TriggerArchitectPatrol).await
+    }
+
+    /// Dispatch an Architect escalation for a task.
+    ///
+    /// Creates a review task and dispatches the Architect to it.
+    /// Called when Lead uses `request_architect` or auto-escalation fires on 2nd `request_pm`.
+    pub async fn dispatch_architect_escalation(
+        &self,
+        source_task_id: &str,
+        reason: &str,
+        project_id: &str,
+    ) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::DispatchArchitectEscalation {
+            source_task_id: source_task_id.to_owned(),
+            reason: reason.to_owned(),
+            project_id: project_id.to_owned(),
+        })
+        .await
+    }
+
+    /// Increment the Lead escalation count for a task and return the new count.
+    ///
+    /// When the count reaches ≥ 2, the caller should route to Architect instead of Lead.
+    pub async fn increment_escalation_count(
+        &self,
+        task_id: &str,
+    ) -> Result<u32, CoordinatorError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(CoordinatorMessage::IncrementEscalationCount {
+                task_id: task_id.to_owned(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| CoordinatorError::ActorDead)?;
+        rx.await.map_err(|_| CoordinatorError::NoResponse)
     }
 }
 
