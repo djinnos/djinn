@@ -222,6 +222,7 @@ impl NoteRepository {
             (task_scores, 60.0),
         ];
         let fused = rrf_fuse(&signals, &confidence_map);
+        let fused_score_map: HashMap<String, f64> = fused.iter().cloned().collect();
         let ranked_ids: Vec<String> = fused
             .into_iter()
             .filter_map(|(id, _)| candidate_ids.contains(&id).then_some(id))
@@ -258,6 +259,7 @@ impl NoteRepository {
         Ok(ranked_ids
             .into_iter()
             .filter_map(|id| {
+                let score = fused_score_map.get(&id).copied().unwrap_or(0.0);
                 by_id
                     .get(&id)
                     .map(
@@ -268,6 +270,7 @@ impl NoteRepository {
                             folder: folder.clone(),
                             note_type: note_type.clone(),
                             snippet: abstract_text.clone(),
+                            score,
                         },
                     )
             })

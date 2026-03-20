@@ -245,6 +245,9 @@ pub struct MemorySearchResultItem {
     pub folder: String,
     pub note_type: String,
     pub snippet: String,
+    /// RRF fusion score (higher = more relevant). Defaults to 0.0 for backward compat.
+    #[serde(default)]
+    pub score: f64,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
