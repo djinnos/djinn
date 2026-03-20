@@ -16,9 +16,14 @@ pub(super) async fn board_health_impl(
                 // Surface any project health issues from the coordinator.
                 if let Some(coordinator) = server.state.coordinator().await
                     && let Ok(status) = coordinator.get_status()
-                    && !status.unhealthy_projects.is_empty()
                 {
-                    parsed.project_issues = Some(status.unhealthy_projects);
+                    if !status.unhealthy_projects.is_empty() {
+                        parsed.project_issues = Some(status.unhealthy_projects);
+                    }
+                    // Surface epic throughput data for the Architect.
+                    if !status.epic_throughput.is_empty() {
+                        parsed.epic_throughput = Some(status.epic_throughput);
+                    }
                 }
 
                 // Surface LSP server warnings (missing binaries).
