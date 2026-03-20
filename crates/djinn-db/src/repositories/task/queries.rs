@@ -50,7 +50,7 @@ impl TaskRepository {
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.verification_failure_count,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.close_reason, t.merge_commit_sha, t.merge_conflict_metadata, t.memory_refs
+                    t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -130,7 +130,7 @@ impl TaskRepository {
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.verification_failure_count,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.close_reason, t.merge_commit_sha, t.merge_conflict_metadata, t.memory_refs
+                    t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -224,7 +224,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs,
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
                     (SELECT COUNT(*) FROM blockers b
                      JOIN tasks bt ON b.blocking_task_id = bt.id
                      WHERE b.task_id = tasks.id AND bt.status != 'closed') AS unresolved_blocker_count
@@ -321,7 +321,8 @@ impl TaskRepository {
                     ) THEN 1 ELSE 0 END) AS in_review,
                     MIN(CASE WHEN t.status IN (
                         'needs_task_review','in_task_review','closed'
-                    ) THEN t.updated_at ELSE NULL END) AS oldest_review_at
+                    ) THEN t.updated_at ELSE NULL END) AS oldest_review_at,
+                    SUM(CASE WHEN t.status = 'pr_ready' THEN 1 ELSE 0 END) AS pr_ready
              FROM epics e
              LEFT JOIN tasks t ON t.epic_id = e.id
              GROUP BY e.id
@@ -337,6 +338,7 @@ impl TaskRepository {
                 let closed: i64 = row.get::<Option<i64>, _>(4).unwrap_or(0);
                 let in_review: i64 = row.get::<Option<i64>, _>(5).unwrap_or(0);
                 let oldest_review_at: Option<String> = row.get(6);
+                let pr_ready: i64 = row.get::<Option<i64>, _>(7).unwrap_or(0);
                 let pct = if total > 0 {
                     (closed as f64 / total as f64 * 1000.0).round() / 10.0
                 } else {
@@ -349,6 +351,7 @@ impl TaskRepository {
                     "total":            total,
                     "closed":           closed,
                     "in_review":        in_review,
+                    "pr_ready":         pr_ready,
                     "pct_complete":     pct,
                     "oldest_review_at": oldest_review_at,
                 })
@@ -388,7 +391,7 @@ impl TaskRepository {
                     e.short_id AS epic_short_id
              FROM tasks t
              JOIN epics e ON t.epic_id = e.id
-             WHERE t.status IN ('needs_task_review','in_task_review','closed')
+             WHERE t.status IN ('needs_task_review','in_task_review','pr_ready','closed')
              ORDER BY t.updated_at ASC",
         )
         .fetch_all(self.db.pool())
@@ -426,7 +429,7 @@ impl TaskRepository {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, merge_conflict_metadata, memory_refs
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
              FROM tasks
              WHERE status = 'in_progress'
                AND updated_at < datetime('now', '-{stale_hours} hours')"
