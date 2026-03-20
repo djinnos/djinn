@@ -51,6 +51,7 @@ pub struct CoordinatorDeps {
 
 mod dispatch;
 mod health;
+mod pr_poller;
 mod prompt_eval;
 mod rules;
 mod wave;
@@ -243,6 +244,11 @@ struct CoordinatorActor {
     /// Per-task Lead escalation count (request_pm call count per task UUID).
     /// When a task accumulates ≥ 2 escalations, the next request_pm routes to Architect.
     escalation_counts: HashMap<String, u32>,
+    /// PR status cache: task_id → last known head SHA.
+    ///
+    /// Used by the PR poller to skip redundant CI check-run queries when the
+    /// PR's head commit has not changed since the previous poll cycle.
+    pr_status_cache: HashMap<String, String>,
     // Metrics
     dispatched: u64,
     recovered: u64,
@@ -296,6 +302,7 @@ impl CoordinatorActor {
             architect_tick_counter: 0,
             throughput_events: HashMap::new(),
             escalation_counts: HashMap::new(),
+            pr_status_cache: HashMap::new(),
             dispatched: 0,
             recovered: 0,
         }
@@ -354,6 +361,7 @@ impl CoordinatorActor {
                     self.enforce_session_stall_timeout().await;
                     self.detect_and_recover_stuck_filtered(None).await;
                     self.dispatch_ready_tasks(None).await;
+                    self.poll_pr_statuses().await;
                     if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
                         let app_state = crate::context::AgentContext {
                             db: self.db.clone(),
