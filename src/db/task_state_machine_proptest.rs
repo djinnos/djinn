@@ -14,11 +14,15 @@ use crate::test_helpers;
 
 // ── Runtime helper ────────────────────────────────────────────────────────────
 
-fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
+fn rt() -> &'static tokio::runtime::Runtime {
+    use std::sync::OnceLock;
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    })
 }
 
 /// Stand up a fresh in-memory DB, create an epic, and return an `open` task.
@@ -96,58 +100,85 @@ fn arb_action() -> impl Strategy<Value = TransitionAction> {
     ]
 }
 
-// ── Property tests ────────────────────────────────────────────────────────────
+// ── DB-backed exhaustive tests (plain #[test], not proptest) ─────────────────
+// With only 8 non-closed statuses there is no sampling benefit — just iterate.
 
-proptest! {
-    // 1. closed_at is set after Close and cleared after Reopen, for any starting status.
-    #[test]
-    fn closed_at_set_on_close_cleared_on_reopen(from in arb_non_closed_status()) {
-        let (has_closed_at, cleared_after_reopen) = rt().block_on(async move {
+const NON_CLOSED_STATUSES: &[TaskStatus] = &[
+    TaskStatus::Open,
+    TaskStatus::InProgress,
+    TaskStatus::Verifying,
+    TaskStatus::NeedsTaskReview,
+    TaskStatus::InTaskReview,
+    TaskStatus::PrReady,
+    TaskStatus::NeedsPmIntervention,
+    TaskStatus::InPmIntervention,
+];
+
+#[test]
+fn closed_at_set_on_close_cleared_on_reopen() {
+    rt().block_on(async {
+        for from in NON_CLOSED_STATUSES {
+            let status_str = from.as_str();
             let (repo, id) = make_open_task().await;
-            repo.set_status(&id, from.as_str()).await.unwrap();
+            repo.set_status(&id, status_str).await.unwrap();
             let after_close = repo
                 .transition(&id, TransitionAction::Close, "", "system", None, None)
                 .await
-                .unwrap();
+                .unwrap_or_else(|_| panic!("Close failed from {status_str}"));
+            assert!(after_close.closed_at.is_some(), "closed_at must be set after Close from {status_str}");
             let after_reopen = repo
                 .transition(&id, TransitionAction::Reopen, "", "system", Some("test"), None)
                 .await
-                .unwrap();
-            (after_close.closed_at.is_some(), after_reopen.closed_at.is_none())
-        });
-        prop_assert!(has_closed_at, "closed_at must be set after Close");
-        prop_assert!(cleared_after_reopen, "closed_at must be None after Reopen");
-    }
+                .unwrap_or_else(|_| panic!("Reopen failed from closed (was {status_str})"));
+            assert!(after_reopen.closed_at.is_none(), "closed_at must be None after Reopen (was {status_str})");
+        }
+    });
+}
 
-    // 2. reopen_count strictly increases on every close/reopen cycle.
-    #[test]
-    fn reopen_count_monotonically_increases(n_cycles in 3usize..=6) {
-        let counts: Vec<i64> = rt().block_on(async move {
+#[test]
+fn reopen_count_monotonically_increases() {
+    rt().block_on(async {
+        let (repo, id) = make_open_task().await;
+        let mut prev = 0i64;
+        for cycle in 0..6 {
+            repo.transition(&id, TransitionAction::Close, "", "system", None, None)
+                .await
+                .unwrap_or_else(|_| panic!("Close failed on cycle {cycle}"));
+            let t = repo
+                .transition(&id, TransitionAction::Reopen, "", "system", Some("cycle"), None)
+                .await
+                .unwrap_or_else(|_| panic!("Reopen failed on cycle {cycle}"));
+            assert!(t.reopen_count > prev, "reopen_count must increase: {prev} -> {}", t.reopen_count);
+            prev = t.reopen_count;
+        }
+    });
+}
+
+#[test]
+fn double_close_returns_error() {
+    rt().block_on(async {
+        for from in NON_CLOSED_STATUSES {
+            let status_str = from.as_str();
             let (repo, id) = make_open_task().await;
-            let mut counts = Vec::with_capacity(n_cycles);
-            for _ in 0..n_cycles {
-                repo.transition(&id, TransitionAction::Close, "", "system", None, None)
-                    .await
-                    .unwrap();
-                let t = repo
-                    .transition(&id, TransitionAction::Reopen, "", "system", Some("cycle"), None)
-                    .await
-                    .unwrap();
-                counts.push(t.reopen_count);
-            }
-            counts
-        });
-        prop_assert_eq!(counts.len(), n_cycles);
-        for window in counts.windows(2) {
-            prop_assert!(
-                window[1] > window[0],
-                "reopen_count must increase: {} -> {}",
-                window[0],
-                window[1]
+            repo.set_status(&id, status_str).await.unwrap();
+            repo.transition(&id, TransitionAction::Close, "", "system", None, None)
+                .await
+                .unwrap_or_else(|_| panic!("First Close failed from {status_str}"));
+            let err = repo
+                .transition(&id, TransitionAction::Close, "", "system", None, None)
+                .await
+                .expect_err("second Close must return an error");
+            assert!(
+                matches!(err, Error::InvalidTransition(_)),
+                "expected InvalidTransition, got {err:?} (from {status_str})"
             );
         }
-    }
+    });
+}
 
+// ── Property tests (pure logic, no DB — 256 random samples worthwhile) ───────
+
+proptest! {
     // 3. UserOverride accepts every (from, to) status pair — no Err path.
     #[test]
     fn user_override_accepts_any_status_pair(from in arb_status(), to in arb_status()) {
@@ -157,26 +188,7 @@ proptest! {
         prop_assert_eq!(apply.to_status, Some(to));
     }
 
-    // 4. Attempting to close an already-closed task returns InvalidTransition, never panics.
-    #[test]
-    fn double_close_returns_error(from in arb_non_closed_status()) {
-        let second_close = rt().block_on(async move {
-            let (repo, id) = make_open_task().await;
-            repo.set_status(&id, from.as_str()).await.unwrap();
-            repo.transition(&id, TransitionAction::Close, "", "system", None, None)
-                .await
-                .unwrap();
-            repo.transition(&id, TransitionAction::Close, "", "system", None, None)
-                .await
-        });
-        prop_assert!(second_close.is_err(), "second Close must return an error");
-        prop_assert!(
-            matches!(second_close.unwrap_err(), Error::InvalidTransition(_)),
-            "error must be InvalidTransition"
-        );
-    }
-
-    // 5. Every successful compute_transition produces a to_status whose as_str()
+    // 4. Every successful compute_transition produces a to_status whose as_str()
     //    round-trips through TaskStatus::parse without error.
     #[test]
     fn successful_transition_gives_parseable_status(
