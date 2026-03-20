@@ -119,14 +119,16 @@ function isRetryableError(error: unknown): boolean {
 
 export async function callMcpTool<TName extends McpToolName>(
   name: TName,
-  args?: McpToolInput<TName>
+  args?: McpToolInput<TName>,
+  options?: { timeout?: number },
 ): Promise<McpToolOutput<TName>> {
+  const timeoutMs = options?.timeout ?? REQUEST_TIMEOUT_MS;
   const invoke = async (reconnect: boolean): Promise<McpToolOutput<TName>> => {
     const client = await connectClient(reconnect);
     const result = (await client.callTool({
       name,
       arguments: (args ?? {}) as Record<string, unknown>,
-    }, undefined, { timeout: REQUEST_TIMEOUT_MS })) as ToolCallResult;
+    }, undefined, { timeout: timeoutMs })) as ToolCallResult;
     if (result.isError) {
       throw new Error(buildErrorMessage(result));
     }

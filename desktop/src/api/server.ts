@@ -97,15 +97,34 @@ export async function fetchProviderCatalog(): Promise<Provider[]> {
   }));
 }
 
+export type OAuthResult = {
+  success: boolean;
+  error?: string;
+  /** For device-code flows: code the user must enter. */
+  user_code?: string;
+  /** For device-code flows: URL where the user enters the code. */
+  verification_uri?: string;
+  /** True when the flow is pending (device-code polling in background). */
+  pending?: boolean;
+};
+
 export async function startProviderOAuth(
   providerId: string
-): Promise<{ success: boolean; error?: string }> {
+): Promise<OAuthResult> {
   try {
     const result = await callMcpTool("provider_oauth_start", {
       provider_id: providerId,
     });
-    if (!result.ok || !result.success) {
+    if (!result.ok) {
       return { success: false, error: result.error ?? "OAuth flow failed" };
+    }
+    if (result.pending) {
+      return {
+        success: false,
+        pending: true,
+        user_code: result.user_code ?? undefined,
+        verification_uri: result.verification_uri ?? undefined,
+      };
     }
     return { success: true };
   } catch (error) {
@@ -251,12 +270,22 @@ export async function updateProject(projectId: string, updates: { branch?: strin
     throw new Error("Project not found");
   }
 
-  await callMcpTool("project_add", {
-    name: project.name,
-    path: project.path,
-    branch: updates.branch ?? project.branch,
-    auto_merge: updates.auto_merge ?? project.auto_merge,
-  });
+  const configCalls: Promise<unknown>[] = [];
+  if (updates.branch !== undefined) {
+    configCalls.push(callMcpTool("project_config_set", {
+      project: project.path,
+      key: "target_branch",
+      value: updates.branch,
+    }));
+  }
+  if (updates.auto_merge !== undefined) {
+    configCalls.push(callMcpTool("project_config_set", {
+      project: project.path,
+      key: "auto_merge",
+      value: String(updates.auto_merge),
+    }));
+  }
+  await Promise.all(configCalls);
 }
 
 // Project commands — tools removed from server (now in .djinn/settings.json)
@@ -302,6 +331,7 @@ export async function removeProject(projectId: string): Promise<void> {
 
   await callMcpTool("project_remove", {
     name: project.name,
+    path: project.path,
   });
 }
 

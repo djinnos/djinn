@@ -1,44 +1,37 @@
-//! GitHub App OAuth — Authorization Code + PKCE flow.
+//! GitHub App OAuth — Device Code flow.
 //!
-//! Handles the full PKCE browser-redirect flow, token caching, and silent
-//! refresh for GitHub App user authentication.
+//! Uses the device code flow (no client_secret required) for user authentication:
+//!  1. Request a device code from GitHub.
+//!  2. User visits the verification URL and enters the code.
+//!  3. Poll GitHub until the user authorizes.
+//!  4. Store the user access token + refresh token in the credential vault.
 //!
 //! Tokens are stored encrypted in the credentials DB table under
 //! `__OAUTH_GITHUB_APP`. The installation ID is stored separately under
 //! `__GITHUB_INSTALLATION_ID`.
 
 use anyhow::{Result, anyhow};
-use base64::Engine as _;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::{Mutex as TokioMutex, oneshot};
 
 use crate::repos::CredentialRepository;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/// GitHub OAuth authorization endpoint.
-const GITHUB_AUTHORIZE_URL: &str = "https://github.com/login/oauth/authorize";
+/// GitHub device-code endpoint.
+const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 
-/// GitHub OAuth token exchange endpoint.
-const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
+/// GitHub OAuth access-token endpoint (used for polling and refresh).
+const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 
-/// GitHub App client ID. Replace with the actual GitHub App client ID.
-/// This is read from the credential vault at runtime when available.
-pub const GITHUB_APP_CLIENT_ID_KEY: &str = "__GITHUB_APP_CLIENT_ID";
+/// GitHub App client ID (Djinn AI Bot, owned by @djinnos).
+pub const CLIENT_ID: &str = "Iv23livjPjcHXVzAU7sc";
 
-/// Default GitHub App client ID fallback (override via credential vault).
-const DEFAULT_CLIENT_ID: &str = "Iv23liGitHubAppDjinn";
+/// Default polling max attempts (60 × 5s = 5 minutes).
+const MAX_POLL_ATTEMPTS: u32 = 60;
 
-/// OAuth callback port — shared with Codex flow.
-const OAUTH_PORT: u16 = 1455;
-
-/// Browser redirect timeout in seconds.
-const OAUTH_TIMEOUT_SECS: u64 = 300;
-
-/// OAuth scopes requested for GitHub App user auth.
-const OAUTH_SCOPES: &str = "read:user";
+/// Default polling interval in seconds.
+const DEFAULT_INTERVAL_SECS: u64 = 5;
 
 /// Credential key for storing GitHub App OAuth tokens.
 pub const GITHUB_APP_OAUTH_DB_KEY: &str = "__OAUTH_GITHUB_APP";
@@ -66,11 +59,7 @@ pub struct GitHubAppTokens {
 impl GitHubAppTokens {
     /// Returns true if the access token has expired (with a 60-second buffer).
     pub fn is_expired(&self) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        now >= self.expires_at - 60
+        now_secs() >= self.expires_at - 60
     }
 
     /// Load tokens from the encrypted credential DB.
@@ -99,71 +88,7 @@ impl GitHubAppTokens {
     }
 }
 
-/// Attempt a silent token refresh using the stored refresh_token.
-/// Returns refreshed `GitHubAppTokens` on success, saving them to the DB.
-pub async fn refresh_cached_token(
-    cached: &GitHubAppTokens,
-    client_id: &str,
-    repo: &CredentialRepository,
-) -> Result<GitHubAppTokens> {
-    let tr = refresh_token(client_id, &cached.refresh_token).await?;
-    let tokens = token_response_to_tokens(tr, cached.user_login.clone());
-    tokens.save_to_db(repo).await?;
-    tracing::info!("GitHubApp: token refreshed successfully (lifecycle)");
-    Ok(tokens)
-}
-
-// ─── PKCE helpers ─────────────────────────────────────────────────────────────
-
-struct PkceChallenge {
-    verifier: String,
-    challenge: String,
-}
-
-fn generate_pkce() -> PkceChallenge {
-    use ring::rand::{SecureRandom, SystemRandom};
-    use sha2::Digest as _;
-    let rng = SystemRandom::new();
-    let mut bytes = [0u8; 43];
-    rng.fill(&mut bytes).expect("rng fill");
-    let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-    let digest = sha2::Sha256::digest(verifier.as_bytes());
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-    PkceChallenge {
-        verifier,
-        challenge,
-    }
-}
-
-fn generate_state() -> String {
-    use ring::rand::{SecureRandom, SystemRandom};
-    let rng = SystemRandom::new();
-    let mut bytes = [0u8; 24];
-    rng.fill(&mut bytes).expect("rng fill");
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
-// ─── Auth URL ─────────────────────────────────────────────────────────────────
-
-fn build_authorize_url(
-    client_id: &str,
-    redirect_uri: &str,
-    pkce: &PkceChallenge,
-    state: &str,
-) -> Result<String> {
-    let params = [
-        ("client_id", client_id),
-        ("redirect_uri", redirect_uri),
-        ("scope", OAUTH_SCOPES),
-        ("state", state),
-        ("code_challenge", &pkce.challenge),
-        ("code_challenge_method", "S256"),
-    ];
-    let query = serde_urlencoded::to_string(params)?;
-    Ok(format!("{}?{}", GITHUB_AUTHORIZE_URL, query))
-}
-
-// ─── Token exchange / refresh ─────────────────────────────────────────────────
+// ─── Token response parsing ──────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
@@ -171,57 +96,6 @@ struct TokenResponse {
     refresh_token: String,
     expires_in: Option<i64>,
     refresh_token_expires_in: Option<i64>,
-}
-
-async fn exchange_code(
-    client_id: &str,
-    code: &str,
-    redirect_uri: &str,
-    pkce: &PkceChallenge,
-) -> Result<TokenResponse> {
-    let client = Client::new();
-    let params = [
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("client_id", client_id),
-        ("code_verifier", &pkce.verifier),
-    ];
-    let resp = client
-        .post(GITHUB_TOKEN_URL)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .form(&params)
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("GitHub App token exchange failed ({}): {}", status, text));
-    }
-    Ok(resp.json().await?)
-}
-
-async fn refresh_token(client_id: &str, refresh_token_value: &str) -> Result<TokenResponse> {
-    let client = Client::new();
-    let params = [
-        ("grant_type", "refresh_token"),
-        ("refresh_token", refresh_token_value),
-        ("client_id", client_id),
-    ];
-    let resp = client
-        .post(GITHUB_TOKEN_URL)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .form(&params)
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("GitHub App token refresh failed ({}): {}", status, text));
-    }
-    Ok(resp.json().await?)
 }
 
 fn token_response_to_tokens(tr: TokenResponse, user_login: Option<String>) -> GitHubAppTokens {
@@ -244,103 +118,183 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-// ─── Local callback server ────────────────────────────────────────────────────
+// ─── Token refresh ───────────────────────────────────────────────────────────
 
-fn oauth_callback_router(
-    expected_state: String,
-    tx: Arc<TokioMutex<Option<oneshot::Sender<Result<String>>>>>,
-) -> axum::Router {
-    use axum::{Router, extract::Query, response::Html, routing::get};
-    use std::collections::HashMap;
-
-    Router::new().route(
-        "/callback",
-        get(move |Query(params): Query<HashMap<String, String>>| {
-            let tx = tx.clone();
-            let expected = expected_state.clone();
-            async move {
-                // Check for OAuth error
-                if let Some(error) = params.get("error") {
-                    let msg = params
-                        .get("error_description")
-                        .cloned()
-                        .unwrap_or_else(|| error.clone());
-                    if let Some(sender) = tx.lock().await.take() {
-                        let _ = sender.send(Err(anyhow!("{}", msg)));
-                    }
-                    return Html(html_error(&msg));
-                }
-
-                let code = match params.get("code").cloned() {
-                    Some(c) => c,
-                    None => {
-                        let msg = "Missing authorization code";
-                        if let Some(sender) = tx.lock().await.take() {
-                            let _ = sender.send(Err(anyhow!("{}", msg)));
-                        }
-                        return Html(html_error(msg));
-                    }
-                };
-
-                if params.get("state").map(String::as_str) != Some(&expected) {
-                    let msg = "Invalid state — potential CSRF attack";
-                    if let Some(sender) = tx.lock().await.take() {
-                        let _ = sender.send(Err(anyhow!("{}", msg)));
-                    }
-                    return Html(html_error(msg));
-                }
-
-                if let Some(sender) = tx.lock().await.take() {
-                    let _ = sender.send(Ok(code));
-                }
-                Html(html_success())
-            }
-        }),
-    )
+/// Attempt a silent token refresh using the stored refresh_token.
+/// Returns refreshed `GitHubAppTokens` on success, saving them to the DB.
+pub async fn refresh_cached_token(
+    cached: &GitHubAppTokens,
+    client_id: &str,
+    repo: &CredentialRepository,
+) -> Result<GitHubAppTokens> {
+    let client = Client::new();
+    let params = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", cached.refresh_token.as_str()),
+        ("client_id", client_id),
+    ];
+    let resp = client
+        .post(ACCESS_TOKEN_URL)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&params)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("GitHub App token refresh failed ({}): {}", status, text));
+    }
+    let body = resp.text().await?;
+    let tr: TokenResponse = serde_json::from_str(&body)
+        .map_err(|e| anyhow!("GitHub App token refresh: failed to decode response ({}): {}", e, body))?;
+    let tokens = token_response_to_tokens(tr, cached.user_login.clone());
+    tokens.save_to_db(repo).await?;
+    tracing::info!("GitHubApp: token refreshed successfully");
+    Ok(tokens)
 }
 
-async fn spawn_callback_server(app: axum::Router) -> Result<(tokio::task::JoinHandle<()>, u16)> {
-    use std::net::SocketAddr;
-    let addr = SocketAddr::from(([127, 0, 0, 1], OAUTH_PORT));
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AddrInUse {
-            anyhow!(
-                "OAuth callback port {} is already in use. Stop the process using it and retry.",
-                OAUTH_PORT
-            )
-        } else {
-            anyhow!("Failed to bind OAuth callback port {}: {}", OAUTH_PORT, e)
+// ─── Device code flow ────────────────────────────────────────────────────────
+
+/// Data returned from the first phase of the device code flow.
+#[derive(Debug)]
+pub struct DeviceCodeSession {
+    /// Short code the user types at `verification_uri`.
+    pub user_code: String,
+    /// URL the user visits to authorize (e.g. `https://github.com/login/device`).
+    pub verification_uri: String,
+    /// Pre-filled verification URL (includes user code), if provided by GitHub.
+    pub verification_uri_complete: Option<String>,
+    /// Opaque device code used when polling (not shown to user).
+    device_code: String,
+    /// Recommended polling interval in seconds.
+    interval: u64,
+}
+
+/// Request a device code from GitHub.
+pub async fn start_device_flow() -> Result<DeviceCodeSession> {
+    let client = Client::new();
+
+    #[derive(Serialize)]
+    struct DeviceCodeRequest {
+        client_id: &'static str,
+    }
+
+    #[derive(Deserialize)]
+    struct DeviceCodeResponse {
+        device_code: String,
+        user_code: String,
+        verification_uri: String,
+        verification_uri_complete: Option<String>,
+        interval: Option<u64>,
+    }
+
+    let resp = client
+        .post(DEVICE_CODE_URL)
+        .header("Accept", "application/json")
+        .json(&DeviceCodeRequest {
+            client_id: CLIENT_ID,
+        })
+        .send()
+        .await
+        .map_err(|e| anyhow!("device code request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("device code endpoint error ({}): {}", status, body));
+    }
+
+    let resp: DeviceCodeResponse = resp
+        .json()
+        .await
+        .map_err(|e| anyhow!("failed to parse device code response: {}", e))?;
+
+    Ok(DeviceCodeSession {
+        user_code: resp.user_code,
+        verification_uri: resp.verification_uri,
+        verification_uri_complete: resp.verification_uri_complete,
+        device_code: resp.device_code,
+        interval: resp.interval.unwrap_or(DEFAULT_INTERVAL_SECS),
+    })
+}
+
+/// Poll GitHub until the user authorizes, then store tokens. Public so the MCP
+/// layer can spawn this as a background task after returning the device code.
+pub async fn poll_and_store(session: &DeviceCodeSession, repo: &CredentialRepository) -> Result<GitHubAppTokens> {
+    let tr = poll_device_flow(session).await?;
+    let user_login = fetch_user_login(&tr.access_token).await;
+    let tokens = token_response_to_tokens(tr, user_login);
+    tokens.save_to_db(repo).await?;
+    tracing::info!(user = ?tokens.user_login, "GitHubApp: authentication successful");
+    Ok(tokens)
+}
+
+/// Poll GitHub until the user authorizes, then return the token response.
+async fn poll_device_flow(session: &DeviceCodeSession) -> Result<TokenResponse> {
+    let client = Client::new();
+
+    for attempt in 0..MAX_POLL_ATTEMPTS {
+        tokio::time::sleep(std::time::Duration::from_secs(session.interval)).await;
+
+        #[derive(Serialize)]
+        struct PollRequest<'a> {
+            client_id: &'static str,
+            device_code: &'a str,
+            grant_type: &'static str,
         }
-    })?;
-    let port = listener.local_addr()?.port();
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    Ok((handle, port))
-}
 
-fn html_success() -> String {
-    r#"<!doctype html><html><head><title>Djinn — GitHub App Connected</title></head>
-<body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#131010;color:#f1ecec">
-<div style="text-align:center">
-  <h1 style="color:#f1ecec">GitHub App Connected</h1>
-  <p style="color:#b7b1b1">You can close this window and return to Djinn.</p>
-</div>
-<script>setTimeout(()=>window.close(),2000)</script>
-</body></html>"#.to_string()
-}
+        let body: serde_json::Value = client
+            .post(ACCESS_TOKEN_URL)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(&PollRequest {
+                client_id: CLIENT_ID,
+                device_code: &session.device_code,
+                grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+            })
+            .send()
+            .await
+            .map_err(|e| anyhow!("poll request failed: {}", e))?
+            .json()
+            .await
+            .map_err(|e| anyhow!("failed to parse poll response: {}", e))?;
 
-fn html_error(error: &str) -> String {
-    format!(
-        r#"<!doctype html><html><head><title>Djinn — Authorization Failed</title></head>
-<body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#131010;color:#f1ecec">
-<div style="text-align:center">
-  <h1 style="color:#fc533a">Authorization Failed</h1>
-  <p style="color:#ff917b;font-family:monospace">{}</p>
-</div>
-</body></html>"#,
-        error
-    )
+        if let Some(error) = body["error"].as_str() {
+            match error {
+                "authorization_pending" => {
+                    tracing::debug!(
+                        "GitHubApp: authorization pending (attempt {}/{})",
+                        attempt + 1,
+                        MAX_POLL_ATTEMPTS
+                    );
+                    continue;
+                }
+                "slow_down" => {
+                    tracing::debug!("GitHubApp: slow_down received, adding extra delay");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+                "expired_token" => {
+                    return Err(anyhow!("device code expired; please restart the flow"));
+                }
+                other => {
+                    let desc = body["error_description"].as_str().unwrap_or("");
+                    return Err(anyhow!("GitHub OAuth error: {} — {}", other, desc));
+                }
+            }
+        }
+
+        // Parse the successful token response from the JSON value.
+        let tr: TokenResponse = serde_json::from_value(body.clone())
+            .map_err(|e| anyhow!("GitHubApp: failed to decode token response ({}): {}", e, body))?;
+        return Ok(tr);
+    }
+
+    Err(anyhow!(
+        "GitHubApp device code flow timed out after {} attempts",
+        MAX_POLL_ATTEMPTS
+    ))
 }
 
 fn open_browser(url: &str) {
@@ -356,23 +310,35 @@ fn open_browser(url: &str) {
     tracing::info!("Please open this URL in your browser: {}", url);
 }
 
-// ─── Full PKCE flow ──────────────────────────────────────────────────────────
+/// Fetch the authenticated user's login from the GitHub API.
+async fn fetch_user_login(access_token: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct GhUser {
+        login: String,
+    }
+    let client = Client::new();
+    let resp = client
+        .get("https://api.github.com/user")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Accept", "application/json")
+        .header("User-Agent", "djinn-server")
+        .send()
+        .await
+        .ok()?;
+    let user: GhUser = resp.json().await.ok()?;
+    Some(user.login)
+}
 
-/// Perform the full GitHub App PKCE OAuth flow.
+// ─── Full device code flow ───────────────────────────────────────────────────
+
+/// Perform the full GitHub App device code OAuth flow.
 ///
-/// 1. Loads client_id from the credential vault (falls back to DEFAULT_CLIENT_ID).
-/// 2. Checks DB cache; returns immediately if unexpired.
-/// 3. Attempts a silent token refresh if the cached token is expired.
-/// 4. Falls back to a full browser redirect if refresh fails or no cache exists.
+/// 1. Checks DB cache; returns immediately if unexpired.
+/// 2. Attempts a silent token refresh if the cached token is expired.
+/// 3. Falls back to a full device code flow if refresh fails or no cache exists.
 ///
 /// Tokens are persisted to the encrypted credential DB on success.
 pub async fn run_github_app_flow(repo: &CredentialRepository) -> Result<GitHubAppTokens> {
-    // Load client_id from vault or fall back to default.
-    let client_id = match repo.get_decrypted(GITHUB_APP_CLIENT_ID_KEY).await {
-        Ok(Some(id)) if !id.is_empty() => id,
-        _ => DEFAULT_CLIENT_ID.to_string(),
-    };
-
     // 1. Check cache
     if let Some(cached) = GitHubAppTokens::load_from_db(repo).await {
         if !cached.is_expired() {
@@ -380,59 +346,36 @@ pub async fn run_github_app_flow(repo: &CredentialRepository) -> Result<GitHubAp
             return Ok(cached);
         }
         tracing::debug!("GitHubApp: cached token expired, attempting refresh");
-        match refresh_token(&client_id, &cached.refresh_token).await {
-            Ok(tr) => {
-                let tokens = token_response_to_tokens(tr, cached.user_login.clone());
-                let _ = tokens.save_to_db(repo).await;
-                tracing::info!("GitHubApp: token refreshed successfully");
-                return Ok(tokens);
-            }
+        match refresh_cached_token(&cached, CLIENT_ID, repo).await {
+            Ok(tokens) => return Ok(tokens),
             Err(e) => {
-                // Do NOT clear tokens — keep the refresh token for future retries.
-                tracing::warn!("GitHubApp: token refresh failed, starting full flow: {}", e);
+                tracing::warn!("GitHubApp: token refresh failed, starting device flow: {}", e);
             }
         }
     }
 
-    // 2. Full PKCE browser flow
-    let pkce = generate_pkce();
-    let csrf_state = generate_state();
-    let redirect_uri = format!("http://localhost:{}/callback", OAUTH_PORT);
-    let auth_url = build_authorize_url(&client_id, &redirect_uri, &pkce, &csrf_state)?;
+    // 2. Device code flow
+    let session = start_device_flow().await?;
 
-    let (tx, rx) = oneshot::channel::<Result<String>>();
-    let tx = Arc::new(TokioMutex::new(Some(tx)));
-    let app = oauth_callback_router(csrf_state, tx);
-    let (server_handle, _port) = spawn_callback_server(app).await?;
+    tracing::info!(
+        user_code = %session.user_code,
+        verification_uri = %session.verification_uri,
+        "GitHubApp: enter code at verification URL"
+    );
 
-    tracing::info!("GitHubApp OAuth: opening browser for authorization");
-    open_browser(&auth_url);
+    // Open the browser — prefer the pre-filled URL if GitHub provided one
+    let browser_url = session
+        .verification_uri_complete
+        .as_deref()
+        .unwrap_or(&session.verification_uri);
+    open_browser(browser_url);
 
-    // 3. Wait for callback (5-minute timeout)
-    let code =
-        match tokio::time::timeout(std::time::Duration::from_secs(OAUTH_TIMEOUT_SECS), rx).await {
-            Ok(Ok(result)) => {
-                server_handle.abort();
-                result?
-            }
-            Ok(Err(_)) => {
-                server_handle.abort();
-                return Err(anyhow!("OAuth callback channel closed unexpectedly"));
-            }
-            Err(_) => {
-                server_handle.abort();
-                return Err(anyhow!(
-                    "OAuth flow timed out after {} seconds",
-                    OAUTH_TIMEOUT_SECS
-                ));
-            }
-        };
-
-    // 4. Exchange code for tokens
-    let tr = exchange_code(&client_id, &code, &redirect_uri, &pkce).await?;
-    let tokens = token_response_to_tokens(tr, None);
+    // 3. Poll until user authorizes
+    let tr = poll_device_flow(&session).await?;
+    let user_login = fetch_user_login(&tr.access_token).await;
+    let tokens = token_response_to_tokens(tr, user_login);
     tokens.save_to_db(repo).await?;
-    tracing::info!("GitHubApp OAuth: authentication successful");
+    tracing::info!(user = ?tokens.user_login, "GitHubApp: authentication successful");
     Ok(tokens)
 }
 
@@ -455,28 +398,6 @@ pub async fn load_installation_id(repo: &CredentialRepository) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pkce_verifier_is_url_safe() {
-        let pkce = generate_pkce();
-        assert!(
-            pkce.verifier
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        );
-        assert!(!pkce.challenge.is_empty());
-    }
-
-    #[test]
-    fn state_is_url_safe() {
-        let state = generate_state();
-        assert!(
-            state
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        );
-        assert!(!state.is_empty());
-    }
 
     #[test]
     fn expired_token_detection() {

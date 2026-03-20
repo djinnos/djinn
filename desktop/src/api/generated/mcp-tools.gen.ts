@@ -618,7 +618,7 @@ export namespace ExecutionStatusOutputSchema {
   ok: boolean
   project_id?: string
   /**
-   * Per-project health issues blocking execution (project_id → error message).
+   * Per-project health issues blocking execution (project_id -> error message).
    */
   project_issues?: {
   [k: string]: string
@@ -650,6 +650,43 @@ export namespace ExecutionStatusOutputSchema {
 
 }
 export type ExecutionStatusOutput = ExecutionStatusOutputSchema.ExecutionStatusOutput;
+export namespace MemoryAssociationsInputSchema {
+  export interface MemoryAssociationsInput {
+  /**
+   * Note ID or permalink (e.g. "decisions/my-adr").
+   */
+  identifier: string
+  /**
+   * Maximum number of results. Default: 20.
+   */
+  limit?: number
+  /**
+   * Minimum association weight [0.0, 1.0]. Default: 0.0 (all associations).
+   */
+  min_weight?: number
+  project: string
+  [k: string]: any
+  }
+
+}
+export type MemoryAssociationsInput = MemoryAssociationsInputSchema.MemoryAssociationsInput;
+export namespace MemoryAssociationsOutputSchema {
+  export interface MemoryAssociationsOutput {
+  associations: MemoryAssociationEntry[]
+  error?: string
+  [k: string]: any
+  }
+  export interface MemoryAssociationEntry {
+  co_access_count: number
+  last_co_access: string
+  note_permalink: string
+  note_title: string
+  weight: number
+  [k: string]: any
+  }
+
+}
+export type MemoryAssociationsOutput = MemoryAssociationsOutputSchema.MemoryAssociationsOutput;
 export namespace MemoryBrokenLinksInputSchema {
   export interface MemoryBrokenLinksInput {
   folder?: string
@@ -681,6 +718,10 @@ export type MemoryBrokenLinksOutput = MemoryBrokenLinksOutputSchema.MemoryBroken
 export namespace MemoryBuildContextInputSchema {
   export interface MemoryBuildContextInput {
   /**
+   * Token budget for context (default 4096). Seed notes are uncapped.
+   */
+  budget: number
+  /**
    * Link traversal depth (default 1).
    */
   depth?: number
@@ -689,6 +730,10 @@ export namespace MemoryBuildContextInputSchema {
    */
   max_related?: number
   project: string
+  /**
+   * Optional task ID for task-affinity scoring in RRF retrieval.
+   */
+  task_id?: string
   /**
    * Memory URI: "memory://folder/note", "folder/note", or "folder/*" for all
    * notes in a folder.
@@ -703,7 +748,8 @@ export namespace MemoryBuildContextOutputSchema {
   export interface MemoryBuildContextOutput {
   error?: string
   primary: MemoryNoteView[]
-  related: NoteCompact[]
+  related_l0: NoteAbstract[]
+  related_l1: NoteOverview[]
   [k: string]: any
   }
   export interface MemoryNoteView {
@@ -722,15 +768,27 @@ export namespace MemoryBuildContextOutputSchema {
   [k: string]: any
   }
   /**
-   * Compact note summary (no full content) for list and recent queries.
+   * L0 note abstract payload used in tiered context responses.
    */
-  export interface NoteCompact {
-  folder: string
+  export interface NoteAbstract {
+  abstract_text: string
   id: string
   note_type: string
   permalink: string
+  score?: number
   title: string
-  updated_at: string
+  [k: string]: any
+  }
+  /**
+   * L1 note overview payload used in tiered context responses.
+   */
+  export interface NoteOverview {
+  id: string
+  note_type: string
+  overview_text: string
+  permalink: string
+  score?: number
+  title: string
   [k: string]: any
   }
 
@@ -753,6 +811,34 @@ export namespace MemoryCatalogOutputSchema {
 
 }
 export type MemoryCatalogOutput = MemoryCatalogOutputSchema.MemoryCatalogOutput;
+export namespace MemoryConfirmInputSchema {
+  export interface MemoryConfirmInput {
+  /**
+   * Optional reason for confirmation.
+   */
+  comment?: string
+  /**
+   * Note permalink or note ID.
+   */
+  identifier: string
+  project: string
+  [k: string]: any
+  }
+
+}
+export type MemoryConfirmInput = MemoryConfirmInputSchema.MemoryConfirmInput;
+export namespace MemoryConfirmOutputSchema {
+  export interface MemoryConfirmOutput {
+  error?: string
+  new_confidence?: number
+  note_id?: string
+  permalink?: string
+  previous_confidence?: number
+  [k: string]: any
+  }
+
+}
+export type MemoryConfirmOutput = MemoryConfirmOutputSchema.MemoryConfirmOutput;
 export namespace MemoryDeleteInputSchema {
   export interface MemoryDeleteInput {
   identifier: string
@@ -1161,6 +1247,10 @@ export namespace MemorySearchOutputSchema {
   id: string
   note_type: string
   permalink: string
+  /**
+   * RRF fusion score (higher = more relevant). Defaults to 0.0 for backward compat.
+   */
+  score?: number
   snippet: string
   title: string
   [k: string]: any
@@ -1203,9 +1293,9 @@ export namespace MemoryWriteInputSchema {
   tags?: string[]
   title: string
   /**
-   * Note type: adr, pattern, research, requirement, reference, design,
-   * session, persona, journey, design_spec, competitive, tech_spike,
-   * brief (singleton), roadmap (singleton).
+   * Note type: adr, pattern, case, pitfall, research, requirement,
+   * reference, design, session, persona, journey, design_spec,
+   * competitive, tech_spike, brief (singleton), roadmap (singleton).
    */
   type: string
   [k: string]: any
@@ -1315,6 +1405,25 @@ export namespace ProjectConfigGetOutputSchema {
   sync_enabled: boolean
   sync_remote?: string
   target_branch: string
+  /**
+   * File-pattern-to-command mapping for selective verification.
+   * Empty list means fall back to full-project verification.
+   */
+  verification_rules: VerificationRuleDto[]
+  [k: string]: any
+  }
+  /**
+   * A single verification rule returned in project config.
+   */
+  export interface VerificationRuleDto {
+  /**
+   * One or more shell commands to run when the pattern matches.
+   */
+  commands: string[]
+  /**
+   * Glob pattern (e.g. `src/** /*.rs`, `**` for catch-all).
+   */
+  match_pattern: string
   [k: string]: any
   }
 
@@ -1338,6 +1447,25 @@ export namespace ProjectConfigSetOutputSchema {
   sync_enabled: boolean
   sync_remote?: string
   target_branch: string
+  /**
+   * File-pattern-to-command mapping for selective verification.
+   * Empty list means fall back to full-project verification.
+   */
+  verification_rules: VerificationRuleDto[]
+  [k: string]: any
+  }
+  /**
+   * A single verification rule returned in project config.
+   */
+  export interface VerificationRuleDto {
+  /**
+   * One or more shell commands to run when the pattern matches.
+   */
+  commands: string[]
+  /**
+   * Glob pattern (e.g. `src/** /*.rs`, `**` for catch-all).
+   */
+  match_pattern: string
   [k: string]: any
   }
 
@@ -1370,6 +1498,10 @@ export namespace ProjectRemoveInputSchema {
    * Project name to remove.
    */
   name: string
+  /**
+   * Absolute path of the project to remove. Must match the registered path exactly.
+   */
+  path: string
   [k: string]: any
   }
 
@@ -1468,10 +1600,12 @@ export namespace ProviderCatalogOutputSchema {
   }
   export interface ProviderCatalogItem {
   base_url: string
+  builtin_id: string
   connected: boolean
   connection_methods: string[]
   docs_url: string
   env_vars: string[]
+  goose_provider_id: string
   id: string
   is_openai_compatible: boolean
   name: string
@@ -1498,10 +1632,12 @@ export namespace ProviderConnectedOutputSchema {
   }
   export interface ProviderCatalogItem {
   base_url: string
+  builtin_id: string
   connected: boolean
   connection_methods: string[]
   docs_url: string
   env_vars: string[]
+  goose_provider_id: string
   id: string
   is_openai_compatible: boolean
   name: string
@@ -1631,7 +1767,7 @@ export type ProviderModelsConnectedOutput = ProviderModelsConnectedOutputSchema.
 export namespace ProviderOauthStartInputSchema {
   export interface ProviderOauthStartInput {
   /**
-   * Provider ID to start OAuth for (accepts catalog/goose aliases, e.g. 'github-copilot').
+   * Provider ID to start OAuth for (accepts catalog aliases, e.g. 'github-copilot').
    */
   provider_id: string
   [k: string]: any
@@ -1641,6 +1777,7 @@ export namespace ProviderOauthStartInputSchema {
 export type ProviderOauthStartInput = ProviderOauthStartInputSchema.ProviderOauthStartInput;
 export namespace ProviderOauthStartOutputSchema {
   export interface ProviderOauthStartOutput {
+  builtin_id?: string
   configured_keys: string[]
   error?: string
   goose_provider_id?: string
@@ -1710,6 +1847,290 @@ export namespace ProviderValidateOutputSchema {
 
 }
 export type ProviderValidateOutput = ProviderValidateOutputSchema.ProviderValidateOutput;
+export namespace RoleCreateInputSchema {
+  export type AnyJson = any
+
+  export interface RoleCreateInput {
+  /**
+   * Base role to extend. One of: worker, lead, planner, architect, reviewer, resolver.
+   */
+  base_role: string
+  description?: string
+  /**
+   * Additional MCP server refs for this role.
+   */
+  mcp_servers?: AnyJson[]
+  /**
+   * Preferred model ID (falls back to project default).
+   */
+  model_preference?: string
+  /**
+   * Unique role name within the project.
+   */
+  name: string
+  /**
+   * Absolute project path.
+   */
+  project: string
+  /**
+   * Skills (prompt templates) available to this role.
+   */
+  skills?: AnyJson[]
+  /**
+   * Additional system prompt content appended to the base role prompt.
+   */
+  system_prompt_extensions?: string
+  /**
+   * Custom verification command (falls back to project default).
+   */
+  verification_command?: string
+  [k: string]: any
+  }
+
+}
+export type RoleCreateInput = RoleCreateInputSchema.RoleCreateInput;
+export namespace RoleCreateOutputSchema {
+  export type AnyJson = any
+
+  export interface RoleCreateOutput {
+  base_role?: string
+  created_at?: string
+  description?: string
+  error?: string
+  id?: string
+  is_default?: boolean
+  /**
+   * Auto-improvement loop amendments. None if not yet set.
+   */
+  learned_prompt?: string
+  mcp_servers?: AnyJson[]
+  model_preference?: string
+  name?: string
+  project_id?: string
+  skills?: AnyJson[]
+  system_prompt_extensions?: string
+  updated_at?: string
+  verification_command?: string
+  [k: string]: any
+  }
+
+}
+export type RoleCreateOutput = RoleCreateOutputSchema.RoleCreateOutput;
+export namespace RoleListInputSchema {
+  export interface RoleListInput {
+  /**
+   * Filter by base role: worker, lead, planner, architect, reviewer, resolver.
+   */
+  base_role?: string
+  limit?: number
+  offset?: number
+  /**
+   * Absolute project path.
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type RoleListInput = RoleListInputSchema.RoleListInput;
+export namespace RoleListOutputSchema {
+  export type AnyJson = any
+
+  export interface RoleListOutput {
+  error?: string
+  has_more?: boolean
+  limit?: number
+  offset?: number
+  roles?: AgentRoleModel[]
+  total_count?: number
+  [k: string]: any
+  }
+  export interface AgentRoleModel {
+  base_role: string
+  created_at: string
+  description: string
+  id: string
+  is_default: boolean
+  /**
+   * Auto-improvement loop amendments. None if not yet set.
+   */
+  learned_prompt?: string
+  mcp_servers: AnyJson[]
+  model_preference?: string
+  name: string
+  project_id: string
+  skills: AnyJson[]
+  system_prompt_extensions: string
+  updated_at: string
+  verification_command?: string
+  [k: string]: any
+  }
+
+}
+export type RoleListOutput = RoleListOutputSchema.RoleListOutput;
+export namespace RoleMetricsInputSchema {
+  export interface RoleMetricsInput {
+  /**
+   * Absolute project path.
+   */
+  project: string
+  /**
+   * Optional role UUID or name — if omitted returns metrics for all roles.
+   */
+  role_id?: string
+  /**
+   * How many days back to include session data (default 30).
+   */
+  window_days?: number
+  [k: string]: any
+  }
+
+}
+export type RoleMetricsInput = RoleMetricsInputSchema.RoleMetricsInput;
+export namespace RoleMetricsOutputSchema {
+  export interface RoleMetricsOutput {
+  error?: string
+  roles?: RoleMetricEntry[]
+  /**
+   * Window used for session queries (days back from now).
+   */
+  window_days: number
+  [k: string]: any
+  }
+  export interface RoleMetricEntry {
+  /**
+   * Average reopen_count across tasks dispatched to this role.
+   */
+  avg_reopens: number
+  /**
+   * Average session wall-clock duration in seconds (completed sessions only).
+   */
+  avg_time_seconds: number
+  /**
+   * Average total tokens (in + out) per completed session.
+   */
+  avg_tokens: number
+  base_role: string
+  /**
+   * Number of completed tasks included in the calculation.
+   */
+  completed_task_count: number
+  role_id: string
+  role_name: string
+  /**
+   * Fraction of completed tasks that closed as "completed" (0.0–1.0).
+   */
+  success_rate: number
+  /**
+   * Fraction of tasks with zero verification failures (0.0–1.0).
+   */
+  verification_pass_rate: number
+  [k: string]: any
+  }
+
+}
+export type RoleMetricsOutput = RoleMetricsOutputSchema.RoleMetricsOutput;
+export namespace RoleShowInputSchema {
+  export interface RoleShowInput {
+  /**
+   * Role UUID or name.
+   */
+  id: string
+  /**
+   * Absolute project path.
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type RoleShowInput = RoleShowInputSchema.RoleShowInput;
+export namespace RoleShowOutputSchema {
+  export type AnyJson = any
+
+  export interface RoleShowOutput {
+  base_role?: string
+  created_at?: string
+  description?: string
+  error?: string
+  id?: string
+  is_default?: boolean
+  /**
+   * Auto-improvement loop amendments. None if not yet set.
+   */
+  learned_prompt?: string
+  mcp_servers?: AnyJson[]
+  model_preference?: string
+  name?: string
+  project_id?: string
+  skills?: AnyJson[]
+  system_prompt_extensions?: string
+  updated_at?: string
+  verification_command?: string
+  [k: string]: any
+  }
+
+}
+export type RoleShowOutput = RoleShowOutputSchema.RoleShowOutput;
+export namespace RoleUpdateInputSchema {
+  export type AnyJson = any
+
+  export interface RoleUpdateInput {
+  /**
+   * Set to true to clear learned_prompt back to NULL. Takes precedence over learned_prompt.
+   */
+  clear_learned_prompt?: boolean
+  description?: string
+  /**
+   * Role UUID or name.
+   */
+  id: string
+  /**
+   * Set a new learned_prompt value (auto-improvement loop only).
+   */
+  learned_prompt?: string
+  mcp_servers?: AnyJson[]
+  model_preference?: string
+  name?: string
+  /**
+   * Absolute project path.
+   */
+  project: string
+  skills?: AnyJson[]
+  system_prompt_extensions?: string
+  verification_command?: string
+  [k: string]: any
+  }
+
+}
+export type RoleUpdateInput = RoleUpdateInputSchema.RoleUpdateInput;
+export namespace RoleUpdateOutputSchema {
+  export type AnyJson = any
+
+  export interface RoleUpdateOutput {
+  base_role?: string
+  created_at?: string
+  description?: string
+  error?: string
+  id?: string
+  is_default?: boolean
+  /**
+   * Auto-improvement loop amendments. None if not yet set.
+   */
+  learned_prompt?: string
+  mcp_servers?: AnyJson[]
+  model_preference?: string
+  name?: string
+  project_id?: string
+  skills?: AnyJson[]
+  system_prompt_extensions?: string
+  updated_at?: string
+  verification_command?: string
+  [k: string]: any
+  }
+
+}
+export type RoleUpdateOutput = RoleUpdateOutputSchema.RoleUpdateOutput;
 export namespace SessionActiveInputSchema {
   export interface SessionActiveInput {
   /**
@@ -1732,7 +2153,6 @@ export namespace SessionActiveOutputSchema {
   export interface SessionToolSession {
   agent_type: string
   ended_at?: string
-  goose_session_id?: string
   id: string
   model_id: string
   project_id: string
@@ -1802,7 +2222,6 @@ export namespace SessionListOutputSchema {
   export interface SessionToolSession {
   agent_type: string
   ended_at?: string
-  goose_session_id?: string
   id: string
   model_id: string
   project_id: string
@@ -1871,7 +2290,6 @@ export namespace SessionShowOutputSchema {
   agent_type?: string
   ended_at?: string
   error?: string
-  goose_session_id?: string
   id?: string
   model_id?: string
   project_id?: string
@@ -1984,21 +2402,17 @@ export namespace SettingsSetInputSchema {
   [k: string]: number
   }
   /**
-   * Ordered model list for the 'conflict_resolver' role. Omit to keep current value.
+   * Ordered model list for the 'lead' role. Omit to keep current value.
    */
-  model_priority_conflict_resolver?: string[]
+  model_priority_lead?: string[]
   /**
-   * Ordered model list for the 'groomer' role. Omit to keep current value.
+   * Ordered model list for the 'planner' role. Omit to keep current value.
    */
-  model_priority_groomer?: string[]
+  model_priority_planner?: string[]
   /**
-   * Ordered model list for the 'pm' role. Omit to keep current value.
+   * Ordered model list for the 'reviewer' role. Omit to keep current value.
    */
-  model_priority_pm?: string[]
-  /**
-   * Ordered model list for the 'task_reviewer' role. Omit to keep current value.
-   */
-  model_priority_task_reviewer?: string[]
+  model_priority_reviewer?: string[]
   /**
    * Ordered model list for the 'worker' role (e.g. ["chatgpt_codex/gpt-5.3-codex"]). Omit to keep current value.
    */
@@ -2057,7 +2471,7 @@ export type SystemPingOutput = SystemPingOutputSchema.SystemPingOutput;
 export namespace TaskActivityListInputSchema {
   export interface TaskActivityListInput {
   /**
-   * Filter by actor_role (e.g. "pm", "task_reviewer", "worker", "verification", "system").
+   * Filter by actor_role (e.g. "lead", "reviewer", "worker", "verification", "system").
    */
   actor_role?: string
   /**
@@ -2069,7 +2483,7 @@ export namespace TaskActivityListInputSchema {
    */
   from_time?: string
   /**
-   * Task UUID or short_id (optional — omit to query all tasks).
+   * Task UUID or short_id (optional - omit to query all tasks).
    */
   id?: string
   limit?: number
@@ -2101,7 +2515,7 @@ export namespace TaskBlockedListInputSchema {
    */
   id: string
   /**
-   * Absolute project path. Optional — task IDs are globally unique.
+   * Absolute project path. Optional - task IDs are globally unique.
    */
   project?: string
   [k: string]: any
@@ -2233,17 +2647,23 @@ export namespace TaskCreateInputSchema {
   export interface TaskCreateInput {
   acceptance_criteria?: AcceptanceCriterionItem[]
   /**
+   * Specialist role name to route this task (e.g. "rust-expert").
+   */
+  agent_type?: string
+  /**
    * Task IDs (UUID or short_id) that block this task. Blockers are set atomically at creation.
    */
   blocked_by?: string[]
   description?: string
   design?: string
   /**
-   * Parent epic ID — UUID or short_id (required).
+   * Parent epic ID - UUID or short_id (required).
    */
   epic_id?: string
   /**
-   * Task type: "task" (default), "feature", or "bug".
+   * Task type: "task" (default), "feature", "bug", "spike", "research", "decomposition", or "review".
+   * Spike, research, decomposition, and review use a simple lifecycle: open → in_progress → closed.
+   * Decomposition tasks are routed to the Planner; spike and review tasks are routed to the Architect.
    */
   issue_type?: string
   labels?: string[]
@@ -2258,7 +2678,7 @@ export namespace TaskCreateInputSchema {
    */
   project: string
   /**
-   * Optional initial status. Allowed values: "backlog" or "open".
+   * Optional initial status. Allowed value: "open" (default).
    */
   status?: string
   title: string
@@ -2335,6 +2755,10 @@ export namespace TaskListOutputSchema {
   status: string
   [k: string]: any
   }
+  /**
+   * Specialist role name assigned to this task, if any.
+   */
+  agent_type?: string
   close_reason?: string
   closed_at?: string
   continuation_count: number
@@ -2347,6 +2771,12 @@ export namespace TaskListOutputSchema {
   labels: string[]
   memory_refs: string[]
   merge_commit_sha?: string
+  /**
+   * JSON metadata about an active merge conflict (files, branches).
+   */
+  merge_conflict_metadata?: {
+  [k: string]: any
+  }
   owner: string
   priority: number
   reopen_count: number
@@ -2430,7 +2860,7 @@ export namespace TaskShowInputSchema {
    */
   id: string
   /**
-   * Absolute project path. Optional — task IDs are globally unique.
+   * Absolute project path. Optional - task IDs are globally unique.
    */
   project?: string
   [k: string]: any
@@ -2630,7 +3060,6 @@ export namespace TaskTimelineOutputSchema {
   export interface SessionToolSession {
   agent_type: string
   ended_at?: string
-  goose_session_id?: string
   id: string
   model_id: string
   project_id: string
@@ -2648,10 +3077,11 @@ export type TaskTimelineOutput = TaskTimelineOutputSchema.TaskTimelineOutput;
 export namespace TaskTransitionInputSchema {
   export interface TaskTransitionInput {
   /**
-   * Transition action: accept, start, submit_verification,
+   * Transition action: start, submit_verification,
    * verification_pass, verification_fail, release_verification,
    * submit_task_review, task_review_start,
    * task_review_reject, task_review_reject_conflict, task_review_approve,
+   * mark_pr_ready, pr_merge, pr_changes_requested,
    * reopen, close, release, release_task_review, force_close,
    * user_override.
    */
@@ -2669,12 +3099,13 @@ export namespace TaskTransitionInputSchema {
   /**
    * Required for: verification_fail, release_verification,
    * task_review_reject, task_review_reject_conflict,
+   * pr_changes_requested,
    * reopen, release, release_task_review, force_close.
    */
   reason?: string
   /**
-   * Required when action = "user_override". Allowed values: draft, open, verifying,
-   * needs_task_review, in_task_review, in_progress, closed.
+   * Required when action = "user_override". Allowed values: open, in_progress,
+   * verifying, needs_task_review, in_task_review, pr_ready, closed.
    */
   target_status?: string
   [k: string]: any
@@ -2697,6 +3128,10 @@ export namespace TaskUpdateInputSchema {
    * Full replacement for acceptance_criteria.
    */
   acceptance_criteria?: AcceptanceCriterionItem[]
+  /**
+   * Specialist role name to assign (set None/"" to clear).
+   */
+  agent_type?: string
   /**
    * Task IDs (UUID or short_id) to add as blockers of this task.
    */
@@ -2756,7 +3191,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "role_create" | "role_list" | "role_metrics" | "role_show" | "role_update" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "board_health": { input: BoardHealthInput; output: BoardHealthOutput };
@@ -2778,9 +3213,11 @@ export interface McpToolMap {
   "execution_resume": { input: ExecutionResumeInput; output: ExecutionResumeOutput };
   "execution_start": { input: ExecutionStartInput; output: ExecutionStartOutput };
   "execution_status": { input: ExecutionStatusInput; output: ExecutionStatusOutput };
+  "memory_associations": { input: MemoryAssociationsInput; output: MemoryAssociationsOutput };
   "memory_broken_links": { input: MemoryBrokenLinksInput; output: MemoryBrokenLinksOutput };
   "memory_build_context": { input: MemoryBuildContextInput; output: MemoryBuildContextOutput };
   "memory_catalog": { input: MemoryCatalogInput; output: MemoryCatalogOutput };
+  "memory_confirm": { input: MemoryConfirmInput; output: MemoryConfirmOutput };
   "memory_delete": { input: MemoryDeleteInput; output: MemoryDeleteOutput };
   "memory_diff": { input: MemoryDiffInput; output: MemoryDiffOutput };
   "memory_edit": { input: MemoryEditInput; output: MemoryEditOutput };
@@ -2812,6 +3249,11 @@ export interface McpToolMap {
   "provider_oauth_start": { input: ProviderOauthStartInput; output: ProviderOauthStartOutput };
   "provider_remove": { input: ProviderRemoveInput; output: ProviderRemoveOutput };
   "provider_validate": { input: ProviderValidateInput; output: ProviderValidateOutput };
+  "role_create": { input: RoleCreateInput; output: RoleCreateOutput };
+  "role_list": { input: RoleListInput; output: RoleListOutput };
+  "role_metrics": { input: RoleMetricsInput; output: RoleMetricsOutput };
+  "role_show": { input: RoleShowInput; output: RoleShowOutput };
+  "role_update": { input: RoleUpdateInput; output: RoleUpdateOutput };
   "session_active": { input: SessionActiveInput; output: SessionActiveOutput };
   "session_for_task": { input: SessionForTaskInput; output: SessionForTaskOutput };
   "session_list": { input: SessionListInput; output: SessionListOutput };

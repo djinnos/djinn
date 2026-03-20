@@ -32,7 +32,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::oauth::github_app::{
-    GITHUB_APP_CLIENT_ID_KEY, GITHUB_INSTALLATION_ID_KEY,
+    CLIENT_ID, GITHUB_INSTALLATION_ID_KEY,
     GitHubAppTokens, refresh_cached_token,
 };
 use crate::repos::CredentialRepository;
@@ -238,15 +238,8 @@ impl GitHubApiClient {
             .ok_or_else(|| anyhow!("No GitHub App tokens found — please authenticate first"))?;
 
         if tokens.is_expired() {
-            let client_id = self
-                .cred_repo
-                .get_decrypted(GITHUB_APP_CLIENT_ID_KEY)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "Iv23liGitHubAppDjinn".to_string());
             tracing::debug!("GitHubApiClient: user token expired, refreshing");
-            return refresh_cached_token(&tokens, &client_id, &self.cred_repo).await;
+            return refresh_cached_token(&tokens, CLIENT_ID, &self.cred_repo).await;
         }
         Ok(tokens)
     }
@@ -326,14 +319,7 @@ impl GitHubApiClient {
             let user_tokens = GitHubAppTokens::load_from_db(&self.cred_repo)
                 .await
                 .ok_or_else(|| anyhow!("No GitHub App tokens found for refresh"))?;
-            let client_id = self
-                .cred_repo
-                .get_decrypted(GITHUB_APP_CLIENT_ID_KEY)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "Iv23liGitHubAppDjinn".to_string());
-            refresh_cached_token(&user_tokens, &client_id, &self.cred_repo).await?;
+            refresh_cached_token(&user_tokens, CLIENT_ID, &self.cred_repo).await?;
 
             // Re-derive installation token and retry once.
             let fresh_token = self.derive_installation_token().await?;

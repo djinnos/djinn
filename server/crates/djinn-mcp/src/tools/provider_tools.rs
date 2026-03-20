@@ -218,6 +218,12 @@ pub struct ProviderOauthStartResponse {
     pub oauth_supported: bool,
     pub configured_keys: Vec<String>,
     pub error: Option<String>,
+    /// For device-code flows: the code the user must enter.
+    pub user_code: Option<String>,
+    /// For device-code flows: the URL where the user enters the code.
+    pub verification_uri: Option<String>,
+    /// True when the flow is still in progress (device-code polling in background).
+    pub pending: bool,
 }
 
 // ── provider_model_lookup ─────────────────────────────────────────────────────
@@ -642,6 +648,9 @@ impl DjinnMcpServer {
                 oauth_supported: false,
                 configured_keys: vec![],
                 error: Some("provider is not a known built-in".into()),
+                user_code: None,
+                verification_uri: None,
+                pending: false,
             });
         };
 
@@ -666,6 +675,9 @@ impl DjinnMcpServer {
                 oauth_supported: false,
                 configured_keys: vec![],
                 error: Some("provider does not support OAuth flow".into()),
+                user_code: None,
+                verification_uri: None,
+                pending: false,
             });
         }
 
@@ -680,11 +692,104 @@ impl DjinnMcpServer {
                 oauth_supported: true,
                 configured_keys: vec![],
                 error: Some(format!("no OAuth flow implemented for '{effective_id}'")),
+                user_code: None,
+                verification_uri: None,
+                pending: false,
             });
         };
 
         let credential_repo =
             CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        // GitHub App uses a non-blocking device-code flow: return the code
+        // immediately and poll in the background.
+        if matches!(flow_kind, OAuthFlowKind::GitHubApp) {
+            use djinn_provider::oauth::github_app;
+
+            // If we already have a valid cached token, return success immediately.
+            if let Some(cached) = github_app::GitHubAppTokens::load_from_db(&credential_repo).await {
+                if !cached.is_expired() {
+                    return Json(ProviderOauthStartResponse {
+                        ok: true,
+                        success: true,
+                        provider_id: input.provider_id,
+                        builtin_id: Some(builtin_id.to_string()),
+                        legacy_builtin_id: Some(builtin_id.to_string()),
+                        oauth_supported: true,
+                        configured_keys: oauth_keys,
+                        error: None,
+                        user_code: None,
+                        verification_uri: None,
+                        pending: false,
+                    });
+                }
+                // Try refresh before falling through to device flow
+                if let Ok(tokens) = github_app::refresh_cached_token(&cached, github_app::CLIENT_ID, &credential_repo).await {
+                    let _ = tokens; // already saved by refresh_cached_token
+                    return Json(ProviderOauthStartResponse {
+                        ok: true,
+                        success: true,
+                        provider_id: input.provider_id,
+                        builtin_id: Some(builtin_id.to_string()),
+                        legacy_builtin_id: Some(builtin_id.to_string()),
+                        oauth_supported: true,
+                        configured_keys: oauth_keys,
+                        error: None,
+                        user_code: None,
+                        verification_uri: None,
+                        pending: false,
+                    });
+                }
+            }
+
+            return match github_app::start_device_flow().await {
+                Ok(session) => {
+                    let user_code = session.user_code.clone();
+                    let verification_uri = session.verification_uri_complete
+                        .clone()
+                        .unwrap_or_else(|| session.verification_uri.clone());
+
+                    // Spawn background polling task
+                    let bg_db = self.state.db().clone();
+                    let bg_events = self.state.event_bus();
+                    tokio::spawn(async move {
+                        let bg_repo = CredentialRepository::new(bg_db, bg_events);
+                        if let Err(e) = github_app::poll_and_store(&session, &bg_repo).await {
+                            tracing::error!("GitHubApp background poll failed: {}", e);
+                        }
+                    });
+
+                    Json(ProviderOauthStartResponse {
+                        ok: true,
+                        success: false,
+                        provider_id: input.provider_id,
+                        builtin_id: Some(builtin_id.to_string()),
+                        legacy_builtin_id: Some(builtin_id.to_string()),
+                        oauth_supported: true,
+                        configured_keys: oauth_keys,
+                        error: None,
+                        user_code: Some(user_code),
+                        verification_uri: Some(verification_uri),
+                        pending: true,
+                    })
+                }
+                Err(e) => Json(ProviderOauthStartResponse {
+                    ok: false,
+                    success: false,
+                    provider_id: input.provider_id,
+                    builtin_id: Some(builtin_id.to_string()),
+                    legacy_builtin_id: Some(builtin_id.to_string()),
+                    oauth_supported: true,
+                    configured_keys: vec![],
+                    error: Some(e.to_string()),
+                    user_code: None,
+                    verification_uri: None,
+                    pending: false,
+                }),
+            };
+        }
+
+        // Blocking flows (Codex, Copilot)
         let result = match flow_kind {
             OAuthFlowKind::Codex => codex::run_codex_flow(&credential_repo).await.map(|_| ()),
             OAuthFlowKind::Copilot => match copilot::start_copilot_flow().await {
@@ -693,12 +798,7 @@ impl DjinnMcpServer {
                     .map(|_| ()),
                 Err(e) => Err(e),
             },
-            OAuthFlowKind::GitHubApp => {
-                use djinn_provider::oauth::github_app;
-                github_app::run_github_app_flow(&credential_repo)
-                    .await
-                    .map(|_| ())
-            }
+            OAuthFlowKind::GitHubApp => unreachable!(),
         };
 
         match result {
@@ -711,6 +811,9 @@ impl DjinnMcpServer {
                 oauth_supported: true,
                 configured_keys: oauth_keys,
                 error: None,
+                user_code: None,
+                verification_uri: None,
+                pending: false,
             }),
             Err(e) => Json(ProviderOauthStartResponse {
                 ok: false,
@@ -721,6 +824,9 @@ impl DjinnMcpServer {
                 oauth_supported: true,
                 configured_keys: vec![],
                 error: Some(e.to_string()),
+                user_code: None,
+                verification_uri: None,
+                pending: false,
             }),
         }
     }
