@@ -1,6 +1,7 @@
 use super::*;
 use crate::roles::DispatchContext;
 use djinn_core::models::{TaskStatus, TransitionAction};
+use djinn_db::AgentRoleRepository;
 
 /// Result of a single `try_dispatch_to_pool` attempt.
 enum DispatchOutcome {
@@ -170,9 +171,32 @@ impl CoordinatorActor {
             if exhausted_roles.contains(role) {
                 continue;
             }
-            let Some(model_ids) = role_models.get(role) else {
+            let Some(base_model_ids) = role_models.get(role) else {
                 tracing::warn!(task_id = %task.short_id, role, "CoordinatorActor: no model configured for task role");
                 continue;
+            };
+
+            // Look up the default DB role for this task's project + base_role.
+            // If model_preference is set and resolves to a known model, prepend it
+            // so the coordinator prefers it over the globally configured priorities.
+            let model_preference_ids =
+                self.resolve_role_model_preference(&task.project_id, role).await;
+            let combined_models: Vec<String>;
+            let model_ids: &[String] = if model_preference_ids.is_empty() {
+                base_model_ids
+            } else {
+                // Prepend model_preference; deduplicate while preserving order.
+                let mut seen = std::collections::HashSet::new();
+                let mut merged = Vec::with_capacity(
+                    model_preference_ids.len() + base_model_ids.len(),
+                );
+                for id in model_preference_ids.iter().chain(base_model_ids.iter()) {
+                    if seen.insert(id.clone()) {
+                        merged.push(id.clone());
+                    }
+                }
+                combined_models = merged;
+                &combined_models
             };
 
             match self.pool.has_session(&task.id).await {
@@ -506,6 +530,105 @@ impl CoordinatorActor {
                 total_recovered = self.recovered,
                 "CoordinatorActor: stuck-task recovery pass complete"
             );
+        }
+    }
+
+    /// Resolve a `provider/model` list for a DB role's `model_preference`.
+    ///
+    /// Looks up the default AgentRole for `(project_id, base_role)`.  If the
+    /// role has a `model_preference` string, resolves it against connected
+    /// providers (same logic as `resolve_dispatch_models_for_role`) and returns
+    /// the matched model IDs.  Returns an empty Vec when:
+    ///   - No default role is configured.
+    ///   - No `model_preference` is set.
+    ///   - The preference cannot be resolved to a connected model.
+    ///   - In test builds (always returns empty to keep tests simple).
+    async fn resolve_role_model_preference(
+        &self,
+        project_id: &str,
+        base_role: &str,
+    ) -> Vec<String> {
+        #[cfg(test)]
+        {
+            let _ = (project_id, base_role);
+            return Vec::new();
+        }
+
+        #[cfg(not(test))]
+        {
+            let role_repo = AgentRoleRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            );
+            let db_role = match role_repo
+                .get_default_for_base_role(project_id, base_role)
+                .await
+            {
+                Ok(Some(r)) => r,
+                Ok(None) => return Vec::new(),
+                Err(e) => {
+                    tracing::warn!(
+                        project_id,
+                        base_role,
+                        error = %e,
+                        "CoordinatorActor: failed to load default role for model_preference"
+                    );
+                    return Vec::new();
+                }
+            };
+
+            let preference = match db_role.model_preference.as_deref() {
+                Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+                _ => return Vec::new(),
+            };
+
+            // Resolve `preference` (which may be a bare model name like
+            // "claude-opus-4-6" or a full "provider/model" ID) against
+            // connected credentials — same resolution path as model priorities.
+            let cred_repo = djinn_provider::repos::CredentialRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            );
+            let credentials = match cred_repo.list().await {
+                Ok(c) => c,
+                Err(_) => return Vec::new(),
+            };
+            let credential_provider_ids = self.catalog.connected_provider_ids(&credentials);
+            if credential_provider_ids.is_empty() {
+                return Vec::new();
+            }
+
+            // Try to match the preference against every connected provider's model list.
+            let mut resolved = Vec::new();
+            for provider_id in &credential_provider_ids {
+                for model in self.catalog.list_models(provider_id) {
+                    let bare = model.id.rsplit('/').next().unwrap_or(&model.id);
+                    let full_id = format!("{provider_id}/{}", model.id);
+                    if model.id == preference
+                        || model.name == preference
+                        || bare == preference
+                        || full_id == preference
+                    {
+                        resolved.push(full_id);
+                        break;
+                    }
+                }
+                if !resolved.is_empty() {
+                    break;
+                }
+            }
+
+            if !resolved.is_empty() {
+                tracing::debug!(
+                    project_id,
+                    base_role,
+                    preference,
+                    resolved_model = %resolved[0],
+                    "CoordinatorActor: resolved role model_preference"
+                );
+            }
+
+            resolved
         }
     }
 

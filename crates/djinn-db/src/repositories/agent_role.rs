@@ -84,6 +84,28 @@ impl AgentRoleRepository {
         .await?)
     }
 
+    /// Return the default role for a given base_role within a project, or None
+    /// if no default is configured.
+    pub async fn get_default_for_base_role(
+        &self,
+        project_id: &str,
+        base_role: &str,
+    ) -> Result<Option<AgentRole>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, AgentRole>(
+            "SELECT id, project_id, name, base_role, description,
+                    system_prompt_extensions, model_preference, verification_command,
+                    mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
+             FROM agent_roles
+             WHERE project_id = ?1 AND base_role = ?2 AND is_default = 1
+             LIMIT 1",
+        )
+        .bind(project_id)
+        .bind(base_role)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
     pub async fn get_by_name_in_project(
         &self,
         project_id: &str,

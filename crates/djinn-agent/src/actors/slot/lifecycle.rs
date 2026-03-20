@@ -41,6 +41,21 @@ pub(crate) struct TaskLifecycleParams {
     pub cancel: CancellationToken,
     pub pause: CancellationToken,
     pub event_tx: mpsc::Sender<SlotEvent>,
+    /// Additional system prompt text from the DB role's system_prompt_extensions.
+    /// Appended after the base rendered prompt. Empty string = no extension.
+    pub system_prompt_extensions: String,
+    /// Auto-improvement amendments from the DB role's learned_prompt.
+    /// Appended after system_prompt_extensions. None = not set.
+    pub learned_prompt: Option<String>,
+    /// MCP server names from the DB role config (JSON → Vec<String>).
+    /// Passed through for future wiring by task `norv`.
+    pub mcp_servers: Vec<String>,
+    /// Skill names from the DB role config (JSON → Vec<String>).
+    /// Passed through for future wiring by task `9trm`.
+    pub skills: Vec<String>,
+    /// Override for the verification command from the DB role.
+    /// When Some, used instead of the project's .djinn/settings.json verification.
+    pub role_verification_command: Option<String>,
     /// Test-only: inject a pre-built provider, bypassing credential loading.
     /// When `Some`, `parse_model_id` and `load_provider_credential` are skipped.
     #[cfg(test)]
@@ -57,6 +72,11 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         cancel,
         pause,
         event_tx,
+        system_prompt_extensions,
+        learned_prompt,
+        mcp_servers,
+        skills,
+        role_verification_command,
         #[cfg(test)]
         provider_override,
     } = params;
@@ -358,13 +378,43 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     emit_step(&task.id, "preflight_passed", serde_json::json!({}));
 
     // ── Run setup commands before session ─────────────────────────────────────
+    // Log role-level MCP servers and skills so downstream tasks (norv, 9trm)
+    // can pick them up.  Actual wiring is not implemented here.
+    if !mcp_servers.is_empty() {
+        tracing::debug!(
+            task_id = %task.short_id,
+            mcp_servers = ?mcp_servers,
+            "Lifecycle: role has MCP servers (wiring deferred to task norv)"
+        );
+    }
+    if !skills.is_empty() {
+        tracing::debug!(
+            task_id = %task.short_id,
+            skills = ?skills,
+            "Lifecycle: role has skills (wiring deferred to task 9trm)"
+        );
+    }
     let (prompt_setup_commands, prompt_verification_commands) = {
         let (setup_specs, verification_specs) = load_commands(&worktree_path).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "failed to load project commands, using empty");
             (Vec::new(), Vec::new())
         });
         let prompt_setup_commands = format_command_details(&setup_specs);
-        let prompt_verification_commands = format_command_details(&verification_specs);
+        // Role-level verification_command overrides .djinn/settings.json when set.
+        let prompt_verification_commands = if let Some(ref cmd) = role_verification_command {
+            if !cmd.trim().is_empty() {
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    command = %cmd,
+                    "Lifecycle: using role-level verification_command override"
+                );
+                Some(cmd.clone())
+            } else {
+                format_command_details(&verification_specs)
+            }
+        } else {
+            format_command_details(&verification_specs)
+        };
         if !setup_specs.is_empty() {
             let setup_start = std::time::Instant::now();
             tracing::info!(
@@ -590,7 +640,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         None
     };
 
-    let system_prompt = role.render_prompt(
+    let base_system_prompt = role.render_prompt(
         &task,
         &TaskContext {
             project_path: project_path.clone(),
@@ -608,6 +658,12 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             activity: activity_text,
             epic_context,
         },
+    );
+    // Apply role-level prompt extensions from DB (system_prompt_extensions + learned_prompt).
+    let system_prompt = crate::prompts::apply_role_extensions(
+        &base_system_prompt,
+        &system_prompt_extensions,
+        learned_prompt.as_deref(),
     );
 
     let context_window = app_state

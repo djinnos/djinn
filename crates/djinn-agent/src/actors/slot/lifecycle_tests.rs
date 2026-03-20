@@ -154,6 +154,11 @@ async fn lifecycle_success_path_session_reaches_paused_and_slot_freed() {
         cancel: cancel.clone(),
         pause: CancellationToken::new(),
         event_tx,
+        system_prompt_extensions: String::new(),
+        learned_prompt: None,
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        role_verification_command: None,
         provider_override: Some(provider),
     };
 
@@ -221,6 +226,11 @@ async fn lifecycle_provider_failure_session_reaches_failed_and_slot_freed() {
         cancel: cancel.clone(),
         pause: CancellationToken::new(),
         event_tx,
+        system_prompt_extensions: String::new(),
+        learned_prompt: None,
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        role_verification_command: None,
         provider_override: Some(provider),
     };
 
@@ -281,6 +291,11 @@ async fn lifecycle_provider_failure_cleans_up_worktree() {
         cancel: cancel.clone(),
         pause: CancellationToken::new(),
         event_tx,
+        system_prompt_extensions: String::new(),
+        learned_prompt: None,
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        role_verification_command: None,
         provider_override: Some(provider),
     };
 
