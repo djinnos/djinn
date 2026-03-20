@@ -23,9 +23,11 @@ use crate::roles::RoleRegistry;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::parse_json_array;
 use djinn_db::Database;
+use djinn_db::EpicRepository;
 use djinn_db::GitSettingsRepository;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
+use djinn_db::SessionRepository;
 use djinn_db::{ActivityQuery, ReadyQuery, TaskRepository};
 use djinn_git::GitActorHandle;
 use djinn_provider::catalog::CatalogService;
@@ -178,6 +180,9 @@ enum CoordinatorMessage {
         healthy: bool,
         error: Option<String>,
     },
+    /// Trigger an immediate Architect patrol dispatch (for testing).
+    #[cfg(test)]
+    TriggerArchitectPatrol,
 }
 
 // ─── Actor (≤20 fields — AGENT-11) ───────────────────────────────────────────
@@ -359,7 +364,7 @@ impl CoordinatorActor {
                     self.architect_tick_counter += 1;
                     if self.architect_tick_counter >= rules::ARCHITECT_PATROL_TICKS {
                         self.architect_tick_counter = 0;
-                        self.maybe_run_architect_patrol().await;
+                        self.maybe_dispatch_architect_patrol().await;
                     }
                 }
             }
@@ -505,6 +510,10 @@ impl CoordinatorActor {
                 if healthy && self.is_project_dispatch_enabled(&project_id) {
                     self.dispatch_ready_tasks(Some(&project_id)).await;
                 }
+            }
+            #[cfg(test)]
+            CoordinatorMessage::TriggerArchitectPatrol => {
+                self.maybe_dispatch_architect_patrol().await;
             }
         }
     }
@@ -1030,6 +1039,12 @@ impl CoordinatorHandle {
             }
         }
     }
+
+    /// Trigger an immediate Architect patrol dispatch (for testing).
+    #[cfg(test)]
+    pub async fn trigger_architect_patrol(&self) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::TriggerArchitectPatrol).await
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -1513,5 +1528,166 @@ mod tests {
         assert_eq!(reopen_markers.len(), 2);
         assert!(reopen_markers.iter().any(|payload| payload["reopen_count"] == 1));
         assert!(reopen_markers.iter().any(|payload| payload["reopen_count"] == 2));
+    }
+
+    // ── Architect patrol dispatch ─────────────────────────────────────────────
+
+    /// Spawn a coordinator that includes an "architect" model slot, so the
+    /// patrol can actually dispatch.
+    fn spawn_coordinator_with_architect(
+        db: &Database,
+        tx: &broadcast::Sender<DjinnEventEnvelope>,
+    ) -> CoordinatorHandle {
+        let cancel = CancellationToken::new();
+        let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+        let pool = SlotPoolHandle::spawn(
+            ctx,
+            cancel.clone(),
+            SlotPoolConfig {
+                models: vec![ModelSlotConfig {
+                    model_id: DEFAULT_MODEL_ID.to_owned(),
+                    max_slots: 2,
+                    roles: ["worker", "reviewer", "architect"]
+                        .into_iter()
+                        .map(ToOwned::to_owned)
+                        .collect(),
+                }],
+                role_priorities: HashMap::new(),
+            },
+        );
+        let catalog = CatalogService::new();
+        let health = HealthTracker::new();
+        let verification_tracker = VerificationTracker::default();
+        let role_registry = Arc::new(RoleRegistry::new());
+        CoordinatorHandle::spawn(CoordinatorDeps {
+            events_tx: tx.clone(),
+            cancel,
+            db: db.clone(),
+            pool,
+            catalog,
+            health,
+            role_registry,
+            verification_tracker,
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patrol_skips_when_no_open_epics() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        // No epics at all — patrol should skip without creating any tasks.
+        let handle = spawn_coordinator_with_architect(&db, &tx);
+        handle.trigger_architect_patrol().await.unwrap();
+        // Give actor time to process.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let review_tasks = task_repo
+            .list_ready(djinn_db::ReadyQuery {
+                issue_type: Some("review".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            review_tasks.is_empty(),
+            "patrol should not create review task when there are no open epics"
+        );
+        // Dispatch counter should remain 0.
+        assert_eq!(
+            handle.get_status().unwrap().tasks_dispatched,
+            0,
+            "patrol should not dispatch when no open epics"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patrol_skips_when_architect_already_running() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        // Create an open epic so the patrol would normally run.
+        let project = test_helpers::create_test_project(&db).await;
+        EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Test Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Insert a fake running Architect session into the DB to simulate one already running.
+        let session_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO sessions (id, project_id, task_id, model_id, agent_type, status, started_at)
+             VALUES (?1, ?2, NULL, 'test/mock', 'architect', 'running', strftime('%s','now'))",
+        )
+        .bind(&session_id)
+        .bind(&project.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let handle = spawn_coordinator_with_architect(&db, &tx);
+        handle.trigger_architect_patrol().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Dispatch counter should remain 0 — patrol was skipped.
+        assert_eq!(
+            handle.get_status().unwrap().tasks_dispatched,
+            0,
+            "patrol should skip when an Architect session is already running"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patrol_creates_review_task_when_open_epic_exists() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        // Create project with an open epic.
+        let project = test_helpers::create_test_project(&db).await;
+        EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Active Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let handle = spawn_coordinator_with_architect(&db, &tx);
+        handle.trigger_architect_patrol().await.unwrap();
+        // Give the actor time to process.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Verify a review task was created (the patrol creates one for visibility).
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let tasks_by_project = task_repo.list_by_project(&project.id).await.unwrap();
+        assert!(
+            tasks_by_project
+                .iter()
+                .any(|t| t.issue_type == "review" && t.title.contains("patrol")),
+            "patrol should create a review task; found tasks: {:?}",
+            tasks_by_project
+                .iter()
+                .map(|t| (&t.title, &t.issue_type))
+                .collect::<Vec<_>>()
+        );
     }
 }
