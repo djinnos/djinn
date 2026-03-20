@@ -8,7 +8,8 @@
 //! - [`GitHubApiClient::create_pull_request`] — open a PR
 //! - [`GitHubApiClient::enable_auto_merge`] — set auto-merge on a PR
 //! - [`GitHubApiClient::get_pull_request`] — fetch PR status and CI checks
-//! - [`GitHubApiClient::list_pull_request_reviews`] — list review comments
+//! - [`GitHubApiClient::list_pull_request_reviews`] — list inline review comments
+//! - [`GitHubApiClient::list_pr_review_states`] — list top-level review states (APPROVED, CHANGES_REQUESTED, etc.)
 //!
 //! # Token lifecycle
 //! On every API call the client checks whether the cached user token is
@@ -133,6 +134,19 @@ pub struct PrRef {
     #[serde(rename = "ref")]
     pub ref_name: String,
     pub sha: String,
+}
+
+/// A top-level PR review (submitted via "Review changes" — distinct from inline comments).
+///
+/// The `state` field is one of `"APPROVED"`, `"CHANGES_REQUESTED"`, `"COMMENTED"`,
+/// `"DISMISSED"`, or `"PENDING"`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrReview {
+    pub id: u64,
+    pub user: Option<GitHubUser>,
+    pub state: String,
+    pub submitted_at: Option<String>,
+    pub html_url: String,
 }
 
 /// A review comment on a pull request.
@@ -504,6 +518,50 @@ impl GitHubApiClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!(
                 "list_pull_request_reviews failed ({}): {}",
+                status,
+                body
+            ));
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// List top-level reviews submitted on a pull request.
+    ///
+    /// Returns each review's state (`"APPROVED"`, `"CHANGES_REQUESTED"`, etc.).
+    /// Uses `GET /repos/{owner}/{repo}/pulls/{number}/reviews`.
+    pub async fn list_pr_review_states(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) -> Result<Vec<PrReview>> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{}/reviews",
+            self.base_url, owner, repo, pull_number
+        );
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "list_pr_review_states failed ({}): {}",
                 status,
                 body
             ));
