@@ -205,21 +205,21 @@ function ProjectsReplica({
 
 const ROLE_LABELS: Record<string, string> = {
   worker: "W",
-  task_reviewer: "R",
+  reviewer: "R",
   lead: "L",
   planner: "P",
 };
 
 const ROLE_FULL_LABELS: Record<string, string> = {
   worker: "Worker",
-  task_reviewer: "Reviewer",
+  reviewer: "Reviewer",
   lead: "Lead",
   planner: "Planner",
 };
 
 const ALL_ROLES = [
   "worker",
-  "task_reviewer",
+  "reviewer",
   "lead",
   "planner",
 ];
@@ -390,7 +390,7 @@ const sampleModels: ModelEntry[] = [
   {
     model: "claude-sonnet-4-20250514",
     provider: "anthropic",
-    enabledRoles: ["worker", "task_reviewer", "planner"],
+    enabledRoles: ["worker", "reviewer", "planner"],
     max_concurrent: 3,
   },
   {

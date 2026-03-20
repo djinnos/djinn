@@ -22,12 +22,12 @@ import {
 
 const BASE_ROLE_LABELS: Record<BaseRole, string> = {
   worker: "Worker",
-  task_reviewer: "Task Reviewer",
+  reviewer: "Task Reviewer",
   lead: "Lead",
   planner: "Planner",
 };
 
-const BASE_ROLES: BaseRole[] = ["worker", "task_reviewer", "lead", "planner"];
+const BASE_ROLES: BaseRole[] = ["worker", "reviewer", "lead", "planner"];
 
 // ── Role Form ────────────────────────────────────────────────────────────────
 

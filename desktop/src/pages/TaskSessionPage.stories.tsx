@@ -68,7 +68,7 @@ const mockSessions: SessionInfo[] = [
   },
   {
     id: "sess-002",
-    agentType: "task_reviewer",
+    agentType: "reviewer",
     modelId: "claude-sonnet-4-6",
     startedAt: minutesAgo(30),
     endedAt: minutesAgo(22),
@@ -183,7 +183,7 @@ const baseTimeline: TimelineEntry[] = [
       },
     ],
     sessionId: "sess-002",
-    agentType: "task_reviewer",
+    agentType: "reviewer",
     modelId: "claude-sonnet-4-6",
     timestamp: minutesAgo(25),
   },

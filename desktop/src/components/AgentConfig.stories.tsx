@@ -54,7 +54,7 @@ const threeModels: UnifiedModelEntry[] = [
   {
     model: "claude-sonnet-4-6",
     provider: "anthropic",
-    enabledRoles: ["worker", "task_reviewer", "lead"],
+    enabledRoles: ["worker", "reviewer", "lead"],
     max_concurrent: 3,
     current_active: 0,
   },

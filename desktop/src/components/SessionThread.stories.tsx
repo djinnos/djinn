@@ -126,10 +126,10 @@ const multiAgentTimeline: TimelineEntry[] = [
 
   divider("Worker completed \u2192 Review started", minutesAgo(13)),
 
-  msg("user", "task_reviewer", [
+  msg("user", "reviewer", [
     { type: "text", text: "Review the changes made to fix SSE reconnection logic." },
   ], { sessionId: "ses-r1", timestamp: minutesAgo(12) }),
-  msg("assistant", "task_reviewer", [
+  msg("assistant", "reviewer", [
     { type: "text", text: "Reviewing the diff. The `Last-Event-ID` header addition looks correct.\n\n**Findings:**\n- The reconnect delay uses exponential backoff (good)\n- Missing: the `readyState` check before scheduling reconnect could cause duplicate connections\n- Suggest adding a guard: `if (source.readyState !== EventSource.CONNECTING)`" },
   ], { sessionId: "ses-r1", timestamp: minutesAgo(10) }),
 ];
@@ -140,7 +140,7 @@ export const MultiAgentSession = {
     streamingText: new Map(),
     loading: false,
     error: null,
-    activeAgentType: "task_reviewer",
+    activeAgentType: "reviewer",
   },
 };
 

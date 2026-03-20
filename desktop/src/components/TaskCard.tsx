@@ -1,6 +1,6 @@
 import type { Epic, Task } from "@/api/types";
 import workerAvatar from "@/assets/worker.png";
-import taskReviewerAvatar from "@/assets/task_reviewer.png";
+import reviewerAvatar from "@/assets/reviewer.png";
 import pmAvatar from "@/assets/pm.png";
 
 import { TaskIdLabel } from "@/components/TaskIdLabel";
@@ -157,7 +157,7 @@ function getCardTint(task: Task): { ring: string; bg: string; hover: string; act
 
 const AGENT_AVATARS: Record<string, string> = {
   worker: workerAvatar,
-  task_reviewer: taskReviewerAvatar,
+  reviewer: reviewerAvatar,
   lead: pmAvatar,
 };
 
