@@ -75,12 +75,12 @@ pub fn validate_priority(p: i64) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate issue_type: "task", "feature", or "bug".
+/// Validate issue_type: "task", "feature", "bug", "spike", "research", "decomposition", or "review".
 pub fn validate_issue_type(s: &str) -> Result<(), String> {
     match s {
-        "task" | "feature" | "bug" => Ok(()),
+        "task" | "feature" | "bug" | "spike" | "research" | "decomposition" | "review" => Ok(()),
         other => Err(format!(
-            "invalid issue_type: {other:?} (expected task, feature, or bug)"
+            "invalid issue_type: {other:?} (expected task, feature, bug, spike, research, decomposition, or review)"
         )),
     }
 }
@@ -270,6 +270,10 @@ mod tests {
         assert!(validate_issue_type("task").is_ok());
         assert!(validate_issue_type("feature").is_ok());
         assert!(validate_issue_type("bug").is_ok());
+        assert!(validate_issue_type("spike").is_ok());
+        assert!(validate_issue_type("research").is_ok());
+        assert!(validate_issue_type("decomposition").is_ok());
+        assert!(validate_issue_type("review").is_ok());
         assert!(validate_issue_type("epic").is_err());
         assert!(validate_issue_type("").is_err());
     }
