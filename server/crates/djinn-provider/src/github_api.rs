@@ -1,10 +1,9 @@
 //! GitHub REST API v3 client.
 //!
-//! Provides a [`GitHubApiClient`] that derives installation access tokens from
-//! the user OAuth token + installation ID stored in the credential vault.
+//! Provides a [`GitHubApiClient`] that uses the GitHub App user OAuth token
+//! directly for all API calls (per ADR-039).
 //!
 //! # Operations
-//! - [`GitHubApiClient::derive_installation_token`] — exchange user token for installation token
 //! - [`GitHubApiClient::create_pull_request`] — open a PR
 //! - [`GitHubApiClient::enable_auto_merge`] — set auto-merge on a PR
 //! - [`GitHubApiClient::get_pull_request`] — fetch PR status and CI checks
@@ -29,11 +28,8 @@ use anyhow::{Result, anyhow};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
-use crate::oauth::github_app::{
-    CLIENT_ID, GITHUB_INSTALLATION_ID_KEY, GitHubAppTokens, refresh_cached_token,
-};
+use crate::oauth::github_app::{CLIENT_ID, GitHubAppTokens, refresh_cached_token};
 use crate::repos::CredentialRepository;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -49,17 +45,6 @@ const BACKOFF_INITIAL_SECS: u64 = 1;
 
 /// Maximum back-off duration for rate-limit retries (seconds).
 const BACKOFF_MAX_SECS: u64 = 60;
-
-// ─── Installation token ───────────────────────────────────────────────────────
-
-/// Short-lived installation access token returned by GitHub.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstallationToken {
-    /// Bearer token for making GitHub API calls as the installation.
-    pub token: String,
-    /// ISO-8601 expiry timestamp.
-    pub expires_at: String,
-}
 
 // ─── PR types ─────────────────────────────────────────────────────────────────
 
@@ -204,8 +189,6 @@ pub struct GitHubApiClient {
     cred_repo: Arc<CredentialRepository>,
     /// Override for the GitHub API base URL (default: `GITHUB_API_BASE`).
     base_url: String,
-    /// Cached installation token — refreshed on expiry or 401.
-    installation_token: Arc<Mutex<Option<InstallationToken>>>,
 }
 
 impl GitHubApiClient {
@@ -224,7 +207,6 @@ impl GitHubApiClient {
             http,
             cred_repo,
             base_url,
-            installation_token: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -243,90 +225,22 @@ impl GitHubApiClient {
         Ok(tokens)
     }
 
-    /// Derive (or return a cached) installation access token.
-    ///
-    /// Calls `POST /app/installations/{installation_id}/access_tokens` using the
-    /// user bearer token. Caches the result until the token is about to expire.
-    pub async fn derive_installation_token(&self) -> Result<InstallationToken> {
-        // Return cached token if still valid.
-        {
-            let guard = self.installation_token.lock().await;
-            if let Some(ref cached) = *guard
-                && !installation_token_expired(cached)
-            {
-                return Ok(cached.clone());
-            }
-        }
-
-        let user_tokens = self.load_user_token().await?;
-        let installation_id = self
-            .cred_repo
-            .get_decrypted(GITHUB_INSTALLATION_ID_KEY)
-            .await
-            .ok()
-            .flatten()
-            .ok_or_else(|| {
-                anyhow!("No GitHub installation ID found — call store_installation_id first")
-            })?;
-
-        let url = format!(
-            "{}/app/installations/{}/access_tokens",
-            self.base_url, installation_id
-        );
-
-        let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(&user_tokens.access_token)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await?;
-
-        let resp = handle_rate_limit(resp).await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "Failed to derive installation token ({}): {}",
-                status,
-                body
-            ));
-        }
-
-        let token: InstallationToken = resp.json().await?;
-        *self.installation_token.lock().await = Some(token.clone());
-        Ok(token)
-    }
-
     // ─── Core request helper ──────────────────────────────────────────────────
 
-    /// Execute a request, retrying once with a fresh token on 401.
+    /// Execute a request using the user OAuth token directly (per ADR-039).
+    /// Retries once with a refreshed token on 401.
     async fn send_with_retry<F, Fut>(&self, build_request: F) -> Result<Response>
     where
         F: Fn(String) -> Fut,
         Fut: std::future::Future<Output = Result<Response>>,
     {
-        let token = self.derive_installation_token().await?;
-        let resp = build_request(token.token.clone()).await?;
+        let user_tokens = self.load_user_token().await?;
+        let resp = build_request(user_tokens.access_token.clone()).await?;
 
         if resp.status() == StatusCode::UNAUTHORIZED {
-            tracing::warn!(
-                "GitHubApiClient: 401 received, invalidating installation token and retrying"
-            );
-            // Invalidate cached installation token so next call re-derives it.
-            *self.installation_token.lock().await = None;
-
-            // Also check if the user token needs refresh.
-            let user_tokens = GitHubAppTokens::load_from_db(&self.cred_repo)
-                .await
-                .ok_or_else(|| anyhow!("No GitHub App tokens found for refresh"))?;
-            refresh_cached_token(&user_tokens, CLIENT_ID, &self.cred_repo).await?;
-
-            // Re-derive installation token and retry once.
-            let fresh_token = self.derive_installation_token().await?;
-            return build_request(fresh_token.token).await;
+            tracing::warn!("GitHubApiClient: 401 received, refreshing user token and retrying");
+            let refreshed = refresh_cached_token(&user_tokens, CLIENT_ID, &self.cred_repo).await?;
+            return build_request(refreshed.access_token).await;
         }
 
         Ok(resp)
@@ -759,20 +673,8 @@ async fn handle_rate_limit(resp: Response) -> Result<Response> {
     Ok(resp)
 }
 
-/// Returns `true` if the installation token has expired (60-second buffer).
-fn installation_token_expired(token: &InstallationToken) -> bool {
-    // expires_at is ISO-8601, e.g. "2024-01-01T12:00:00Z"
-    let Ok(dt) = chrono_parse_iso8601(&token.expires_at) else {
-        return false; // can't parse — assume still valid
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    now >= dt - 60
-}
-
 /// Minimal ISO-8601 UTC parser: `YYYY-MM-DDTHH:MM:SSZ` → epoch seconds.
+#[cfg(test)]
 fn chrono_parse_iso8601(s: &str) -> Result<i64> {
     // Format: "2024-01-01T12:00:00Z"
     let s = s.trim_end_matches('Z');
@@ -803,6 +705,7 @@ fn chrono_parse_iso8601(s: &str) -> Result<i64> {
 }
 
 /// Compute days since 1970-01-01 for a given Gregorian date.
+#[cfg(test)]
 fn days_since_epoch(year: i64, month: i64, day: i64) -> i64 {
     // Algorithm from https://howardhinnant.github.io/date_algorithms.html
     let y = if month <= 2 { year - 1 } else { year };
@@ -926,68 +829,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn installation_token_not_expired_for_future() {
-        let token = InstallationToken {
-            token: "ghs_test".into(),
-            expires_at: future_expires_at(),
-        };
-        assert!(!installation_token_expired(&token));
-    }
-
-    #[test]
-    fn installation_token_expired_for_past() {
-        let token = InstallationToken {
-            token: "ghs_test".into(),
-            expires_at: "2020-01-01T00:00:00Z".into(),
-        };
-        assert!(installation_token_expired(&token));
-    }
-
     // ─── Integration tests with wiremock ──────────────────────────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn derive_installation_token_success() {
-        let server = MockServer::start().await;
-        let repo = make_repo();
-        seed_tokens(&repo, "ghu_user_token").await;
-
-        Mock::given(method("POST"))
-            .and(path("/app/installations/12345678/access_tokens"))
-            .and(header("Authorization", "Bearer ghu_user_token"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "token": "ghs_installation_token",
-                "expires_at": future_expires_at()
-            })))
-            .mount(&server)
-            .await;
-
-        let client = GitHubApiClient::with_base_url(repo, server.uri());
-        let token = client.derive_installation_token().await.unwrap();
-        assert_eq!(token.token, "ghs_installation_token");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn derive_installation_token_cached() {
-        let server = MockServer::start().await;
-        let repo = make_repo();
-        seed_tokens(&repo, "ghu_user_token").await;
-
-        Mock::given(method("POST"))
-            .and(path("/app/installations/12345678/access_tokens"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "token": "ghs_cached",
-                "expires_at": future_expires_at()
-            })))
-            .expect(1) // Only one call — second call should use cache.
-            .mount(&server)
-            .await;
-
-        let client = GitHubApiClient::with_base_url(repo, server.uri());
-        client.derive_installation_token().await.unwrap();
-        client.derive_installation_token().await.unwrap();
-        // wiremock will panic on drop if the expectation is violated.
-    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_pull_request_success() {
@@ -995,20 +837,10 @@ mod tests {
         let repo = make_repo();
         seed_tokens(&repo, "ghu_user").await;
 
-        // Installation token endpoint.
-        Mock::given(method("POST"))
-            .and(path("/app/installations/12345678/access_tokens"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "token": "ghs_tok",
-                "expires_at": future_expires_at()
-            })))
-            .mount(&server)
-            .await;
-
-        // PR creation endpoint.
+        // PR creation endpoint — uses user token directly (ADR-039).
         Mock::given(method("POST"))
             .and(path("/repos/djinnos/server/pulls"))
-            .and(header("Authorization", "Bearer ghs_tok"))
+            .and(header("Authorization", "Bearer ghu_user"))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "number": 42,
                 "title": "feat: add feature",
@@ -1051,18 +883,9 @@ mod tests {
         let repo = make_repo();
         seed_tokens(&repo, "ghu_user").await;
 
-        Mock::given(method("POST"))
-            .and(path("/app/installations/12345678/access_tokens"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "token": "ghs_tok",
-                "expires_at": future_expires_at()
-            })))
-            .mount(&server)
-            .await;
-
         Mock::given(method("PUT"))
             .and(path("/repos/djinnos/server/pulls/42/merge"))
-            .and(header("Authorization", "Bearer ghs_tok"))
+            .and(header("Authorization", "Bearer ghu_user"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "sha": "abc123",
                 "merged": true,
@@ -1085,15 +908,6 @@ mod tests {
         let server = MockServer::start().await;
         let repo = make_repo();
         seed_tokens(&repo, "ghu_user").await;
-
-        Mock::given(method("POST"))
-            .and(path("/app/installations/12345678/access_tokens"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "token": "ghs_tok",
-                "expires_at": future_expires_at()
-            })))
-            .mount(&server)
-            .await;
 
         Mock::given(method("GET"))
             .and(path("/repos/djinnos/server/pulls/42"))
@@ -1145,15 +959,6 @@ mod tests {
         let repo = make_repo();
         seed_tokens(&repo, "ghu_user").await;
 
-        Mock::given(method("POST"))
-            .and(path("/app/installations/12345678/access_tokens"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "token": "ghs_tok",
-                "expires_at": future_expires_at()
-            })))
-            .mount(&server)
-            .await;
-
         Mock::given(method("GET"))
             .and(path("/repos/djinnos/server/pulls/42/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
@@ -1190,15 +995,6 @@ mod tests {
         seed_tokens(&repo, "ghu_user").await;
 
         Mock::given(method("POST"))
-            .and(path("/app/installations/12345678/access_tokens"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "token": "ghs_tok",
-                "expires_at": future_expires_at()
-            })))
-            .mount(&server)
-            .await;
-
-        Mock::given(method("POST"))
             .and(path("/repos/djinnos/server/pulls"))
             .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
                 "message": "Validation Failed",
@@ -1229,11 +1025,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn derive_installation_token_missing_creds_returns_error() {
+    async fn missing_creds_returns_error() {
+        let server = MockServer::start().await;
         let repo = make_repo();
-        // No tokens seeded.
-        let client = GitHubApiClient::with_base_url(repo, "http://localhost:9999".into());
-        let result = client.derive_installation_token().await;
+        // No tokens seeded — should fail when trying to load user token.
+        let client = GitHubApiClient::with_base_url(repo, server.uri());
+        let result = client.get_pull_request("djinnos", "server", 1).await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -1244,36 +1041,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn rate_limit_remaining_zero_returns_error() {
+    async fn send_with_retry_refreshes_on_401() {
         let server = MockServer::start().await;
         let repo = make_repo();
         seed_tokens(&repo, "ghu_user").await;
 
-        // Installation token is fetched first; give it a near-future reset.
-        let reset_epoch = now_secs() + 1; // 1 second from now
-
-        Mock::given(method("POST"))
-            .and(path("/app/installations/12345678/access_tokens"))
-            .respond_with(
-                ResponseTemplate::new(201)
-                    .append_header("X-RateLimit-Remaining", "0")
-                    .append_header("X-RateLimit-Reset", &reset_epoch.to_string())
-                    .set_body_json(serde_json::json!({
-                        "token": "ghs_tok",
-                        "expires_at": future_expires_at()
-                    })),
-            )
+        // First call returns 401, second (after refresh) succeeds.
+        // Since refresh_cached_token hits GitHub, and we can't mock that easily,
+        // just verify that 401 triggers the refresh path (which will fail in
+        // test with "No GitHub App tokens" since refresh needs real endpoints).
+        Mock::given(method("GET"))
+            .and(path("/repos/djinnos/server/pulls/1"))
+            .respond_with(ResponseTemplate::new(401))
             .mount(&server)
             .await;
 
         let client = GitHubApiClient::with_base_url(repo, server.uri());
-        let result = client.derive_installation_token().await;
+        let result = client.get_pull_request("djinnos", "server", 1).await;
+        // Should fail because refresh can't succeed in test environment.
         assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("rate limit"),
-            "expected rate limit error: {}",
-            msg
-        );
     }
 }

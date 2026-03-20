@@ -52,6 +52,9 @@ pub(crate) struct MergeActions {
     pub(crate) release: TransitionAction,
     /// Action when pre-merge verification fails. Falls back to `release` if None.
     pub(crate) verification_fail: Option<TransitionAction>,
+    /// Action when GitHub PR creation fails (infra/auth error, not a code issue).
+    /// Falls back to `release` if None.
+    pub(crate) pr_creation_fail: Option<TransitionAction>,
 }
 
 /// Standard actions used by the task reviewer path.
@@ -62,6 +65,10 @@ pub(crate) const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
     // Pre-merge verification failure should reopen the task for the worker,
     // not loop back to the reviewer who already approved.
     verification_fail: Some(TransitionAction::TaskReviewReject),
+    // PR creation failure is an infra/auth issue, not a code issue. Escalate to
+    // lead intervention so a human can fix the credentials rather than looping
+    // the reviewer in an infinite approve → PR fail → re-review cycle.
+    pr_creation_fail: Some(TransitionAction::Escalate),
 };
 
 /// Actions used when Lead approves directly from intervention.
@@ -75,6 +82,7 @@ pub(crate) const PM_MERGE_ACTIONS: MergeActions = MergeActions {
     conflict: TransitionAction::LeadApproveConflict,
     release: TransitionAction::LeadInterventionComplete,
     verification_fail: None, // falls back to release (→ Open), which is correct for Lead
+    pr_creation_fail: None,  // falls back to release (→ Open), which is correct for Lead
 };
 
 pub(crate) async fn merge_after_task_review(
@@ -385,7 +393,7 @@ pub(crate) async fn merge_and_transition(
             tracing::warn!(
                 task_id = %task.short_id,
                 error = %reason,
-                "GitHub PR creation failed; releasing task"
+                "GitHub PR creation failed; escalating to lead intervention"
             );
             let _ = repo
                 .log_activity(
@@ -396,10 +404,16 @@ pub(crate) async fn merge_and_transition(
                     &serde_json::json!({ "reason": reason }).to_string(),
                 )
                 .await;
-            return Some((
-                actions.release.clone(),
-                Some(format!("GitHub PR creation failed: {reason}")),
-            ));
+            // PR creation failure is an infra/auth problem, not a code problem.
+            // Use pr_creation_fail action if set (→ NeedsLeadIntervention for the
+            // reviewer path) to avoid looping the reviewer. Fall back to release
+            // only when no dedicated action is configured (e.g. Lead path).
+            let action = actions
+                .pr_creation_fail
+                .as_ref()
+                .unwrap_or(&actions.release)
+                .clone();
+            return Some((action, Some(format!("GitHub PR creation failed: {reason}"))));
         }
     }
 
