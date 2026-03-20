@@ -3,50 +3,50 @@
     {
       "match": "server/crates/djinn-agent/**",
       "commands": [
-        "cargo test -p djinn-agent",
-        "cargo clippy -p djinn-agent --all-targets -- -D warnings"
+        "cd server && cargo test -p djinn-agent",
+        "cd server && cargo clippy -p djinn-agent --all-targets -- -D warnings"
       ]
     },
     {
       "match": "server/crates/djinn-core/**",
       "commands": [
-        "cargo test -p djinn-core",
-        "cargo clippy -p djinn-core --all-targets -- -D warnings"
+        "cd server && cargo test -p djinn-core",
+        "cd server && cargo clippy -p djinn-core --all-targets -- -D warnings"
       ]
     },
     {
       "match": "server/crates/djinn-db/**",
       "commands": [
-        "cargo test -p djinn-db",
-        "cargo clippy -p djinn-db --all-targets -- -D warnings"
+        "cd server && cargo test -p djinn-db",
+        "cd server && cargo clippy -p djinn-db --all-targets -- -D warnings"
       ]
     },
     {
       "match": "server/crates/djinn-git/**",
       "commands": [
-        "cargo test -p djinn-git",
-        "cargo clippy -p djinn-git --all-targets -- -D warnings"
+        "cd server && cargo test -p djinn-git",
+        "cd server && cargo clippy -p djinn-git --all-targets -- -D warnings"
       ]
     },
     {
       "match": "server/crates/djinn-mcp/**",
       "commands": [
-        "cargo test -p djinn-mcp",
-        "cargo clippy -p djinn-mcp --all-targets -- -D warnings"
+        "cd server && cargo test -p djinn-mcp",
+        "cd server && cargo clippy -p djinn-mcp --all-targets -- -D warnings"
       ]
     },
     {
       "match": "server/crates/djinn-provider/**",
       "commands": [
-        "cargo test -p djinn-provider",
-        "cargo clippy -p djinn-provider --all-targets -- -D warnings"
+        "cd server && cargo test -p djinn-provider",
+        "cd server && cargo clippy -p djinn-provider --all-targets -- -D warnings"
       ]
     },
     {
       "match": "server/src/**",
       "commands": [
-        "cargo test -p djinn-server",
-        "cargo clippy -p djinn-server --all-targets -- -D warnings"
+        "cd server && cargo test -p djinn-server",
+        "cd server && cargo clippy -p djinn-server --all-targets -- -D warnings"
       ]
     }
   ]
