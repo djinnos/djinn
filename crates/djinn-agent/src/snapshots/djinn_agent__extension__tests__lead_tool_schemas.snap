@@ -121,6 +121,10 @@ expression: tool_schemas_lead()
         "query": {
           "type": "string"
         },
+        "task_id": {
+          "description": "Task ID for affinity scoring; defaults to the current session task",
+          "type": "string"
+        },
         "type": {
           "type": "string"
         }
