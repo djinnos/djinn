@@ -207,17 +207,19 @@ pub struct TaskTransitionParams {
     /// verification_pass, verification_fail, release_verification,
     /// submit_task_review, task_review_start,
     /// task_review_reject, task_review_reject_conflict, task_review_approve,
+    /// mark_pr_ready, pr_merge, pr_changes_requested,
     /// reopen, close, release, release_task_review, force_close,
     /// user_override.
     pub action: String,
     /// Required for: verification_fail, release_verification,
     /// task_review_reject, task_review_reject_conflict,
+    /// pr_changes_requested,
     /// reopen, release, release_task_review, force_close.
     pub reason: Option<String>,
     pub actor_id: Option<String>,
     pub actor_role: Option<String>,
-    /// Required when action = "user_override". Allowed values: draft, open, verifying,
-    /// needs_task_review, in_task_review, in_progress, closed.
+    /// Required when action = "user_override". Allowed values: open, in_progress,
+    /// verifying, needs_task_review, in_task_review, pr_ready, closed.
     pub target_status: Option<String>,
 }
 
@@ -457,6 +459,8 @@ pub struct BoardHealthEpicStat {
     pub total: i64,
     pub closed: i64,
     pub in_review: i64,
+    /// Number of tasks in pr_ready state (PR opened, awaiting merge).
+    pub pr_ready: i64,
     pub pct_complete: f64,
     pub oldest_review_at: Option<String>,
 }

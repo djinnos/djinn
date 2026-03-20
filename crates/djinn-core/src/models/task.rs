@@ -87,6 +87,10 @@ pub struct Task {
     pub closed_at: Option<String>,
     pub close_reason: Option<String>,
     pub merge_commit_sha: Option<String>,
+    /// URL of the GitHub PR created when the GitHub App is connected.
+    /// NULL when the direct-push merge path is used (no GitHub App).
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub pr_url: Option<String>,
     /// JSON metadata about an active merge conflict (set by conflict transitions
     /// and worktree rebase failures; cleared on submit_verification/close).
     pub merge_conflict_metadata: Option<String>,
@@ -127,6 +131,8 @@ pub enum TaskStatus {
     Verifying,
     NeedsTaskReview,
     InTaskReview,
+    /// PR has been opened and is awaiting CI/review/merge. Distinct from closed.
+    PrReady,
     NeedsPmIntervention,
     InPmIntervention,
     Closed,
@@ -141,6 +147,7 @@ impl TaskStatus {
             Self::Verifying => "verifying",
             Self::NeedsTaskReview => "needs_task_review",
             Self::InTaskReview => "in_task_review",
+            Self::PrReady => "pr_ready",
             Self::NeedsPmIntervention => "needs_pm_intervention",
             Self::InPmIntervention => "in_pm_intervention",
             Self::Closed => "closed",
@@ -155,6 +162,7 @@ impl TaskStatus {
             "verifying" => Ok(Self::Verifying),
             "needs_task_review" => Ok(Self::NeedsTaskReview),
             "in_task_review" => Ok(Self::InTaskReview),
+            "pr_ready" => Ok(Self::PrReady),
             "needs_pm_intervention" => Ok(Self::NeedsPmIntervention),
             "in_pm_intervention" => Ok(Self::InPmIntervention),
             "closed" => Ok(Self::Closed),
@@ -203,6 +211,12 @@ pub enum TransitionAction {
     PmApprove,
     /// Merge conflict discovered during PM approval — reopen for conflict resolver.
     PmApproveConflict,
+    /// Reviewer approves and opens a GitHub PR — transitions in_task_review → pr_ready.
+    MarkPrReady,
+    /// GitHub App signals PR merged — transitions pr_ready → closed.
+    PrMerge,
+    /// GitHub App signals changes requested on PR — transitions pr_ready → open.
+    PrChangesRequested,
 }
 
 impl TransitionAction {
@@ -221,6 +235,7 @@ impl TransitionAction {
                 | Self::ForceClose
                 | Self::Escalate
                 | Self::PmInterventionRelease
+                | Self::PrChangesRequested
         )
     }
 
@@ -250,6 +265,9 @@ impl TransitionAction {
             "pm_intervention_complete" => Ok(Self::PmInterventionComplete),
             "pm_approve" => Ok(Self::PmApprove),
             "pm_approve_conflict" => Ok(Self::PmApproveConflict),
+            "mark_pr_ready" => Ok(Self::MarkPrReady),
+            "pr_merge" => Ok(Self::PrMerge),
+            "pr_changes_requested" => Ok(Self::PrChangesRequested),
             other => Err(Error::Internal(format!(
                 "unknown transition action: {other}"
             ))),
@@ -582,6 +600,36 @@ pub fn compute_transition(
                 ..Default::default()
             }
         }
+
+        TransitionAction::MarkPrReady => {
+            if *from != TaskStatus::InTaskReview {
+                return bad("mark_pr_ready is only valid from in_task_review");
+            }
+            TransitionApply::simple(TaskStatus::PrReady)
+        }
+
+        TransitionAction::PrMerge => {
+            if *from != TaskStatus::PrReady {
+                return bad("pr_merge is only valid from pr_ready");
+            }
+            TransitionApply {
+                to_status: Some(TaskStatus::Closed),
+                set_closed_at: true,
+                close_reason: Some("completed"),
+                ..Default::default()
+            }
+        }
+
+        TransitionAction::PrChangesRequested => {
+            if *from != TaskStatus::PrReady {
+                return bad("pr_changes_requested is only valid from pr_ready");
+            }
+            TransitionApply {
+                to_status: Some(TaskStatus::Open),
+                increment_reopen: true,
+                ..Default::default()
+            }
+        }
     })
 }
 
@@ -635,18 +683,19 @@ pub fn compute_transition_for_issue_type(
 mod tests {
     use super::*;
 
-    const STATUSES: [TaskStatus; 8] = [
+    const STATUSES: [TaskStatus; 9] = [
         TaskStatus::Open,
         TaskStatus::InProgress,
         TaskStatus::Verifying,
         TaskStatus::NeedsTaskReview,
         TaskStatus::InTaskReview,
+        TaskStatus::PrReady,
         TaskStatus::NeedsPmIntervention,
         TaskStatus::InPmIntervention,
         TaskStatus::Closed,
     ];
 
-    const ACTIONS: [TransitionAction; 23] = [
+    const ACTIONS: [TransitionAction; 26] = [
         TransitionAction::Start,
         TransitionAction::SubmitVerification,
         TransitionAction::VerificationPass,
@@ -670,6 +719,9 @@ mod tests {
         TransitionAction::PmInterventionComplete,
         TransitionAction::PmApprove,
         TransitionAction::PmApproveConflict,
+        TransitionAction::MarkPrReady,
+        TransitionAction::PrMerge,
+        TransitionAction::PrChangesRequested,
     ];
 
     fn expected_status(action: &TransitionAction, from: &TaskStatus) -> Option<TaskStatus> {
@@ -733,6 +785,11 @@ mod tests {
             (TransitionAction::PmApproveConflict, TaskStatus::InPmIntervention) => {
                 Some(TaskStatus::Open)
             }
+            (TransitionAction::MarkPrReady, TaskStatus::InTaskReview) => {
+                Some(TaskStatus::PrReady)
+            }
+            (TransitionAction::PrMerge, TaskStatus::PrReady) => Some(TaskStatus::Closed),
+            (TransitionAction::PrChangesRequested, TaskStatus::PrReady) => Some(TaskStatus::Open),
             _ => None,
         }
     }

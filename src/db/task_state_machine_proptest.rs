@@ -45,6 +45,7 @@ fn arb_status() -> impl Strategy<Value = TaskStatus> {
         Just(TaskStatus::Verifying),
         Just(TaskStatus::NeedsTaskReview),
         Just(TaskStatus::InTaskReview),
+        Just(TaskStatus::PrReady),
         Just(TaskStatus::NeedsPmIntervention),
         Just(TaskStatus::InPmIntervention),
         Just(TaskStatus::Closed),
@@ -58,6 +59,7 @@ fn arb_non_closed_status() -> impl Strategy<Value = TaskStatus> {
         Just(TaskStatus::Verifying),
         Just(TaskStatus::NeedsTaskReview),
         Just(TaskStatus::InTaskReview),
+        Just(TaskStatus::PrReady),
         Just(TaskStatus::NeedsPmIntervention),
         Just(TaskStatus::InPmIntervention),
     ]
@@ -88,6 +90,9 @@ fn arb_action() -> impl Strategy<Value = TransitionAction> {
         Just(TransitionAction::PmInterventionComplete),
         Just(TransitionAction::PmApprove),
         Just(TransitionAction::PmApproveConflict),
+        Just(TransitionAction::MarkPrReady),
+        Just(TransitionAction::PrMerge),
+        Just(TransitionAction::PrChangesRequested),
     ]
 }
 

@@ -199,6 +199,32 @@ impl TaskRepository {
         Ok(task)
     }
 
+    /// Store the GitHub PR URL for a task after PR creation.
+    ///
+    /// Set when the GitHub App is connected and a PR is opened instead of
+    /// using the direct-push merge path.
+    pub async fn set_pr_url(&self, id: &str, url: &str) -> Result<Task> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE tasks SET pr_url = ?2,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(url)
+        .execute(self.db.pool())
+        .await?;
+
+        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
+            .bind(id)
+            .fetch_one(self.db.pool())
+            .await?;
+
+        self.events
+            .send(DjinnEventEnvelope::task_updated(&task, false));
+        Ok(task)
+    }
+
     /// Set or clear the merge conflict metadata JSON on a task.
     ///
     /// Used by the worktree lifecycle when a rebase detects conflicts
