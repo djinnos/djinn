@@ -1,6 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension.rs
-assertion_line: 2893
+assertion_line: 2902
 expression: tool_schemas_reviewer()
 ---
 [
@@ -59,11 +59,11 @@ expression: tool_schemas_reviewer()
     "name": "task_list"
   },
   {
-    "description": "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect PM guidance, reviewer feedback, or verification history.",
+    "description": "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.",
     "inputSchema": {
       "properties": {
         "actor_role": {
-          "description": "Filter by actor: pm, task_reviewer, worker, verification, system",
+          "description": "Filter by actor: lead, reviewer, worker, verification, system",
           "type": "string"
         },
         "event_type": {

@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension.rs
+assertion_line: 2914
 expression: tool_schemas_lead()
 ---
 [
@@ -58,11 +59,11 @@ expression: tool_schemas_lead()
     "name": "task_list"
   },
   {
-    "description": "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect PM guidance, reviewer feedback, or verification history.",
+    "description": "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.",
     "inputSchema": {
       "properties": {
         "actor_role": {
-          "description": "Filter by actor: pm, task_reviewer, worker, verification, system",
+          "description": "Filter by actor: lead, reviewer, worker, verification, system",
           "type": "string"
         },
         "event_type": {
@@ -519,7 +520,7 @@ expression: tool_schemas_lead()
     "name": "epic_show"
   },
   {
-    "description": "Update epic fields (title/description) and accept memory ref delta args for groomer workflows.",
+    "description": "Update epic fields (title/description) and accept memory ref delta args for planner workflows.",
     "inputSchema": {
       "properties": {
         "description": {
@@ -578,7 +579,7 @@ expression: tool_schemas_lead()
     "name": "epic_tasks"
   },
   {
-    "description": "Submit the PM intervention decision and release the task back to the worker queue. Your session ends after this call.",
+    "description": "Submit the Lead intervention decision and release the task back to the worker queue. Your session ends after this call.",
     "inputSchema": {
       "properties": {
         "created_tasks": {
@@ -589,7 +590,7 @@ expression: tool_schemas_lead()
           "type": "array"
         },
         "decision": {
-          "description": "The decision taken: reopen (send back to worker), decompose (split into subtasks), force_close, or escalate (release back to PM queue)",
+          "description": "The decision taken: reopen (send back to worker), decompose (split into subtasks), force_close, or escalate (release back to Lead queue)",
           "enum": [
             "reopen",
             "decompose",
