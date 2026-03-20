@@ -1,5 +1,6 @@
 use super::*;
 use crate::repositories::note::rrf::rrf_fuse;
+use djinn_core::models::{ContradictionCandidate, TypeRisk};
 
 /// Sanitize a user query into valid FTS5 syntax.
 ///
@@ -94,6 +95,65 @@ impl NoteRepository {
                 },
             )
             .collect())
+    }
+
+    /// Find notes that may structurally contradict a newly written note.
+    ///
+    /// Uses a stricter BM25 threshold (-5.0) than dedup, searches across all
+    /// folders and types, excludes self, and annotates each candidate with a
+    /// `TypeRisk`. Returns only High and Medium risks (Low is filtered out).
+    pub async fn detect_contradiction_candidates(
+        &self,
+        note_id: &str,
+        note_type: &str,
+        folder: &str,
+        text: &str,
+    ) -> Result<Vec<ContradictionCandidate>> {
+        self.db.ensure_initialized().await?;
+
+        let Some(safe_query) = sanitize_fts5_query(text) else {
+            return Ok(vec![]);
+        };
+
+        let rows = sqlx::query_as::<_, (String, String, String, String, String, f64)>(
+            "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,
+                    -bm25(notes_fts, 3.0, 1.0, 2.0) as score
+             FROM notes_fts
+             JOIN notes n ON notes_fts.rowid = n.rowid
+             WHERE notes_fts MATCH ?1
+               AND n.id != ?2
+               AND -bm25(notes_fts, 3.0, 1.0, 2.0) > 5.0
+             ORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)
+             LIMIT 3",
+        )
+        .bind(&safe_query)
+        .bind(note_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        let candidates = rows
+            .into_iter()
+            .filter_map(|(id, permalink, title, cand_folder, cand_type, score)| {
+                let risk = if cand_type == note_type && cand_folder == folder {
+                    TypeRisk::High
+                } else if cand_type == note_type {
+                    TypeRisk::Medium
+                } else {
+                    return None; // Low risk — filter out
+                };
+                Some(ContradictionCandidate {
+                    id,
+                    permalink,
+                    title,
+                    folder: cand_folder,
+                    note_type: cand_type,
+                    score,
+                    risk,
+                })
+            })
+            .collect();
+
+        Ok(candidates)
     }
 
     /// Full-text search with FTS candidate generation and RRF-fused ranking.
@@ -338,5 +398,152 @@ impl NoteRepository {
                 })
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod contradiction_tests {
+    use super::*;
+    use crate::database::Database;
+    use djinn_core::events::EventBus;
+    use djinn_core::models::TypeRisk;
+
+    async fn make_repo_and_project(tmp: &tempfile::TempDir) -> (NoteRepository, String) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
+            .bind(&id)
+            .bind("test")
+            .bind(tmp.path().to_str().unwrap())
+            .execute(db.pool())
+            .await
+            .unwrap();
+        (NoteRepository::new(db, EventBus::noop()), id)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn detect_candidates_same_type_and_folder_is_high_risk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, project_id) = make_repo_and_project(&tmp).await;
+
+        // Add unrelated noise notes to boost IDF so the matching pair scores > 5.0
+        let noise_content = [
+            "database migration schema versioning rollback strategy deployment pipeline",
+            "kubernetes pod scheduling resource limits cpu memory horizontal autoscaling",
+            "graphql schema stitching federation gateway resolver batching dataloader",
+            "redis caching eviction policy lru ttl distributed session storage cluster",
+            "webpack bundling tree shaking code splitting lazy loading module federation",
+        ];
+        for (i, content) in noise_content.iter().enumerate() {
+            repo.create(&project_id, tmp.path(), &format!("Noise {i}"), content, "adr", "[]")
+                .await
+                .unwrap();
+        }
+
+        // Existing pattern note with specific rare content
+        let shared = "tokio_spawn_contradiction_xqz concurrent_xqz execution_xqz async_xqz \
+                      rust_xqz service_xqz pattern_xqz distributed_xqz systems_xqz \
+                      architectural_xqz decision_xqz record_xqz implementation_xqz guide_xqz";
+        let existing = repo
+            .create(&project_id, tmp.path(), "Existing Pattern", shared, "pattern", "[]")
+            .await
+            .unwrap();
+
+        // New note with identical content — should be detected
+        let new_note = repo
+            .create(&project_id, tmp.path(), "New Pattern", shared, "pattern", "[]")
+            .await
+            .unwrap();
+
+        let candidates = repo
+            .detect_contradiction_candidates(&new_note.id, "pattern", "patterns", shared)
+            .await
+            .unwrap();
+
+        assert!(
+            candidates.iter().any(|c| c.id == existing.id),
+            "existing note should be a candidate"
+        );
+        let cand = candidates.iter().find(|c| c.id == existing.id).unwrap();
+        assert_eq!(cand.risk, TypeRisk::High, "same type+folder should be High risk");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn detect_candidates_excludes_self() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, project_id) = make_repo_and_project(&tmp).await;
+
+        let note = repo
+            .create(
+                &project_id,
+                tmp.path(),
+                "Solo Note",
+                "unique content about tokio spawn concurrent execution patterns rust async",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let candidates = repo
+            .detect_contradiction_candidates(
+                &note.id,
+                "pattern",
+                "patterns",
+                "unique content about tokio spawn concurrent execution patterns rust async",
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            candidates.iter().all(|c| c.id != note.id),
+            "note should not be its own candidate"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn detect_candidates_filters_out_different_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, project_id) = make_repo_and_project(&tmp).await;
+
+        // Note of a DIFFERENT type — should be filtered (Low risk)
+        repo.create(
+            &project_id,
+            tmp.path(),
+            "Reference Note",
+            "tokio spawn concurrent execution async rust service pattern for distributed systems",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let new_note = repo
+            .create(
+                &project_id,
+                tmp.path(),
+                "Pattern Note",
+                "tokio spawn concurrent execution async rust service pattern for distributed systems",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let candidates = repo
+            .detect_contradiction_candidates(
+                &new_note.id,
+                "pattern",
+                "patterns",
+                "tokio spawn concurrent execution async rust service pattern for distributed systems",
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            candidates.iter().all(|c| c.note_type == "pattern"),
+            "different-type candidates should be filtered out (Low risk)"
+        );
     }
 }

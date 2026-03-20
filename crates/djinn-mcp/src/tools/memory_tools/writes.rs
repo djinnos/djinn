@@ -1,7 +1,9 @@
 use super::*;
 
+use crate::tools::memory_tools::contradiction::{ContradictionAnalysisInput, run_contradiction_analysis};
 use crate::tools::memory_tools::summaries::NoteSummaryService;
-use djinn_core::models::NoteDedupCandidate;
+use djinn_core::events::DjinnEventEnvelope;
+use djinn_core::models::{Note, NoteDedupCandidate};
 use djinn_db::{folder_for_type, is_singleton};
 use djinn_provider::{
     CompletionRequest, CompletionResponse, complete,
@@ -408,6 +410,7 @@ impl DjinnMcpServer {
         {
             Ok(note) => {
                 self.schedule_summary_regeneration(&note.id);
+                self.detect_emit_and_schedule_contradictions(&repo, &note).await;
                 Json(MemoryNoteResponse::from_note(&note))
             }
             Err(e) => Json(MemoryNoteResponse::error(e.to_string())),
@@ -953,6 +956,46 @@ impl DjinnMcpServer {
                 Ok(_) => service.generate_for_note_ids(&[note_id]).await,
                 Err(_) => service.apply_fallback_for_note_id(&note_id).await,
             }
+        });
+    }
+
+    /// Stage 1: detect candidates and emit event. Stage 2: schedule LLM analysis.
+    async fn detect_emit_and_schedule_contradictions(
+        &self,
+        repo: &NoteRepository,
+        note: &Note,
+    ) {
+        let folder = folder_for_type(&note.note_type);
+        let Ok(candidates) = repo
+            .detect_contradiction_candidates(&note.id, &note.note_type, folder, &note.content)
+            .await
+        else {
+            return;
+        };
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        // Stage 1: emit event for SSE / external listeners
+        self.state
+            .event_bus()
+            .send(DjinnEventEnvelope::contradiction_candidates(note, &candidates));
+
+        // Stage 2: schedule LLM classification
+        let db = self.state.db().clone();
+        let input = ContradictionAnalysisInput {
+            note_id: note.id.clone(),
+            note_title: note.title.clone(),
+            note_created_at: note.created_at.clone(),
+            note_summary: note
+                .abstract_
+                .clone()
+                .unwrap_or_else(|| note.content.chars().take(500).collect()),
+            candidates,
+        };
+        tokio::spawn(async move {
+            run_contradiction_analysis(db, input).await;
         });
     }
 }
