@@ -487,6 +487,7 @@ mod tests {
             closed_at: None,
             close_reason: None,
             merge_commit_sha: None,
+            pr_url: None,
             merge_conflict_metadata: None,
             memory_refs: "[]".to_string(),
             agent_type: None,
