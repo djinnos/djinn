@@ -1758,7 +1758,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     let mut conversation = Conversation::new();
     conversation.push(Message::system(system_prompt));
     conversation.push(Message::user(
-        "Begin planning the backlog for this project.",
+        "Begin planning for this project.",
     ));
 
     let project_dir = PathBuf::from(&project_path);

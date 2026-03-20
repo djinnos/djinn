@@ -68,7 +68,7 @@ where
         "task_update" => call_task_update(state, &call.arguments).await,
         "task_update_ac" => call_task_update_ac(state, &call.arguments).await,
         "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
-        "request_pm" => call_request_pm(state, &call.arguments).await,
+        "request_lead" => call_request_pm(state, &call.arguments).await,
         "request_architect" => call_request_architect(state, &call.arguments).await,
         "task_transition" => call_task_transition(state, &call.arguments).await,
         "task_delete_branch" => call_task_delete_branch(state, &call.arguments).await,
@@ -2515,9 +2515,9 @@ fn tool_task_show() -> RmcpTool {
     )
 }
 
-fn tool_request_pm() -> RmcpTool {
+fn tool_request_lead() -> RmcpTool {
     RmcpTool::new(
-        "request_pm".to_string(),
+        "request_lead".to_string(),
         "Request Lead intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the Lead queue. Your session will effectively end after this call."
             .to_string(),
         object!({
@@ -2918,7 +2918,7 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
     tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
     tool_values.push(serde_json::to_value(tool_apply_patch()).expect("serialize tool_apply_patch"));
-    tool_values.push(serde_json::to_value(tool_request_pm()).expect("serialize tool_request_pm"));
+    tool_values.push(serde_json::to_value(tool_request_lead()).expect("serialize tool_request_lead"));
     tool_values.push(
         serde_json::to_value(crate::roles::finalize::tool_submit_work())
             .expect("serialize tool_submit_work"),
@@ -2973,12 +2973,6 @@ pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
 /// Tool schemas for Planner: base + task/epic management tools + submit_grooming finalize tool.
 /// task_comment_add is excluded — submit_grooming captures session output.
 pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
-    tool_schemas_groomer()
-}
-
-/// Tool schemas for Groomer (Planner): base + task/epic management tools + submit_grooming finalize tool.
-/// task_comment_add is excluded — submit_grooming captures session output.
-pub(crate) fn tool_schemas_groomer() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     for value in [
         serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),

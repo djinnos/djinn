@@ -133,8 +133,8 @@ pub enum TaskStatus {
     InTaskReview,
     /// PR has been opened and is awaiting CI/review/merge. Distinct from closed.
     PrReady,
-    NeedsPmIntervention,
-    InPmIntervention,
+    NeedsLeadIntervention,
+    InLeadIntervention,
     Closed,
 }
 
@@ -148,8 +148,8 @@ impl TaskStatus {
             Self::NeedsTaskReview => "needs_task_review",
             Self::InTaskReview => "in_task_review",
             Self::PrReady => "pr_ready",
-            Self::NeedsPmIntervention => "needs_pm_intervention",
-            Self::InPmIntervention => "in_pm_intervention",
+            Self::NeedsLeadIntervention => "needs_lead_intervention",
+            Self::InLeadIntervention => "in_lead_intervention",
             Self::Closed => "closed",
         }
     }
@@ -163,8 +163,8 @@ impl TaskStatus {
             "needs_task_review" => Ok(Self::NeedsTaskReview),
             "in_task_review" => Ok(Self::InTaskReview),
             "pr_ready" => Ok(Self::PrReady),
-            "needs_pm_intervention" => Ok(Self::NeedsPmIntervention),
-            "in_pm_intervention" => Ok(Self::InPmIntervention),
+            "needs_lead_intervention" => Ok(Self::NeedsLeadIntervention),
+            "in_lead_intervention" => Ok(Self::InLeadIntervention),
             "closed" => Ok(Self::Closed),
             other => Err(Error::Internal(format!("unknown task status: {other}"))),
         }
@@ -199,18 +199,18 @@ pub enum TransitionAction {
     ReleaseTaskReview,
     ForceClose,
     UserOverride,
-    /// System escalates stuck task to PM intervention queue.
+    /// System escalates stuck task to Lead intervention queue.
     Escalate,
-    /// PM agent starts working on an intervention task.
-    PmInterventionStart,
-    /// PM agent releases intervention (still needs attention).
-    PmInterventionRelease,
-    /// PM agent finishes intervention; task ready for worker again.
-    PmInterventionComplete,
-    /// PM agent approves implementation directly — triggers merge.
-    PmApprove,
-    /// Merge conflict discovered during PM approval — reopen for conflict resolver.
-    PmApproveConflict,
+    /// Lead agent starts working on an intervention task.
+    LeadInterventionStart,
+    /// Lead agent releases intervention (still needs attention).
+    LeadInterventionRelease,
+    /// Lead agent finishes intervention; task ready for worker again.
+    LeadInterventionComplete,
+    /// Lead agent approves implementation directly — triggers merge.
+    LeadApprove,
+    /// Merge conflict discovered during Lead approval — reopen for conflict resolver.
+    LeadApproveConflict,
     /// Reviewer approves and opens a GitHub PR — transitions in_task_review → pr_ready.
     MarkPrReady,
     /// GitHub App signals PR merged — transitions pr_ready → closed.
@@ -234,7 +234,7 @@ impl TransitionAction {
                 | Self::ReleaseTaskReview
                 | Self::ForceClose
                 | Self::Escalate
-                | Self::PmInterventionRelease
+                | Self::LeadInterventionRelease
                 | Self::PrChangesRequested
         )
     }
@@ -260,11 +260,11 @@ impl TransitionAction {
             "force_close" => Ok(Self::ForceClose),
             "user_override" => Ok(Self::UserOverride),
             "escalate" => Ok(Self::Escalate),
-            "pm_intervention_start" => Ok(Self::PmInterventionStart),
-            "pm_intervention_release" => Ok(Self::PmInterventionRelease),
-            "pm_intervention_complete" => Ok(Self::PmInterventionComplete),
-            "pm_approve" => Ok(Self::PmApprove),
-            "pm_approve_conflict" => Ok(Self::PmApproveConflict),
+            "lead_intervention_start" => Ok(Self::LeadInterventionStart),
+            "lead_intervention_release" => Ok(Self::LeadInterventionRelease),
+            "lead_intervention_complete" => Ok(Self::LeadInterventionComplete),
+            "lead_approve" => Ok(Self::LeadApprove),
+            "lead_approve_conflict" => Ok(Self::LeadApproveConflict),
             "mark_pr_ready" => Ok(Self::MarkPrReady),
             "pr_merge" => Ok(Self::PrMerge),
             "pr_changes_requested" => Ok(Self::PrChangesRequested),
@@ -545,29 +545,29 @@ pub fn compute_transition(
                 );
             }
             TransitionApply {
-                to_status: Some(TaskStatus::NeedsPmIntervention),
+                to_status: Some(TaskStatus::NeedsLeadIntervention),
                 reset_continuation: true,
                 ..Default::default()
             }
         }
 
-        TransitionAction::PmInterventionStart => {
-            if *from != TaskStatus::NeedsPmIntervention {
-                return bad("pm_intervention_start is only valid from needs_pm_intervention");
+        TransitionAction::LeadInterventionStart => {
+            if *from != TaskStatus::NeedsLeadIntervention {
+                return bad("lead_intervention_start is only valid from needs_lead_intervention");
             }
-            TransitionApply::simple(TaskStatus::InPmIntervention)
+            TransitionApply::simple(TaskStatus::InLeadIntervention)
         }
 
-        TransitionAction::PmInterventionRelease => {
-            if *from != TaskStatus::InPmIntervention {
-                return bad("pm_intervention_release is only valid from in_pm_intervention");
+        TransitionAction::LeadInterventionRelease => {
+            if *from != TaskStatus::InLeadIntervention {
+                return bad("lead_intervention_release is only valid from in_lead_intervention");
             }
-            TransitionApply::simple(TaskStatus::NeedsPmIntervention)
+            TransitionApply::simple(TaskStatus::NeedsLeadIntervention)
         }
 
-        TransitionAction::PmInterventionComplete => {
-            if *from != TaskStatus::InPmIntervention {
-                return bad("pm_intervention_complete is only valid from in_pm_intervention");
+        TransitionAction::LeadInterventionComplete => {
+            if *from != TaskStatus::InLeadIntervention {
+                return bad("lead_intervention_complete is only valid from in_lead_intervention");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
@@ -577,9 +577,9 @@ pub fn compute_transition(
             }
         }
 
-        TransitionAction::PmApprove => {
-            if *from != TaskStatus::InPmIntervention {
-                return bad("pm_approve is only valid from in_pm_intervention");
+        TransitionAction::LeadApprove => {
+            if *from != TaskStatus::InLeadIntervention {
+                return bad("lead_approve is only valid from in_lead_intervention");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::Closed),
@@ -589,9 +589,9 @@ pub fn compute_transition(
             }
         }
 
-        TransitionAction::PmApproveConflict => {
-            if *from != TaskStatus::InPmIntervention {
-                return bad("pm_approve_conflict is only valid from in_pm_intervention");
+        TransitionAction::LeadApproveConflict => {
+            if *from != TaskStatus::InLeadIntervention {
+                return bad("lead_approve_conflict is only valid from in_lead_intervention");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
@@ -638,7 +638,7 @@ pub fn compute_transition(
 /// For `spike`, `research`, `decomposition`, and `review` task types the simple
 /// lifecycle applies: `open → in_progress → closed`.  Actions that belong only to
 /// the full worker lifecycle (submit_verification, verification_*, task_review_*,
-/// pm_intervention_*) are rejected for these types.
+/// lead_intervention_*) are rejected for these types.
 ///
 /// All other issue types (task, feature, bug) use the full lifecycle via
 /// [`compute_transition`].
@@ -663,11 +663,11 @@ pub fn compute_transition_for_issue_type(
                 | TransitionAction::Release
                 | TransitionAction::UserOverride
                 | TransitionAction::Escalate
-                | TransitionAction::PmInterventionStart
-                | TransitionAction::PmInterventionRelease
-                | TransitionAction::PmInterventionComplete
-                | TransitionAction::PmApprove
-                | TransitionAction::PmApproveConflict
+                | TransitionAction::LeadInterventionStart
+                | TransitionAction::LeadInterventionRelease
+                | TransitionAction::LeadInterventionComplete
+                | TransitionAction::LeadApprove
+                | TransitionAction::LeadApproveConflict
         );
         if !allowed {
             return Err(Error::InvalidTransition(format!(
@@ -690,8 +690,8 @@ mod tests {
         TaskStatus::NeedsTaskReview,
         TaskStatus::InTaskReview,
         TaskStatus::PrReady,
-        TaskStatus::NeedsPmIntervention,
-        TaskStatus::InPmIntervention,
+        TaskStatus::NeedsLeadIntervention,
+        TaskStatus::InLeadIntervention,
         TaskStatus::Closed,
     ];
 
@@ -714,11 +714,11 @@ mod tests {
         TransitionAction::ForceClose,
         TransitionAction::UserOverride,
         TransitionAction::Escalate,
-        TransitionAction::PmInterventionStart,
-        TransitionAction::PmInterventionRelease,
-        TransitionAction::PmInterventionComplete,
-        TransitionAction::PmApprove,
-        TransitionAction::PmApproveConflict,
+        TransitionAction::LeadInterventionStart,
+        TransitionAction::LeadInterventionRelease,
+        TransitionAction::LeadInterventionComplete,
+        TransitionAction::LeadApprove,
+        TransitionAction::LeadApproveConflict,
         TransitionAction::MarkPrReady,
         TransitionAction::PrMerge,
         TransitionAction::PrChangesRequested,
@@ -771,18 +771,18 @@ mod tests {
                 | TaskStatus::InProgress
                 | TaskStatus::InTaskReview
                 | TaskStatus::Verifying,
-            ) => Some(TaskStatus::NeedsPmIntervention),
-            (TransitionAction::PmInterventionStart, TaskStatus::NeedsPmIntervention) => {
-                Some(TaskStatus::InPmIntervention)
+            ) => Some(TaskStatus::NeedsLeadIntervention),
+            (TransitionAction::LeadInterventionStart, TaskStatus::NeedsLeadIntervention) => {
+                Some(TaskStatus::InLeadIntervention)
             }
-            (TransitionAction::PmInterventionRelease, TaskStatus::InPmIntervention) => {
-                Some(TaskStatus::NeedsPmIntervention)
+            (TransitionAction::LeadInterventionRelease, TaskStatus::InLeadIntervention) => {
+                Some(TaskStatus::NeedsLeadIntervention)
             }
-            (TransitionAction::PmInterventionComplete, TaskStatus::InPmIntervention) => {
+            (TransitionAction::LeadInterventionComplete, TaskStatus::InLeadIntervention) => {
                 Some(TaskStatus::Open)
             }
-            (TransitionAction::PmApprove, TaskStatus::InPmIntervention) => Some(TaskStatus::Closed),
-            (TransitionAction::PmApproveConflict, TaskStatus::InPmIntervention) => {
+            (TransitionAction::LeadApprove, TaskStatus::InLeadIntervention) => Some(TaskStatus::Closed),
+            (TransitionAction::LeadApproveConflict, TaskStatus::InLeadIntervention) => {
                 Some(TaskStatus::Open)
             }
             (TransitionAction::MarkPrReady, TaskStatus::InTaskReview) => {
@@ -869,12 +869,12 @@ mod tests {
 
         let escalate = compute_transition(&TransitionAction::Escalate, &TaskStatus::Open, None)
             .expect("escalate should be valid from open");
-        assert_eq!(escalate.to_status, Some(TaskStatus::NeedsPmIntervention));
+        assert_eq!(escalate.to_status, Some(TaskStatus::NeedsLeadIntervention));
         assert!(escalate.reset_continuation);
     }
 
     #[test]
-    fn stale_rejections_three_cycles_trigger_pm_intervention_at_threshold() {
+    fn stale_rejections_three_cycles_trigger_lead_intervention_at_threshold() {
         let mut status = TaskStatus::InTaskReview;
         let mut continuation_count = 0;
 
@@ -889,10 +889,10 @@ mod tests {
             if continuation_count >= 3 {
                 let escalate = compute_transition(&TransitionAction::Escalate, &status, None)
                     .expect("threshold stale count should allow escalation from open");
-                assert_eq!(escalate.to_status, Some(TaskStatus::NeedsPmIntervention));
+                assert_eq!(escalate.to_status, Some(TaskStatus::NeedsLeadIntervention));
                 assert!(escalate.reset_continuation);
                 status = escalate.to_status.expect("escalate should set status");
-                assert_eq!(status, TaskStatus::NeedsPmIntervention);
+                assert_eq!(status, TaskStatus::NeedsLeadIntervention);
             } else {
                 let start = compute_transition(&TransitionAction::Start, &status, None)
                     .expect("open should start");
@@ -957,8 +957,8 @@ mod tests {
         assert!(!conflict_reject.clear_merge_conflict_metadata);
 
         let pm_conflict = compute_transition(
-            &TransitionAction::PmApproveConflict,
-            &TaskStatus::InPmIntervention,
+            &TransitionAction::LeadApproveConflict,
+            &TaskStatus::InLeadIntervention,
             None,
         ).unwrap();
         assert!(pm_conflict.set_merge_conflict_metadata);

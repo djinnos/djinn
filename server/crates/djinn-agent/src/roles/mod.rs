@@ -34,7 +34,7 @@ pub(crate) struct RoleConfig {
     pub(crate) is_project_scoped: bool,
     /// Tool names the agent can call to signal completion for this role.
     /// The first entry is the primary finalize tool; additional entries are
-    /// alternate exit paths (e.g. `request_pm` for workers).
+    /// alternate exit paths (e.g. `request_lead` for workers).
     pub(crate) finalize_tool_names: &'static [&'static str],
 }
 

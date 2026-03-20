@@ -648,7 +648,7 @@ impl CoordinatorActor {
     /// to the source task, then dispatch the Architect to it.
     ///
     /// Called when Lead calls `request_architect` or when auto-escalation fires on the
-    /// 2nd `request_pm` for the same task.
+    /// 2nd `request_lead` for the same task.
     pub(super) async fn dispatch_architect_escalation(
         &mut self,
         source_task_id: &str,

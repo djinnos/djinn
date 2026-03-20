@@ -241,8 +241,8 @@ struct CoordinatorActor {
     architect_tick_counter: u32,
     /// Rolling-window throughput tracking: epic_id → Vec of merge event instants.
     throughput_events: HashMap<String, Vec<StdInstant>>,
-    /// Per-task Lead escalation count (request_pm call count per task UUID).
-    /// When a task accumulates ≥ 2 escalations, the next request_pm routes to Architect.
+    /// Per-task Lead escalation count (request_lead call count per task UUID).
+    /// When a task accumulates ≥ 2 escalations, the next request_lead routes to Architect.
     escalation_counts: HashMap<String, u32>,
     /// PR status cache: task_id → last known head SHA.
     ///
@@ -1107,7 +1107,7 @@ impl CoordinatorHandle {
     /// Dispatch an Architect escalation for a task.
     ///
     /// Creates a review task and dispatches the Architect to it.
-    /// Called when Lead uses `request_architect` or auto-escalation fires on 2nd `request_pm`.
+    /// Called when Lead uses `request_architect` or auto-escalation fires on 2nd `request_lead`.
     pub async fn dispatch_architect_escalation(
         &self,
         source_task_id: &str,

@@ -145,7 +145,7 @@ pub(crate) struct ReplyLoopContext<'a> {
     pub role_name: &'a str,
     /// Tool names that signal session completion (ADR-036).
     /// The first entry is the primary finalize tool; additional entries are
-    /// alternate exit paths (e.g. `request_pm`).
+    /// alternate exit paths (e.g. `request_lead`).
     pub finalize_tool_names: &'a [&'a str],
     pub context_window: i64,
     pub model_id: &'a str,
@@ -658,7 +658,7 @@ pub(super) async fn run_reply_loop(
             // a virtual tool — its payload is captured here and processed after
             // the loop by finalize_handlers. We break immediately (no dispatch).
             //
-            // Alternate finalize tools (e.g. request_pm) are real extension tools
+            // Alternate finalize tools (e.g. request_lead) are real extension tools
             // that must be dispatched to execute their side effects. We mark them
             // but fall through to the dispatch section; a post-dispatch check
             // breaks the loop after the tool results are collected.
@@ -965,7 +965,7 @@ pub(super) async fn run_reply_loop(
             conversation.push(tool_result_msg);
 
             // ── Post-dispatch finalize check for alternate finalize tools ─────
-            // Alternate finalize tools (e.g. request_pm) were dispatched above
+            // Alternate finalize tools (e.g. request_lead) were dispatched above
             // so their side effects ran. Now break the loop.
             if let Some((name, payload)) = alternate_finalize {
                 tracing::info!(
@@ -1276,7 +1276,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_names: &["submit_work", "request_pm"],
+                finalize_tool_names: &["submit_work", "request_lead"],
                 context_window,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1361,7 +1361,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_names: &["submit_work", "request_pm"],
+                finalize_tool_names: &["submit_work", "request_lead"],
                 context_window,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1478,7 +1478,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_names: &["submit_work", "request_pm"],
+                finalize_tool_names: &["submit_work", "request_lead"],
                 context_window,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1696,7 +1696,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_names: &["submit_work", "request_pm"],
+                finalize_tool_names: &["submit_work", "request_lead"],
                 context_window: 10_000,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1751,7 +1751,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_names: &["submit_work", "request_pm"],
+                finalize_tool_names: &["submit_work", "request_lead"],
                 context_window: 10_000,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1818,7 +1818,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_names: &["submit_work", "request_pm"],
+                finalize_tool_names: &["submit_work", "request_lead"],
                 context_window: 10_000,
                 model_id: "test/mock-model",
                 cancel: &cancel,
@@ -1915,7 +1915,7 @@ mod tests {
                 project_path: &project_path,
                 worktree_path: &worktree_path,
                 role_name: "worker",
-                finalize_tool_names: &["submit_work", "request_pm"],
+                finalize_tool_names: &["submit_work", "request_lead"],
                 context_window: 10_000,
                 model_id: "openai/gpt-5.4",
                 cancel: &cancel,

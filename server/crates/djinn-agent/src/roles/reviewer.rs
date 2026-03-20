@@ -31,9 +31,9 @@ impl AgentRole for ReviewerRole {
         app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
         Box::pin(async move {
-            // If the session ended via request_pm, the task already transitioned
-            // to needs_pm_intervention — no further transition needed.
-            if output.finalize_tool_name.as_deref() == Some("request_pm") {
+            // If the session ended via request_lead, the task already transitioned
+            // to needs_lead_intervention — no further transition needed.
+            if output.finalize_tool_name.as_deref() == Some("request_lead") {
                 return None;
             }
 
@@ -211,7 +211,7 @@ pub(crate) const REVIEWER_CONFIG: RoleConfig = RoleConfig {
     initial_message: crate::prompts::REVIEWER_TEMPLATE,
     preserves_session: false,
     is_project_scoped: false,
-    finalize_tool_names: &["submit_review", "request_pm"],
+    finalize_tool_names: &["submit_review", "request_lead"],
 };
 
 #[cfg(test)]

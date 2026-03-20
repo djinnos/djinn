@@ -26,9 +26,9 @@ impl AgentRole for WorkerRole {
         _app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
         Box::pin(async move {
-            // If the session ended via request_pm, the task already transitioned
-            // to needs_pm_intervention — no further transition needed.
-            if output.finalize_tool_name.as_deref() == Some("request_pm") {
+            // If the session ended via request_lead, the task already transitioned
+            // to needs_lead_intervention — no further transition needed.
+            if output.finalize_tool_name.as_deref() == Some("request_lead") {
                 return None;
             }
             Some((TransitionAction::SubmitVerification, None))
@@ -57,5 +57,5 @@ pub(crate) const WORKER_CONFIG: RoleConfig = RoleConfig {
     initial_message: crate::prompts::DEV_TEMPLATE,
     preserves_session: true,
     is_project_scoped: false,
-    finalize_tool_names: &["submit_work", "request_pm"],
+    finalize_tool_names: &["submit_work", "request_lead"],
 };
