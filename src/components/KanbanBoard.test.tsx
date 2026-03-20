@@ -62,7 +62,7 @@ describe("KanbanBoard", () => {
     );
 
     const openCol = screen.getByText("Open").closest(".flex.flex-col");
-    const inFlightCol = screen.getByText("In Flight").closest(".flex.flex-col");
+    const inFlightCol = screen.getByText("In Progress").closest(".flex.flex-col");
     const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
 
     expect(openCol).toHaveTextContent("1");

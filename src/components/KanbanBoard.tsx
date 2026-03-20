@@ -41,7 +41,7 @@ import {
 } from "@/components/ui/input-group";
 import { Search01Icon } from "@hugeicons/core-free-icons";
 
-type ColumnKey = "open" | "in_flight" | "pr_ready" | "done";
+type ColumnKey = "open" | "in_progress" | "pr_ready" | "done";
 
 const ISSUE_TYPES = [
   { value: "task", label: "Task" },
@@ -61,7 +61,7 @@ const STATUS_COLUMNS: Array<{
   icon: typeof UnavailableIcon;
 }> = [
   { key: "open", label: "Open", colorClass: "bg-[#4B5563]", glowClass: "", icon: CircleIcon },
-  { key: "in_flight", label: "In Flight", colorClass: "bg-[#3B82F6]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#3B82F6]/40", icon: Progress02Icon },
+  { key: "in_progress", label: "In Progress", colorClass: "bg-[#3B82F6]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#3B82F6]/40", icon: Progress02Icon },
   { key: "pr_ready", label: "PR Ready", colorClass: "bg-[#8B5CF6]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#8B5CF6]/40", icon: GitPullRequestIcon },
   { key: "done", label: "Merged", colorClass: "bg-[#10B981]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#10B981]/40", icon: CheckmarkCircle03Icon },
 ];
@@ -86,7 +86,7 @@ function taskToColumnKey(task: Task): ColumnKey {
     task.status === "needs_pm_intervention" ||
     task.status === "in_pm_intervention"
   )
-    return "in_flight";
+    return "in_progress";
   return "open";
 }
 
@@ -454,7 +454,7 @@ export function KanbanBoard({
               <div className="flex flex-col">
                 <div className="relative px-4 pb-2.5 pt-3.5 text-sm font-semibold">
                   <div className="flex items-center gap-2.5">
-                    {column.key === "in_flight" && taskCount > 0 ? (
+                    {column.key === "in_progress" ? (
                       <HugeiconsIcon
                         icon={Loading03Icon}
                         className="size-4 shrink-0 animate-spin text-blue-400"
