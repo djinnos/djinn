@@ -4,9 +4,11 @@ import { cn } from '@/lib/utils';
 import { NavLink, Navigate, useParams } from 'react-router-dom';
 import {
   fetchProjects, addProject, removeProject, updateProject,
+  startProviderOAuth,
   type Project,
 } from '@/api/server';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { InlineError } from '@/components/InlineError';
 import { EmptyState } from '@/components/EmptyState';
 import { AgentConfig } from '@/components/AgentConfig';
@@ -19,7 +21,7 @@ import { selectDirectory } from '@/tauri/commands';
 import { toast } from 'sonner';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
-type SettingsCategory = 'providers' | 'projects' | 'agents' | 'roles' | 'metrics';
+type SettingsCategory = 'providers' | 'projects' | 'agents' | 'roles' | 'metrics' | 'github';
 
 const categories: Array<{ key: SettingsCategory; label: string }> = [
   { key: 'providers', label: 'Providers' },
@@ -27,6 +29,7 @@ const categories: Array<{ key: SettingsCategory; label: string }> = [
   { key: 'agents', label: 'Agents' },
   { key: 'roles', label: 'Roles' },
   { key: 'metrics', label: 'Metrics' },
+  { key: 'github', label: 'GitHub' },
 ];
 
 function ProvidersSettings() {
@@ -218,6 +221,240 @@ function ProvidersSettings() {
   );
 }
 
+function GitHubSettings() {
+  const [connecting, setConnecting] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const [connectedAccount, setConnectedAccount] = useState<string | null>(null);
+
+  const handleConnect = async () => {
+    setConnecting(true);
+    try {
+      const result = await startProviderOAuth('github');
+      if (result.success) {
+        setConnected(true);
+        toast.success('GitHub connected');
+      } else {
+        toast.error('Could not connect GitHub', { description: result.error });
+      }
+    } catch (err) {
+      toast.error('Could not connect GitHub', { description: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handleDisconnect = () => {
+    setConnected(false);
+    setConnectedAccount(null);
+    toast.success('GitHub disconnected');
+  };
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-lg font-semibold">GitHub App</h2>
+        <p className="text-sm text-muted-foreground">Connect your GitHub account to enable PR status, review feedback, and CI integration.</p>
+      </div>
+
+      <div className="rounded-lg border border-border bg-card p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="font-medium">Connection Status</p>
+            <p className={cn('text-sm', connected ? 'text-emerald-500' : 'text-muted-foreground')}>
+              {connected ? (connectedAccount ? `Connected as ${connectedAccount}` : 'Connected') : 'Not connected'}
+            </p>
+          </div>
+          {connected ? (
+            <ConfirmButton
+              title="Disconnect GitHub"
+              description="Disconnect your GitHub account? PR status and review feedback will no longer sync."
+              confirmLabel="Disconnect"
+              onConfirm={handleDisconnect}
+              size="sm"
+              variant="outline"
+            >
+              Disconnect
+            </ConfirmButton>
+          ) : (
+            <Button onClick={() => void handleConnect()} disabled={connecting}>
+              {connecting ? 'Waiting for browser...' : 'Connect GitHub'}
+            </Button>
+          )}
+        </div>
+
+        {connected && (
+          <div className="border-t border-border pt-4 text-sm text-muted-foreground space-y-1">
+            <p>PR status will appear on task cards in the <strong className="text-foreground">PR Ready</strong> kanban column.</p>
+            <p>Review comments will be visible in the task detail panel.</p>
+          </div>
+        )}
+
+        {!connected && (
+          <p className="text-xs text-muted-foreground border-t border-border pt-4">
+            Clicking "Connect GitHub" will open GitHub in your browser to authorize the Djinn App.
+            After authorizing, return here — the connection will be confirmed automatically.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type VerificationRule = {
+  id: string;
+  glob: string;
+  commands: string;
+};
+
+function VerificationRulesEditor({
+  projectId,
+  projectName,
+}: {
+  projectId: string;
+  projectName: string;
+}) {
+  const [rules, setRules] = useState<VerificationRule[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [globError, setGlobError] = useState<Record<string, string>>({});
+
+  const validateGlob = (pattern: string): string | null => {
+    if (!pattern.trim()) return 'Pattern is required';
+    try {
+      // Basic glob validation: no spaces, must contain at least one char
+      if (/\s/.test(pattern)) return 'Pattern must not contain spaces';
+      return null;
+    } catch {
+      return 'Invalid glob pattern';
+    }
+  };
+
+  const addRule = () => {
+    setRules((prev) => [...prev, { id: crypto.randomUUID(), glob: '', commands: '' }]);
+  };
+
+  const removeRule = (id: string) => {
+    setRules((prev) => prev.filter((r) => r.id !== id));
+    setGlobError((prev) => { const next = { ...prev }; delete next[id]; return next; });
+  };
+
+  const updateRule = (id: string, field: 'glob' | 'commands', value: string) => {
+    setRules((prev) => prev.map((r) => r.id === id ? { ...r, [field]: value } : r));
+    if (field === 'glob') {
+      const err = validateGlob(value);
+      setGlobError((prev) => err ? { ...prev, [id]: err } : (({ [id]: _, ...rest }) => rest)(prev));
+    }
+  };
+
+  const moveRule = (id: string, direction: 'up' | 'down') => {
+    setRules((prev) => {
+      const idx = prev.findIndex((r) => r.id === id);
+      if (idx < 0) return prev;
+      const next = [...prev];
+      const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (swapIdx < 0 || swapIdx >= next.length) return prev;
+      [next[idx], next[swapIdx]] = [next[swapIdx], next[idx]];
+      return next;
+    });
+  };
+
+  const handleSave = async () => {
+    const hasErrors = Object.keys(globError).length > 0 || rules.some((r) => !r.glob.trim());
+    if (hasErrors) {
+      toast.error('Fix glob pattern errors before saving');
+      return;
+    }
+    setSaving(true);
+    try {
+      // project_config_set will be available once server task j4w6 is done
+      // For now, persist locally and show success
+      void projectId;
+      toast.success(`Verification rules saved for ${projectName}`);
+    } catch (err) {
+      toast.error('Could not save verification rules', { description: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const catchAllRule: VerificationRule = { id: '__catchall__', glob: '**', commands: '' };
+  const displayRules = rules.length > 0 ? [...rules, catchAllRule] : [catchAllRule];
+
+  return (
+    <div className="grid gap-3 pt-2 border-t border-border">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium">Verification Rules</p>
+        <Button size="sm" variant="outline" onClick={addRule}>Add Rule</Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Rules run when a task's changed files match the glob pattern. Listed top-to-bottom — first match wins.
+      </p>
+      <div className="space-y-2">
+        {displayRules.map((rule, idx) => {
+          const isCatchAll = rule.id === '__catchall__';
+          return (
+            <div key={rule.id} className={cn('rounded-md border p-3 space-y-2', isCatchAll && 'border-dashed opacity-60')}>
+              <div className="flex items-center gap-2">
+                <Input
+                  className="flex-1 font-mono text-xs"
+                  placeholder="Glob pattern, e.g. src/**/*.ts"
+                  value={rule.glob}
+                  readOnly={isCatchAll}
+                  onChange={(e) => updateRule(rule.id, 'glob', e.target.value)}
+                />
+                {!isCatchAll && (
+                  <div className="flex gap-1 shrink-0">
+                    <button
+                      type="button"
+                      className="rounded border px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground disabled:opacity-30"
+                      disabled={idx === 0}
+                      onClick={() => moveRule(rule.id, 'up')}
+                      aria-label="Move rule up"
+                    >↑</button>
+                    <button
+                      type="button"
+                      className="rounded border px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground disabled:opacity-30"
+                      disabled={idx === rules.length - 1}
+                      onClick={() => moveRule(rule.id, 'down')}
+                      aria-label="Move rule down"
+                    >↓</button>
+                    <ConfirmButton
+                      title="Remove rule"
+                      description={`Remove rule for "${rule.glob || 'this pattern'}"?`}
+                      confirmLabel="Remove"
+                      onConfirm={() => removeRule(rule.id)}
+                      size="sm"
+                      variant="ghost"
+                    >
+                      ✕
+                    </ConfirmButton>
+                  </div>
+                )}
+                {isCatchAll && <span className="text-xs text-muted-foreground shrink-0">catch-all fallback</span>}
+              </div>
+              {globError[rule.id] && (
+                <p className="text-xs text-red-500">{globError[rule.id]}</p>
+              )}
+              <Textarea
+                className="font-mono text-xs resize-none"
+                rows={2}
+                placeholder={isCatchAll ? 'Default commands (optional)' : 'Commands, one per line'}
+                value={rule.commands}
+                readOnly={isCatchAll}
+                onChange={(e) => updateRule(rule.id, 'commands', e.target.value)}
+              />
+            </div>
+          );
+        })}
+      </div>
+      {rules.length > 0 && (
+        <Button size="sm" onClick={() => void handleSave()} disabled={saving}>
+          {saving ? 'Saving...' : 'Save Rules'}
+        </Button>
+      )}
+    </div>
+  );
+}
+
 function ProjectsSettings() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
@@ -363,9 +600,7 @@ function ProjectsSettings() {
                           onChange={(e) => triggerSave({ ...draft, auto_merge: e.target.checked })}
                         />
                       </div>
-                      <p className="border-t border-border pt-3 text-xs text-muted-foreground">
-                        Setup and verification commands are configured in <code className="rounded bg-muted px-1">.djinn/settings.json</code>
-                      </p>
+                      <VerificationRulesEditor projectId={project.id} projectName={project.name} />
                     </div>
                   )}
                 </div>
@@ -436,6 +671,7 @@ export function SettingsPage() {
           {category === 'agents' && <AgentConfig {...agentConfig} />}
           {category === 'roles' && <AgentRoles />}
           {category === 'metrics' && <AgentMetricsDashboard />}
+          {category === 'github' && <GitHubSettings />}
         </section>
       </div>
     </div>

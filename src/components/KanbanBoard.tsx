@@ -15,6 +15,7 @@ import {
   CheckmarkCircle03Icon,
   CircleIcon,
   FullSignalIcon,
+  GitPullRequestIcon,
   Loading03Icon,
   LowSignalIcon,
   MediumSignalIcon,
@@ -61,8 +62,8 @@ const STATUS_COLUMNS: Array<{
 }> = [
   { key: "open", label: "Open", colorClass: "bg-[#4B5563]", glowClass: "", icon: CircleIcon },
   { key: "in_flight", label: "In Flight", colorClass: "bg-[#3B82F6]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#3B82F6]/40", icon: Progress02Icon },
-  { key: "pr_ready", label: "PR Ready", colorClass: "bg-[#8B5CF6]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#8B5CF6]/40", icon: ArrowRight01Icon },
-  { key: "done", label: "Done", colorClass: "bg-[#10B981]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#10B981]/40", icon: CheckmarkCircle03Icon },
+  { key: "pr_ready", label: "PR Ready", colorClass: "bg-[#8B5CF6]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#8B5CF6]/40", icon: GitPullRequestIcon },
+  { key: "done", label: "Merged", colorClass: "bg-[#10B981]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#10B981]/40", icon: CheckmarkCircle03Icon },
 ];
 
 const PRIORITIES = [0, 1, 2, 3] as const;
