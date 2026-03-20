@@ -12,6 +12,7 @@ use super::sandbox;
 use crate::context::AgentContext;
 use crate::lsp::format_diagnostics_xml;
 use djinn_core::models::Task;
+use djinn_db::AgentRoleRepository;
 use djinn_db::EpicRepository;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
@@ -68,6 +69,7 @@ where
         "task_update_ac" => call_task_update_ac(state, &call.arguments).await,
         "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
         "request_pm" => call_request_pm(state, &call.arguments).await,
+        "request_architect" => call_request_architect(state, &call.arguments).await,
         "task_transition" => call_task_transition(state, &call.arguments).await,
         "task_delete_branch" => call_task_delete_branch(state, &call.arguments).await,
         "task_archive_activity" => call_task_archive_activity(state, &call.arguments).await,
@@ -81,6 +83,9 @@ where
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments, session_task_id).await,
         "memory_list" => call_memory_list(state, &call.arguments).await,
+        "memory_build_context" => call_memory_build_context(state, &call.arguments, session_task_id).await,
+        "role_metrics" => call_role_metrics(state, &call.arguments).await,
+        "role_amend_prompt" => call_role_amend_prompt(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
         "read" => call_read(state, &call.arguments, worktree_path).await,
         "write" => call_write(state, &call.arguments, worktree_path).await,
@@ -213,6 +218,32 @@ struct MemoryListParams {
     #[serde(rename = "type")]
     note_type: Option<String>,
     depth: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct MemoryBuildContextParams {
+    project: Option<String>,
+    url: String,
+    /// Link traversal depth (default 1). Currently unused at the dispatch layer.
+    _depth: Option<i64>,
+    max_related: Option<i64>,
+    budget: Option<i64>,
+    task_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RoleMetricsParams {
+    project: Option<String>,
+    role_id: Option<String>,
+    window_days: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct RoleAmendPromptParams {
+    project: Option<String>,
+    role_id: String,
+    amendment: String,
+    metrics_snapshot: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -749,7 +780,28 @@ async fn call_request_pm(
     .await
     .map_err(|e| e.to_string())?;
 
-    // Escalate to Lead intervention queue.
+    // Check escalation count via coordinator.
+    // On the 2nd+ escalation for the same task, auto-route to Architect.
+    let coordinator = state.coordinator().await;
+    let escalation_count = if let Some(ref coord) = coordinator {
+        coord.increment_escalation_count(&task.id).await.unwrap_or(1)
+    } else {
+        1
+    };
+
+    if escalation_count >= 2 {
+        let architect_reason = format!(
+            "Auto-escalated to Architect after {} Lead escalations. Latest reason: {}",
+            escalation_count, p.reason
+        );
+        if let Some(ref coord) = coordinator {
+            let _ = coord
+                .dispatch_architect_escalation(&task.id, &architect_reason, &task.project_id)
+                .await;
+        }
+    }
+
+    // Escalate the task to needs_pm_intervention in all cases.
     let updated = repo
         .transition(
             &task.id,
@@ -762,11 +814,65 @@ async fn call_request_pm(
         .await
         .map_err(|e| e.to_string())?;
 
+    if escalation_count >= 2 {
+        Ok(serde_json::json!({
+            "status": "architect_escalated",
+            "task_id": updated.id,
+            "new_status": updated.status,
+            "escalation_count": escalation_count,
+            "message": "Task has been escalated multiple times. Routing to Architect for review. Your session should end now."
+        }))
+    } else {
+        Ok(serde_json::json!({
+            "status": "escalated",
+            "task_id": updated.id,
+            "new_status": updated.status,
+            "escalation_count": escalation_count,
+            "message": "Task escalated to Lead. Your session should end now."
+        }))
+    }
+}
+
+async fn call_request_architect(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    #[derive(Deserialize)]
+    struct RequestArchitectParams {
+        id: String,
+        reason: String,
+    }
+
+    let p: RequestArchitectParams = parse_args(arguments)?;
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
+
+    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
+    };
+
+    let body = format!(
+        "[ARCHITECT_REQUEST] Lead escalating to Architect. {}",
+        p.reason
+    );
+    let payload = serde_json::json!({ "body": body }).to_string();
+    repo.log_activity(Some(&task.id), "lead-agent", "lead", "comment", &payload)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let Some(coordinator) = state.coordinator().await else {
+        return Ok(serde_json::json!({
+            "error": "coordinator not available — cannot dispatch Architect"
+        }));
+    };
+
+    let _ = coordinator
+        .dispatch_architect_escalation(&task.id, &p.reason, &task.project_id)
+        .await;
+
     Ok(serde_json::json!({
-        "status": "escalated",
-        "task_id": updated.id,
-        "new_status": updated.status,
-        "message": "Task escalated to Lead. Your session should end now."
+        "status": "architect_dispatched",
+        "task_id": task.id,
+        "message": "Architect has been dispatched to review this task. Your session should end now."
     }))
 }
 
@@ -897,6 +1003,191 @@ async fn call_memory_list(
         .collect();
 
     Ok(serde_json::json!({ "notes": items }))
+}
+
+async fn call_memory_build_context(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    session_task_id: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let p: MemoryBuildContextParams = parse_args(arguments)?;
+    let project_path = resolve_project_path(p.project);
+    let project_id = project_id_for_path(state, &project_path).await?;
+
+    let repo = NoteRepository::new(state.db.clone(), state.event_bus.clone());
+    let max_related = p.max_related.unwrap_or(10).clamp(1, 50) as usize;
+    let budget = p.budget.map(|b| b as usize);
+    let task_id = p.task_id.as_deref().or(session_task_id);
+
+    // Strip memory:// prefix.
+    let url = p.url.strip_prefix("memory://").unwrap_or(&p.url);
+
+    // Wildcard: return all notes in folder as primary.
+    if url.ends_with("/*") {
+        let folder = url.trim_end_matches("/*");
+        let all = repo
+            .list(&project_id, Some(folder))
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(serde_json::json!({
+            "primary": all.iter().map(|n| serde_json::json!({
+                "id": n.id,
+                "permalink": n.permalink,
+                "title": n.title,
+                "content": n.content,
+            })).collect::<Vec<_>>(),
+            "related_l1": [],
+            "related_l0": [],
+        }));
+    }
+
+    match repo
+        .build_context(&project_id, url, budget, task_id, max_related)
+        .await
+    {
+        Ok(result) => Ok(serde_json::json!({
+            "primary": result.primary.iter().map(|n| serde_json::json!({
+                "id": n.id,
+                "permalink": n.permalink,
+                "title": n.title,
+                "content": n.content,
+            })).collect::<Vec<_>>(),
+            "related_l1": result.related_l1.iter().map(|n| serde_json::json!({
+                "id": n.id,
+                "permalink": n.permalink,
+                "title": n.title,
+                "overview": n.overview_text,
+            })).collect::<Vec<_>>(),
+            "related_l0": result.related_l0.iter().map(|n| serde_json::json!({
+                "id": n.id,
+                "permalink": n.permalink,
+                "title": n.title,
+                "abstract": n.abstract_text,
+            })).collect::<Vec<_>>(),
+        })),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+async fn call_role_metrics(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: RoleMetricsParams = parse_args(arguments)?;
+    let project_path = resolve_project_path(p.project);
+    let project_id = project_id_for_path(state, &project_path).await?;
+    let window_days = p.window_days.unwrap_or(30).max(1);
+
+    let repo = AgentRoleRepository::new(state.db.clone(), state.event_bus.clone());
+
+    let roles: Vec<djinn_core::models::AgentRole> = if let Some(ref id_or_name) = p.role_id {
+        let role = repo.get(id_or_name).await.map_err(|e| e.to_string())?;
+        let role = match role {
+            Some(r) if r.project_id == project_id => Some(r),
+            _ => repo
+                .get_by_name_for_project(&project_id, id_or_name)
+                .await
+                .map_err(|e| e.to_string())?,
+        };
+        match role {
+            Some(r) => vec![r],
+            None => return Err(format!("agent_role not found: {id_or_name}")),
+        }
+    } else {
+        repo.list_for_project(djinn_db::AgentRoleListQuery {
+            project_id: project_id.clone(),
+            base_role: None,
+            limit: 200,
+            offset: 0,
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .roles
+    };
+
+    let mut entries = Vec::with_capacity(roles.len());
+    for role in &roles {
+        let agent_type = match role.base_role.as_str() {
+            "worker" | "resolver" => "worker",
+            "reviewer" => "reviewer",
+            "planner" => "planner",
+            "lead" => "lead",
+            other => other,
+        };
+        let m = repo
+            .get_metrics(&project_id, agent_type, window_days)
+            .await
+            .unwrap_or(djinn_db::AgentRoleMetrics {
+                success_rate: 0.0,
+                avg_reopens: 0.0,
+                verification_pass_rate: 0.0,
+                completed_task_count: 0,
+                avg_tokens: 0.0,
+                avg_time_seconds: 0.0,
+            });
+        entries.push(serde_json::json!({
+            "role_id": role.id,
+            "role_name": role.name,
+            "base_role": role.base_role,
+            "success_rate": m.success_rate,
+            "avg_reopens": m.avg_reopens,
+            "verification_pass_rate": m.verification_pass_rate,
+            "completed_task_count": m.completed_task_count,
+            "avg_tokens": m.avg_tokens,
+            "avg_time_seconds": m.avg_time_seconds,
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "roles": entries,
+        "window_days": window_days,
+    }))
+}
+
+async fn call_role_amend_prompt(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: RoleAmendPromptParams = parse_args(arguments)?;
+    let project_path = resolve_project_path(p.project);
+    let project_id = project_id_for_path(state, &project_path).await?;
+
+    let repo = AgentRoleRepository::new(state.db.clone(), state.event_bus.clone());
+
+    // Resolve role by UUID or name.
+    let role = {
+        let by_id = repo.get(&p.role_id).await.map_err(|e| e.to_string())?;
+        match by_id {
+            Some(r) if r.project_id == project_id => Some(r),
+            _ => repo
+                .get_by_name_for_project(&project_id, &p.role_id)
+                .await
+                .map_err(|e| e.to_string())?,
+        }
+    };
+
+    let role = role.ok_or_else(|| format!("agent_role not found: {}", p.role_id))?;
+
+    // Only allow amending specialist roles. Prevents patching high-level orchestration roles.
+    if matches!(role.base_role.as_str(), "architect" | "lead" | "planner") {
+        return Err(format!(
+            "cannot amend learned_prompt for base_role '{}'; only specialist roles (worker, reviewer, resolver) are eligible",
+            role.base_role
+        ));
+    }
+
+    let updated = repo
+        .append_learned_prompt(&role.id, &p.amendment, p.metrics_snapshot.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "role_id": updated.id,
+        "role_name": updated.name,
+        "learned_prompt": updated.learned_prompt,
+        "updated_at": updated.updated_at,
+        "amendment_appended": true,
+    }))
 }
 
 async fn call_shell(
@@ -2241,6 +2532,22 @@ fn tool_request_pm() -> RmcpTool {
     )
 }
 
+fn tool_request_architect() -> RmcpTool {
+    RmcpTool::new(
+        "request_architect".to_string(),
+        "Escalate to the Architect when the task requires strategic technical review that is beyond Lead intervention scope. Use when the problem is architectural, requires codebase-wide analysis, or has failed multiple Lead interventions. Adds a comment and dispatches the Architect. Your session should end after this call."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["id", "reason"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short_id"},
+                "reason": {"type": "string", "description": "Why Architect escalation is needed (e.g. architectural ambiguity, repeated Lead failures, codebase-wide impact)"}
+            }
+        }),
+    )
+}
+
 fn tool_memory_read() -> RmcpTool {
     RmcpTool::new(
         "memory_read".to_string(),
@@ -2286,6 +2593,57 @@ fn tool_memory_list() -> RmcpTool {
                 "folder": {"type": "string", "description": "Filter by folder (e.g. \"decisions\")"},
                 "type": {"type": "string", "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\")"},
                 "depth": {"type": "integer", "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels"}
+            }
+        }),
+    )
+}
+
+fn tool_memory_build_context() -> RmcpTool {
+    RmcpTool::new(
+        "memory_build_context".to_string(),
+        "Build context from a memory note with progressive disclosure. Returns full content for primary notes, overview for direct linked notes, abstract for discovered related notes. Use url='folder/*' to return all notes in a folder. Seed notes are never dropped by budget constraints.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["url"],
+            "properties": {
+                "project": {"type": "string", "description": "Absolute project path"},
+                "url": {"type": "string", "description": "Memory URI: 'memory://folder/note', 'folder/note', or 'folder/*' for all notes in a folder"},
+                "depth": {"type": "integer", "description": "Link traversal depth (default 1)"},
+                "max_related": {"type": "integer", "description": "Maximum related notes to return (default 10)"},
+                "budget": {"type": "integer", "description": "Token budget for context (default 4096)"},
+                "task_id": {"type": "string", "description": "Task ID for affinity scoring"}
+            }
+        }),
+    )
+}
+
+fn tool_role_metrics() -> RmcpTool {
+    RmcpTool::new(
+        "role_metrics".to_string(),
+        "Return aggregated effectiveness metrics per agent role: success_rate, avg_tokens, avg_time_seconds, verification_pass_rate, avg_reopens, completed_task_count. Omit role_id to return metrics for all roles in the project.".to_string(),
+        object!({
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Absolute project path"},
+                "role_id": {"type": "string", "description": "Role UUID or name; omit for all roles"},
+                "window_days": {"type": "integer", "description": "Days back for session data (default 30)"}
+            }
+        }),
+    )
+}
+
+fn tool_role_amend_prompt() -> RmcpTool {
+    RmcpTool::new(
+        "role_amend_prompt".to_string(),
+        "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer, resolver base_role). Do NOT use on architect, lead, or planner roles.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["role_id", "amendment"],
+            "properties": {
+                "project": {"type": "string", "description": "Absolute project path"},
+                "role_id": {"type": "string", "description": "Role UUID or name to amend"},
+                "amendment": {"type": "string", "description": "Amendment text to append to learned_prompt"},
+                "metrics_snapshot": {"type": "string", "description": "JSON string of current metrics for the history record"}
             }
         }),
     )
@@ -2602,6 +2960,8 @@ pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
         serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
         serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
+        serde_json::to_value(tool_request_architect())
+            .expect("serialize tool_request_architect"),
         serde_json::to_value(crate::roles::finalize::tool_submit_decision())
             .expect("serialize tool_submit_decision"),
     ] {
@@ -2642,8 +3002,9 @@ pub(crate) fn tool_schemas_groomer() -> Vec<serde_json::Value> {
     tool_values
 }
 
-/// Tool schemas for Architect: read-only tools + task/epic management + submit_work.
-/// No write/edit/apply_patch — the Architect diagnoses and directs but does not write code.
+/// Tool schemas for Architect: read-only tools, task/epic management, submit_work,
+/// and agent effectiveness tools (role_metrics, memory_build_context, role_amend_prompt).
+/// Does not include write/edit/apply_patch. The Architect diagnoses and directs but does not write code.
 pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     for value in [
@@ -2655,6 +3016,10 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
         serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
         serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
+        serde_json::to_value(tool_memory_build_context())
+            .expect("serialize tool_memory_build_context"),
+        serde_json::to_value(tool_role_metrics()).expect("serialize tool_role_metrics"),
+        serde_json::to_value(tool_role_amend_prompt()).expect("serialize tool_role_amend_prompt"),
         serde_json::to_value(crate::roles::finalize::tool_submit_work())
             .expect("serialize tool_submit_work"),
     ] {

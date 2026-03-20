@@ -24,5 +24,6 @@ expression: names
   "epic_show",
   "epic_update",
   "epic_tasks",
+  "request_architect",
   "submit_decision"
 ]

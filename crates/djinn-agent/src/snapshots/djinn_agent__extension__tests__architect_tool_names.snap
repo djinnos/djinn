@@ -22,5 +22,8 @@ expression: names
   "epic_show",
   "epic_update",
   "epic_tasks",
+  "memory_build_context",
+  "role_metrics",
+  "role_amend_prompt",
   "submit_work"
 ]
