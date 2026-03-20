@@ -214,15 +214,20 @@ pub fn extract_session_signals(
 /// co-access associations to `note_associations`. The taxonomy is stored as
 /// JSON on the session record.
 ///
+/// Returns the extracted `SessionTaxonomy` on success so that callers can
+/// chain LLM extraction without a round-trip DB read. Returns `None` when
+/// extraction is skipped (e.g. no messages) or when the taxonomy cannot be
+/// serialised.
+///
 /// All errors are logged as warnings; nothing propagates back to the caller.
 pub(crate) async fn run_structural_extraction(
     session_id: String,
     messages: Vec<Message>,
     app_state: AgentContext,
-) {
+) -> Option<SessionTaxonomy> {
     if messages.is_empty() {
         tracing::debug!(session_id = %session_id, "structural_extraction: no messages; skipping");
-        return;
+        return None;
     }
 
     let (taxonomy, notes_read, stale_notes) = extract_session_signals(&messages);
@@ -254,7 +259,7 @@ pub(crate) async fn run_structural_extraction(
         Ok(j) => j,
         Err(e) => {
             tracing::warn!(session_id = %session_id, error = %e, "structural_extraction: failed to serialize taxonomy");
-            return;
+            return None;
         }
     };
 
@@ -282,6 +287,8 @@ pub(crate) async fn run_structural_extraction(
     // Because we don't have project_id here (it's available on the session
     // record), we look up the session to find project_id, then resolve notes.
     flush_co_access(&session_id, &notes_read, &app_state).await;
+
+    Some(taxonomy)
 }
 
 /// Resolve note identifiers to DB IDs via project context, then flush all
