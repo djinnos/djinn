@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use djinn_core::commands::CommandSpec;
 
@@ -171,6 +172,20 @@ pub fn resolve_mcp_servers<'a>(
         }
     }
     resolved
+}
+
+/// Compute the verification cache key from a commit SHA and the resolved scoped command set.
+///
+/// The key encodes both the commit identity and the exact commands run so that different
+/// scoped command sets for the same commit produce different cache entries.
+pub fn verification_cache_key(commit_sha: &str, scoped_commands: &[String]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(commit_sha.as_bytes());
+    for cmd in scoped_commands {
+        hasher.update(b"\x00");
+        hasher.update(cmd.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
