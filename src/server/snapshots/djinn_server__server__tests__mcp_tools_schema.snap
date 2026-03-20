@@ -1,5 +1,6 @@
 ---
 source: src/server/mod.rs
+assertion_line: 583
 expression: signatures
 ---
 [
@@ -2817,6 +2818,12 @@ expression: signatures
             },
             "permalink": {
               "type": "string"
+            },
+            "score": {
+              "default": 0.0,
+              "description": "RRF fusion score (higher = more relevant). Defaults to 0.0 for backward compat.",
+              "format": "double",
+              "type": "number"
             },
             "snippet": {
               "type": "string"
@@ -5812,7 +5819,7 @@ expression: signatures
           "type": "string"
         },
         "issue_type": {
-          "description": "Task type: \"task\" (default), \"feature\", or \"bug\".",
+          "description": "Task type: \"task\" (default), \"feature\", \"bug\", \"spike\", \"research\", \"decomposition\", or \"review\".\nSpike, research, decomposition, and review use a simple lifecycle: open → in_progress → closed.\nDecomposition tasks are routed to the Planner; spike and review tasks are routed to the Architect.",
           "nullable": true,
           "type": "string"
         },
