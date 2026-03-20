@@ -147,6 +147,53 @@ pub struct PrReview {
     pub state: String,
     pub submitted_at: Option<String>,
     pub html_url: String,
+    /// The general review body (non-line-specific).  May be empty or absent.
+    #[serde(default)]
+    pub body: String,
+}
+
+/// Structured feedback extracted from a PR review with 'changes requested'.
+///
+/// Aggregates both inline (line-specific) comments and top-level (general)
+/// review body text into a single agent-consumable context payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrReviewFeedback {
+    /// Inline review comments — each anchored to a specific file/line.
+    pub inline_comments: Vec<InlineReviewComment>,
+    /// General review comments (non-line-specific body text from reviewers).
+    pub general_comments: Vec<GeneralReviewComment>,
+}
+
+/// A single inline review comment on a specific file/line range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlineReviewComment {
+    /// GitHub comment ID.
+    pub id: u64,
+    /// Reviewer login.
+    pub reviewer: Option<String>,
+    /// Path to the file being commented on.
+    pub file_path: String,
+    /// Line number in the diff (original `line` from GitHub).
+    pub line: Option<u32>,
+    /// The reviewer's comment text.
+    pub body: String,
+    /// URL to the comment on GitHub.
+    pub url: String,
+}
+
+/// A general (non-line-specific) review comment from the review body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneralReviewComment {
+    /// GitHub review ID.
+    pub id: u64,
+    /// Reviewer login.
+    pub reviewer: Option<String>,
+    /// The review body text.
+    pub body: String,
+    /// Review state (always `"CHANGES_REQUESTED"` in this context).
+    pub state: String,
+    /// URL to the review on GitHub.
+    pub url: String,
 }
 
 /// A review comment on a pull request.
@@ -523,6 +570,59 @@ impl GitHubApiClient {
             ));
         }
         Ok(resp.json().await?)
+    }
+
+    /// Fetch all review feedback for a PR and map it to a structured format.
+    ///
+    /// Calls both `/pulls/{number}/comments` (inline) and `/pulls/{number}/reviews`
+    /// (general), then aggregates them into a [`PrReviewFeedback`] payload.
+    ///
+    /// Only includes general review bodies that are non-empty.  Multiple reviews
+    /// from different reviewers are all included.
+    pub async fn fetch_pr_review_feedback(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) -> Result<PrReviewFeedback> {
+        // Fetch inline (line-specific) comments.
+        let raw_inline = self
+            .list_pull_request_reviews(owner, repo, pull_number)
+            .await?;
+
+        let inline_comments: Vec<InlineReviewComment> = raw_inline
+            .into_iter()
+            .map(|c| InlineReviewComment {
+                id: c.id,
+                reviewer: c.user.map(|u| u.login),
+                file_path: c.path.unwrap_or_default(),
+                line: c.line,
+                body: c.body,
+                url: c.html_url,
+            })
+            .collect();
+
+        // Fetch top-level reviews for general (non-line-specific) review bodies.
+        let raw_reviews = self
+            .list_pr_review_states(owner, repo, pull_number)
+            .await?;
+
+        let general_comments: Vec<GeneralReviewComment> = raw_reviews
+            .into_iter()
+            .filter(|r| !r.body.is_empty())
+            .map(|r| GeneralReviewComment {
+                id: r.id,
+                reviewer: r.user.map(|u| u.login),
+                body: r.body,
+                state: r.state,
+                url: r.html_url,
+            })
+            .collect();
+
+        Ok(PrReviewFeedback {
+            inline_comments,
+            general_comments,
+        })
     }
 
     /// List top-level reviews submitted on a pull request.
