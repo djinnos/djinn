@@ -178,6 +178,18 @@ impl CoordinatorActor {
                             pr = pull_number,
                             "PR poller: reviewer requested changes → reopening task"
                         );
+
+                        // Extract review comments and attach as structured feedback
+                        // before transitioning, so the agent can see them on reopen.
+                        self.attach_pr_review_feedback(
+                            &task.id,
+                            &gh_client,
+                            &owner,
+                            &repo,
+                            pull_number,
+                        )
+                        .await;
+
                         self.apply_pr_transition(
                             &task.id,
                             TransitionAction::PrChangesRequested,
@@ -194,6 +206,75 @@ impl CoordinatorActor {
                         "PR poller: failed to fetch PR reviews, will retry next tick"
                     );
                 }
+            }
+        }
+    }
+
+    /// Fetch PR review comments and log them as structured feedback on the task.
+    ///
+    /// Calls both the inline-comments and review-states GitHub endpoints, then
+    /// writes a single `pr_review_feedback` activity entry containing the full
+    /// aggregated feedback set.  If the fetch fails the error is logged as a
+    /// warning and the poller continues — feedback is best-effort.
+    async fn attach_pr_review_feedback(
+        &self,
+        task_id: &str,
+        gh_client: &GitHubApiClient,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) {
+        match gh_client
+            .fetch_pr_review_feedback(owner, repo, pull_number)
+            .await
+        {
+            Ok(feedback) => {
+                let total_inline = feedback.inline_comments.len();
+                let total_general = feedback.general_comments.len();
+
+                let payload = match serde_json::to_string(&feedback) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id,
+                            error = %e,
+                            "PR poller: failed to serialize review feedback"
+                        );
+                        return;
+                    }
+                };
+
+                let task_repo = self.task_repo();
+                if let Err(e) = task_repo
+                    .log_activity(
+                        Some(task_id),
+                        "pr_poller",
+                        "system",
+                        "pr_review_feedback",
+                        &payload,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        task_id,
+                        error = %e,
+                        "PR poller: failed to log review feedback activity"
+                    );
+                } else {
+                    tracing::info!(
+                        task_id,
+                        inline_comments = total_inline,
+                        general_comments = total_general,
+                        "PR poller: attached review feedback to task"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id,
+                    error = %e,
+                    "PR poller: failed to fetch PR review feedback, continuing without it"
+                );
             }
         }
     }
