@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::server::DjinnMcpServer;
-use djinn_db::ProjectRepository;
+use djinn_db::{ProjectRepository, VerificationRule};
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
 
@@ -116,6 +116,15 @@ pub struct ProjectConfigSetParams {
     pub value: String,
 }
 
+/// A single verification rule returned in project config.
+#[derive(Deserialize, Serialize, JsonSchema, Clone)]
+pub struct VerificationRuleDto {
+    /// Glob pattern (e.g. `src/**/*.rs`, `**` for catch-all).
+    pub match_pattern: String,
+    /// One or more shell commands to run when the pattern matches.
+    pub commands: Vec<String>,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct ProjectConfigResponse {
     pub status: String,
@@ -124,6 +133,9 @@ pub struct ProjectConfigResponse {
     pub auto_merge: bool,
     pub sync_enabled: bool,
     pub sync_remote: Option<String>,
+    /// File-pattern-to-command mapping for selective verification.
+    /// Empty list means fall back to full-project verification.
+    pub verification_rules: Vec<VerificationRuleDto>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -181,6 +193,21 @@ struct StrictDjinnSettings {
     _setup: Vec<ProjectCommandSpec>,
     #[serde(default, rename = "verification")]
     _verification: Vec<ProjectCommandSpec>,
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Parse a JSON-encoded `verification_rules` string into `Vec<VerificationRuleDto>`.
+/// Returns an empty vec on any parse error (safe default).
+fn parse_verification_rules(json: &str) -> Vec<VerificationRuleDto> {
+    serde_json::from_str::<Vec<VerificationRule>>(json)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| VerificationRuleDto {
+            match_pattern: r.match_pattern,
+            commands: r.commands,
+        })
+        .collect()
 }
 
 // ── Tools ────────────────────────────────────────────────────────────────────
@@ -356,30 +383,58 @@ impl DjinnMcpServer {
         Parameters(input): Parameters<ProjectConfigGetParams>,
     ) -> Json<ProjectConfigResponse> {
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        match repo.get_by_path(&input.project).await {
-            Ok(Some(project)) => Json(ProjectConfigResponse {
+        let project = match repo.get_by_path(&input.project).await {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return Json(ProjectConfigResponse {
+                    status: format!("error: project not found: {}", input.project),
+                    project: input.project,
+                    target_branch: "main".into(),
+                    auto_merge: true,
+                    sync_enabled: false,
+                    sync_remote: None,
+                    verification_rules: vec![],
+                });
+            }
+            Err(e) => {
+                return Json(ProjectConfigResponse {
+                    status: format!("error: {e}"),
+                    project: input.project,
+                    target_branch: "main".into(),
+                    auto_merge: true,
+                    sync_enabled: false,
+                    sync_remote: None,
+                    verification_rules: vec![],
+                });
+            }
+        };
+        match repo.get_config(&project.id).await {
+            Ok(Some(config)) => Json(ProjectConfigResponse {
+                status: "ok".into(),
+                project: project.path,
+                target_branch: config.target_branch,
+                auto_merge: config.auto_merge,
+                sync_enabled: config.sync_enabled,
+                sync_remote: config.sync_remote,
+                verification_rules: parse_verification_rules(&config.verification_rules),
+            }),
+            Ok(None) => Json(ProjectConfigResponse {
                 status: "ok".into(),
                 project: project.path,
                 target_branch: project.target_branch,
                 auto_merge: project.auto_merge,
                 sync_enabled: project.sync_enabled,
                 sync_remote: project.sync_remote,
-            }),
-            Ok(None) => Json(ProjectConfigResponse {
-                status: format!("error: project not found: {}", input.project),
-                project: input.project,
-                target_branch: "main".into(),
-                auto_merge: true,
-                sync_enabled: false,
-                sync_remote: None,
+                verification_rules: vec![],
             }),
             Err(e) => Json(ProjectConfigResponse {
                 status: format!("error: {e}"),
-                project: input.project,
-                target_branch: "main".into(),
-                auto_merge: true,
-                sync_enabled: false,
-                sync_remote: None,
+                project: project.path,
+                target_branch: project.target_branch,
+                auto_merge: project.auto_merge,
+                sync_enabled: project.sync_enabled,
+                sync_remote: project.sync_remote,
+                verification_rules: vec![],
             }),
         }
     }
@@ -400,6 +455,7 @@ impl DjinnMcpServer {
                     auto_merge: true,
                     sync_enabled: false,
                     sync_remote: None,
+                    verification_rules: vec![],
                 });
             }
             Err(e) => {
@@ -410,6 +466,7 @@ impl DjinnMcpServer {
                     auto_merge: true,
                     sync_enabled: false,
                     sync_remote: None,
+                    verification_rules: vec![],
                 });
             }
         };
@@ -425,6 +482,7 @@ impl DjinnMcpServer {
                 auto_merge: config.auto_merge,
                 sync_enabled: config.sync_enabled,
                 sync_remote: config.sync_remote,
+                verification_rules: parse_verification_rules(&config.verification_rules),
             }),
             Ok(None) => Json(ProjectConfigResponse {
                 status: format!("error: invalid key '{}'", input.key),
@@ -433,6 +491,7 @@ impl DjinnMcpServer {
                 auto_merge: project.auto_merge,
                 sync_enabled: project.sync_enabled,
                 sync_remote: project.sync_remote,
+                verification_rules: vec![],
             }),
             Err(e) => Json(ProjectConfigResponse {
                 status: format!("error: {e}"),
@@ -441,6 +500,7 @@ impl DjinnMcpServer {
                 auto_merge: project.auto_merge,
                 sync_enabled: project.sync_enabled,
                 sync_remote: project.sync_remote,
+                verification_rules: vec![],
             }),
         }
     }
