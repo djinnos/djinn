@@ -1,0 +1,385 @@
+/**
+ * SSE Event Handlers - Wire SSE events to task/epic stores
+ *
+ * Sets up subscriptions to SSE events and updates stores directly
+ * from full-entity event payloads. No mapping needed — types match MCP wire format.
+ */
+
+import { sseStore, type SSEEvent } from "./sseStore";
+import { taskStore } from "./taskStore";
+import { epicStore } from "./epicStore";
+import { projectStore } from "./projectStore";
+import { queryClient } from "@/lib/queryClient";
+import { fetchProjects } from "@/api/server";
+import { verificationStore, type StepEntry } from "./verificationStore";
+import type { Task, Epic } from "@/api/types";
+
+/**
+ * Unwrap SSE event payload.
+ *
+ * The server sends DjinnEventEnvelope format:
+ *   {"entity_type":"task","action":"created","payload":{"task":{...},"from_sync":false}}
+ *
+ * For entity events (task/epic), the payload nests the entity under a key
+ * matching the entity_type (e.g. payload.task). This helper extracts the
+ * inner entity so callers receive the flat entity object.
+ */
+function unwrapPayload(raw: unknown): Record<string, unknown> {
+  const obj = raw as Record<string, unknown>;
+  if (!obj || typeof obj !== "object") return obj;
+
+  // DjinnEventEnvelope format: extract payload field
+  if ("entity_type" in obj && "payload" in obj && typeof obj.payload === "object" && obj.payload !== null) {
+    const payload = obj.payload as Record<string, unknown>;
+    const entityType = obj.entity_type as string;
+
+    // Entity events nest under entity_type key, e.g. payload.task for task events
+    if (entityType in payload) {
+      const entity = payload[entityType];
+      if (entity && typeof entity === "object") {
+        return entity as Record<string, unknown>;
+      }
+    }
+
+    // Non-entity events (session, verification, etc.) — return payload directly
+    return payload;
+  }
+
+  // Legacy format: {data: {...entity...}}
+  if ("data" in obj && typeof obj.data === "object") {
+    return obj.data as Record<string, unknown>;
+  }
+
+  return obj;
+}
+
+/**
+ * SSE sends some array fields as JSON strings (e.g. labels, acceptance_criteria).
+ * Parse them back to arrays before storing.
+ */
+function normalizeSSEPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...payload };
+  for (const key of ["labels", "acceptance_criteria", "memory_refs"]) {
+    if (typeof result[key] === "string") {
+      try {
+        result[key] = JSON.parse(result[key] as string);
+      } catch {
+        // leave as-is
+      }
+    }
+  }
+  return result;
+}
+
+// Track subscription cleanup functions
+let taskCreatedUnsub: (() => void) | null = null;
+let taskUpdatedUnsub: (() => void) | null = null;
+let taskDeletedUnsub: (() => void) | null = null;
+let epicCreatedUnsub: (() => void) | null = null;
+let epicUpdatedUnsub: (() => void) | null = null;
+let epicDeletedUnsub: (() => void) | null = null;
+
+/**
+ * Initialize SSE event handlers
+ * Call this once at app startup to wire SSE events to stores
+ */
+export function initSSEEventHandlers(): () => void {
+  const { subscribe } = sseStore.getState();
+
+  // Task events — SSE sends snake_case MCP payloads wrapped in {type,action,data}
+  // Only apply events for the currently selected project to avoid cross-project flicker.
+  taskCreatedUnsub = subscribe("task_created", (event: SSEEvent) => {
+    const task = normalizeSSEPayload(unwrapPayload(event.data)) as unknown as Task;
+    if (!task.id || !task.title) {
+      console.warn("[SSE] task_created with missing id/title, skipping:", task);
+      return;
+    }
+    const selectedProject = projectStore.getState().getSelectedProject();
+    if (selectedProject && task.project_id !== selectedProject.id) return;
+    taskStore.getState().addTask(task);
+    queryClient.setQueryData(["tasks"], (current: Task[] | undefined) =>
+      current ? [...current, task] : [task]
+    );
+  });
+
+  taskUpdatedUnsub = subscribe("task_updated", (event: SSEEvent) => {
+    const task = normalizeSSEPayload(unwrapPayload(event.data)) as unknown as Task;
+    if (!task.id) return;
+    const selectedProject = projectStore.getState().getSelectedProject();
+    if (selectedProject && task.project_id !== selectedProject.id) return;
+
+    // SSE task.updated payloads don't include active_session or session_count
+    // (those are only added by MCP task_list/task_show). Preserve the values
+    // that the session_started handler already set on the store — but only
+    // for in-flight statuses. If the task moved back to open/closed, clear
+    // the session so stale avatars don't linger.
+    const IN_FLIGHT = new Set([
+      "in_progress", "verifying", "needs_task_review",
+      "in_task_review", "needs_pm_intervention", "in_pm_intervention",
+    ]);
+    const existing = taskStore.getState().getTask(task.id);
+    if (!existing) {
+      // Don't create tasks from update events — wait for a full task_created or snapshot
+      console.warn("[SSE] task_updated for unknown task, skipping:", task.id);
+      return;
+    }
+
+    const isInFlight = IN_FLIGHT.has(task.status);
+    if (!("active_session" in task)) {
+      task.active_session = isInFlight ? existing.active_session : undefined;
+    }
+    if (!("session_count" in task)) task.session_count = existing.session_count;
+    if (!("duration_seconds" in task)) task.duration_seconds = existing.duration_seconds;
+
+    taskStore.getState().updateTask(task);
+    queryClient.setQueryData(["tasks"], (current: Task[] | undefined) =>
+      current?.map((t) => (t.id === task.id ? task : t))
+    );
+  });
+
+  taskDeletedUnsub = subscribe("task_deleted", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as { id: string };
+    taskStore.getState().removeTask(payload.id);
+    queryClient.setQueryData(["tasks"], (current: { id: string }[] | undefined) =>
+      current?.filter((task) => task.id !== payload.id)
+    );
+  });
+
+  // Epic events — SSE sends snake_case MCP payloads wrapped in {type,action,data}
+  epicCreatedUnsub = subscribe("epic_created", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data);
+    const selectedProject = projectStore.getState().getSelectedProject();
+    if (selectedProject && payload.project_id && payload.project_id !== selectedProject.id) return;
+    const epic = payload as unknown as Epic;
+    epicStore.getState().addEpic(epic);
+    queryClient.setQueryData(["epics"], (current: Epic[] | undefined) =>
+      current ? [...current, epic] : [epic]
+    );
+  });
+
+  epicUpdatedUnsub = subscribe("epic_updated", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data);
+    const selectedProject = projectStore.getState().getSelectedProject();
+    if (selectedProject && payload.project_id && payload.project_id !== selectedProject.id) return;
+    const epic = payload as unknown as Epic;
+    epicStore.getState().updateEpic(epic);
+    queryClient.setQueryData(["epics"], (current: Epic[] | undefined) =>
+      current?.map((e) => (e.id === epic.id ? epic : e))
+    );
+  });
+
+  epicDeletedUnsub = subscribe("epic_deleted", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as { id: string };
+    epicStore.getState().removeEpic(payload.id);
+    queryClient.setQueryData(["epics"], (current: { id: string }[] | undefined) =>
+      current?.filter((epic) => epic.id !== payload.id)
+    );
+  });
+
+  // Session events — update active_session on the corresponding task
+  const sessionDispatchedUnsub = subscribe("session_dispatched", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as {
+      task_id?: string;
+      agent_type?: string;
+      model_id?: string;
+    };
+    if (!payload.task_id) return;
+    const existing = taskStore.getState().getTask(payload.task_id);
+    if (!existing) return;
+    taskStore.getState().updateTask({
+      ...existing,
+      active_session: {
+        session_id: undefined,
+        agent_type: payload.agent_type,
+        model_id: payload.model_id,
+        started_at: new Date().toISOString(),
+        status: "dispatched",
+      },
+    });
+  });
+
+  const sessionStartedUnsub = subscribe("session_started", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as {
+      id?: string;
+      task_id?: string;
+      agent_type?: string;
+      model_id?: string;
+      started_at?: string;
+      status?: string;
+    };
+    if (!payload.task_id) return;
+    const existing = taskStore.getState().getTask(payload.task_id);
+    if (!existing) return;
+    // Setup is complete — clear lifecycle steps so "setting up" badge disappears
+    verificationStore.getState().clearLifecycleSteps(payload.task_id);
+    taskStore.getState().updateTask({
+      ...existing,
+      active_session: {
+        session_id: payload.id,
+        agent_type: payload.agent_type,
+        model_id: payload.model_id,
+        started_at: payload.started_at,
+        status: payload.status,
+      },
+    });
+  });
+
+  const sessionEndedUnsub = subscribe("session_ended", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as { task_id?: string };
+    if (!payload.task_id) return;
+    const existing = taskStore.getState().getTask(payload.task_id);
+    if (!existing) return;
+    verificationStore.getState().clearLifecycleSteps(payload.task_id);
+    taskStore.getState().updateTask({
+      ...existing,
+      active_session: undefined,
+      session_count: (existing.session_count ?? 0) + 1,
+    });
+  });
+
+  // Sync events — when an import brings in new tasks, the individual task.updated
+  // SSE events (from_sync=true) will have already updated the stores. This handler
+  // is for visibility — invalidate queries so any list views re-fetch.
+  const syncCompletedUnsub = subscribe("sync_completed", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as {
+      channel?: string;
+      direction?: string;
+      count?: number;
+      error?: string | null;
+    };
+    // Only refresh on successful imports that actually changed data.
+    if (payload.direction === "import" && (payload.count ?? 0) > 0) {
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["epics"] });
+    }
+  });
+
+  const projectChangedUnsub = subscribe("project_changed", () => {
+    queryClient.invalidateQueries({ queryKey: ["providers"] });
+    queryClient.invalidateQueries({ queryKey: ["settings"] });
+    fetchProjects()
+      .then((projects) => projectStore.getState().setProjects(projects))
+      .catch((err) => console.error("Failed to refetch projects after SSE event:", err));
+  });
+
+  const verificationStepUnsub = subscribe("verification_step", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as {
+      project_id?: string;
+      task_id?: string;
+      phase?: "setup" | "verification";
+      step?: Record<string, unknown>;
+    };
+
+    if (!payload.project_id || !payload.phase || !payload.step) return;
+
+    const key = payload.task_id ?? payload.project_id;
+    const [variant] = Object.keys(payload.step);
+    const body = payload.step[variant] as Record<string, unknown> | undefined;
+
+    if (!variant) return;
+
+    if (variant === "Started" && body) {
+      verificationStore.getState().clearRun(key);
+      const step: StepEntry = {
+        index: Number(body.index ?? 0),
+        name: String(body.name ?? "step"),
+        command: typeof body.command === "string" ? body.command : undefined,
+        phase: payload.phase,
+        status: "running",
+      };
+      verificationStore.getState().addStep(key, step, {
+        projectId: payload.project_id,
+        taskId: payload.task_id,
+        startedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    if (variant === "Finished" && body) {
+      const index = Number(body.index ?? 0);
+      const exitCode = typeof body.exit_code === "number" ? body.exit_code : undefined;
+      verificationStore.getState().updateStep(key, index, {
+        exitCode,
+        durationMs: typeof body.duration_ms === "number" ? body.duration_ms : undefined,
+        stdout: typeof body.stdout === "string" ? body.stdout : undefined,
+        stderr: typeof body.stderr === "string" ? body.stderr : undefined,
+        status: exitCode === 0 ? "passed" : "failed",
+      });
+      return;
+    }
+
+    if (variant === "PhaseComplete" && body) {
+      const phaseStatus = String(body.status ?? "").toLowerCase();
+      verificationStore.getState().setRunStatus(
+        key,
+        phaseStatus === "passed" ? "passed" : phaseStatus === "failed" ? "failed" : "running",
+      );
+      return;
+    }
+
+    if (variant === "CacheHit") {
+      verificationStore.getState().setRunStatus(key, "cache_hit");
+    }
+  });
+
+  const lifecycleStepUnsub = subscribe("lifecycle_step", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as {
+      task_id?: string;
+      step?: string;
+      detail?: string;
+    };
+
+    if (!payload.task_id || !payload.step) return;
+
+    // detail is a serde_json::Value — stringify objects to a compact human-readable form
+    let detail: string | undefined;
+    if (typeof payload.detail === "string") {
+      detail = payload.detail;
+    } else if (payload.detail && typeof payload.detail === "object") {
+      const vals = Object.values(payload.detail as Record<string, unknown>);
+      detail = vals.length === 1 ? String(vals[0]) : undefined;
+    }
+
+    verificationStore.getState().addLifecycleStep(payload.task_id, {
+      step: payload.step,
+      detail,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // Return cleanup function
+  return () => {
+    taskCreatedUnsub?.();
+    taskUpdatedUnsub?.();
+    taskDeletedUnsub?.();
+    epicCreatedUnsub?.();
+    epicUpdatedUnsub?.();
+    epicDeletedUnsub?.();
+    projectChangedUnsub?.();
+    sessionDispatchedUnsub?.();
+    sessionStartedUnsub?.();
+    sessionEndedUnsub?.();
+    syncCompletedUnsub?.();
+    verificationStepUnsub?.();
+    lifecycleStepUnsub?.();
+  };
+}
+
+/**
+ * Cleanup SSE event handlers
+ */
+export function cleanupSSEEventHandlers(): void {
+  taskCreatedUnsub?.();
+  taskUpdatedUnsub?.();
+  taskDeletedUnsub?.();
+  epicCreatedUnsub?.();
+  epicUpdatedUnsub?.();
+  epicDeletedUnsub?.();
+
+  taskCreatedUnsub = null;
+  taskUpdatedUnsub = null;
+  taskDeletedUnsub = null;
+  epicCreatedUnsub = null;
+  epicUpdatedUnsub = null;
+  epicDeletedUnsub = null;
+}

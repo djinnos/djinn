@@ -1,0 +1,26 @@
+{
+  "setup": [
+    {
+      "name": "pnpm-install",
+      "command": "pnpm install --frozen-lockfile",
+      "timeout_secs": 120
+    }
+  ],
+  "verification": [
+    {
+      "name": "clippy",
+      "command": "cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",
+      "timeout_secs": 300
+    },
+    {
+      "name": "typecheck",
+      "command": "pnpm exec tsc -b",
+      "timeout_secs": 120
+    },
+    {
+      "name": "test",
+      "command": "pnpm test",
+      "timeout_secs": 300
+    }
+  ]
+}
