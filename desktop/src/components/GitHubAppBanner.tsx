@@ -77,18 +77,18 @@ export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
   if (!showWarning || dismissed) return null;
 
   return (
-    <Card className="mx-4 border-amber-500/30 bg-amber-500/10">
+    <Card className="mx-4 border-none ring-orange-500/50 bg-orange-500/10">
       <CardContent className="py-4">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-start gap-3">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-500/20">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-orange-500/20">
               <HugeiconsIcon
                 icon={Alert02Icon}
-                className="size-4 text-amber-400"
+                className="size-4 text-orange-400"
               />
             </div>
             <div className="flex flex-col gap-1">
-              <h3 className="text-sm font-semibold text-amber-200">
+              <h3 className="text-sm font-semibold text-orange-200">
                 GitHub App Not Installed
               </h3>
               <p className="text-sm text-muted-foreground">
@@ -108,19 +108,19 @@ export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
         </div>
 
         <div className="mt-3 flex items-center gap-2 pl-11">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 gap-1.5 px-3 text-xs"
-            onClick={() =>
-              window.open(
-                "https://github.com/apps/djinn-ai-bot/installations/new",
-                "_blank"
-              )
-            }
+          <a
+            href="https://github.com/apps/djinn-ai-bot/installations/new"
+            target="_blank"
+            rel="noopener noreferrer"
           >
-            Install on GitHub
-          </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 px-3 text-xs"
+            >
+              Install on GitHub
+            </Button>
+          </a>
           <Button
             variant="ghost"
             size="sm"

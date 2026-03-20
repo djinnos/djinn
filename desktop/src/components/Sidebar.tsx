@@ -506,8 +506,8 @@ export function Sidebar() {
       {/* Header */}
       <div data-tauri-drag-region className={cn("flex h-12 items-center border-b", isCollapsed ? "justify-center px-2" : "px-5")}>
         <div className={cn("flex items-center gap-3", !isCollapsed && "flex-1")}>
-          <span className="flex h-4 w-4 items-center justify-center shrink-0">
-            <img src={logoSvg} alt="Djinn" className="h-4 w-4" />
+          <span className="flex h-4 w-4 items-center justify-center shrink-0 overflow-visible">
+            <img src={logoSvg} alt="Djinn" className="h-6 w-6" />
           </span>
           {!isCollapsed && (
             <span className="text-sm font-semibold text-sidebar-foreground truncate">
