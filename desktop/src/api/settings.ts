@@ -88,7 +88,7 @@ export async function fetchSettings(): Promise<SettingsResponse> {
     agents: {
       model_priorities: {
         worker: toPriorityItems(modelPriority.worker),
-        task_reviewer: toPriorityItems(modelPriority.task_reviewer),
+        task_reviewer: toPriorityItems(modelPriority.reviewer),
         lead: toPriorityItems(modelPriority.lead),
         planner: toPriorityItems(modelPriority.planner),
       },
@@ -110,7 +110,7 @@ export async function saveSettings(settings: SettingsResponse): Promise<void> {
     model_priority_worker: settings.agents.model_priorities.worker.map((item) =>
       combineModelId(item.provider, item.model)
     ),
-    model_priority_task_reviewer: settings.agents.model_priorities.task_reviewer.map((item) =>
+    model_priority_reviewer: settings.agents.model_priorities.task_reviewer.map((item) =>
       combineModelId(item.provider, item.model)
     ),
     model_priority_lead: settings.agents.model_priorities.lead.map((item) =>
