@@ -52,6 +52,7 @@ pub struct CoordinatorDeps {
 mod dispatch;
 mod health;
 mod rules;
+mod wave;
 
 /// Interval between stuck-detection passes (AGENT-08).
 const STUCK_INTERVAL: Duration = Duration::from_secs(30);
@@ -560,6 +561,15 @@ impl CoordinatorActor {
                 );
                 self.publish_status();
             }
+            // Epic created → create a decomposition task for the Planner (wave 1).
+            ("epic", "created") => {
+                let Some(epic) =
+                    envelope.parse_payload::<djinn_core::models::Epic>()
+                else {
+                    return;
+                };
+                self.maybe_create_decomposition_task(&epic).await;
+            }
             ("task", "created") | ("task", "updated") => {
                 let Some(task_payload) = envelope
                     .payload
@@ -594,6 +604,15 @@ impl CoordinatorActor {
                         "CoordinatorActor: ready-task event → dispatch pass"
                     );
                     self.dispatch_ready_tasks(Some(&task.project_id)).await;
+                }
+                // Batch-completion check: when a task closes, check if all
+                // non-decomposition worker tasks under the epic are closed
+                // (AC5/AC6 — wave-based planning).
+                if task.status == "closed"
+                    && let Some(ref epic_id) = task.epic_id
+                {
+                    self.maybe_create_next_wave_decomposition(epic_id, &task.project_id)
+                        .await;
                 }
             }
             _ => {}
@@ -1532,9 +1551,11 @@ mod tests {
 
     // ── Architect patrol dispatch ─────────────────────────────────────────────
 
-    /// Spawn a coordinator that includes an "architect" model slot, so the
-    /// patrol can actually dispatch.
-    fn spawn_coordinator_with_architect(
+    // ── Wave-based Planner decomposition (task watx) ──────────────────────────
+
+    /// Spawn a coordinator that includes "architect" and "planner" model slots,
+    /// used by both patrol tests and wave decomposition tests.
+    fn spawn_coordinator_with_planner(
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
     ) -> CoordinatorHandle {
@@ -1546,8 +1567,8 @@ mod tests {
             SlotPoolConfig {
                 models: vec![ModelSlotConfig {
                     model_id: DEFAULT_MODEL_ID.to_owned(),
-                    max_slots: 2,
-                    roles: ["worker", "reviewer", "architect"]
+                    max_slots: 4,
+                    roles: ["worker", "reviewer", "planner", "architect"]
                         .into_iter()
                         .map(ToOwned::to_owned)
                         .collect(),
@@ -1569,6 +1590,13 @@ mod tests {
             role_registry,
             verification_tracker,
         })
+    }
+
+    fn spawn_coordinator_with_architect(
+        db: &Database,
+        tx: &broadcast::Sender<DjinnEventEnvelope>,
+    ) -> CoordinatorHandle {
+        spawn_coordinator_with_planner(db, tx)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1600,6 +1628,80 @@ mod tests {
             handle.get_status().unwrap().tasks_dispatched,
             0,
             "patrol should not dispatch when no open epics"
+        );
+    }
+
+    /// Helper: poll until there is at least `min_count` decomposition tasks for
+    /// the given epic (open or in-progress), or timeout after 2 seconds.
+    async fn wait_for_decomp_tasks(
+        db: &Database,
+        tx: &broadcast::Sender<DjinnEventEnvelope>,
+        epic_id: &str,
+        min_count: usize,
+    ) -> Vec<djinn_core::models::Task> {
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let tasks = task_repo.list_by_epic(epic_id).await.unwrap_or_default();
+            let open_decomp: Vec<_> = tasks
+                .into_iter()
+                .filter(|t| {
+                    t.issue_type == "decomposition"
+                        && matches!(t.status.as_str(), "open" | "in_progress")
+                })
+                .collect();
+            if open_decomp.len() >= min_count {
+                return open_decomp;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return open_decomp;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn epic_creation_triggers_decomposition_task() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        // Create project and epic BEFORE spawning coordinator so the project
+        // is not auto-paused (coordinator pauses projects only when it receives
+        // a project_created event — but create_test_project uses noop bus).
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(
+            db.clone(),
+            crate::events::event_bus_for(&tx),
+        );
+        // Spawn coordinator BEFORE creating epic so it receives the event.
+        let _handle = spawn_coordinator_with_planner(&db, &tx);
+        // Yield to give the coordinator task a chance to start.
+        tokio::task::yield_now().await;
+
+        let epic = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Wave Test Epic",
+                    description: "test",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Wait for the coordinator to process the epic_created event and create
+        // the decomposition task (polling with 2s timeout).
+        let decomp_tasks =
+            wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
+
+        assert_eq!(
+            decomp_tasks.len(),
+            1,
+            "expected 1 decomposition task after epic creation"
         );
     }
 
@@ -1650,6 +1752,54 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn epic_creation_does_not_create_duplicate_decomposition_task() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let _handle = spawn_coordinator_with_planner(&db, &tx);
+        tokio::task::yield_now().await;
+
+        let epic = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Dedup Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Wait for the first decomposition task to be created.
+        let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
+        assert_eq!(decomp_tasks.len(), 1, "expected 1 decomposition task");
+
+        // Send a duplicate epic_created event (e.g. from a sync artifact).
+        let _ = tx.send(DjinnEventEnvelope::epic_created(&epic));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
+        let open_decomp_count = tasks
+            .iter()
+            .filter(|t| {
+                t.issue_type == "decomposition"
+                    && matches!(t.status.as_str(), "open" | "in_progress")
+            })
+            .count();
+        assert_eq!(
+            open_decomp_count, 1,
+            "duplicate epic_created events should not create duplicate decomposition tasks"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn patrol_creates_review_task_when_open_epic_exists() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -1688,6 +1838,74 @@ mod tests {
                 .iter()
                 .map(|t| (&t.title, &t.issue_type))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_completion_triggers_next_wave_decomposition() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let _handle = spawn_coordinator_with_planner(&db, &tx);
+        tokio::task::yield_now().await;
+
+        let epic = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Batch Completion Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        // Wait for the first decomposition task.
+        let initial_decomp = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
+        assert_eq!(initial_decomp.len(), 1, "should have initial decomposition task");
+        let decomp_task = &initial_decomp[0];
+
+        // Manually close the decomposition task (simulating Planner completed wave 1).
+        task_repo
+            .set_status_with_reason(&decomp_task.id, "closed", Some("completed"))
+            .await
+            .unwrap();
+
+        // Create 2 worker tasks under the epic.
+        let w1 = task_repo
+            .create(&epic.id, "Worker Task 1", "", "", "task", 0, "", Some("open"))
+            .await
+            .unwrap();
+        let w2 = task_repo
+            .create(&epic.id, "Worker Task 2", "", "", "task", 0, "", Some("open"))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Close both worker tasks — this should trigger batch-completion detection.
+        task_repo
+            .set_status_with_reason(&w1.id, "closed", Some("completed"))
+            .await
+            .unwrap();
+        task_repo
+            .set_status_with_reason(&w2.id, "closed", Some("completed"))
+            .await
+            .unwrap();
+
+        // Wait for the coordinator to create the next-wave decomposition task.
+        let next_wave = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
+        assert_eq!(
+            next_wave.len(),
+            1,
+            "batch completion should create exactly one new decomposition task"
         );
     }
 }

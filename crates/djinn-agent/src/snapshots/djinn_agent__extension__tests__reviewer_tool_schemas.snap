@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension.rs
-assertion_line: 2902
 expression: tool_schemas_reviewer()
 ---
 [
@@ -120,6 +119,10 @@ expression: tool_schemas_reviewer()
           "type": "string"
         },
         "query": {
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task ID for affinity scoring; defaults to the current session task",
           "type": "string"
         },
         "type": {
