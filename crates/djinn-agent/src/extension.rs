@@ -35,6 +35,7 @@ async fn dispatch_tool_call<T>(
     tool_call: &T,
     worktree_path: &Path,
     allowed_schemas: Option<&[serde_json::Value]>,
+    session_task_id: Option<&str>,
 ) -> Result<serde_json::Value, String>
 where
     T: Serialize,
@@ -78,7 +79,7 @@ where
         "epic_update" => call_epic_update(state, &call.arguments).await,
         "epic_tasks" => call_epic_tasks(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments).await,
-        "memory_search" => call_memory_search(state, &call.arguments).await,
+        "memory_search" => call_memory_search(state, &call.arguments, session_task_id).await,
         "memory_list" => call_memory_list(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
         "read" => call_read(state, &call.arguments, worktree_path).await,
@@ -202,6 +203,7 @@ struct MemorySearchParams {
     #[serde(rename = "type")]
     note_type: Option<String>,
     limit: Option<i64>,
+    task_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -819,10 +821,14 @@ async fn call_memory_read(
 async fn call_memory_search(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    session_task_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: MemorySearchParams = parse_args(arguments)?;
     let project_path = resolve_project_path(p.project);
     let project_id = project_id_for_path(state, &project_path).await?;
+
+    // Use task_id from args if provided, otherwise fall back to session context.
+    let task_id = p.task_id.as_deref().or(session_task_id);
 
     let repo = NoteRepository::new(state.db.clone(), state.event_bus.clone());
     let limit = p.limit.unwrap_or(10).clamp(1, 100) as usize;
@@ -830,7 +836,7 @@ async fn call_memory_search(
         .search(
             &project_id,
             &p.query,
-            None,
+            task_id,
             p.folder.as_deref(),
             p.note_type.as_deref(),
             limit,
@@ -2262,7 +2268,8 @@ fn tool_memory_search() -> RmcpTool {
                 "query": {"type": "string"},
                 "folder": {"type": "string"},
                 "type": {"type": "string"},
-                "limit": {"type": "integer"}
+                "limit": {"type": "integer"},
+                "task_id": {"type": "string", "description": "Task ID for affinity scoring; defaults to the current session task"}
             }
         }),
     )
@@ -2636,9 +2643,10 @@ pub(crate) async fn call_tool(
     name: &str,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
+    session_task_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
-    dispatch_tool_call(state, &synthetic, worktree_path, None).await
+    dispatch_tool_call(state, &synthetic, worktree_path, None, session_task_id).await
 }
 
 #[cfg(test)]
