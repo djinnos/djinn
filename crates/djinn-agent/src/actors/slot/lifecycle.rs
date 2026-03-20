@@ -1127,6 +1127,24 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             &app_state,
         )
         .await;
+
+        // Spawn structural extraction as a background job for completed sessions.
+        if session_status == SessionStatus::Completed
+            && let Some(ref record_id) = current_record_id
+        {
+            let session_id_for_extraction = record_id.clone();
+            let messages_snapshot = conversation.messages.clone();
+            let app_state_for_extraction = app_state.clone();
+            tokio::spawn(async move {
+                super::session_extraction::run_structural_extraction(
+                    session_id_for_extraction,
+                    messages_snapshot,
+                    app_state_for_extraction,
+                )
+                .await;
+            });
+        }
+
         teardown_worktree(
             &task.short_id,
             &worktree_path,
@@ -1720,6 +1738,23 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
         &app_state,
     )
     .await;
+
+    // Spawn structural extraction for completed project-lifecycle sessions.
+    if session_status == SessionStatus::Completed
+        && let Some(ref record_id) = current_record_id
+    {
+        let session_id_for_extraction = record_id.clone();
+        let messages_snapshot = conversation.messages.clone();
+        let app_state_for_extraction = app_state.clone();
+        tokio::spawn(async move {
+            super::session_extraction::run_structural_extraction(
+                session_id_for_extraction,
+                messages_snapshot,
+                app_state_for_extraction,
+            )
+            .await;
+        });
+    }
 
     return_free!();
 }

@@ -343,6 +343,22 @@ impl SessionRepository {
         .await?)
     }
 
+    /// Store the event taxonomy JSON on a completed session record.
+    ///
+    /// Called after structural extraction completes. A best-effort write:
+    /// callers should log errors but must not propagate them to the slot.
+    pub async fn set_event_taxonomy(&self, id: &str, taxonomy_json: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+
+        sqlx::query("UPDATE sessions SET event_taxonomy = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(taxonomy_json)
+            .execute(self.db.pool())
+            .await?;
+
+        Ok(())
+    }
+
     /// Find the most recent paused session for a task that matches the given
     /// agent type.  Used during dispatch so that e.g. a PM session never
     /// accidentally resumes a worker's paused conversation.
