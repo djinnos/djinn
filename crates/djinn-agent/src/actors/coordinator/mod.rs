@@ -51,6 +51,7 @@ pub struct CoordinatorDeps {
 
 mod dispatch;
 mod health;
+mod prompt_eval;
 mod rules;
 mod wave;
 
@@ -376,6 +377,7 @@ impl CoordinatorActor {
                         self.prune_tick_counter = 0;
                         self.prune_note_associations().await;
                         self.evict_throughput_events();
+                        self.evaluate_prompt_amendments().await;
                     }
                     // Architect patrol every ~5 min (rules::ARCHITECT_PATROL_TICKS ticks at 30s)
                     self.architect_tick_counter += 1;
