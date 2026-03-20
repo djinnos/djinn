@@ -8,12 +8,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+mod architect;
 pub mod finalize;
 mod lead;
 mod planner;
 mod reviewer;
 mod worker;
 
+pub(crate) use architect::{ARCHITECT_CONFIG, ArchitectRole};
 pub(crate) use lead::{LEAD_CONFIG, LeadRole};
 pub(crate) use planner::{PLANNER_CONFIG, PlannerRole};
 pub(crate) use reviewer::{REVIEWER_CONFIG, ReviewerRole};
@@ -42,6 +44,7 @@ pub(crate) fn config_for(agent_type: AgentType) -> &'static RoleConfig {
         AgentType::Reviewer => &REVIEWER_CONFIG,
         AgentType::Lead => &LEAD_CONFIG,
         AgentType::Planner => &PLANNER_CONFIG,
+        AgentType::Architect => &ARCHITECT_CONFIG,
     }
 }
 
@@ -106,6 +109,7 @@ pub(crate) fn role_impl_for(agent_type: AgentType) -> Arc<dyn AgentRole> {
         AgentType::Reviewer => Arc::new(ReviewerRole),
         AgentType::Lead => Arc::new(LeadRole),
         AgentType::Planner => Arc::new(PlannerRole),
+        AgentType::Architect => Arc::new(ArchitectRole),
     }
 }
 
@@ -144,9 +148,14 @@ impl RoleRegistry {
             ("reviewer", AgentType::Reviewer),
             ("lead", AgentType::Lead),
             ("planner", AgentType::Planner),
+            ("architect", AgentType::Architect),
         ]);
 
         let dispatch_rules = vec![
+            // Architect claims spike/review tasks (open status) first.
+            architect_dispatch_rule(),
+            // Decomposition tasks go to Planner.
+            decomposition_dispatch_rule(),
             worker_dispatch_rule(),
             reviewer_dispatch_rule(),
             lead_dispatch_rule(),
@@ -189,11 +198,42 @@ impl RoleRegistry {
     }
 }
 
+/// Returns `true` if the task's `issue_type` uses the simple lifecycle and is
+/// dispatched to the Architect role (spike, review).
+fn architect_claims(task: &Task, _ctx: &DispatchContext) -> bool {
+    matches!(task.status.as_str(), "open" | "in_progress")
+        && matches!(task.issue_type.as_str(), "spike" | "review")
+}
+
+fn architect_dispatch_rule() -> DispatchRule {
+    DispatchRule {
+        role_name: "architect",
+        claims: architect_claims,
+    }
+}
+
+/// Returns `true` if the task's `issue_type` is `decomposition` (simple lifecycle,
+/// dispatched to the Planner role).
+fn decomposition_claims(task: &Task, _ctx: &DispatchContext) -> bool {
+    matches!(task.status.as_str(), "open" | "in_progress")
+        && task.issue_type.as_str() == "decomposition"
+}
+
+fn decomposition_dispatch_rule() -> DispatchRule {
+    DispatchRule {
+        role_name: "planner",
+        claims: decomposition_claims,
+    }
+}
+
 fn worker_claims(task: &Task, _ctx: &DispatchContext) -> bool {
+    // Spike, research, review, and decomposition tasks with simple lifecycle
+    // are handled by architect_claims / decomposition_claims / a direct worker path.
+    // Research tasks go to the worker role (open-ended but same execution model).
     !matches!(
         task.status.as_str(),
         "needs_task_review" | "in_task_review" | "needs_pm_intervention" | "in_pm_intervention"
-    )
+    ) && !matches!(task.issue_type.as_str(), "spike" | "review" | "decomposition")
 }
 
 fn worker_dispatch_rule() -> DispatchRule {
@@ -245,6 +285,10 @@ mod tests {
     use djinn_core::models::Task;
 
     fn make_task(status: &str) -> Task {
+        make_task_with_type(status, "task")
+    }
+
+    fn make_task_with_type(status: &str, issue_type: &str) -> Task {
         Task {
             id: "task-123".into(),
             project_id: "project-1".into(),
@@ -253,7 +297,7 @@ mod tests {
             title: "Test task".into(),
             description: "Test description".into(),
             design: "Test design".into(),
-            issue_type: "task".into(),
+            issue_type: issue_type.into(),
             status: status.into(),
             priority: 1,
             owner: "dev@example.com".into(),
@@ -345,5 +389,76 @@ mod tests {
         // Also test without conflict context
         let role_no_conflict = role_for_task_dispatch(&task, false);
         assert_eq!(role_no_conflict.config().name, "worker");
+    }
+
+    #[test]
+    fn spike_and_review_tasks_dispatch_to_architect() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+
+        for issue_type in ["spike", "review"] {
+            for status in ["open", "in_progress"] {
+                let task = make_task_with_type(status, issue_type);
+                let role = registry.role_for_task(&task, &ctx);
+                assert_eq!(
+                    role,
+                    Some("architect"),
+                    "{issue_type}/{status} task should dispatch to architect"
+                );
+                let dispatch_role = registry.dispatch_role_for_task(&task, &ctx);
+                assert_eq!(
+                    dispatch_role,
+                    Some("architect"),
+                    "{issue_type}/{status} task should have architect dispatch_role"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decomposition_tasks_dispatch_to_planner() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+
+        for status in ["open", "in_progress"] {
+            let task = make_task_with_type(status, "decomposition");
+            let role = registry.role_for_task(&task, &ctx);
+            assert_eq!(
+                role,
+                Some("planner"),
+                "decomposition/{status} task should dispatch to planner"
+            );
+        }
+    }
+
+    #[test]
+    fn research_tasks_dispatch_to_worker() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+
+        // Research uses the simple lifecycle but still goes to the worker role.
+        for status in ["open", "in_progress"] {
+            let task = make_task_with_type(status, "research");
+            let role = registry.role_for_task(&task, &ctx);
+            assert_eq!(
+                role,
+                Some("worker"),
+                "research/{status} task should dispatch to worker"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_includes_architect_role() {
+        let registry = RoleRegistry::new();
+        assert!(
+            registry.roles.contains_key("architect"),
+            "RoleRegistry should contain 'architect'"
+        );
+        let model_pool_roles = registry.model_pool_roles();
+        assert!(
+            model_pool_roles.contains(&"architect"),
+            "model_pool_roles should include 'architect'"
+        );
     }
 }
