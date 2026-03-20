@@ -50,6 +50,8 @@ pub(crate) struct MergeActions {
     pub(crate) approve: TransitionAction,
     pub(crate) conflict: TransitionAction,
     pub(crate) release: TransitionAction,
+    /// Action when pre-merge verification fails. Falls back to `release` if None.
+    pub(crate) verification_fail: Option<TransitionAction>,
 }
 
 /// Standard actions used by the task reviewer path.
@@ -57,6 +59,9 @@ pub(crate) const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
     approve: TransitionAction::TaskReviewApprove,
     conflict: TransitionAction::TaskReviewRejectConflict,
     release: TransitionAction::ReleaseTaskReview,
+    // Pre-merge verification failure should reopen the task for the worker,
+    // not loop back to the reviewer who already approved.
+    verification_fail: Some(TransitionAction::TaskReviewReject),
 };
 
 /// Actions used when Lead approves directly from intervention.
@@ -69,6 +74,7 @@ pub(crate) const PM_MERGE_ACTIONS: MergeActions = MergeActions {
     approve: TransitionAction::LeadApprove,
     conflict: TransitionAction::LeadApproveConflict,
     release: TransitionAction::LeadInterventionComplete,
+    verification_fail: None, // falls back to release (→ Open), which is correct for Lead
 };
 
 pub(crate) async fn merge_after_task_review(
@@ -307,7 +313,7 @@ pub(crate) async fn merge_and_transition(
     if let Err(feedback) = verification_result {
         tracing::warn!(
             task_id = %task_id,
-            "pre-merge verification failed; releasing task"
+            "pre-merge verification failed; routing to worker"
         );
         let payload = serde_json::json!({ "body": feedback }).to_string();
         let _ = repo
@@ -319,8 +325,16 @@ pub(crate) async fn merge_and_transition(
                 &payload,
             )
             .await;
+        // Use verification_fail action (→ worker) if available, otherwise fall
+        // back to release. This avoids a reviewer loop where the reviewer keeps
+        // approving but the code never gets fixed.
+        let action = actions
+            .verification_fail
+            .as_ref()
+            .unwrap_or(&actions.release)
+            .clone();
         return Some((
-            actions.release.clone(),
+            action,
             Some(format!("pre-merge verification failed: {feedback}")),
         ));
     }
