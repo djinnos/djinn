@@ -83,8 +83,8 @@ function taskToColumnKey(task: Task): ColumnKey {
     task.status === "verifying" ||
     task.status === "needs_task_review" ||
     task.status === "in_task_review" ||
-    task.status === "needs_pm_intervention" ||
-    task.status === "in_pm_intervention"
+    task.status === "needs_lead_intervention" ||
+    task.status === "in_lead_intervention"
   )
     return "in_progress";
   return "open";
@@ -194,7 +194,7 @@ export function KanbanBoard({
   const [textFilter, setTextFilter] = useState<string>(searchParams.get("q") ?? "");
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
-  const IN_FLIGHT = new Set(["in_progress", "verifying", "needs_task_review", "in_task_review", "needs_pm_intervention", "in_pm_intervention"]);
+  const IN_FLIGHT = new Set(["in_progress", "verifying", "needs_task_review", "in_task_review", "needs_lead_intervention", "in_lead_intervention"]);
 
   const handleTaskClick = (task: Task) => {
     if (IN_FLIGHT.has(task.status) || (task.session_count ?? 0) > 0 || task.active_session) {

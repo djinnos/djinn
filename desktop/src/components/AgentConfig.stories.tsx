@@ -54,7 +54,7 @@ const threeModels: UnifiedModelEntry[] = [
   {
     model: "claude-sonnet-4-6",
     provider: "anthropic",
-    enabledRoles: ["worker", "task_reviewer", "pm"],
+    enabledRoles: ["worker", "task_reviewer", "lead"],
     max_concurrent: 3,
     current_active: 0,
   },
@@ -68,7 +68,7 @@ const threeModels: UnifiedModelEntry[] = [
   {
     model: "deepseek-coder",
     provider: "deepseek",
-    enabledRoles: ["worker", "groomer"],
+    enabledRoles: ["worker", "planner"],
     max_concurrent: 1,
     current_active: 0,
   },

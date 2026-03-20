@@ -94,7 +94,7 @@ function formatCompactDuration(totalSeconds: number): string {
 // --- Status badge for in-flight cards ---
 
 function getStatusBadge(status: string, hasSession: boolean, allAcMet: boolean, hasSetupStep: boolean): { label: string; className: string } | null {
-  if (status === "needs_pm_intervention" && !hasSession) {
+  if (status === "needs_lead_intervention" && !hasSession) {
     return { label: "agent stuck", className: "text-red-400" };
   }
   if (status === "verifying") {
@@ -146,10 +146,10 @@ function getTaskRunningStep(taskId: string, state: ReturnType<typeof verificatio
 // --- Card tint based on status ---
 
 function getCardTint(task: Task): { ring: string; bg: string; hover: string; actionsBg: string } | null {
-  if (task.status === "needs_pm_intervention" && !task.active_session) {
+  if (task.status === "needs_lead_intervention" && !task.active_session) {
     return { ring: "ring-red-500/40", bg: "bg-red-500/5", hover: "hover:bg-red-500/10 hover:ring-red-500/60", actionsBg: "bg-red-500/10 text-white" };
   }
-  if ((task.status === "needs_pm_intervention" && task.active_session) || task.status === "in_pm_intervention") {
+  if ((task.status === "needs_lead_intervention" && task.active_session) || task.status === "in_lead_intervention") {
     return { ring: "ring-red-500/40", bg: "bg-red-500/5", hover: "hover:bg-red-500/10 hover:ring-red-500/60", actionsBg: "bg-red-500/10 text-white" };
   }
   return null;
@@ -158,7 +158,7 @@ function getCardTint(task: Task): { ring: string; bg: string; hover: string; act
 const AGENT_AVATARS: Record<string, string> = {
   worker: workerAvatar,
   task_reviewer: taskReviewerAvatar,
-  pm: pmAvatar,
+  lead: pmAvatar,
 };
 
 function agentAvatar(agentType?: string): string {
@@ -320,8 +320,8 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
     task.status === "verifying" ||
     task.status === "needs_task_review" ||
     task.status === "in_task_review" ||
-    task.status === "needs_pm_intervention" ||
-    task.status === "in_pm_intervention";
+    task.status === "needs_lead_intervention" ||
+    task.status === "in_lead_intervention";
   const isDone = task.status === "closed";
   const hasBlockers = (task.unresolved_blocker_count ?? 0) > 0;
   const ac = task.acceptance_criteria ?? [];

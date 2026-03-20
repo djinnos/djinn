@@ -56,7 +56,7 @@ async fn run_with_provider(
             project_path,
             worktree_path,
             role_name: "worker",
-            finalize_tool_names: &["submit_work", "request_pm"],
+            finalize_tool_names: &["submit_work", "request_lead"],
             context_window: 10_000,
             model_id: "synthetic/test-model",
             cancel,

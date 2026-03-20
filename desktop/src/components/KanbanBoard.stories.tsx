@@ -90,7 +90,7 @@ const tasksFixture: Task[] = [
   }),
 
   // In Flight — Lead intervention (red tint)
-  makeTask("t-17", "Credential validation flow", "in_pm_intervention", 0, "Priya", "epic-auth", [], "2026-03-01T11:30:00.000Z", {
+  makeTask("t-17", "Credential validation flow", "in_lead_intervention", 0, "Priya", "epic-auth", [], "2026-03-01T11:30:00.000Z", {
     duration_seconds: 360,
   }),
 

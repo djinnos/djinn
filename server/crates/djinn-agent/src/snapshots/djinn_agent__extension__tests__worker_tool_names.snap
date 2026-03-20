@@ -18,6 +18,6 @@ expression: names
   "write",
   "edit",
   "apply_patch",
-  "request_pm",
+  "request_lead",
   "submit_work"
 ]

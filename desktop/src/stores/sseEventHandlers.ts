@@ -115,7 +115,7 @@ export function initSSEEventHandlers(): () => void {
     // the session so stale avatars don't linger.
     const IN_FLIGHT = new Set([
       "in_progress", "verifying", "needs_task_review",
-      "in_task_review", "needs_pm_intervention", "in_pm_intervention",
+      "in_task_review", "needs_lead_intervention", "in_lead_intervention",
     ]);
     const existing = taskStore.getState().getTask(task.id);
     if (!existing) {

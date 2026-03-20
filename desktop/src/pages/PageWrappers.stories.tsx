@@ -95,7 +95,7 @@ const tasksFixture: Task[] = [
   makeTask("t-3", "Refine empty states", "needs_task_review", 2, "Mina", "epic-ux", ["ui"], "2026-03-01T11:20:00.000Z", {
     duration_seconds: 1860,
   }),
-  makeTask("t-17", "Credential validation flow", "in_pm_intervention", 0, "Priya", "epic-auth", [], "2026-03-01T11:30:00.000Z", {
+  makeTask("t-17", "Credential validation flow", "in_lead_intervention", 0, "Priya", "epic-auth", [], "2026-03-01T11:30:00.000Z", {
     duration_seconds: 360,
   }),
   makeTask("t-4", "Keyboard navigation pass", "closed", 1, "Alex", "epic-ux", ["accessibility"], "2026-03-01T11:30:00.000Z", {

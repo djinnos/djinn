@@ -36,8 +36,8 @@ const STATUS_LABELS: Record<string, string> = {
   verifying: "Verifying",
   needs_task_review: "Needs Review",
   in_task_review: "In Review",
-  needs_pm_intervention: "Lead Intervention",
-  in_pm_intervention: "Lead Intervening",
+  needs_lead_intervention: "Lead Intervention",
+  in_lead_intervention: "Lead Intervening",
   closed: "Done",
 };
 
@@ -47,8 +47,8 @@ const STATUS_COLORS: Record<string, string> = {
   verifying: "bg-yellow-500/15 text-yellow-400",
   needs_task_review: "bg-amber-500/15 text-amber-400",
   in_task_review: "bg-amber-500/15 text-amber-400",
-  needs_pm_intervention: "bg-red-500/15 text-red-400",
-  in_pm_intervention: "bg-red-500/15 text-red-400",
+  needs_lead_intervention: "bg-red-500/15 text-red-400",
+  in_lead_intervention: "bg-red-500/15 text-red-400",
   closed: "bg-muted text-muted-foreground",
 };
 

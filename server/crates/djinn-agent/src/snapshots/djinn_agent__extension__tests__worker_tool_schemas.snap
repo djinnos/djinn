@@ -379,7 +379,7 @@ expression: tool_schemas_worker()
       ],
       "type": "object"
     },
-    "name": "request_pm"
+    "name": "request_lead"
   },
   {
     "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",

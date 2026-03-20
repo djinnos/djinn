@@ -1,7 +1,7 @@
 import { callMcpTool } from "@/api/mcpClient";
 import type { McpToolOutput, ProviderModelsConnectedOutputSchema } from "@/api/generated/mcp-tools.gen";
 
-export type AgentRole = "worker" | "task_reviewer" | "pm" | "groomer";
+export type AgentRole = "worker" | "task_reviewer" | "lead" | "planner";
 
 export interface ModelPriorityItem {
   model: string;
@@ -89,8 +89,8 @@ export async function fetchSettings(): Promise<SettingsResponse> {
       model_priorities: {
         worker: toPriorityItems(modelPriority.worker),
         task_reviewer: toPriorityItems(modelPriority.task_reviewer),
-        pm: toPriorityItems(modelPriority.pm),
-        groomer: toPriorityItems(modelPriority.groomer),
+        lead: toPriorityItems(modelPriority.lead),
+        planner: toPriorityItems(modelPriority.planner),
       },
       session_limits: sessionLimits,
     },
@@ -113,10 +113,10 @@ export async function saveSettings(settings: SettingsResponse): Promise<void> {
     model_priority_task_reviewer: settings.agents.model_priorities.task_reviewer.map((item) =>
       combineModelId(item.provider, item.model)
     ),
-    model_priority_pm: settings.agents.model_priorities.pm.map((item) =>
+    model_priority_lead: settings.agents.model_priorities.lead.map((item) =>
       combineModelId(item.provider, item.model)
     ),
-    model_priority_groomer: settings.agents.model_priorities.groomer.map((item) =>
+    model_priority_planner: settings.agents.model_priorities.planner.map((item) =>
       combineModelId(item.provider, item.model)
     ),
     max_sessions: maxSessions,

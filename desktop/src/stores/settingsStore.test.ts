@@ -26,7 +26,7 @@ describe('settingsStore', () => {
   it('loads settings into unified models', async () => {
     vi.mocked(fetchSettings).mockResolvedValue({
       agents: {
-        model_priorities: { worker: [{ model: 'm1', provider: 'p1' }], task_reviewer: [], pm: [], groomer: [] },
+        model_priorities: { worker: [{ model: 'm1', provider: 'p1' }], task_reviewer: [], lead: [], planner: [] },
         session_limits: [{ model: 'm1', provider: 'p1', max_concurrent: 3, current_active: 1 }],
       },
     } satisfies SettingsResponse);
@@ -38,7 +38,7 @@ describe('settingsStore', () => {
   it('mutates model list actions', () => {
     const st = useSettingsStore.getState();
     st.addModel({ model: 'm1', provider: 'p1' });
-    st.toggleRoleForModel(0, 'pm');
+    st.toggleRoleForModel(0, 'lead');
     st.updateMaxSessions(0, 5);
     st.reorderModels(0, 0);
     st.removeModelsByProvider('none');

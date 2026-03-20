@@ -5,7 +5,7 @@ async function getBaseUrl(): Promise<string> {
   return `http://127.0.0.1:${port}`;
 }
 
-export type BaseRole = "worker" | "task_reviewer" | "pm" | "groomer";
+export type BaseRole = "worker" | "task_reviewer" | "lead" | "planner";
 
 export interface Role {
   id: string;

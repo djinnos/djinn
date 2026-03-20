@@ -8,11 +8,11 @@ import { TrendingUp, TrendingDown, Minus, RefreshCw } from "lucide-react";
 const BASE_ROLE_LABELS: Record<BaseRole, string> = {
   worker: "Worker",
   task_reviewer: "Task Reviewer",
-  pm: "Planner (PM)",
-  groomer: "Groomer",
+  lead: "Lead",
+  planner: "Planner",
 };
 
-const BASE_ROLES: BaseRole[] = ["worker", "task_reviewer", "pm", "groomer"];
+const BASE_ROLES: BaseRole[] = ["worker", "task_reviewer", "lead", "planner"];
 
 const POLL_INTERVAL_MS = 30_000;
 

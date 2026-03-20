@@ -31,7 +31,7 @@ describe('AgentConfig', () => {
           {
             provider: 'openai',
             model: 'gpt-4o',
-            enabledRoles: ['worker', 'pm'],
+            enabledRoles: ['worker', 'lead'],
             maxConcurrent: 2,
           },
         ]}

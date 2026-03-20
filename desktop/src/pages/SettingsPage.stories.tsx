@@ -206,22 +206,22 @@ function ProjectsReplica({
 const ROLE_LABELS: Record<string, string> = {
   worker: "W",
   task_reviewer: "R",
-  pm: "L",
-  groomer: "P",
+  lead: "L",
+  planner: "P",
 };
 
 const ROLE_FULL_LABELS: Record<string, string> = {
   worker: "Worker",
   task_reviewer: "Reviewer",
-  pm: "Lead",
-  groomer: "Planner",
+  lead: "Lead",
+  planner: "Planner",
 };
 
 const ALL_ROLES = [
   "worker",
   "task_reviewer",
-  "pm",
-  "groomer",
+  "lead",
+  "planner",
 ];
 
 interface ModelEntry {
@@ -390,13 +390,13 @@ const sampleModels: ModelEntry[] = [
   {
     model: "claude-sonnet-4-20250514",
     provider: "anthropic",
-    enabledRoles: ["worker", "task_reviewer", "groomer"],
+    enabledRoles: ["worker", "task_reviewer", "planner"],
     max_concurrent: 3,
   },
   {
     model: "gpt-4o",
     provider: "openai",
-    enabledRoles: ["worker", "pm"],
+    enabledRoles: ["worker", "lead"],
     max_concurrent: 2,
   },
 ];
