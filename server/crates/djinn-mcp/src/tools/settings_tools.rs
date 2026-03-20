@@ -42,6 +42,8 @@ pub struct SettingsSetParams {
     /// Per-model concurrent session caps (e.g. {"chatgpt_codex/gpt-5.3-codex": 4}). Omit to keep current value.
     #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
+    /// Model used for memory operations (knowledge extraction, summarisation). Format: "provider/model". Set to "" to clear. Omit to keep current value.
+    pub memory_model: Option<String>,
     /// Langfuse public key for LLM observability (e.g. "pk-lf-..."). Set to "" to disable. Omit to keep current value.
     pub langfuse_public_key: Option<String>,
     /// Langfuse secret key for LLM observability (e.g. "sk-lf-..."). Set to "" to disable. Omit to keep current value.
@@ -159,6 +161,9 @@ impl DjinnMcpServer {
                 .model_priority
                 .get_or_insert_with(HashMap::new)
                 .insert("planner".to_string(), v);
+        }
+        if let Some(v) = p.memory_model {
+            settings.memory_model = if v.is_empty() { None } else { Some(v) };
         }
         if let Some(v) = p.langfuse_public_key {
             settings.langfuse_public_key = if v.is_empty() { None } else { Some(v) };

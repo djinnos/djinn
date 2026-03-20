@@ -22,6 +22,7 @@ export interface AgentSettings {
 
 export interface SettingsResponse {
   agents: AgentSettings;
+  memoryModel: string | null;
 }
 
 type SettingsGetToolResponse = McpToolOutput<"settings_get">;
@@ -30,6 +31,7 @@ interface ParsedSettingsGet {
   settings?: {
     model_priority?: Record<string, string[]>;
     max_sessions?: Record<string, number>;
+    memory_model?: string | null;
   };
   error?: string;
 }
@@ -94,6 +96,7 @@ export async function fetchSettings(): Promise<SettingsResponse> {
       },
       session_limits: sessionLimits,
     },
+    memoryModel: parsed.settings?.memory_model ?? null,
   };
 }
 
@@ -120,6 +123,7 @@ export async function saveSettings(settings: SettingsResponse): Promise<void> {
       combineModelId(item.provider, item.model)
     ),
     max_sessions: maxSessions,
+    memory_model: settings.memoryModel ?? "",
   });
 
   if (!response.ok) {

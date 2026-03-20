@@ -48,6 +48,8 @@ describe('AgentConfig', () => {
         onReorderModels={vi.fn()}
         onToggleRole={vi.fn()}
         onUpdateMaxSessions={vi.fn()}
+        memoryModel={null}
+        onSetMemoryModel={vi.fn()}
         onDismissError={vi.fn()}
         onSave={vi.fn()}
       />,
@@ -88,6 +90,8 @@ describe('AgentConfig', () => {
         onReorderModels={vi.fn()}
         onToggleRole={vi.fn()}
         onUpdateMaxSessions={vi.fn()}
+        memoryModel={null}
+        onSetMemoryModel={vi.fn()}
         onDismissError={vi.fn()}
         onSave={vi.fn()}
       />,

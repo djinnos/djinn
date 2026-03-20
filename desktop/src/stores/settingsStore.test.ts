@@ -29,6 +29,7 @@ describe('settingsStore', () => {
         model_priorities: { worker: [{ model: 'm1', provider: 'p1' }], reviewer: [], lead: [], planner: [] },
         session_limits: [{ model: 'm1', provider: 'p1', max_concurrent: 3, current_active: 1 }],
       },
+      memoryModel: null,
     } satisfies SettingsResponse);
     await useSettingsStore.getState().loadSettings();
     expect(useSettingsStore.getState().models[0].model).toBe('m1');

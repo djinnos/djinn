@@ -23,6 +23,10 @@ pub struct DjinnSettings {
     /// Per-model concurrent session caps, e.g. `{"openai/gpt-4o": 4}`.
     #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
+    /// Model used for memory operations (knowledge extraction, summarisation).
+    /// Format: `provider/model`, e.g. `"openai/gpt-4.1-mini"`. Falls back to the
+    /// first model in `model_priority` when unset.
+    pub memory_model: Option<String>,
     /// Langfuse public key for OTLP trace export (e.g. `pk-lf-...`).
     pub langfuse_public_key: Option<String>,
     /// Langfuse secret key for OTLP trace export (e.g. `sk-lf-...`).
@@ -72,6 +76,7 @@ impl DjinnSettings {
             dispatch_limit,
             model_priority,
             max_sessions,
+            memory_model: None,
             langfuse_public_key: None,
             langfuse_secret_key: None,
             langfuse_endpoint: None,

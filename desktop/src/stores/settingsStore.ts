@@ -20,6 +20,7 @@ export interface UnifiedModelEntry {
 export interface SettingsState {
   models: UnifiedModelEntry[];
   availableModels: ProviderModel[];
+  memoryModel: string | null;
   isLoading: boolean;
   isSaving: boolean;
   error: string | null;
@@ -35,6 +36,7 @@ export interface SettingsActions {
   toggleRoleForModel: (index: number, role: AgentRole) => void;
   updateMaxSessions: (index: number, maxConcurrent: number) => void;
   removeModelsByProvider: (provider: string) => void;
+  setMemoryModel: (modelId: string | null) => void;
   saveSettings: () => Promise<void>;
   resetError: () => void;
 }
@@ -107,6 +109,7 @@ function splitFromUnified(models: UnifiedModelEntry[]): {
 const initialState: SettingsState = {
   models: [],
   availableModels: [],
+  memoryModel: null,
   isLoading: false,
   isSaving: false,
   error: null,
@@ -124,7 +127,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
         settings.agents.model_priorities,
         settings.agents.session_limits,
       );
-      set({ models, isLoading: false, hasUnsavedChanges: false });
+      set({ models, memoryModel: settings.memoryModel, isLoading: false, hasUnsavedChanges: false });
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : 'Failed to load settings',
@@ -215,8 +218,12 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
     });
   },
 
+  setMemoryModel: (modelId: string | null) => {
+    set({ memoryModel: modelId, hasUnsavedChanges: true });
+  },
+
   saveSettings: async () => {
-    const { models } = get();
+    const { models, memoryModel } = get();
     const { priorities, sessionLimits } = splitFromUnified(models);
 
     set({ isSaving: true, error: null });
@@ -226,6 +233,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
           model_priorities: priorities,
           session_limits: sessionLimits,
         },
+        memoryModel,
       });
       set({ isSaving: false, hasUnsavedChanges: false });
     } catch (error) {

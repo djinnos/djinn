@@ -25,9 +25,11 @@ const ALL_ROLES: AgentRole[] = ["worker", "reviewer", "lead", "planner"];
 function ModelPicker({
   availableModels,
   onSelect,
+  placeholder = "Search models...",
 }: {
   availableModels: ProviderModel[];
   onSelect: (model: ProviderModel) => void;
+  placeholder?: string;
 }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
@@ -61,7 +63,7 @@ function ModelPicker({
     <div ref={containerRef} className="relative flex gap-2" onBlur={handleBlur}>
       <Input
         ref={inputRef}
-        placeholder="Search models..."
+        placeholder={placeholder}
         value={query}
         onChange={(e) => {
           setQuery(e.target.value);
@@ -98,6 +100,7 @@ function ModelPicker({
 interface AgentConfigProps {
   models: UnifiedModelEntry[];
   availableModels: ProviderModel[];
+  memoryModel: string | null;
   isLoading: boolean;
   isSaving: boolean;
   error: string | null;
@@ -107,6 +110,7 @@ interface AgentConfigProps {
   onReorderModels: (fromIndex: number, toIndex: number) => void;
   onToggleRole: (index: number, role: AgentRole) => void;
   onUpdateMaxSessions: (index: number, maxConcurrent: number) => void;
+  onSetMemoryModel: (modelId: string | null) => void;
   onDismissError: () => void;
   onSave: () => void;
 }
@@ -114,6 +118,7 @@ interface AgentConfigProps {
 export function AgentConfig({
   models,
   availableModels,
+  memoryModel,
   isLoading,
   isSaving,
   error,
@@ -123,6 +128,7 @@ export function AgentConfig({
   onReorderModels,
   onToggleRole,
   onUpdateMaxSessions,
+  onSetMemoryModel,
   onDismissError,
   onSave,
 }: AgentConfigProps) {
@@ -300,6 +306,44 @@ export function AgentConfig({
               ))}
             </div>
           )}
+
+          {/* Memory Model */}
+          <div className="border-t pt-6 space-y-3">
+            <div>
+              <h3 className="text-lg font-semibold">Memory Model</h3>
+              <p className="text-sm text-muted-foreground">
+                Model used for knowledge extraction and summarisation after sessions complete.
+                Defaults to the first agent model above if not set.
+              </p>
+            </div>
+
+            {memoryModel ? (
+              <div className="flex items-center gap-3 rounded-md border bg-card p-3">
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium truncate">
+                    {memoryModel.includes("/") ? memoryModel.split("/").slice(1).join("/") : memoryModel}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {memoryModel.includes("/") ? memoryModel.split("/")[0] : "unknown"}
+                  </div>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onSetMemoryModel(null)}
+                  className="h-8 shrink-0 text-xs text-muted-foreground"
+                >
+                  Clear
+                </Button>
+              </div>
+            ) : (
+              <ModelPicker
+                availableModels={availableModels}
+                onSelect={(m) => onSetMemoryModel(`${m.provider_id}/${m.id}`)}
+                placeholder="Select memory model..."
+              />
+            )}
+          </div>
         </div>
       )}
     </div>
