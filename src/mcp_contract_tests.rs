@@ -1312,6 +1312,147 @@ mod project_tools {
     }
 
     #[tokio::test]
+    async fn project_config_get_returns_empty_verification_rules_by_default() {
+        let app = create_test_app();
+        let session_id = initialize_mcp_session(&app).await;
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().to_string_lossy().to_string();
+
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            json!({"name": "proj-vr-default", "path": path.clone()}),
+        )
+        .await;
+
+        let got = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_config_get",
+            json!({"project": path}),
+        )
+        .await;
+        assert_eq!(got["status"], "ok");
+        assert_eq!(got["verification_rules"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn project_config_set_verification_rules_round_trip() {
+        let app = create_test_app();
+        let session_id = initialize_mcp_session(&app).await;
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().to_string_lossy().to_string();
+
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            json!({"name": "proj-vr-set", "path": path.clone()}),
+        )
+        .await;
+
+        let rules = json!([
+            {"match_pattern": "src/**/*.rs", "commands": ["cargo test"]},
+            {"match_pattern": "**", "commands": ["cargo clippy"]}
+        ]);
+        let set = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_config_set",
+            json!({
+                "project": path.clone(),
+                "key": "verification_rules",
+                "value": rules.to_string()
+            }),
+        )
+        .await;
+        assert_eq!(set["status"], "ok");
+
+        let got = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_config_get",
+            json!({"project": path}),
+        )
+        .await;
+        assert_eq!(got["status"], "ok");
+        let returned_rules = got["verification_rules"].as_array().expect("array");
+        assert_eq!(returned_rules.len(), 2);
+        assert_eq!(returned_rules[0]["match_pattern"], "src/**/*.rs");
+        assert_eq!(returned_rules[0]["commands"], json!(["cargo test"]));
+        assert_eq!(returned_rules[1]["match_pattern"], "**");
+    }
+
+    #[tokio::test]
+    async fn project_config_set_verification_rules_invalid_glob_returns_error() {
+        let app = create_test_app();
+        let session_id = initialize_mcp_session(&app).await;
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().to_string_lossy().to_string();
+
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            json!({"name": "proj-vr-badglob", "path": path.clone()}),
+        )
+        .await;
+
+        let bad_rules = json!([{"match_pattern": "[invalid", "commands": ["echo ok"]}]);
+        let set = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_config_set",
+            json!({
+                "project": path,
+                "key": "verification_rules",
+                "value": bad_rules.to_string()
+            }),
+        )
+        .await;
+        assert!(
+            set["status"].as_str().unwrap_or("").starts_with("error:"),
+            "expected error, got: {}",
+            set["status"]
+        );
+    }
+
+    #[tokio::test]
+    async fn project_config_set_verification_rules_empty_commands_returns_error() {
+        let app = create_test_app();
+        let session_id = initialize_mcp_session(&app).await;
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().to_string_lossy().to_string();
+
+        mcp_call_tool(
+            &app,
+            &session_id,
+            "project_add",
+            json!({"name": "proj-vr-emptycmds", "path": path.clone()}),
+        )
+        .await;
+
+        let bad_rules = json!([{"match_pattern": "**", "commands": []}]);
+        let set = mcp_call_tool(
+            &app,
+            &session_id,
+            "project_config_set",
+            json!({
+                "project": path,
+                "key": "verification_rules",
+                "value": bad_rules.to_string()
+            }),
+        )
+        .await;
+        assert!(
+            set["status"].as_str().unwrap_or("").starts_with("error:"),
+            "expected error, got: {}",
+            set["status"]
+        );
+    }
+
+    #[tokio::test]
     async fn project_settings_validate_reports_valid_and_invalid() {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;

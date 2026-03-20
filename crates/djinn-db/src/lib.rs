@@ -23,7 +23,7 @@ pub use repositories::{
         UpdateNoteIndexParams, CONTRADICTION, STALE_CITATION, file_path_for, folder_for_type,
         is_singleton, permalink_for, slugify,
     },
-    project::{ProjectConfig, ProjectRepository},
+    project::{ProjectConfig, ProjectRepository, VerificationRule, validate_verification_rules},
     session::{CreateSessionParams, SessionRepository},
     session_message::SessionMessageRepository,
     settings::SettingsRepository,
