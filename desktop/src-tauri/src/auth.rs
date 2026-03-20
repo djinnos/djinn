@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 /// GitHub OAuth App configuration
-pub const GITHUB_CLIENT_ID: &str = "Ov23liBIL080Vt6WJs69";
+pub const GITHUB_CLIENT_ID: &str = "Iv23livjPjcHXVzAU7sc";
 pub const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 pub const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 pub const GITHUB_API_URL: &str = "https://api.github.com";
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn test_github_constants_are_set() {
-        assert_eq!(GITHUB_CLIENT_ID, "Ov23liBIL080Vt6WJs69");
+        assert_eq!(GITHUB_CLIENT_ID, "Iv23livjPjcHXVzAU7sc");
         assert!(DEVICE_CODE_URL.starts_with("https://github.com/"));
         assert!(ACCESS_TOKEN_URL.starts_with("https://github.com/"));
         assert!(GITHUB_API_URL.starts_with("https://api.github.com"));
