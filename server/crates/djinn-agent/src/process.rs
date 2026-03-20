@@ -70,8 +70,30 @@ pub async fn output_with_kill(mut cmd: Command, timeout: Duration) -> io::Result
         let mut child = cmd.spawn()?;
         let pgid = child.id() as i32;
 
-        match child.wait_timeout(timeout)? {
-            Some(_status) => child.wait_with_output(),
+        // Drain stdout and stderr in background threads to prevent pipe buffer
+        // deadlock. The Linux pipe buffer is 64KB — if the child writes more
+        // than that before we read, it blocks on write() and wait_timeout()
+        // never returns (classic pipe deadlock).
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let stdout_handle = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut out) = stdout {
+                let _ = io::Read::read_to_end(&mut out, &mut buf);
+            }
+            buf
+        });
+        let stderr_handle = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut err) = stderr {
+                let _ = io::Read::read_to_end(&mut err, &mut buf);
+            }
+            buf
+        });
+
+        let status = match child.wait_timeout(timeout)? {
+            Some(status) => status,
             None => {
                 let _ = signal_process_group(pgid, libc::SIGTERM);
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -80,9 +102,18 @@ pub async fn output_with_kill(mut cmd: Command, timeout: Duration) -> io::Result
                     let _ = signal_process_group(pgid, libc::SIGKILL);
                 }
 
-                child.wait_with_output()
+                child.wait()?
             }
-        }
+        };
+
+        let stdout_bytes = stdout_handle.join().unwrap_or_default();
+        let stderr_bytes = stderr_handle.join().unwrap_or_default();
+
+        Ok(Output {
+            status,
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+        })
     })
     .await
     .map_err(io::Error::other)?
