@@ -583,6 +583,61 @@ impl DjinnMcpServer {
     }
 }
 
+impl DjinnMcpServer {
+    fn schedule_summary_regeneration(&self, note_id: &str) {
+        let db = self.state.db().clone();
+        let note_id = note_id.to_string();
+        tokio::spawn(async move {
+            let service = NoteSummaryService::new(db.clone());
+            match djinn_provider::resolve_memory_provider(&db).await {
+                Ok(_) => service.generate_for_note_ids(&[note_id]).await,
+                Err(_) => service.apply_fallback_for_note_id(&note_id).await,
+            }
+        });
+    }
+
+    /// Stage 1: detect candidates and emit event. Stage 2: send to analysis worker.
+    ///
+    /// The analysis worker is triggered only when stage 1 finds candidates and emits
+    /// the `contradiction_candidates` event — never on every write.
+    async fn detect_emit_and_schedule_contradictions(
+        &self,
+        repo: &NoteRepository,
+        note: &Note,
+    ) {
+        let folder = folder_for_type(&note.note_type);
+        let Ok(candidates) = repo
+            .detect_contradiction_candidates(&note.id, &note.note_type, folder, &note.content)
+            .await
+        else {
+            return;
+        };
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        // Stage 1: emit event for SSE / external listeners
+        self.state
+            .event_bus()
+            .send(DjinnEventEnvelope::contradiction_candidates(note, &candidates));
+
+        // Stage 2: send to the contradiction analysis worker channel.
+        // The worker is only active when stage 1 emits candidates — satisfying the
+        // requirement that LLM analysis is triggered by the contradiction_candidates event.
+        let input = ContradictionAnalysisInput {
+            note_id: note.id.clone(),
+            note_title: note.title.clone(),
+            note_summary: note
+                .abstract_
+                .clone()
+                .unwrap_or_else(|| note.content.chars().take(500).collect()),
+            candidates,
+        };
+        let _ = self.contradiction_analysis_tx.try_send(input);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,60 +998,5 @@ mod tests {
         assert!(mergeable_note_type("reference"));
         assert!(!mergeable_note_type("brief"));
         assert!(!mergeable_note_type("roadmap"));
-    }
-}
-
-impl DjinnMcpServer {
-    fn schedule_summary_regeneration(&self, note_id: &str) {
-        let db = self.state.db().clone();
-        let note_id = note_id.to_string();
-        tokio::spawn(async move {
-            let service = NoteSummaryService::new(db.clone());
-            match djinn_provider::resolve_memory_provider(&db).await {
-                Ok(_) => service.generate_for_note_ids(&[note_id]).await,
-                Err(_) => service.apply_fallback_for_note_id(&note_id).await,
-            }
-        });
-    }
-
-    /// Stage 1: detect candidates and emit event. Stage 2: send to analysis worker.
-    ///
-    /// The analysis worker is triggered only when stage 1 finds candidates and emits
-    /// the `contradiction_candidates` event — never on every write.
-    async fn detect_emit_and_schedule_contradictions(
-        &self,
-        repo: &NoteRepository,
-        note: &Note,
-    ) {
-        let folder = folder_for_type(&note.note_type);
-        let Ok(candidates) = repo
-            .detect_contradiction_candidates(&note.id, &note.note_type, folder, &note.content)
-            .await
-        else {
-            return;
-        };
-
-        if candidates.is_empty() {
-            return;
-        }
-
-        // Stage 1: emit event for SSE / external listeners
-        self.state
-            .event_bus()
-            .send(DjinnEventEnvelope::contradiction_candidates(note, &candidates));
-
-        // Stage 2: send to the contradiction analysis worker channel.
-        // The worker is only active when stage 1 emits candidates — satisfying the
-        // requirement that LLM analysis is triggered by the contradiction_candidates event.
-        let input = ContradictionAnalysisInput {
-            note_id: note.id.clone(),
-            note_title: note.title.clone(),
-            note_summary: note
-                .abstract_
-                .clone()
-                .unwrap_or_else(|| note.content.chars().take(500).collect()),
-            candidates,
-        };
-        let _ = self.contradiction_analysis_tx.try_send(input);
     }
 }

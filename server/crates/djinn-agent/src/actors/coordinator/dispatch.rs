@@ -3,6 +3,7 @@ use crate::roles::DispatchContext;
 use djinn_core::models::{TaskStatus, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRoleRepository;
+#[cfg(not(test))]
 use djinn_provider::oauth::github_app::{GITHUB_APP_OAUTH_DB_KEY, GITHUB_INSTALLATION_ID_KEY};
 
 /// Result of a single `try_dispatch_to_pool` attempt.
