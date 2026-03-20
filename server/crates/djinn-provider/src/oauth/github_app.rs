@@ -1,4 +1,4 @@
-//! GitHub App OAuth — Device Code flow.
+//! GitHub OAuth App — Device Code flow.
 //!
 //! Uses the device code flow (no client_secret required) for user authentication:
 //!  1. Request a device code from GitHub.
@@ -7,8 +7,7 @@
 //!  4. Store the user access token + refresh token in the credential vault.
 //!
 //! Tokens are stored encrypted in the credentials DB table under
-//! `__OAUTH_GITHUB_APP`. The installation ID is stored separately under
-//! `__GITHUB_INSTALLATION_ID`.
+//! `__OAUTH_GITHUB_APP`.
 
 use anyhow::{Result, anyhow};
 use reqwest::Client;
@@ -24,8 +23,8 @@ const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 /// GitHub OAuth access-token endpoint (used for polling and refresh).
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 
-/// GitHub App client ID (Djinn AI Bot, owned by @djinnos).
-pub const CLIENT_ID: &str = "Iv23livjPjcHXVzAU7sc";
+/// GitHub OAuth App client ID (Djinn AI, owned by @djinnos).
+pub const CLIENT_ID: &str = "Ov23liBIL080Vt6WJs69";
 
 /// Default polling max attempts (60 × 5s = 5 minutes).
 const MAX_POLL_ATTEMPTS: u32 = 60;
@@ -33,15 +32,12 @@ const MAX_POLL_ATTEMPTS: u32 = 60;
 /// Default polling interval in seconds.
 const DEFAULT_INTERVAL_SECS: u64 = 5;
 
-/// Credential key for storing GitHub App OAuth tokens.
+/// Credential key for storing GitHub OAuth tokens.
 pub const GITHUB_APP_OAUTH_DB_KEY: &str = "__OAUTH_GITHUB_APP";
-
-/// Credential key for storing the installation ID.
-pub const GITHUB_INSTALLATION_ID_KEY: &str = "__GITHUB_INSTALLATION_ID";
 
 // ─── Token types ─────────────────────────────────────────────────────────────
 
-/// Cached GitHub App OAuth token bundle.
+/// Cached GitHub OAuth token bundle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubAppTokens {
     /// User access token for authenticating as the user.
@@ -240,20 +236,6 @@ pub async fn poll_and_store(
     tokens.save_to_db(repo).await?;
     tracing::info!(user = ?tokens.user_login, "GitHubApp: authentication successful");
 
-    // Fetch and persist the GitHub App installation ID so that downstream
-    // callers (e.g. derive_installation_token) can create PRs.
-    match fetch_installation_id(&tokens.access_token).await {
-        Ok(id) => {
-            store_installation_id(&id, repo).await?;
-            tracing::info!(installation_id = %id, "GitHubApp: installation ID stored");
-        }
-        Err(e) => {
-            tracing::warn!(
-                "GitHubApp: failed to fetch installation ID (install the app on your org): {e}"
-            );
-        }
-    }
-
     Ok(tokens)
 }
 
@@ -363,7 +345,7 @@ async fn fetch_user_login(access_token: &str) -> Option<String> {
 
 // ─── Full device code flow ───────────────────────────────────────────────────
 
-/// Perform the full GitHub App device code OAuth flow.
+/// Perform the full GitHub OAuth device code flow.
 ///
 /// 1. Checks DB cache; returns immediately if unexpired.
 /// 2. Attempts a silent token refresh if the cached token is expired.
@@ -412,107 +394,7 @@ pub async fn run_github_app_flow(repo: &CredentialRepository) -> Result<GitHubAp
     tokens.save_to_db(repo).await?;
     tracing::info!(user = ?tokens.user_login, "GitHubApp: authentication successful");
 
-    // Fetch and persist the installation ID (same as poll_and_store).
-    match fetch_installation_id(&tokens.access_token).await {
-        Ok(id) => {
-            store_installation_id(&id, repo).await?;
-            tracing::info!(installation_id = %id, "GitHubApp: installation ID stored");
-        }
-        Err(e) => {
-            tracing::warn!(
-                "GitHubApp: failed to fetch installation ID (install the app on your org): {e}"
-            );
-        }
-    }
-
     Ok(tokens)
-}
-
-/// Fetch the GitHub App installation ID for the authenticated user.
-///
-/// Calls `GET /user/installations` and returns the `id` of the first
-/// installation whose `app_slug` matches our GitHub App.
-pub async fn fetch_installation_id(access_token: &str) -> Result<String> {
-    #[derive(Deserialize)]
-    struct Installation {
-        id: u64,
-        app_slug: Option<String>,
-    }
-
-    #[derive(Deserialize)]
-    struct InstallationsResponse {
-        installations: Vec<Installation>,
-    }
-
-    let client = Client::new();
-    let resp = client
-        .get("https://api.github.com/user/installations")
-        .header("Authorization", format!("Bearer {access_token}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", "djinn-server")
-        .send()
-        .await
-        .map_err(|e| anyhow!("failed to fetch user installations: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("GET /user/installations failed ({status}): {body}"));
-    }
-
-    let body: InstallationsResponse = resp
-        .json()
-        .await
-        .map_err(|e| anyhow!("failed to parse installations response: {e}"))?;
-
-    let installation = body
-        .installations
-        .iter()
-        .find(|i| i.app_slug.as_deref() == Some("djinn-ai-bot"))
-        .or_else(|| body.installations.first())
-        .ok_or_else(|| {
-            anyhow!(
-                "No GitHub App installation found. \
-                 Install the Djinn app at https://github.com/apps/djinn-ai-bot/installations/new"
-            )
-        })?;
-
-    Ok(installation.id.to_string())
-}
-
-/// Re-check for the GitHub App installation ID using the stored user token.
-///
-/// Called when the user installs the app after initial auth and clicks
-/// "retry" in the UI.
-pub async fn refresh_installation_id(repo: &CredentialRepository) -> Result<String> {
-    let tokens = GitHubAppTokens::load_from_db(repo)
-        .await
-        .ok_or_else(|| anyhow!("No GitHub App tokens found — authenticate first"))?;
-
-    let id = fetch_installation_id(&tokens.access_token).await?;
-    store_installation_id(&id, repo).await?;
-    tracing::info!(installation_id = %id, "GitHubApp: installation ID refreshed");
-    Ok(id)
-}
-
-/// Store the GitHub App installation ID in the credential vault.
-pub async fn store_installation_id(
-    installation_id: &str,
-    repo: &CredentialRepository,
-) -> Result<()> {
-    repo.set("github_app", GITHUB_INSTALLATION_ID_KEY, installation_id)
-        .await
-        .map_err(|e| anyhow!("failed to store GitHub installation ID: {e}"))?;
-    Ok(())
-}
-
-/// Load the stored GitHub App installation ID from the credential vault.
-pub async fn load_installation_id(repo: &CredentialRepository) -> Option<String> {
-    repo.get_decrypted(GITHUB_INSTALLATION_ID_KEY)
-        .await
-        .ok()
-        .flatten()
 }
 
 #[cfg(test)]

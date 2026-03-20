@@ -730,9 +730,7 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_db::Database;
 
-    use crate::oauth::github_app::{
-        GITHUB_APP_OAUTH_DB_KEY, GITHUB_INSTALLATION_ID_KEY, GitHubAppTokens,
-    };
+    use crate::oauth::github_app::{GITHUB_APP_OAUTH_DB_KEY, GitHubAppTokens};
     use crate::repos::CredentialRepository;
 
     // ─── Test helpers ──────────────────────────────────────────────────────────
@@ -752,9 +750,6 @@ mod tests {
         };
         let json = serde_json::to_string(&tokens).unwrap();
         repo.set("github_app", GITHUB_APP_OAUTH_DB_KEY, &json)
-            .await
-            .unwrap();
-        repo.set("github_app", GITHUB_INSTALLATION_ID_KEY, "12345678")
             .await
             .unwrap();
     }

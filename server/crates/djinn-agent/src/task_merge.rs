@@ -55,6 +55,10 @@ pub(crate) struct MergeActions {
     /// Action when GitHub PR creation fails (infra/auth error, not a code issue).
     /// Falls back to `release` if None.
     pub(crate) pr_creation_fail: Option<TransitionAction>,
+    /// Action when a GitHub PR is created successfully. The task should wait for
+    /// the PR to be merged rather than closing immediately. Falls back to
+    /// `approve` if None (used by the direct-push path where there is no PR).
+    pub(crate) pr_created: Option<TransitionAction>,
 }
 
 /// Standard actions used by the task reviewer path.
@@ -69,6 +73,9 @@ pub(crate) const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
     // lead intervention so a human can fix the credentials rather than looping
     // the reviewer in an infinite approve → PR fail → re-review cycle.
     pr_creation_fail: Some(TransitionAction::Escalate),
+    // When a GitHub PR is created, transition to pr_ready instead of closed.
+    // The PR poller will close the task via PrMerge once the PR is merged.
+    pr_created: Some(TransitionAction::MarkPrReady),
 };
 
 /// Actions used when Lead approves directly from intervention.
@@ -83,6 +90,8 @@ pub(crate) const PM_MERGE_ACTIONS: MergeActions = MergeActions {
     release: TransitionAction::LeadInterventionComplete,
     verification_fail: None, // falls back to release (→ Open), which is correct for Lead
     pr_creation_fail: None,  // falls back to release (→ Open), which is correct for Lead
+    // When a GitHub PR is created from Lead approval, also go to pr_ready.
+    pr_created: Some(TransitionAction::MarkPrReady),
 };
 
 pub(crate) async fn merge_after_task_review(
@@ -361,7 +370,9 @@ pub(crate) async fn merge_and_transition(
     .await
     {
         Ok(Some(pr_url)) => {
-            // PR created and auto-merge enabled. Teardown worktree and approve.
+            // PR created and auto-merge enabled. Teardown worktree and transition
+            // to pr_ready (if configured) so the PR poller closes the task when
+            // the PR is actually merged on GitHub.
             let worktree_path = project_dir
                 .join(".djinn")
                 .join("worktrees")
@@ -384,7 +395,12 @@ pub(crate) async fn merge_and_transition(
                     &serde_json::json!({ "pr_url": pr_url }).to_string(),
                 )
                 .await;
-            return Some((actions.approve.clone(), None));
+            let action = actions
+                .pr_created
+                .as_ref()
+                .unwrap_or(&actions.approve)
+                .clone();
+            return Some((action, None));
         }
         Ok(None) => {
             // No GitHub App credential — fall through to direct-push merge below.

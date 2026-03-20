@@ -602,8 +602,13 @@ pub fn compute_transition(
         }
 
         TransitionAction::MarkPrReady => {
-            if *from != TaskStatus::InTaskReview {
-                return bad("mark_pr_ready is only valid from in_task_review");
+            if !matches!(
+                from,
+                TaskStatus::InTaskReview | TaskStatus::InLeadIntervention
+            ) {
+                return bad(
+                    "mark_pr_ready is only valid from in_task_review or in_lead_intervention",
+                );
             }
             TransitionApply::simple(TaskStatus::PrReady)
         }
@@ -787,7 +792,10 @@ mod tests {
             (TransitionAction::LeadApproveConflict, TaskStatus::InLeadIntervention) => {
                 Some(TaskStatus::Open)
             }
-            (TransitionAction::MarkPrReady, TaskStatus::InTaskReview) => Some(TaskStatus::PrReady),
+            (
+                TransitionAction::MarkPrReady,
+                TaskStatus::InTaskReview | TaskStatus::InLeadIntervention,
+            ) => Some(TaskStatus::PrReady),
             (TransitionAction::PrMerge, TaskStatus::PrReady) => Some(TaskStatus::Closed),
             (TransitionAction::PrChangesRequested, TaskStatus::PrReady) => Some(TaskStatus::Open),
             _ => None,
