@@ -1,0 +1,14 @@
+{
+  "verification": [
+    {
+      "name": "clippy",
+      "command": "cargo clippy --workspace -- -D warnings",
+      "timeout_secs": 300
+    },
+    {
+      "name": "test",
+      "command": "RUSTFLAGS=\"-D warnings\" cargo test --workspace",
+      "timeout_secs": 600
+    }
+  ]
+}

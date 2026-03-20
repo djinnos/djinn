@@ -1,0 +1,75 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[package]
+name = "djinn-server"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+djinn-agent = { path = "crates/djinn-agent" }
+djinn-core = { path = "crates/djinn-core", features = ["sqlx"] }
+djinn-db = { path = "crates/djinn-db" }
+djinn-git = { path = "crates/djinn-git" }
+djinn-mcp = { path = "crates/djinn-mcp" }
+djinn-provider = { path = "crates/djinn-provider" }
+async-trait = "0.1"
+anyhow = "1"
+axum = "0.8"
+http-body-util = "0.1"
+tower-service = "0.3"
+tower-http = { version = "0.6", features = ["cors"] }
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form"] }
+futures = "0.3"
+async-stream = "0.3"
+bytes = "1"
+git2 = "0.20"
+dirs = "6"
+refinery = { version = "0.9", features = ["int8-versions"] }
+rmcp = { version = "0.16", features = ["server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+libc = "0.2"
+ring = "0.17"
+base64 = "0.22"
+sha2 = "0.10"
+serde_urlencoded = "0.7"
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = "0.7"
+time = { version = "0.3", features = ["formatting"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v7"] }
+regex = "1.12.3"
+notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
+notify-debouncer-mini = "0.6"
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", features = ["reqwest-rustls"] }
+opentelemetry-semantic-conventions = "0.31"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+
+[dev-dependencies]
+insta = { version = "1", features = ["json", "redactions"] }
+proptest = "1"
+rstest = "0.24"
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+tower = { version = "0.5", features = ["util"] }
+
+[profile.dev]
+debug = "line-tables-only"
+[profile.dev.build-override]
+opt-level = 3

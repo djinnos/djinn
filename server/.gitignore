@@ -1,0 +1,4 @@
+/target
+.djinn/.obsidian/
+.claude/
+tarpaulin-report.json

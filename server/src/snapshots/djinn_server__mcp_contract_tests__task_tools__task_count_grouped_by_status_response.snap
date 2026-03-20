@@ -1,0 +1,16 @@
+---
+source: src/mcp_contract_tests.rs
+expression: grouped
+---
+{
+  "groups": [
+    {
+      "count": 1,
+      "key": "open"
+    },
+    {
+      "count": 1,
+      "key": "in_progress"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+[build]
+build-dir = "{cargo-cache-home}/build/djinn-server"
+
+[unstable]
+fine-grain-locking = true
+
+[net]
+git-fetch-with-cli = true
+
+# Rewrite SSH GitHub URLs to HTTPS for CI / machines without SSH keys.
+[url."https://github.com/jh-block/"]
+insteadOf = "git@github.com:jh-block/"

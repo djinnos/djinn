@@ -1,0 +1,2 @@
+-- Add 'verifying' task status for background verification after agent session.
+-- This was originally a no-op — the actual table rebuild is in V20260309000002.

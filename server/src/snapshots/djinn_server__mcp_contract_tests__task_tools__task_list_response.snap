@@ -1,0 +1,40 @@
+---
+source: src/mcp_contract_tests.rs
+assertion_line: 1605
+expression: paged
+---
+{
+  "has_more": true,
+  "limit": 1,
+  "offset": 0,
+  "tasks": [
+    {
+      "acceptance_criteria": [
+        "{\"description\":\"default\",\"met\":false}"
+      ],
+      "close_reason": null,
+      "closed_at": null,
+      "continuation_count": 0,
+      "created_at": "[TIMESTAMP]",
+      "description": "desc",
+      "design": "design",
+      "epic_id": "[UUID]",
+      "id": "[UUID]",
+      "issue_type": "task",
+      "labels": [],
+      "memory_refs": [],
+      "merge_commit_sha": null,
+      "owner": "owner",
+      "priority": 1,
+      "reopen_count": 0,
+      "session_count": 0,
+      "short_id": "[SHORT_ID]",
+      "status": "in_progress",
+      "title": "alpha ready",
+      "unresolved_blocker_count": 0,
+      "updated_at": "[TIMESTAMP]",
+      "verification_failure_count": 0
+    }
+  ],
+  "total_count": 3
+}

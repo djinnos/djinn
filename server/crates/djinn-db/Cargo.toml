@@ -1,0 +1,26 @@
+[package]
+name = "djinn-db"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+djinn-core = { path = "../djinn-core", features = ["sqlx"] }
+dirs = "6"
+globset = "0.4"
+refinery = { version = "0.9", features = ["int8-versions"] }
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

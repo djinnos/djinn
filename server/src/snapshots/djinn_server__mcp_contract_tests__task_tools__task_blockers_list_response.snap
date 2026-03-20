@@ -1,0 +1,15 @@
+---
+source: src/mcp_contract_tests.rs
+expression: blockers
+---
+{
+  "blockers": [
+    {
+      "blocking_task_id": "[UUID]",
+      "blocking_task_short_id": "[SHORT_ID]",
+      "blocking_task_status": "open",
+      "blocking_task_title": "test-task",
+      "resolved": false
+    }
+  ]
+}

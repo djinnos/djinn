@@ -1,0 +1,17 @@
+[package]
+name = "djinn-git"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+anyhow = "1"
+git2 = "0.20"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

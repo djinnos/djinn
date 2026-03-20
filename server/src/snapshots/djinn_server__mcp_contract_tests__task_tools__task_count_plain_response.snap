@@ -1,0 +1,8 @@
+---
+source: src/mcp_contract_tests.rs
+assertion_line: 1699
+expression: plain
+---
+{
+  "total_count": 2
+}

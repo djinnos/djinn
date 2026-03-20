@@ -1,0 +1,216 @@
+use super::*;
+
+#[tool_router(router = memory_search_router, vis = "pub(super)")]
+impl DjinnMcpServer {
+    /// Search notes using FTS5 full-text search with BM25 ranking. Returns compact
+    /// results with snippets.
+    #[tool(
+        description = "Search notes using FTS5 full-text search with BM25 ranking. Returns compact results with snippets."
+    )]
+    pub async fn memory_search(
+        &self,
+        Parameters(p): Parameters<SearchParams>,
+    ) -> Json<MemorySearchResponse> {
+        let Some(project_id) = self.project_id_for_path(&p.project).await else {
+            return Json(MemorySearchResponse {
+                results: vec![],
+                error: Some(format!("project not found: {}", p.project)),
+            });
+        };
+
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+        let limit = p.limit.unwrap_or(10).clamp(1, 100) as usize;
+
+        let results = match repo
+            .search(
+                &project_id,
+                &p.query,
+                None,
+                p.folder.as_deref(),
+                p.note_type.as_deref(),
+                limit,
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return Json(MemorySearchResponse {
+                    results: vec![],
+                    error: Some(format!("search failed: {e}")),
+                });
+            }
+        };
+
+        let items: Vec<MemorySearchResultItem> = results
+            .into_iter()
+            .map(|r| MemorySearchResultItem {
+                id: r.id,
+                permalink: r.permalink,
+                title: r.title,
+                folder: r.folder,
+                note_type: r.note_type,
+                snippet: r.snippet,
+                score: r.score,
+            })
+            .collect();
+
+        Json(MemorySearchResponse {
+            results: items,
+            error: None,
+        })
+    }
+
+    /// Returns the full knowledge graph for visualization — all notes with
+    /// connection counts and all resolved wikilink edges in a single query.
+    #[tool(
+        description = "Returns the full knowledge graph for visualization — all notes with connection counts and all resolved wikilink edges in a single query."
+    )]
+    pub async fn memory_graph(
+        &self,
+        Parameters(params): Parameters<GraphParams>,
+    ) -> Json<MemoryGraphResponse> {
+        let Some(project_id) = self.project_id_for_path(&params.project).await else {
+            return Json(MemoryGraphResponse {
+                nodes: vec![],
+                edges: vec![],
+                error: Some(format!("project not found: {}", params.project)),
+            });
+        };
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+        let graph = repo.graph(&project_id).await.unwrap_or_default();
+        Json(MemoryGraphResponse {
+            nodes: graph.nodes,
+            edges: graph.edges,
+            error: None,
+        })
+    }
+
+    /// Get unified diff for a specific commit of a .djinn/ file. No SHA = returns
+    /// diff for most recent change.
+    #[tool(
+        description = "Get unified diff for a specific commit of a .djinn/ file. No SHA = returns diff for most recent change."
+    )]
+    pub async fn memory_diff(
+        &self,
+        Parameters(p): Parameters<DiffParams>,
+    ) -> Json<MemoryDiffResponse> {
+        let Some(project_id) = self.project_id_for_path(&p.project).await else {
+            return Json(MemoryDiffResponse {
+                diff: String::new(),
+                error: Some(format!("project not found: {}", p.project)),
+            });
+        };
+
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        let Some(note) = repo
+            .get_by_permalink(&project_id, &p.permalink)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return Json(MemoryDiffResponse {
+                diff: String::new(),
+                error: Some(format!("note not found: {}", p.permalink)),
+            });
+        };
+
+        let diff = git_diff_for_file(&note.file_path, p.sha.as_deref()).await;
+        Json(MemoryDiffResponse { diff, error: None })
+    }
+
+    /// Re-index all memory notes for a project from disk on demand.
+    #[tool(
+        description = "Re-index memory notes for a project by scanning note files, comparing checksums to indexed content, and applying create/update/delete changes."
+    )]
+    pub async fn memory_reindex(
+        &self,
+        Parameters(params): Parameters<ReindexParams>,
+    ) -> Json<MemoryReindexResponse> {
+        let Some(project_id) = self.project_id_for_path(&params.project).await else {
+            return Json(MemoryReindexResponse {
+                updated: 0,
+                created: 0,
+                deleted: 0,
+                unchanged: 0,
+                error: Some(format!("project not found: {}", params.project)),
+            });
+        };
+
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+        let summary = repo
+            .reindex_from_disk(&project_id, Path::new(&params.project))
+            .await
+            .unwrap_or_else(|_| ReindexSummary::default());
+
+        Json(MemoryReindexResponse {
+            updated: summary.updated,
+            created: summary.created,
+            deleted: summary.deleted,
+            unchanged: summary.unchanged,
+            error: None,
+        })
+    }
+
+    /// Build context from a seed note with progressive disclosure and token budget
+    /// awareness. Returns full content for primary notes, overview for direct (L1)
+    /// linked notes, and abstract for discovered (L0) related notes.
+    #[tool(
+        description = "Build context from a seed note with progressive disclosure. Returns full content for primary notes, overview for direct linked notes, and abstract for discovered related notes. Seed notes are never dropped by budget constraints."
+    )]
+    pub async fn memory_build_context(
+        &self,
+        Parameters(p): Parameters<BuildContextParams>,
+    ) -> Json<MemoryBuildContextResponse> {
+        let Some(project_id) = self.project_id_for_path(&p.project).await else {
+            return Json(MemoryBuildContextResponse {
+                primary: vec![],
+                related_l1: vec![],
+                related_l0: vec![],
+                error: Some(format!("project not found: {}", p.project)),
+            });
+        };
+
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+        let max_related = p.max_related.unwrap_or(10).clamp(1, 50) as usize;
+        let budget = p.budget.map(|b| b as usize);
+        let task_id = p.task_id.as_deref();
+
+        // Strip memory:// prefix.
+        let url = p.url.strip_prefix("memory://").unwrap_or(&p.url);
+
+        // Wildcard: return all notes in folder as primary.
+        if url.ends_with("/*") {
+            let folder = url.trim_end_matches("/*");
+            let all = repo
+                .list(&project_id, Some(folder))
+                .await
+                .unwrap_or_default();
+            return Json(MemoryBuildContextResponse {
+                primary: all.into_iter().map(|n| note_to_view(&n)).collect(),
+                related_l1: vec![],
+                related_l0: vec![],
+                error: None,
+            });
+        }
+
+        // Use the new build_context method from repository
+        match repo
+            .build_context(&project_id, url, budget, task_id, max_related)
+            .await
+        {
+            Ok(response) => Json(MemoryBuildContextResponse {
+                primary: response.primary.iter().map(note_to_view).collect(),
+                related_l1: response.related_l1,
+                related_l0: response.related_l0,
+                error: None,
+            }),
+            Err(e) => Json(MemoryBuildContextResponse {
+                primary: vec![],
+                related_l1: vec![],
+                related_l0: vec![],
+                error: Some(format!("build_context failed: {e}")),
+            }),
+        }
+    }
+}
