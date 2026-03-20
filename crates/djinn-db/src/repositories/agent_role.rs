@@ -106,7 +106,11 @@ impl AgentRoleRepository {
         .await?)
     }
 
-    pub async fn get_by_name_in_project(
+    /// Return an `AgentRole` by its exact `name` within a project.
+    ///
+    /// Used by the slot lifecycle when a task has `agent_type` set to a
+    /// specialist name (e.g. "rust-expert") to load that role's config.
+    pub async fn get_by_name_for_project(
         &self,
         project_id: &str,
         name: &str,
@@ -121,6 +125,23 @@ impl AgentRoleRepository {
         .bind(project_id)
         .bind(name)
         .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    /// Return all roles for a project without pagination — used for the planner
+    /// specialist roster where a complete list is always needed.
+    pub async fn all_for_project(&self, project_id: &str) -> Result<Vec<AgentRole>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, AgentRole>(
+            "SELECT id, project_id, name, base_role, description,
+                    system_prompt_extensions, model_preference, verification_command,
+                    mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
+             FROM agent_roles
+             WHERE project_id = ?1
+             ORDER BY is_default DESC, base_role ASC, name ASC",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
         .await?)
     }
 

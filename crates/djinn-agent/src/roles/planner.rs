@@ -19,6 +19,7 @@ impl AgentRole for PlannerRole {
             self.config(),
             &ctx.project_path,
             ctx.verification_commands.as_deref(),
+            None,
         )
     }
 

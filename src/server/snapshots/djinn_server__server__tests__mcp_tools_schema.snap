@@ -5785,6 +5785,11 @@ expression: signatures
           "nullable": true,
           "type": "array"
         },
+        "agent_type": {
+          "description": "Specialist role name to route this task (e.g. \"rust-expert\").",
+          "nullable": true,
+          "type": "string"
+        },
         "blocked_by": {
           "description": "Task IDs (UUID or short_id) that block this task. Blockers are set atomically at creation.",
           "items": {
@@ -5981,6 +5986,11 @@ expression: signatures
                 "status"
               ],
               "type": "object"
+            },
+            "agent_type": {
+              "description": "Specialist role name assigned to this task, if any.",
+              "nullable": true,
+              "type": "string"
             },
             "close_reason": {
               "nullable": true,
@@ -6776,6 +6786,11 @@ expression: signatures
           },
           "nullable": true,
           "type": "array"
+        },
+        "agent_type": {
+          "description": "Specialist role name to assign (set None/\"\" to clear).",
+          "nullable": true,
+          "type": "string"
         },
         "blocked_by_add": {
           "description": "Task IDs (UUID or short_id) to add as blockers of this task.",
