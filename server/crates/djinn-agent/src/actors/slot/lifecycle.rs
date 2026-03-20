@@ -644,15 +644,16 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     // Fetch activity log for the prompt: last 3 high-signal comments plus a
     // summary of total counts by role so the agent knows what to look up.
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let activity_text = match task_repo.list_activity(&task.id).await {
-        Ok(entries) if !entries.is_empty() => {
+    let activity_entries = task_repo.list_activity(&task.id).await.ok();
+    let activity_text = match &activity_entries {
+        Some(entries) if !entries.is_empty() => {
             // Last 3 high-signal comments (PM, reviewer, verification)
-            let feedback = recent_feedback(&entries, 3);
+            let feedback = recent_feedback(entries, 3);
 
             // Count comments by role for the summary line
             let mut counts: std::collections::BTreeMap<&str, usize> =
                 std::collections::BTreeMap::new();
-            for e in &entries {
+            for e in entries {
                 if e.event_type == "comment" {
                     *counts.entry(e.actor_role.as_str()).or_default() += 1;
                 }
@@ -684,6 +685,11 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         }
         _ => None,
     };
+
+    // Extract worker submission summary/concerns and last verification failure
+    // from the activity log so the reviewer can see why certain changes were made.
+    let (worker_summary, worker_concerns, verification_failure) =
+        extract_worker_context(&activity_entries);
 
     // ── Build epic context for roles that need it (e.g. PM) ─────────────────
     let epic_context = if role.needs_epic_context() {
@@ -751,6 +757,9 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             verification_commands: prompt_verification_commands.clone(),
             verification_rules: prompt_verification_rules.clone(),
             activity: activity_text,
+            worker_summary,
+            worker_concerns,
+            verification_failure,
             epic_context,
         },
     );

@@ -70,6 +70,14 @@ pub struct TaskContext {
     /// Pre-formatted activity log (comments, transitions) for the task.
     pub activity: Option<String>,
 
+    // ── Worker submission context (for reviewer) ─────────────────────────
+    /// Summary from the last `work_submitted` activity entry.
+    pub worker_summary: Option<String>,
+    /// Remaining concerns from the last `work_submitted` activity entry.
+    pub worker_concerns: Option<String>,
+    /// Body of the last verification failure comment.
+    pub verification_failure: Option<String>,
+
     // ── Epic context ─────────────────────────────────────────────────────
     /// Epic context section for PM agents (title, description, memory_refs, sibling tasks).
     pub epic_context: Option<String>,
@@ -221,6 +229,37 @@ pub(crate) fn render_prompt_for_role(
         _ => String::new(),
     };
     out = out.replace("{{activity_section}}", &activity_section);
+
+    // Worker submission context (reviewer-facing)
+    let worker_context_section = {
+        let mut parts = Vec::new();
+        if let Some(summary) = &ctx.worker_summary
+            && !summary.trim().is_empty()
+        {
+            parts.push(format!("### Worker's submission notes\n\n{summary}"));
+        }
+        if let Some(concerns) = &ctx.worker_concerns
+            && !concerns.trim().is_empty()
+        {
+            parts.push(format!("### Worker's remaining concerns\n\n{concerns}"));
+        }
+        if let Some(failure) = &ctx.verification_failure
+            && !failure.trim().is_empty()
+        {
+            parts.push(format!(
+                "### Previous verification failure\n\n{failure}\n\n\
+                 **Important:** If the worker made changes to fix this verification failure, \
+                 those changes are IN SCOPE even if they touch files outside the task's primary \
+                 scope. Build/lint fixes required to pass verification are always acceptable."
+            ));
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("## Worker Context\n\n{}\n", parts.join("\n\n"))
+        }
+    };
+    out = out.replace("{{worker_context_section}}", &worker_context_section);
 
     let verification_rules_section = match &ctx.verification_rules {
         Some(rules) if !rules.trim().is_empty() => format!(
@@ -377,6 +416,9 @@ mod tests {
             verification_commands: None,
             verification_rules: None,
             activity: None,
+            worker_summary: None,
+            worker_concerns: None,
+            verification_failure: None,
             epic_context: None,
         }
     }

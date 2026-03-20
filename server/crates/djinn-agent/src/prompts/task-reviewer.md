@@ -48,6 +48,8 @@ For each acceptance criterion, find evidence in the code:
 
 **This is the only way to complete your review.** Do not use `task_comment_add`, `task_update`, or `task_transition` to signal completion — only `submit_review` ends your session.
 
+{{worker_context_section}}
+
 ## Out-of-Workspace AC
 
 If a criterion requires changes to code that lives **outside this workspace** (another project, service, or codebase), mark it as **MET** — the worker cannot fulfil it from here. Add a FEEDBACK note describing where the work belongs so the PM can remove the AC.
@@ -58,6 +60,8 @@ If a criterion requires changes to code that lives **outside this workspace** (a
 - "I'd do differently" → mark as MET
 - "Code smell" → mark as MET
 - Criterion requires code outside this workspace → mark as MET
+- Change fixes a build/lint/verification failure → NOT a scope violation
+- Pre-existing issue on main surfaced during the task → acceptable to fix
 - Criterion clearly unmet → mark as NOT MET
 
 **Default to MET.**
