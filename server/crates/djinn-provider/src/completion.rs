@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use djinn_core::events::EventBus;
 use djinn_core::message::{ContentBlock, Conversation, Message};
-use djinn_core::models::{Credential, Model};
+use djinn_core::models::{Credential, DjinnSettings, Model};
 use djinn_db::{Database, SettingsRepository};
 use futures::StreamExt;
 use tokio::time::{Duration, timeout};
@@ -16,6 +16,7 @@ use crate::repos::CredentialRepository;
 
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 const MEMORY_MODEL_SETTING_KEY: &str = "memory.llm_model";
+const SETTINGS_RAW_KEY: &str = "settings.raw";
 
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
@@ -93,6 +94,7 @@ pub(crate) fn select_memory_model(
         .iter()
         .flat_map(|provider| catalog.list_models(provider.id).into_iter())
         .filter(|model| connected.contains(&model.provider_id))
+        .filter(|model| model.tool_call) // exclude embedding / non-chat models
         .collect::<Vec<_>>();
 
     candidates.sort_by(|left, right| {
@@ -192,16 +194,37 @@ fn build_conversation(request: &CompletionRequest) -> Conversation {
 pub async fn resolve_memory_provider(db: &Database) -> Result<Box<dyn LlmProvider>> {
     let event_bus = EventBus::noop();
     let settings_repo = SettingsRepository::new(db.clone(), event_bus.clone());
+
+    // 1. Check explicit memory.llm_model setting.
     let configured_model = settings_repo
         .get(MEMORY_MODEL_SETTING_KEY)
         .await?
         .map(|setting| setting.value)
         .filter(|value| !value.trim().is_empty());
 
-    let settings_raw = match configured_model {
-        Some(model_id) => format!(r#"{{"memory":{{"llm_model":"{}"}}}}"#, model_id),
-        None => "{}".to_string(),
+    // 2. If no explicit model, fall back to the first model from settings model_priority.
+    let model_id = match configured_model {
+        Some(id) => id,
+        None => {
+            let settings_raw = settings_repo
+                .get(SETTINGS_RAW_KEY)
+                .await?
+                .map(|s| s.value)
+                .unwrap_or_default();
+            let settings = DjinnSettings::from_db_value(&settings_raw);
+            let priorities = settings.model_priority_or_default();
+            priorities
+                .values()
+                .flat_map(|models| models.iter())
+                .next()
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow!("no model configured — add a model in Settings → Model Configuration")
+                })?
+        }
     };
+
+    let settings_raw = format!(r#"{{"memory":{{"llm_model":"{}"}}}}"#, model_id);
 
     let catalog = CatalogService::new();
     catalog.inject_builtin_providers(builtin::BUILTIN_PROVIDERS);
@@ -732,16 +755,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn resolve_memory_provider_falls_back_to_cheapest_available() {
+    async fn resolve_memory_provider_falls_back_to_settings_model_priority() {
         let db = Database::open_in_memory().unwrap();
+        let settings = SettingsRepository::new(db.clone(), EventBus::noop());
         let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
+        // Configure a model in settings model_priority (what the UI does).
+        settings
+            .set(
+                "settings.raw",
+                r#"{"model_priority":{"worker":["openai/gpt-4.1-mini"]}}"#,
+            )
+            .await
+            .unwrap();
         credentials
             .set("openai", "OPENAI_API_KEY", "test-key")
             .await
             .unwrap();
 
         let provider = resolve_memory_provider(&db).await.unwrap();
-        assert!(!provider.name().is_empty());
+        assert_eq!(provider.name(), "openai");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
