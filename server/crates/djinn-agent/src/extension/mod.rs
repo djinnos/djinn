@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+mod params;
+
 use std::process::Stdio;
 
 use tokio::time::Duration;
@@ -7,6 +9,15 @@ use tokio::time::Duration;
 use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+use self::params::{
+    ApplyPatchParams, EditParams, EpicShowParams, EpicTasksParams, EpicUpdateParams,
+    LspParams, MemoryBuildContextParams, MemoryListParams, MemoryReadParams,
+    MemorySearchParams, ReadParams, RoleAmendPromptParams, RoleMetricsParams, ShellParams,
+    TaskActivityListParams, TaskArchiveActivityParams, TaskCommentAddParams, TaskCreateParams,
+    TaskDeleteBranchParams, TaskKillSessionParams, TaskListParams, TaskResetCountersParams,
+    TaskShowParams, TaskTransitionParams, TaskUpdateAcParams, TaskUpdateParams, WriteParams,
+};
 
 use super::sandbox;
 use crate::context::AgentContext;
@@ -98,187 +109,26 @@ where
     }
 }
 
-#[derive(Deserialize)]
-struct TaskListParams {
-    status: Option<String>,
-    issue_type: Option<String>,
-    priority: Option<i64>,
-    #[serde(alias = "q")]
-    text: Option<String>,
-    label: Option<String>,
-    parent: Option<String>,
-    sort: Option<String>,
-    limit: Option<i64>,
-    offset: Option<i64>,
-}
 
-#[derive(Deserialize)]
-struct TaskShowParams {
-    id: String,
-}
 
-#[derive(Deserialize)]
-struct TaskActivityListParams {
-    id: String,
-    #[serde(default)]
-    event_type: Option<String>,
-    #[serde(default)]
-    actor_role: Option<String>,
-    #[serde(default)]
-    limit: Option<i64>,
-}
 
-#[derive(Deserialize)]
-struct TaskUpdateParams {
-    id: String,
-    title: Option<String>,
-    description: Option<String>,
-    design: Option<String>,
-    priority: Option<i64>,
-    owner: Option<String>,
-    labels_add: Option<Vec<String>>,
-    labels_remove: Option<Vec<String>>,
-    acceptance_criteria: Option<Vec<serde_json::Value>>,
-    memory_refs_add: Option<Vec<String>>,
-    memory_refs_remove: Option<Vec<String>>,
-}
 
-#[derive(Deserialize)]
-struct TaskUpdateAcParams {
-    id: String,
-    acceptance_criteria: Vec<serde_json::Value>,
-}
 
-#[derive(Deserialize)]
-struct TaskCreateParams {
-    epic_id: String,
-    title: String,
-    issue_type: Option<String>,
-    description: Option<String>,
-    design: Option<String>,
-    priority: Option<i64>,
-    owner: Option<String>,
-    status: Option<String>,
-    acceptance_criteria: Option<Vec<String>>,
-    blocked_by: Option<Vec<String>>,
-    memory_refs: Option<Vec<String>>,
-    /// Specialist role name to route this task (e.g. "rust-expert").
-    agent_type: Option<String>,
-}
 
-#[derive(Deserialize)]
-struct EpicShowParams {
-    id: String,
-}
 
-#[derive(Deserialize)]
-struct EpicUpdateParams {
-    id: String,
-    title: Option<String>,
-    description: Option<String>,
-    status: Option<String>,
-    memory_refs_add: Option<Vec<String>>,
-    memory_refs_remove: Option<Vec<String>>,
-}
 
-#[derive(Deserialize)]
-struct EpicTasksParams {
-    id: String,
-    limit: Option<i64>,
-    offset: Option<i64>,
-}
 
-#[derive(Deserialize)]
-struct TaskCommentAddParams {
-    id: String,
-    body: String,
-    actor_id: Option<String>,
-    actor_role: Option<String>,
-}
 
-#[derive(Deserialize)]
-struct MemoryReadParams {
-    project: Option<String>,
-    identifier: String,
-}
 
-#[derive(Deserialize)]
-struct MemorySearchParams {
-    project: Option<String>,
-    query: String,
-    folder: Option<String>,
-    #[serde(rename = "type")]
-    note_type: Option<String>,
-    limit: Option<i64>,
-    task_id: Option<String>,
-}
 
-#[derive(Deserialize)]
-struct MemoryListParams {
-    project: Option<String>,
-    folder: Option<String>,
-    #[serde(rename = "type")]
-    note_type: Option<String>,
-    depth: Option<i64>,
-}
 
-#[derive(Deserialize)]
-struct MemoryBuildContextParams {
-    project: Option<String>,
-    url: String,
-    /// Link traversal depth (default 1). Currently unused at the dispatch layer.
-    _depth: Option<i64>,
-    max_related: Option<i64>,
-    budget: Option<i64>,
-    task_id: Option<String>,
-}
 
-#[derive(Deserialize)]
-struct RoleMetricsParams {
-    project: Option<String>,
-    role_id: Option<String>,
-    window_days: Option<i64>,
-}
 
-#[derive(Deserialize)]
-struct RoleAmendPromptParams {
-    project: Option<String>,
-    role_id: String,
-    amendment: String,
-    metrics_snapshot: Option<String>,
-}
 
-#[derive(Deserialize)]
-struct ShellParams {
-    command: String,
-    timeout_ms: Option<u64>,
-}
 
-#[derive(Deserialize)]
-struct WriteParams {
-    path: String,
-    content: String,
-}
 
-#[derive(Deserialize)]
-struct EditParams {
-    path: String,
-    old_text: String,
-    new_text: String,
-}
 
-#[derive(Deserialize)]
-struct ApplyPatchParams {
-    patch: String,
-}
 
-#[derive(Deserialize)]
-struct ReadParams {
-    #[serde(alias = "path")]
-    file_path: String,
-    offset: Option<usize>,
-    limit: Option<usize>,
-}
 
 /// Normalize `Some("")` → `None`. OpenAI models often send empty strings
 /// for optional parameters instead of omitting them, which breaks SQL filters.
@@ -1860,13 +1710,6 @@ async fn call_apply_patch(
     }))
 }
 
-#[derive(Deserialize)]
-struct LspParams {
-    operation: String,
-    file_path: String,
-    line: Option<u32>,
-    character: Option<u32>,
-}
 
 async fn call_lsp(
     state: &AgentContext,
@@ -2088,31 +1931,9 @@ fn task_to_value(t: &Task) -> serde_json::Value {
 
 // ── Lead-only tool params and handlers ────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct TaskTransitionParams {
-    id: String,
-    action: String,
-    reason: Option<String>,
-    target_status: Option<String>,
-    /// Required when action = "force_close". UUIDs or short IDs of replacement
-    /// tasks the Lead created before closing this one.
-    replacement_task_ids: Option<Vec<String>>,
-}
 
-#[derive(Deserialize)]
-struct TaskDeleteBranchParams {
-    id: String,
-}
 
-#[derive(Deserialize)]
-struct TaskArchiveActivityParams {
-    id: String,
-}
 
-#[derive(Deserialize)]
-struct TaskResetCountersParams {
-    id: String,
-}
 
 async fn call_task_transition(
     state: &AgentContext,
@@ -2335,10 +2156,6 @@ async fn call_task_reset_counters(
     )
 }
 
-#[derive(Deserialize)]
-struct TaskKillSessionParams {
-    id: String,
-}
 
 async fn call_task_kill_session(
     state: &AgentContext,
@@ -3388,59 +3205,59 @@ mod tests {
     fn snapshot_worker_tool_names() {
         let schemas = tool_schemas_worker();
         let names = tool_names(&schemas);
-        insta::assert_json_snapshot!("worker_tool_names", names);
+        insta::with_settings!({snapshot_path => "../snapshots"}, { insta::assert_json_snapshot!("worker_tool_names", names); });
     }
 
     #[test]
     fn snapshot_worker_tool_schemas() {
-        insta::assert_json_snapshot!("worker_tool_schemas", tool_schemas_worker());
+        insta::with_settings!({snapshot_path => "../snapshots"}, { insta::assert_json_snapshot!("worker_tool_schemas", tool_schemas_worker()); });
     }
 
     #[test]
     fn snapshot_reviewer_tool_names() {
         let schemas = tool_schemas_reviewer();
         let names = tool_names(&schemas);
-        insta::assert_json_snapshot!("reviewer_tool_names", names);
+        insta::with_settings!({snapshot_path => "../snapshots"}, { insta::assert_json_snapshot!("reviewer_tool_names", names); });
     }
 
     #[test]
     fn snapshot_reviewer_tool_schemas() {
-        insta::assert_json_snapshot!("reviewer_tool_schemas", tool_schemas_reviewer());
+        insta::with_settings!({snapshot_path => "../snapshots"}, { insta::assert_json_snapshot!("reviewer_tool_schemas", tool_schemas_reviewer()); });
     }
 
     #[test]
     fn snapshot_lead_tool_names() {
         let schemas = tool_schemas_lead();
         let names = tool_names(&schemas);
-        insta::assert_json_snapshot!("lead_tool_names", names);
+        insta::with_settings!({snapshot_path => "../snapshots"}, { insta::assert_json_snapshot!("lead_tool_names", names); });
     }
 
     #[test]
     fn snapshot_lead_tool_schemas() {
-        insta::assert_json_snapshot!("lead_tool_schemas", tool_schemas_lead());
+        insta::with_settings!({snapshot_path => "../snapshots"}, { insta::assert_json_snapshot!("lead_tool_schemas", tool_schemas_lead()); });
     }
 
     #[test]
     fn snapshot_planner_tool_names() {
         let schemas = tool_schemas_planner();
         let names = tool_names(&schemas);
-        insta::assert_json_snapshot!("planner_tool_names", names);
+        insta::with_settings!({snapshot_path => "../snapshots"}, { insta::assert_json_snapshot!("planner_tool_names", names); });
     }
 
     #[test]
     fn snapshot_planner_tool_schemas() {
-        insta::assert_json_snapshot!("planner_tool_schemas", tool_schemas_planner());
+        insta::with_settings!({snapshot_path => "../snapshots"}, { insta::assert_json_snapshot!("planner_tool_schemas", tool_schemas_planner()); });
     }
 
     #[test]
     fn snapshot_architect_tool_names() {
         let schemas = tool_schemas_architect();
         let names = tool_names(&schemas);
-        insta::assert_json_snapshot!("architect_tool_names", names);
+        insta::with_settings!({snapshot_path => "../snapshots"}, { insta::assert_json_snapshot!("architect_tool_names", names); });
     }
 
     #[test]
     fn snapshot_architect_tool_schemas() {
-        insta::assert_json_snapshot!("architect_tool_schemas", tool_schemas_architect());
+        insta::with_settings!({snapshot_path => "../snapshots"}, { insta::assert_json_snapshot!("architect_tool_schemas", tool_schemas_architect()); });
     }
 }
