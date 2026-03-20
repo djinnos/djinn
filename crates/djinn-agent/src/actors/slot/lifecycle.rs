@@ -377,23 +377,61 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     }
     emit_step(&task.id, "preflight_passed", serde_json::json!({}));
 
-    // ── Run setup commands before session ─────────────────────────────────────
-    // Log role-level MCP servers and skills so downstream tasks (norv, 9trm)
-    // can pick them up.  Actual wiring is not implemented here.
-    if !mcp_servers.is_empty() {
+    // ── Resolve role-level MCP servers ────────────────────────────────────────
+    // Load the project MCP server registry from .djinn/settings.json and resolve
+    // each server name in the role's mcp_servers list.  Unknown names are logged
+    // as warnings and skipped — they never block the session from starting.
+    //
+    // Default roles have empty mcp_servers, so this block is a no-op for them.
+    let resolved_mcp_servers = if !mcp_servers.is_empty() {
+        let registry = crate::verification::settings::load_mcp_server_registry(&worktree_path);
+        let resolved = crate::verification::settings::resolve_mcp_servers(
+            &task.short_id,
+            role.config().name,
+            &mcp_servers,
+            &registry,
+        );
+        tracing::info!(
+            task_id = %task.short_id,
+            role = %role.config().name,
+            requested_count = mcp_servers.len(),
+            resolved_count = resolved.len(),
+            "Lifecycle: resolved role MCP servers"
+        );
+        resolved
+            .into_iter()
+            .map(|(name, cfg)| (name, cfg.clone()))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    if !resolved_mcp_servers.is_empty() {
         tracing::debug!(
             task_id = %task.short_id,
-            mcp_servers = ?mcp_servers,
-            "Lifecycle: role has MCP servers (wiring deferred to task norv)"
+            role = %role.config().name,
+            servers = ?resolved_mcp_servers.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            "Lifecycle: MCP servers ready for session (rmcp client wiring pending full transport support)"
         );
     }
-    if !skills.is_empty() {
-        tracing::debug!(
+
+    // ── Load and resolve skills from worktree .djinn/skills/ ─────────────────
+    // Skills are markdown files with YAML frontmatter. Missing skills are logged
+    // as warnings and skipped — they never block the session from starting.
+    let resolved_skills = if !skills.is_empty() {
+        let loaded = crate::skills::load_skills(&worktree_path, &skills);
+        tracing::info!(
             task_id = %task.short_id,
-            skills = ?skills,
-            "Lifecycle: role has skills (wiring deferred to task 9trm)"
+            role = %role.config().name,
+            requested_count = skills.len(),
+            resolved_count = loaded.len(),
+            "Lifecycle: resolved role skills"
         );
-    }
+        loaded
+    } else {
+        Vec::new()
+    };
+
     let (prompt_setup_commands, prompt_verification_commands) = {
         let (setup_specs, verification_specs) = load_commands(&worktree_path).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "failed to load project commands, using empty");
@@ -660,10 +698,15 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         },
     );
     // Apply role-level prompt extensions from DB (system_prompt_extensions + learned_prompt).
-    let system_prompt = crate::prompts::apply_role_extensions(
+    let system_prompt_with_extensions = crate::prompts::apply_role_extensions(
         &base_system_prompt,
         &system_prompt_extensions,
         learned_prompt.as_deref(),
+    );
+    // Append skills section after all other extensions.
+    let system_prompt = crate::prompts::apply_skills(
+        &system_prompt_with_extensions,
+        &resolved_skills,
     );
 
     let context_window = app_state
