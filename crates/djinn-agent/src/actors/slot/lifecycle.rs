@@ -11,7 +11,7 @@ use crate::prompts::TaskContext;
 use crate::provider::LlmProvider;
 use crate::provider::create_provider;
 use crate::roles::AgentRole;
-use crate::verification::settings::load_commands;
+use crate::verification::settings::{load_commands, load_settings};
 use djinn_core::models::SessionStatus;
 use djinn_core::models::TransitionAction;
 use djinn_db::SessionRepository;
@@ -466,11 +466,14 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         Vec::new()
     };
 
-    let (prompt_setup_commands, prompt_verification_commands) = {
-        let (setup_specs, verification_specs) = load_commands(&worktree_path).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to load project commands, using empty");
-            (Vec::new(), Vec::new())
+    let (prompt_setup_commands, prompt_verification_commands, prompt_verification_rules) = {
+        let settings = load_settings(&worktree_path).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to load project settings, using defaults");
+            Default::default()
         });
+        let setup_specs = settings.setup;
+        let verification_specs = settings.verification;
+        let verification_rules = settings.verification_rules;
         let prompt_setup_commands = format_command_details(&setup_specs);
         // Role-level verification_command overrides .djinn/settings.json when set.
         let prompt_verification_commands = if let Some(ref cmd) = role_verification_command {
@@ -608,7 +611,27 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                 }
             }
         }
-        (prompt_setup_commands, prompt_verification_commands)
+        // Format verification_rules as a markdown list for the prompt.
+        // Each rule becomes: "- `<pattern>`: `cmd1`, `cmd2`"
+        let prompt_verification_rules = if verification_rules.is_empty() {
+            None
+        } else {
+            let formatted = verification_rules
+                .iter()
+                .map(|r| {
+                    let cmds = r
+                        .commands
+                        .iter()
+                        .map(|c| format!("`{c}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("- `{}`: {}", r.pattern, cmds)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(formatted)
+        };
+        (prompt_setup_commands, prompt_verification_commands, prompt_verification_rules)
     };
 
     let conflict_files = conflict_ctx.as_ref().map(|m| {
@@ -727,6 +750,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             merge_failure_context: merge_validation_ctx,
             setup_commands: prompt_setup_commands.clone(),
             verification_commands: prompt_verification_commands.clone(),
+            verification_rules: prompt_verification_rules.clone(),
             activity: activity_text,
             epic_context,
         },

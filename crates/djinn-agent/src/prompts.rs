@@ -60,6 +60,11 @@ pub struct TaskContext {
     /// Newline-separated list of verification command names, or None if none configured.
     pub verification_commands: Option<String>,
 
+    // ── Verification rules ────────────────────────────────────────────────
+    /// Formatted verification rules section for scoped build/test guidance.
+    /// None or empty means no rules are configured; section is omitted from prompt.
+    pub verification_rules: Option<String>,
+
     // ── Activity log ─────────────────────────────────────────────────────
     /// Pre-formatted activity log (comments, transitions) for the task.
     pub activity: Option<String>,
@@ -216,6 +221,17 @@ pub(crate) fn render_prompt_for_role(
     };
     out = out.replace("{{activity_section}}", &activity_section);
 
+    let verification_rules_section = match &ctx.verification_rules {
+        Some(rules) if !rules.trim().is_empty() => format!(
+            "## Verification Rules\n\n\
+             When running build/test commands between edits, match your changed files against \
+             these rules and run the corresponding commands — not full-workspace equivalents.\n\n\
+             {rules}\n"
+        ),
+        _ => String::new(),
+    };
+    out = out.replace("{{verification_rules_section}}", &verification_rules_section);
+
     // Hard cap: truncate the rendered system prompt to prevent context window
     // blowout when individual sections escape their soft limits.
     if out.len() > MAX_SYSTEM_PROMPT_CHARS {
@@ -357,6 +373,7 @@ mod tests {
             merge_failure_context: None,
             setup_commands: None,
             verification_commands: None,
+            verification_rules: None,
             activity: None,
             epic_context: None,
         }
@@ -541,6 +558,57 @@ mod tests {
         assert!(
             prompt.contains("main"),
             "worker prompt should include merge target branch"
+        );
+    }
+
+    #[test]
+    fn worker_prompt_includes_verification_rules_when_present() {
+        let task = make_task();
+        let ctx = TaskContext {
+            verification_rules: Some(
+                "- `crates/djinn-mcp/**`: `cargo test -p djinn-mcp`, `cargo clippy -p djinn-mcp -- -D warnings`".into(),
+            ),
+            ..make_ctx()
+        };
+        let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+        assert!(
+            prompt.contains("Verification Rules"),
+            "worker prompt should include verification rules section heading"
+        );
+        assert!(
+            prompt.contains("crates/djinn-mcp/**"),
+            "worker prompt should include rule pattern"
+        );
+        assert!(
+            prompt.contains("cargo test -p djinn-mcp"),
+            "worker prompt should include rule commands"
+        );
+        assert!(!prompt.contains("{{verification_rules_section}}"));
+    }
+
+    #[test]
+    fn worker_prompt_omits_verification_rules_when_empty() {
+        let task = make_task();
+        let ctx = make_ctx(); // verification_rules: None
+        let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+        assert!(
+            !prompt.contains("Verification Rules"),
+            "worker prompt should not include verification rules section when empty"
+        );
+        assert!(!prompt.contains("{{verification_rules_section}}"));
+    }
+
+    #[test]
+    fn worker_prompt_contains_scoped_build_guidance() {
+        let task = make_task();
+        let ctx = make_ctx();
+        let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+        assert!(
+            prompt.contains("scoped"),
+            "worker prompt should mention scoped build/check commands"
         );
     }
 }
