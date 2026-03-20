@@ -3044,6 +3044,72 @@ pub(crate) async fn call_tool(
     dispatch_tool_call(state, &synthetic, worktree_path, None, session_task_id).await
 }
 
+fn tool_apply_patch() -> RmcpTool {
+    RmcpTool::new(
+        "apply_patch".to_string(),
+        concat!(
+            "Apply a patch to one or more files using a custom LLM-friendly format. ",
+            "Uses content-based context matching (not line numbers). Format:\n\n",
+            "*** Begin Patch\n",
+            "*** Update File: path/to/file.rs\n",
+            "@@ context_line_from_file\n",
+            " context line (unchanged)\n",
+            "-old line to remove\n",
+            "+new line to add\n",
+            " context line (unchanged)\n\n",
+            "*** Add File: path/to/new_file.rs\n",
+            "+line 1\n",
+            "+line 2\n\n",
+            "*** Delete File: path/to/old_file.rs\n",
+            "*** End Patch\n\n",
+            "Rules: ' ' prefix = context (must match file), '-' = delete, '+' = add. ",
+            "The @@ line text is searched in the file to locate each chunk. ",
+            "Multiple @@ chunks per file are allowed. ",
+            "Files being updated or deleted must be read first.",
+        )
+        .to_string(),
+        object!({
+            "type": "object",
+            "required": ["patch"],
+            "properties": {
+                "patch": {"type": "string", "description": "Patch content in the custom format (see tool description)"}
+            }
+        }),
+    )
+}
+
+fn tool_lsp() -> RmcpTool {
+    RmcpTool::new(
+        "lsp".to_string(),
+        "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols). Line and character are 1-based.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["operation", "file_path"],
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["hover", "definition", "references", "symbols"],
+                    "description": "LSP operation to perform"
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute or worktree-relative file path"
+                },
+                "line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-based line number (required for hover, definition, references)"
+                },
+                "character": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-based column number (required for hover, definition, references)"
+                }
+            }
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3365,70 +3431,4 @@ mod tests {
     fn snapshot_architect_tool_schemas() {
         insta::assert_json_snapshot!("architect_tool_schemas", tool_schemas_architect());
     }
-}
-
-fn tool_apply_patch() -> RmcpTool {
-    RmcpTool::new(
-        "apply_patch".to_string(),
-        concat!(
-            "Apply a patch to one or more files using a custom LLM-friendly format. ",
-            "Uses content-based context matching (not line numbers). Format:\n\n",
-            "*** Begin Patch\n",
-            "*** Update File: path/to/file.rs\n",
-            "@@ context_line_from_file\n",
-            " context line (unchanged)\n",
-            "-old line to remove\n",
-            "+new line to add\n",
-            " context line (unchanged)\n\n",
-            "*** Add File: path/to/new_file.rs\n",
-            "+line 1\n",
-            "+line 2\n\n",
-            "*** Delete File: path/to/old_file.rs\n",
-            "*** End Patch\n\n",
-            "Rules: ' ' prefix = context (must match file), '-' = delete, '+' = add. ",
-            "The @@ line text is searched in the file to locate each chunk. ",
-            "Multiple @@ chunks per file are allowed. ",
-            "Files being updated or deleted must be read first.",
-        )
-        .to_string(),
-        object!({
-            "type": "object",
-            "required": ["patch"],
-            "properties": {
-                "patch": {"type": "string", "description": "Patch content in the custom format (see tool description)"}
-            }
-        }),
-    )
-}
-
-fn tool_lsp() -> RmcpTool {
-    RmcpTool::new(
-        "lsp".to_string(),
-        "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols). Line and character are 1-based.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["operation", "file_path"],
-            "properties": {
-                "operation": {
-                    "type": "string",
-                    "enum": ["hover", "definition", "references", "symbols"],
-                    "description": "LSP operation to perform"
-                },
-                "file_path": {
-                    "type": "string",
-                    "description": "Absolute or worktree-relative file path"
-                },
-                "line": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "1-based line number (required for hover, definition, references)"
-                },
-                "character": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "1-based column number (required for hover, definition, references)"
-                }
-            }
-        }),
-    )
 }

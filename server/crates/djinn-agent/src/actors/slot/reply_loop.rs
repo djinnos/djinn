@@ -1875,7 +1875,7 @@ mod tests {
                 self.recorded_choices
                     .lock()
                     .unwrap()
-                    .push(tool_choice.clone());
+                    .push(tool_choice);
                 self.inner.stream(conversation, tools, tool_choice)
             }
         }

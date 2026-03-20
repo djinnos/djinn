@@ -18,7 +18,7 @@ async fn create_test_repo() -> TempDir {
     // Initialize repo
     let output = Command::new("git")
         .args(["init"])
-        .current_dir(&path)
+        .current_dir(path)
         .output()
         .await
         .unwrap();
@@ -27,12 +27,12 @@ async fn create_test_repo() -> TempDir {
     // Configure git user
     let _ = Command::new("git")
         .args(["config", "user.email", "test@test.com"])
-        .current_dir(&path)
+        .current_dir(path)
         .output()
         .await;
     let _ = Command::new("git")
         .args(["config", "user.name", "Test"])
-        .current_dir(&path)
+        .current_dir(path)
         .output()
         .await;
 
@@ -42,7 +42,7 @@ async fn create_test_repo() -> TempDir {
         .unwrap();
     let output = Command::new("git")
         .args(["add", "file.txt"])
-        .current_dir(&path)
+        .current_dir(path)
         .output()
         .await
         .unwrap();
@@ -50,7 +50,7 @@ async fn create_test_repo() -> TempDir {
 
     let output = Command::new("git")
         .args(["commit", "-m", "initial commit"])
-        .current_dir(&path)
+        .current_dir(path)
         .output()
         .await
         .unwrap();
@@ -59,7 +59,7 @@ async fn create_test_repo() -> TempDir {
     // Create main branch explicitly
     let _ = Command::new("git")
         .args(["branch", "-M", "main"])
-        .current_dir(&path)
+        .current_dir(path)
         .output()
         .await;
 
@@ -71,7 +71,7 @@ async fn create_task_branch(repo_path: &std::path::Path, task_short_id: &str) ->
     // Create task branch
     let output = Command::new("git")
         .args(["checkout", "-b", &format!("task/{task_short_id}")])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -83,7 +83,7 @@ async fn create_task_branch(repo_path: &std::path::Path, task_short_id: &str) ->
         .unwrap();
     let output = Command::new("git")
         .args(["add", "file.txt"])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -91,7 +91,7 @@ async fn create_task_branch(repo_path: &std::path::Path, task_short_id: &str) ->
 
     let output = Command::new("git")
         .args(["commit", "-m", "task branch commit"])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -100,7 +100,7 @@ async fn create_task_branch(repo_path: &std::path::Path, task_short_id: &str) ->
     // Go back to main
     let output = Command::new("git")
         .args(["checkout", "main"])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -118,7 +118,7 @@ async fn create_task_branch(repo_path: &std::path::Path, task_short_id: &str) ->
             worktree_path.to_str().unwrap(),
             &format!("task/{task_short_id}"),
         ])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -132,7 +132,7 @@ async fn advance_main_with_conflict(repo_path: &std::path::Path) {
     // Checkout main
     let output = Command::new("git")
         .args(["checkout", "main"])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -144,7 +144,7 @@ async fn advance_main_with_conflict(repo_path: &std::path::Path) {
         .unwrap();
     let output = Command::new("git")
         .args(["add", "file.txt"])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -152,7 +152,7 @@ async fn advance_main_with_conflict(repo_path: &std::path::Path) {
 
     let output = Command::new("git")
         .args(["commit", "-m", "main conflicting commit"])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -164,7 +164,7 @@ async fn advance_main_clean(repo_path: &std::path::Path) {
     // Checkout main
     let output = Command::new("git")
         .args(["checkout", "main"])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -176,7 +176,7 @@ async fn advance_main_clean(repo_path: &std::path::Path) {
         .unwrap();
     let output = Command::new("git")
         .args(["add", "new_file.txt"])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -184,7 +184,7 @@ async fn advance_main_clean(repo_path: &std::path::Path) {
 
     let output = Command::new("git")
         .args(["commit", "-m", "main new file commit"])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -296,7 +296,7 @@ async fn fresh_branch_sync_uses_temp_worktree() {
     // Create task branch but NO worktree yet
     let output = Command::new("git")
         .args(["checkout", "-b", &format!("task/{task_short_id}")])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -307,7 +307,7 @@ async fn fresh_branch_sync_uses_temp_worktree() {
         .unwrap();
     let output = Command::new("git")
         .args(["add", "file.txt"])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -315,7 +315,7 @@ async fn fresh_branch_sync_uses_temp_worktree() {
 
     let output = Command::new("git")
         .args(["commit", "-m", "task branch commit"])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -324,7 +324,7 @@ async fn fresh_branch_sync_uses_temp_worktree() {
     // Go back to main
     let output = Command::new("git")
         .args(["checkout", "main"])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -363,7 +363,7 @@ async fn fresh_branch_sync_no_conflict_when_no_changes() {
     // Create task branch with NO changes yet (just branched from main)
     let output = Command::new("git")
         .args(["checkout", "-b", &format!("task/{task_short_id}")])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();
@@ -372,7 +372,7 @@ async fn fresh_branch_sync_no_conflict_when_no_changes() {
     // Go back to main
     let output = Command::new("git")
         .args(["checkout", "main"])
-        .current_dir(&repo_path)
+        .current_dir(repo_path)
         .output()
         .await
         .unwrap();

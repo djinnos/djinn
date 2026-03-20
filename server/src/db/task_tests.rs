@@ -1394,7 +1394,7 @@ async fn blocker_swap_atomic_no_race_window() {
     repo.add_blocker(&task.id, &blocker_a.id).await.unwrap();
 
     // Atomic swap: remove blocker_a and add blocker_b in one transaction.
-    repo.update_blockers_atomic(&task.id, &[blocker_b.id.clone()], &[blocker_a.id.clone()])
+    repo.update_blockers_atomic(&task.id, std::slice::from_ref(&blocker_b.id), std::slice::from_ref(&blocker_a.id))
         .await
         .unwrap();
 
@@ -1458,11 +1458,10 @@ async fn blocker_swap_atomic_no_race_concurrent() {
         let claimed = Arc::clone(&claimed);
         tokio::spawn(async move {
             for _ in 0..iterations * 2 {
-                if let Ok(Some(t)) = repo.claim(ReadyQuery::default(), "test", "system").await {
-                    if t.id == task_id {
+                if let Ok(Some(t)) = repo.claim(ReadyQuery::default(), "test", "system").await
+                    && t.id == task_id {
                         claimed.store(true, Ordering::SeqCst);
                         return;
-                    }
                 }
                 tokio::task::yield_now().await;
             }
@@ -1481,16 +1480,16 @@ async fn blocker_swap_atomic_no_race_concurrent() {
                     let _ = repo
                         .update_blockers_atomic(
                             &task_id,
-                            &[blocker_b_id.clone()],
-                            &[blocker_a_id.clone()],
+                            std::slice::from_ref(&blocker_b_id),
+                            std::slice::from_ref(&blocker_a_id),
                         )
                         .await;
                 } else {
                     let _ = repo
                         .update_blockers_atomic(
                             &task_id,
-                            &[blocker_a_id.clone()],
-                            &[blocker_b_id.clone()],
+                            std::slice::from_ref(&blocker_a_id),
+                            std::slice::from_ref(&blocker_b_id),
                         )
                         .await;
                 }

@@ -132,82 +132,6 @@ impl CoordinatorActor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_helpers;
-    use djinn_core::models::TransitionAction;
-    use djinn_db::{EpicRepository, TaskRepository};
-    use tokio::sync::broadcast;
-    use tokio_util::sync::CancellationToken;
-
-    #[tokio::test]
-    async fn sweep_removes_worktree_for_closed_task() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
-        let (tx, _rx) = broadcast::channel(32);
-        let project = test_helpers::create_test_project(&db).await;
-
-        let events = crate::events::event_bus_for(&tx);
-        let epic = EpicRepository::new(db.clone(), events.clone())
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "epic",
-                    description: "",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        let task_repo = TaskRepository::new(db.clone(), events);
-        let task = task_repo
-            .create_in_project(
-                &project.id,
-                Some(&epic.id),
-                "stale",
-                "",
-                "",
-                "task",
-                0,
-                "",
-                None,
-            )
-            .await
-            .unwrap();
-        task_repo
-            .transition(
-                &task.id,
-                TransitionAction::Close,
-                "test",
-                "system",
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let short_id = task.short_id.clone();
-        let worktree_path = std::path::PathBuf::from(&project.path)
-            .join(".djinn")
-            .join("worktrees")
-            .join(&short_id);
-        std::fs::create_dir_all(&worktree_path).unwrap();
-        assert!(worktree_path.exists());
-
-        sweep_stale_resources(&db, &ctx).await;
-
-        assert!(
-            !worktree_path.exists(),
-            "stale worktree should be removed for closed task"
-        );
-    }
-}
-
 // ─── Project health check (ADR-014) ──────────────────────────────────────────
 
 /// Create a temporary git worktree, run setup + verification commands, clean up,
@@ -477,5 +401,81 @@ impl CoordinatorActor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers;
+    use djinn_core::models::TransitionAction;
+    use djinn_db::{EpicRepository, TaskRepository};
+    use tokio::sync::broadcast;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn sweep_removes_worktree_for_closed_task() {
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+        let (tx, _rx) = broadcast::channel(32);
+        let project = test_helpers::create_test_project(&db).await;
+
+        let events = crate::events::event_bus_for(&tx);
+        let epic = EpicRepository::new(db.clone(), events.clone())
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let task_repo = TaskRepository::new(db.clone(), events);
+        let task = task_repo
+            .create_in_project(
+                &project.id,
+                Some(&epic.id),
+                "stale",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                None,
+            )
+            .await
+            .unwrap();
+        task_repo
+            .transition(
+                &task.id,
+                TransitionAction::Close,
+                "test",
+                "system",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let short_id = task.short_id.clone();
+        let worktree_path = std::path::PathBuf::from(&project.path)
+            .join(".djinn")
+            .join("worktrees")
+            .join(&short_id);
+        std::fs::create_dir_all(&worktree_path).unwrap();
+        assert!(worktree_path.exists());
+
+        sweep_stale_resources(&db, &ctx).await;
+
+        assert!(
+            !worktree_path.exists(),
+            "stale worktree should be removed for closed task"
+        );
     }
 }

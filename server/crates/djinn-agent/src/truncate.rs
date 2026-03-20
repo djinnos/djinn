@@ -150,7 +150,7 @@ mod tests {
         let mut lines = Vec::new();
         lines.push("=== TEST START ===");
         for i in 0..100 {
-            lines.push(&leaked(format!("test line {i} ... ok")));
+            lines.push(leaked(format!("test line {i} ... ok")));
         }
         lines.push("FAILURES:");
         lines.push("test_foo: assertion failed");

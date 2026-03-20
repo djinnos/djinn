@@ -563,6 +563,7 @@ impl CoordinatorActor {
         #[cfg(test)]
         {
             let _ = (project_id, base_role);
+            #[allow(clippy::needless_return)]
             return Vec::new();
         }
 

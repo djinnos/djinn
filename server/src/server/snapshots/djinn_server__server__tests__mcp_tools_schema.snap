@@ -4132,11 +4132,25 @@ expression: signatures
         "ok": {
           "type": "boolean"
         },
+        "pending": {
+          "description": "True when the flow is still in progress (device-code polling in background).",
+          "type": "boolean"
+        },
         "provider_id": {
           "type": "string"
         },
         "success": {
           "type": "boolean"
+        },
+        "user_code": {
+          "description": "For device-code flows: the code the user must enter.",
+          "nullable": true,
+          "type": "string"
+        },
+        "verification_uri": {
+          "description": "For device-code flows: the URL where the user enters the code.",
+          "nullable": true,
+          "type": "string"
         }
       },
       "required": [
@@ -4144,7 +4158,8 @@ expression: signatures
         "success",
         "provider_id",
         "oauth_supported",
-        "configured_keys"
+        "configured_keys",
+        "pending"
       ],
       "title": "ProviderOauthStartResponse",
       "type": "object"
@@ -5330,6 +5345,11 @@ expression: signatures
               "nullable": true,
               "type": "object"
             },
+            "memory_model": {
+              "description": "Model used for memory operations (knowledge extraction, summarisation).\nFormat: `provider/model`, e.g. `\"openai/gpt-4.1-mini\"`. Falls back to the\nfirst model in `model_priority` when unset.",
+              "nullable": true,
+              "type": "string"
+            },
             "model_priority": {
               "additionalProperties": {
                 "items": {
@@ -5436,6 +5456,11 @@ expression: signatures
           "description": "Per-model concurrent session caps (e.g. {\"chatgpt_codex/gpt-5.3-codex\": 4}). Omit to keep current value.",
           "nullable": true,
           "type": "object"
+        },
+        "memory_model": {
+          "description": "Model used for memory operations (knowledge extraction, summarisation). Format: \"provider/model\". Set to \"\" to clear. Omit to keep current value.",
+          "nullable": true,
+          "type": "string"
         },
         "model_priority_lead": {
           "description": "Ordered model list for the 'lead' role. Omit to keep current value.",

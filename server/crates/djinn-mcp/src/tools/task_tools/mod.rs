@@ -185,13 +185,12 @@ impl DjinnMcpServer {
         }
 
         // Apply pre-resolved blocked_by relationships atomically.
-        if !resolved_blocker_ids.is_empty() {
-            if let Err(e) = repo
+        if !resolved_blocker_ids.is_empty()
+            && let Err(e) = repo
                 .update_blockers_atomic(&task.id, &resolved_blocker_ids, &[])
                 .await
-            {
-                return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
-            }
+        {
+            return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
         }
 
         // Apply agent_type (specialist routing) if provided.
