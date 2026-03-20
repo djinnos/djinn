@@ -251,11 +251,13 @@ pub(crate) async fn run_llm_extraction(
                 .await
             {
                 Ok(created) => {
-                    // Set confidence to 0.5 (session-extracted, below human-written 1.0).
-                    // The default confidence at creation is 0.5 in the schema default, but
-                    // we explicitly apply a Bayesian update to the created note to reflect
-                    // our lower certainty signal.
-                    if let Err(e) = note_repo.update_confidence(&created.id, 0.5).await {
+                    // Set confidence directly to 0.5 (session-extracted, below the
+                    // human-written default of 1.0). Notes are created with the
+                    // schema default of 1.0; we override that here. We use
+                    // `set_confidence` (absolute set) rather than `update_confidence`
+                    // (Bayesian signal update) because we want the value to be
+                    // exactly 0.5, not the result of a Bayesian update from 1.0.
+                    if let Err(e) = note_repo.set_confidence(&created.id, 0.5).await {
                         tracing::warn!(
                             session_id = %session_id,
                             note_id = %created.id,
