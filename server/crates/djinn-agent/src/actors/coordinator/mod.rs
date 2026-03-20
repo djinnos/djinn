@@ -355,7 +355,7 @@ impl CoordinatorActor {
                 }
 
                 // 4. 30s safety-net tick — stuck detection + dispatch pass for
-                //    any tasks that missed an event (e.g. needs_pm_intervention
+                //    any tasks that missed an event (e.g. needs_lead_intervention
                 //    tasks surviving a server restart).
                 _ = self.tick.tick() => {
                     self.enforce_session_stall_timeout().await;
@@ -635,7 +635,7 @@ impl CoordinatorActor {
                 }
                 if matches!(
                     task.status.as_str(),
-                    "open" | "needs_task_review" | "needs_pm_intervention" | "closed"
+                    "open" | "needs_task_review" | "needs_lead_intervention" | "closed"
                 ) {
                     tracing::debug!(
                         task_id = %task.short_id,

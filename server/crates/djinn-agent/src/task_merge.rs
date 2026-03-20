@@ -59,16 +59,16 @@ pub(crate) const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
     release: TransitionAction::ReleaseTaskReview,
 };
 
-/// Actions used when PM approves directly from intervention.
+/// Actions used when Lead approves directly from intervention.
 ///
-/// `release` uses `PmInterventionComplete` (→ Open) instead of
-/// `PmInterventionRelease` (→ NeedsPmIntervention) so that verification
+/// `release` uses `LeadInterventionComplete` (→ Open) instead of
+/// `LeadInterventionRelease` (→ NeedsLeadIntervention) so that verification
 /// or git failures route the task back to a worker who can fix the code,
-/// rather than looping the PM in a re-dispatch cycle it cannot resolve.
+/// rather than looping the Lead in a re-dispatch cycle it cannot resolve.
 pub(crate) const PM_MERGE_ACTIONS: MergeActions = MergeActions {
-    approve: TransitionAction::PmApprove,
-    conflict: TransitionAction::PmApproveConflict,
-    release: TransitionAction::PmInterventionComplete,
+    approve: TransitionAction::LeadApprove,
+    conflict: TransitionAction::LeadApproveConflict,
+    release: TransitionAction::LeadInterventionComplete,
 };
 
 pub(crate) async fn merge_after_task_review(

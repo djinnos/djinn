@@ -68,7 +68,7 @@ where
         "task_update" => call_task_update(state, &call.arguments).await,
         "task_update_ac" => call_task_update_ac(state, &call.arguments).await,
         "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
-        "request_lead" => call_request_pm(state, &call.arguments).await,
+        "request_lead" => call_request_lead(state, &call.arguments).await,
         "request_architect" => call_request_architect(state, &call.arguments).await,
         "task_transition" => call_task_transition(state, &call.arguments).await,
         "task_delete_branch" => call_task_delete_branch(state, &call.arguments).await,
@@ -746,7 +746,7 @@ async fn call_task_update_ac(
     Ok(task_to_value(&updated))
 }
 
-async fn call_request_pm(
+async fn call_request_lead(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
@@ -801,7 +801,7 @@ async fn call_request_pm(
         }
     }
 
-    // Escalate the task to needs_pm_intervention in all cases.
+    // Escalate the task to needs_lead_intervention in all cases.
     let updated = repo
         .transition(
             &task.id,
@@ -2122,11 +2122,11 @@ async fn call_task_transition(
     };
     let action = TransitionAction::parse(&p.action).map_err(|e| e.to_string())?;
 
-    // PM approve: squash merge (verification gate runs inside merge_and_transition).
-    if action == TransitionAction::PmApprove {
-        if task.status != TaskStatus::InPmIntervention.as_str() {
+    // Lead approve: squash merge (verification gate runs inside merge_and_transition).
+    if action == TransitionAction::LeadApprove {
+        if task.status != TaskStatus::InLeadIntervention.as_str() {
             return Ok(
-                serde_json::json!({ "error": "pm_approve is only valid from in_pm_intervention" }),
+                serde_json::json!({ "error": "lead_approve is only valid from in_lead_intervention" }),
             );
         }
 
@@ -2146,7 +2146,7 @@ async fn call_task_transition(
             merge_and_transition(&task.id, state, &PM_MERGE_ACTIONS, Some(gate))
                 .await
                 .unwrap_or((
-                    TransitionAction::PmInterventionComplete,
+                    TransitionAction::LeadInterventionComplete,
                     Some("merge_and_transition returned None".to_string()),
                 ));
         let updated = repo
@@ -2766,7 +2766,7 @@ fn tool_task_update() -> RmcpTool {
 fn tool_task_transition() -> RmcpTool {
     RmcpTool::new(
         "task_transition".to_string(),
-        "Execute a state machine transition on a task. Lead can use: pm_intervention_complete (rescope and reopen for worker), pm_approve (approve implementation and merge), force_close (requires replacement_task_ids for decomposition OR reason for redundant/already-landed tasks), escalate.".to_string(),
+        "Execute a state machine transition on a task. Lead can use: lead_intervention_complete (rescope and reopen for worker), lead_approve (approve implementation and merge), force_close (requires replacement_task_ids for decomposition OR reason for redundant/already-landed tasks), escalate.".to_string(),
         object!({
             "type": "object",
             "required": ["id", "action"],

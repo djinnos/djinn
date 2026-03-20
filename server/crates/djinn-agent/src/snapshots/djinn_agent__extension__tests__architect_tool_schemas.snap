@@ -378,7 +378,7 @@ expression: tool_schemas_architect()
     "name": "task_comment_add"
   },
   {
-    "description": "Execute a state machine transition on a task. Lead can use: pm_intervention_complete (rescope and reopen for worker), pm_approve (approve implementation and merge), force_close (requires replacement_task_ids for decomposition OR reason for redundant/already-landed tasks), escalate.",
+    "description": "Execute a state machine transition on a task. Lead can use: lead_intervention_complete (rescope and reopen for worker), lead_approve (approve implementation and merge), force_close (requires replacement_task_ids for decomposition OR reason for redundant/already-landed tasks), escalate.",
     "inputSchema": {
       "properties": {
         "action": {

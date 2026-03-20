@@ -59,7 +59,7 @@ impl AgentType {
     pub fn for_task_status(status: &str, _has_conflict_context: bool) -> Self {
         match status {
             "needs_task_review" | "in_task_review" => Self::Reviewer,
-            "needs_pm_intervention" | "in_pm_intervention" => Self::Lead,
+            "needs_lead_intervention" | "in_lead_intervention" => Self::Lead,
             _ => Self::Worker,
         }
     }
@@ -164,11 +164,11 @@ mod tests {
             AgentType::Reviewer
         );
         assert_eq!(
-            AgentType::for_task_status("needs_pm_intervention", false),
+            AgentType::for_task_status("needs_lead_intervention", false),
             AgentType::Lead
         );
         assert_eq!(
-            AgentType::for_task_status("in_pm_intervention", false),
+            AgentType::for_task_status("in_lead_intervention", false),
             AgentType::Lead
         );
     }
@@ -196,8 +196,8 @@ mod tests {
 
         let cfg = AgentType::Lead.role_config();
         assert_eq!(
-            (cfg.start_action)("needs_pm_intervention"),
-            Some(TransitionAction::PmInterventionStart)
+            (cfg.start_action)("needs_lead_intervention"),
+            Some(TransitionAction::LeadInterventionStart)
         );
 
         let cfg = AgentType::Planner.role_config();
@@ -219,7 +219,7 @@ mod tests {
         );
         assert_eq!(
             (AgentType::Lead.role_config().release_action)(),
-            TransitionAction::PmInterventionRelease
+            TransitionAction::LeadInterventionRelease
         );
         assert_eq!(
             (AgentType::Planner.role_config().release_action)(),

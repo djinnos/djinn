@@ -232,7 +232,7 @@ fn worker_claims(task: &Task, _ctx: &DispatchContext) -> bool {
     // Research tasks go to the worker role (open-ended but same execution model).
     !matches!(
         task.status.as_str(),
-        "needs_task_review" | "in_task_review" | "needs_pm_intervention" | "in_pm_intervention"
+        "needs_task_review" | "in_task_review" | "needs_lead_intervention" | "in_lead_intervention"
     ) && !matches!(task.issue_type.as_str(), "spike" | "review" | "decomposition")
 }
 
@@ -257,7 +257,7 @@ fn reviewer_dispatch_rule() -> DispatchRule {
 fn lead_claims(task: &Task, _ctx: &DispatchContext) -> bool {
     matches!(
         task.status.as_str(),
-        "needs_pm_intervention" | "in_pm_intervention"
+        "needs_lead_intervention" | "in_lead_intervention"
     )
 }
 
@@ -369,7 +369,7 @@ mod tests {
         let registry = RoleRegistry::new();
         let ctx = DispatchContext;
 
-        for status in ["needs_pm_intervention", "in_pm_intervention"] {
+        for status in ["needs_lead_intervention", "in_lead_intervention"] {
             let task = make_task(status);
             let role = registry.role_for_task(&task, &ctx);
             assert_eq!(role, Some("lead"), "{status} should dispatch to lead");

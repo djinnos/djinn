@@ -37,21 +37,21 @@ impl AgentRole for LeadRole {
             {
                 let action = match decision.decision.as_str() {
                     // reopen: complete the intervention and send back to worker.
-                    "reopen" => TransitionAction::PmInterventionComplete,
+                    "reopen" => TransitionAction::LeadInterventionComplete,
                     // decompose: the Lead split this task into subtasks — close the
                     // original so it doesn't get re-dispatched to a worker.
                     "decompose" => TransitionAction::ForceClose,
                     // force_close: hard-close the task.
                     "force_close" => TransitionAction::ForceClose,
                     // escalate: release back to the Lead queue (needs_pm_intervention).
-                    "escalate" => TransitionAction::PmInterventionRelease,
+                    "escalate" => TransitionAction::LeadInterventionRelease,
                     other => {
                         tracing::warn!(
                             task_id = %task_id,
                             decision = %other,
                             "Lead agent: unrecognized decision value; defaulting to complete"
                         );
-                        TransitionAction::PmInterventionComplete
+                        TransitionAction::LeadInterventionComplete
                     }
                 };
                 tracing::info!(
@@ -65,7 +65,7 @@ impl AgentRole for LeadRole {
             // Fallback: check if the task already transitioned (pre-ADR-036 Lead tools).
             let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
             if let Ok(Some(task)) = repo.get(task_id).await
-                && task.status != "in_pm_intervention"
+                && task.status != "in_lead_intervention"
             {
                 tracing::info!(
                     task_id = %task_id,
@@ -79,7 +79,7 @@ impl AgentRole for LeadRole {
                 "Lead agent: session ended without explicit completion → releasing back"
             );
             Some((
-                TransitionAction::PmInterventionRelease,
+                TransitionAction::LeadInterventionRelease,
                 Some("Lead session ended without completing intervention".to_string()),
             ))
         })
@@ -92,10 +92,10 @@ pub(crate) const LEAD_CONFIG: RoleConfig = RoleConfig {
     dispatch_role: "lead",
     tool_schemas: extension::tool_schemas_lead,
     start_action: |status| match status {
-        "needs_pm_intervention" => Some(TransitionAction::PmInterventionStart),
+        "needs_lead_intervention" => Some(TransitionAction::LeadInterventionStart),
         _ => None,
     },
-    release_action: || TransitionAction::PmInterventionRelease,
+    release_action: || TransitionAction::LeadInterventionRelease,
     initial_message: crate::prompts::PM_TEMPLATE,
     preserves_session: false,
     is_project_scoped: false,

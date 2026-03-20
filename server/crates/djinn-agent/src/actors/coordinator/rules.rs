@@ -102,8 +102,8 @@ impl CoordinatorActor {
         let any_in_progress = all_tasks.iter().any(|t| {
             matches!(
                 t.status.as_str(),
-                "in_progress" | "in_task_review" | "in_pm_intervention"
-                    | "needs_task_review" | "needs_pm_intervention" | "verifying"
+                "in_progress" | "in_task_review" | "in_lead_intervention"
+                    | "needs_task_review" | "needs_lead_intervention" | "verifying"
             )
         });
 

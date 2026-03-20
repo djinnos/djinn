@@ -50,8 +50,8 @@ fn arb_status() -> impl Strategy<Value = TaskStatus> {
         Just(TaskStatus::NeedsTaskReview),
         Just(TaskStatus::InTaskReview),
         Just(TaskStatus::PrReady),
-        Just(TaskStatus::NeedsPmIntervention),
-        Just(TaskStatus::InPmIntervention),
+        Just(TaskStatus::NeedsLeadIntervention),
+        Just(TaskStatus::InLeadIntervention),
         Just(TaskStatus::Closed),
     ]
 }
@@ -65,8 +65,8 @@ fn arb_non_closed_status() -> impl Strategy<Value = TaskStatus> {
         Just(TaskStatus::NeedsTaskReview),
         Just(TaskStatus::InTaskReview),
         Just(TaskStatus::PrReady),
-        Just(TaskStatus::NeedsPmIntervention),
-        Just(TaskStatus::InPmIntervention),
+        Just(TaskStatus::NeedsLeadIntervention),
+        Just(TaskStatus::InLeadIntervention),
     ]
 }
 
@@ -90,11 +90,11 @@ fn arb_action() -> impl Strategy<Value = TransitionAction> {
         Just(TransitionAction::ForceClose),
         Just(TransitionAction::UserOverride),
         Just(TransitionAction::Escalate),
-        Just(TransitionAction::PmInterventionStart),
-        Just(TransitionAction::PmInterventionRelease),
-        Just(TransitionAction::PmInterventionComplete),
-        Just(TransitionAction::PmApprove),
-        Just(TransitionAction::PmApproveConflict),
+        Just(TransitionAction::LeadInterventionStart),
+        Just(TransitionAction::LeadInterventionRelease),
+        Just(TransitionAction::LeadInterventionComplete),
+        Just(TransitionAction::LeadApprove),
+        Just(TransitionAction::LeadApproveConflict),
         Just(TransitionAction::MarkPrReady),
         Just(TransitionAction::PrMerge),
         Just(TransitionAction::PrChangesRequested),
@@ -111,8 +111,8 @@ const NON_CLOSED_STATUSES: &[TaskStatus] = &[
     TaskStatus::NeedsTaskReview,
     TaskStatus::InTaskReview,
     TaskStatus::PrReady,
-    TaskStatus::NeedsPmIntervention,
-    TaskStatus::InPmIntervention,
+    TaskStatus::NeedsLeadIntervention,
+    TaskStatus::InLeadIntervention,
 ];
 
 #[test]

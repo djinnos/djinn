@@ -108,7 +108,7 @@ impl CoordinatorActor {
             }
         };
 
-        for status in ["needs_task_review", "needs_pm_intervention"] {
+        for status in ["needs_task_review", "needs_lead_intervention"] {
             match repo.list_by_status(status).await {
                 Ok(mut tasks) => ready.append(&mut tasks),
                 Err(e) => {
@@ -366,7 +366,7 @@ impl CoordinatorActor {
     /// On each tick: find tasks in active execution states with no active session
     /// and release them back to a dispatch-ready state (AGENT-08).
     ///
-    /// For slot-based statuses (in_progress, in_task_review, in_pm_intervention),
+    /// For slot-based statuses (in_progress, in_task_review, in_lead_intervention),
     /// we check `has_session` in the slot pool.
     ///
     /// For "verifying", we check the shared `VerificationTracker` — if no
@@ -376,7 +376,7 @@ impl CoordinatorActor {
         let repo = self.task_repo();
         let mut affected = 0u64;
 
-        for status in ["in_progress", "in_task_review", "in_pm_intervention"] {
+        for status in ["in_progress", "in_task_review", "in_lead_intervention"] {
             let tasks = match repo.list_by_status(status).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -429,9 +429,9 @@ impl CoordinatorActor {
 
                 let (release_action, release_to) = match task.status.as_str() {
                     "in_task_review" => (TransitionAction::ReleaseTaskReview, "needs_task_review"),
-                    "in_pm_intervention" => (
-                        TransitionAction::PmInterventionRelease,
-                        "needs_pm_intervention",
+                    "in_lead_intervention" => (
+                        TransitionAction::LeadInterventionRelease,
+                        "needs_lead_intervention",
                     ),
                     _ => (TransitionAction::Release, "open"),
                 };
