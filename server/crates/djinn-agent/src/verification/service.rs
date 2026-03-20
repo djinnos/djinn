@@ -6,7 +6,7 @@ use anyhow::Result;
 use djinn_core::commands::{CommandResult, CommandSpec};
 use djinn_db::VerificationCacheRepository;
 
-use super::settings::{load_commands, verification_cache_key};
+use super::settings::{load_setup_commands, verification_cache_key};
 
 #[derive(Debug, Clone)]
 pub struct VerificationResult {
@@ -37,7 +37,7 @@ pub async fn verify_commit(
     let start = Instant::now();
     let cache_repo = VerificationCacheRepository::new(db.clone());
 
-    let (setup_commands, _) = load_commands(worktree_path).map_err(anyhow::Error::msg)?;
+    let setup_commands = load_setup_commands(worktree_path).map_err(anyhow::Error::msg)?;
 
     let setup_results = run_commands(&setup_commands, worktree_path)
         .await
@@ -112,12 +112,12 @@ mod tests {
         Database::open_in_memory().expect("in-memory db")
     }
 
-    fn write_settings(dir: &Path, setup_json: &str, verification_json: &str) {
+    fn write_settings(dir: &Path, setup_json: &str) {
         let djinn_dir = dir.join(".djinn");
         std::fs::create_dir_all(&djinn_dir).expect("create .djinn");
         std::fs::write(
             djinn_dir.join("settings.json"),
-            format!(r#"{{"setup": {setup_json}, "verification": {verification_json}}}"#),
+            format!(r#"{{"setup": {setup_json}}}"#),
         )
         .expect("write settings.json");
     }
@@ -139,7 +139,6 @@ mod tests {
                 r#"[{{"name":"setup","command":"touch {}","timeout_secs":10}}]"#,
                 marker.display()
             ),
-            r#"[{"name":"verify","command":"echo ok","timeout_secs":10}]"#,
         );
         let state = test_db();
         let scoped = vec!["echo ok".to_string()];
@@ -170,10 +169,6 @@ mod tests {
             &format!(
                 r#"[{{"name":"setup","command":"touch {}","timeout_secs":10}}]"#,
                 setup_marker.display()
-            ),
-            &format!(
-                r#"[{{"name":"verify","command":"touch {}","timeout_secs":10}}]"#,
-                verify_marker.display()
             ),
         );
         let state = test_db();
@@ -211,7 +206,6 @@ mod tests {
         write_settings(
             dir.path(),
             r#"[{"name":"setup","command":"echo setup","timeout_secs":10}]"#,
-            r#"[{"name":"verify","command":"false","timeout_secs":10}]"#,
         );
         let state = test_db();
         let scoped = vec!["false".to_string()];

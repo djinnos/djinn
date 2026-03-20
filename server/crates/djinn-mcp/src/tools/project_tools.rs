@@ -191,8 +191,6 @@ pub struct ProjectSettingsValidateResponse {
 struct StrictDjinnSettings {
     #[serde(default, rename = "setup")]
     _setup: Vec<ProjectCommandSpec>,
-    #[serde(default, rename = "verification")]
-    _verification: Vec<ProjectCommandSpec>,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

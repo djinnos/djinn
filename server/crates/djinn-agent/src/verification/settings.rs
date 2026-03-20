@@ -38,12 +38,10 @@ pub struct VerificationRule {
 pub struct DjinnSettings {
     #[serde(default)]
     pub setup: Vec<CommandSpec>,
-    #[serde(default)]
-    pub verification: Vec<CommandSpec>,
     /// File-pattern-to-command rules for scoped verification.
     ///
-    /// When populated, the agent should match changed files against these rules and run
-    /// only the matching commands rather than the full `verification` suite.
+    /// Each rule maps a glob pattern to the commands that should run when any
+    /// changed file matches that pattern.
     #[serde(default)]
     pub verification_rules: Vec<VerificationRule>,
     /// Named MCP server registry for this project.
@@ -92,11 +90,11 @@ pub fn load_settings(worktree_path: &Path) -> Result<DjinnSettings, String> {
     }
 }
 
-/// Load commands from `.djinn/settings.json` in the worktree.
+/// Load setup commands from `.djinn/settings.json` in the worktree.
 ///
-/// Returns empty vecs when the file is absent. Errors on malformed JSON.
-pub fn load_commands(worktree_path: &Path) -> Result<(Vec<CommandSpec>, Vec<CommandSpec>), String> {
-    load_settings(worktree_path).map(|s| (s.setup, s.verification))
+/// Returns an empty vec when the file is absent. Errors on malformed JSON.
+pub fn load_setup_commands(worktree_path: &Path) -> Result<Vec<CommandSpec>, String> {
+    load_settings(worktree_path).map(|s| s.setup)
 }
 
 /// Load the MCP server registry from `.djinn/settings.json` in the worktree.
@@ -206,45 +204,41 @@ mod tests {
     }
 
     #[test]
-    fn load_commands_uses_settings_file_when_present() {
+    fn load_setup_commands_uses_settings_file_when_present() {
         let dir = tempdir_in_tmp();
         let djinn_dir = dir.path().join(".djinn");
         std::fs::create_dir_all(&djinn_dir).unwrap();
         std::fs::write(
             djinn_dir.join("settings.json"),
             r#"{
-                "setup": [{"name": "build", "command": "cargo build", "timeout_secs": 300}],
-                "verification": [{"name": "test", "command": "cargo test", "timeout_secs": 300}]
+                "setup": [{"name": "build", "command": "cargo build", "timeout_secs": 300}]
             }"#,
         )
         .unwrap();
 
-        let (setup, verification) = load_commands(dir.path()).expect("load commands");
+        let setup = load_setup_commands(dir.path()).expect("load commands");
 
         assert_eq!(setup.len(), 1);
         assert_eq!(setup[0].name, "build");
-        assert_eq!(verification.len(), 1);
-        assert_eq!(verification[0].name, "test");
     }
 
     #[test]
-    fn load_commands_returns_empty_when_file_missing() {
+    fn load_setup_commands_returns_empty_when_file_missing() {
         let dir = tempdir_in_tmp();
 
-        let (setup, verification) = load_commands(dir.path()).expect("load commands");
+        let setup = load_setup_commands(dir.path()).expect("load commands");
 
         assert!(setup.is_empty());
-        assert!(verification.is_empty());
     }
 
     #[test]
-    fn load_commands_errors_when_file_malformed() {
+    fn load_setup_commands_errors_when_file_malformed() {
         let dir = tempdir_in_tmp();
         let djinn_dir = dir.path().join(".djinn");
         std::fs::create_dir_all(&djinn_dir).unwrap();
         std::fs::write(djinn_dir.join("settings.json"), "{not valid json").unwrap();
 
-        let err = load_commands(dir.path()).expect_err("malformed settings should error");
+        let err = load_setup_commands(dir.path()).expect_err("malformed settings should error");
         assert!(err.contains("invalid .djinn/settings.json"));
     }
 
@@ -261,10 +255,9 @@ mod tests {
         )
         .unwrap();
 
-        let (setup, verification) = load_commands(dir.path()).expect("load commands");
+        let setup = load_setup_commands(dir.path()).expect("load commands");
 
         assert_eq!(setup.len(), 1);
-        assert!(verification.is_empty());
     }
 
     // ── MCP server registry tests ─────────────────────────────────────────────
@@ -452,7 +445,6 @@ mod tests {
         let dir = tempdir_in_tmp();
         let settings = load_settings(dir.path()).expect("load settings on missing file");
         assert!(settings.setup.is_empty());
-        assert!(settings.verification.is_empty());
         assert!(settings.verification_rules.is_empty());
         assert!(settings.mcp_servers.is_empty());
     }

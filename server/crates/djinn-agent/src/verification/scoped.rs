@@ -5,8 +5,6 @@
 /// the project's `verification_rules` glob patterns.
 use std::path::Path;
 
-use djinn_core::commands::CommandSpec;
-
 use super::settings::{load_settings, VerificationRule};
 
 /// Resolve the set of verification commands to run for the current branch.
@@ -47,21 +45,16 @@ pub fn resolve_scoped_commands(
     });
 
     let rules = &settings.verification_rules;
-    let full_project_commands: Vec<String> = settings
-        .verification
-        .iter()
-        .map(|s: &CommandSpec| s.command.clone())
-        .collect();
 
-    // AC-5: no rules configured → fall back to full-project commands.
+    // No rules configured → nothing to verify.
     if rules.is_empty() {
         tracing::debug!(
-            "resolve_scoped_commands: no verification_rules configured; using full-project commands"
+            "resolve_scoped_commands: no verification_rules configured; skipping verification"
         );
-        return full_project_commands;
+        return Vec::new();
     }
 
-    // AC-1: get changed files via git diff.
+    // Get changed files via git diff.
     let changed_files = git_diff_changed_files(worktree_path, target_branch);
     tracing::debug!(
         target_branch = %target_branch,
@@ -71,29 +64,26 @@ pub fn resolve_scoped_commands(
 
     if changed_files.is_empty() {
         tracing::debug!(
-            "resolve_scoped_commands: no changed files detected; using full-project commands"
+            "resolve_scoped_commands: no changed files detected; skipping verification"
         );
-        return full_project_commands;
+        return Vec::new();
     }
 
-    // AC-2/3: match changed files against rules (in config order), collect
-    // commands from each matching rule, deduplicate while preserving first-seen
-    // order.
+    // Match changed files against rules (in config order), collect commands
+    // from each matching rule, deduplicate while preserving first-seen order.
     let matched = collect_commands_for_changed_files(rules, &changed_files);
 
     if matched.is_empty() {
-        // AC-5: no rules matched → fall back.
         tracing::debug!(
-            "resolve_scoped_commands: no rules matched changed files; using full-project commands"
+            "resolve_scoped_commands: no rules matched changed files; skipping verification"
         );
-        full_project_commands
     } else {
         tracing::debug!(
             command_count = matched.len(),
             "resolve_scoped_commands: using scoped commands from matching rules"
         );
-        matched
     }
+    matched
 }
 
 /// Run `git diff --name-only <target_branch>..HEAD` in `worktree_path` and
@@ -254,28 +244,19 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // ── AC-5: no rules configured → fall back to full-project commands ────────
+    // ── No rules configured → empty ────────────────────────────────────────────
 
     #[test]
-    fn no_rules_configured_returns_full_project_commands() {
+    fn no_rules_configured_returns_empty() {
         let dir = tempdir_in_tmp();
         write_settings(
             &dir,
             r#"{
-                "verification": [
-                    {"name": "test", "command": "cargo test --workspace", "timeout_secs": 300},
-                    {"name": "clippy", "command": "cargo clippy --workspace -- -D warnings", "timeout_secs": 120}
-                ]
+                "setup": [{"name": "build", "command": "cargo build", "timeout_secs": 300}]
             }"#,
         );
         let result = resolve_scoped_commands(dir.path(), "main", None);
-        assert_eq!(
-            result,
-            vec![
-                "cargo test --workspace",
-                "cargo clippy --workspace -- -D warnings"
-            ]
-        );
+        assert!(result.is_empty());
     }
 
     #[test]
@@ -350,18 +331,15 @@ mod tests {
         assert_eq!(result, vec!["cargo test --workspace"]);
     }
 
-    // ── AC-5: no rules match → fall back to full-project ─────────────────────
+    // ── No rules match → empty ─────────────────────────────────────────────────
 
     #[test]
-    fn no_matching_rules_falls_back_to_full_project() {
+    fn no_matching_rules_returns_empty() {
         let dir = tempdir_in_tmp();
         let base = init_git_repo_with_task_branch(dir.path(), "main", "task/test");
         write_settings(
             &dir,
             r#"{
-                "verification": [
-                    {"name": "test", "command": "cargo test --workspace", "timeout_secs": 300}
-                ],
                 "verification_rules": [
                     {"match": "crates/djinn-mcp/**", "commands": ["cargo test -p djinn-mcp"]}
                 ]
@@ -371,6 +349,6 @@ mod tests {
         git_commit_file(dir.path(), "docs/README.md", "# readme");
 
         let result = resolve_scoped_commands(dir.path(), &base, None);
-        assert_eq!(result, vec!["cargo test --workspace"]);
+        assert!(result.is_empty());
     }
 }

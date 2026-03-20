@@ -11,7 +11,7 @@ use crate::prompts::TaskContext;
 use crate::provider::LlmProvider;
 use crate::provider::create_provider;
 use crate::roles::AgentRole;
-use crate::verification::settings::{load_commands, load_settings};
+use crate::verification::settings::load_settings;
 use djinn_core::models::SessionStatus;
 use djinn_core::models::TransitionAction;
 use djinn_db::SessionRepository;
@@ -472,7 +472,6 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             Default::default()
         });
         let setup_specs = settings.setup;
-        let verification_specs = settings.verification;
         let verification_rules = settings.verification_rules;
         let prompt_setup_commands = format_command_details(&setup_specs);
         // Role-level verification_command overrides .djinn/settings.json when set.
@@ -485,10 +484,10 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                 );
                 Some(cmd.clone())
             } else {
-                format_command_details(&verification_specs)
+                None
             }
         } else {
-            format_command_details(&verification_specs)
+            None
         };
         if !setup_specs.is_empty() {
             let setup_start = std::time::Instant::now();
@@ -1642,14 +1641,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
             return_free!();
         }
     };
-    let verification_commands = {
-        let (_, verification_specs) = load_commands(std::path::Path::new(&project_path))
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "failed to load project commands for planner prompt");
-                (Vec::new(), Vec::new())
-            });
-        helpers::format_command_details(&verification_specs)
-    };
+    let verification_commands: Option<String> = None; // verification is now driven by verification_rules
 
     // ── Build specialist roster for planner prompt ────────────────────────
     let specialist_roster = {

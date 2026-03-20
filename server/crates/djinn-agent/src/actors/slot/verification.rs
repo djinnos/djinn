@@ -25,11 +25,10 @@ const PIPELINE_TIMEOUT_OVERHEAD_SECS: u64 = 120;
 /// settings file is missing or unreadable.
 fn compute_pipeline_timeout(project_path: &str) -> std::time::Duration {
     let path = std::path::Path::new(project_path);
-    let sum = match crate::verification::settings::load_commands(path) {
-        Ok((setup, verification)) => {
+    let sum = match crate::verification::settings::load_setup_commands(path) {
+        Ok(setup) => {
             let total: u64 = setup
                 .iter()
-                .chain(verification.iter())
                 .map(|c| c.timeout_secs.unwrap_or(300))
                 .sum();
             total
@@ -474,7 +473,7 @@ mod tests {
     };
     use std::time::Duration;
     use crate::verification::service::VerificationResult;
-    use crate::verification::settings::load_commands;
+    use crate::verification::settings::load_setup_commands;
     use djinn_core::commands::CommandResult;
     use djinn_core::models::TransitionAction;
     use djinn_db::TaskRepository;
@@ -654,15 +653,14 @@ mod tests {
         write_settings(
             dir.path(),
             r#"{
-                "setup": [{"name": "fmt", "command": "cargo fmt --check", "timeout_secs": 7}],
-                "verification": [{"name": "test", "command": "cargo test", "timeout_secs": 11}]
+                "setup": [{"name": "fmt", "command": "cargo fmt --check", "timeout_secs": 7}]
             }"#,
         );
 
         let timeout = compute_pipeline_timeout(dir.path().to_str().expect("utf8 path"));
-        let (setup, verification) = load_commands(dir.path()).expect("load settings commands");
+        let setup = load_setup_commands(dir.path()).expect("load settings commands");
         let configured_timeout_secs: u64 =
-            setup.iter().chain(verification.iter()).map(|c| c.timeout_secs.unwrap_or(300)).sum();
+            setup.iter().map(|c| c.timeout_secs.unwrap_or(300)).sum();
         let expected_timeout_secs =
             (configured_timeout_secs + PIPELINE_TIMEOUT_OVERHEAD_SECS).max(MIN_PIPELINE_TIMEOUT_SECS);
 

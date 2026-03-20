@@ -78,16 +78,16 @@ impl CoordinatorActor {
                 }
             }
 
-            let project_cfg = match crate::verification::settings::load_commands(
+            let project_settings = match crate::verification::settings::load_settings(
                 std::path::Path::new(&project.path),
             ) {
-                Ok(cfg) => cfg,
+                Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!(project_id = %project.id, error = %e, "CoordinatorActor: failed to load commands for health check");
+                    tracing::warn!(project_id = %project.id, error = %e, "CoordinatorActor: failed to load settings for health check");
                     continue;
                 }
             };
-            if project_cfg.0.is_empty() && project_cfg.1.is_empty() {
+            if project_settings.setup.is_empty() && project_settings.verification_rules.is_empty() {
                 // No commands configured — always healthy; clear any stale failure.
                 if self.unhealthy_projects.remove(&project.id).is_some() {
                     let _ = self
@@ -109,8 +109,8 @@ impl CoordinatorActor {
 
             tracing::info!(
                 project_id = %project_id,
-                setup_count = project_cfg.0.len(),
-                verify_count = project_cfg.1.len(),
+                setup_count = project_settings.setup.len(),
+                rules_count = project_settings.verification_rules.len(),
                 "CoordinatorActor: spawning project health check"
             );
 
