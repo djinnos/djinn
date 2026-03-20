@@ -238,6 +238,68 @@ impl SlotHandle {
                             crate::roles::role_impl_for(crate::AgentType::Worker)
                         }
                     };
+
+                    // Look up the default DB AgentRole for this task's project + base_role.
+                    // Provides system_prompt_extensions, learned_prompt, mcp_servers, skills,
+                    // and verification_command overrides from the configurable role system.
+                    let (system_prompt_extensions, learned_prompt, mcp_servers, skills, role_verification_command) =
+                        if let Some(ref t) = task {
+                            use djinn_db::AgentRoleRepository;
+                            let role_repo = AgentRoleRepository::new(
+                                app_state.db.clone(),
+                                app_state.event_bus.clone(),
+                            );
+                            let base_role_name = role.config().name;
+                            match role_repo
+                                .get_default_for_base_role(&t.project_id, base_role_name)
+                                .await
+                            {
+                                Ok(Some(db_role)) => {
+                                    let mcp_servers = djinn_core::models::parse_json_array(&db_role.mcp_servers);
+                                    let skills = djinn_core::models::parse_json_array(&db_role.skills);
+                                    tracing::debug!(
+                                        task_id = %t.short_id,
+                                        role_name = %db_role.name,
+                                        base_role = %base_role_name,
+                                        has_extensions = !db_role.system_prompt_extensions.trim().is_empty(),
+                                        has_learned_prompt = db_role.learned_prompt.is_some(),
+                                        mcp_server_count = mcp_servers.len(),
+                                        skill_count = skills.len(),
+                                        has_model_preference = db_role.model_preference.is_some(),
+                                        has_verification_command = db_role.verification_command.is_some(),
+                                        "Lifecycle: resolved default DB role config"
+                                    );
+                                    (
+                                        db_role.system_prompt_extensions,
+                                        db_role.learned_prompt,
+                                        mcp_servers,
+                                        skills,
+                                        db_role.verification_command,
+                                    )
+                                }
+                                Ok(None) => {
+                                    tracing::debug!(
+                                        task_id = %t.short_id,
+                                        base_role = %base_role_name,
+                                        project_id = %t.project_id,
+                                        "Lifecycle: no default DB role configured; using base role defaults"
+                                    );
+                                    (String::new(), None, Vec::new(), Vec::new(), None)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        task_id = %t.short_id,
+                                        base_role = %base_role_name,
+                                        error = %e,
+                                        "Lifecycle: failed to load default DB role; using base role defaults"
+                                    );
+                                    (String::new(), None, Vec::new(), Vec::new(), None)
+                                }
+                            }
+                        } else {
+                            (String::new(), None, Vec::new(), Vec::new(), None)
+                        };
+
                     run_task_lifecycle(crate::actors::slot::lifecycle::TaskLifecycleParams {
                         task_id,
                         project_path,
@@ -247,6 +309,11 @@ impl SlotHandle {
                         cancel: kill,
                         pause,
                         event_tx: sink,
+                        system_prompt_extensions,
+                        learned_prompt,
+                        mcp_servers,
+                        skills,
+                        role_verification_command,
                         #[cfg(test)]
                         provider_override: None,
                     })
