@@ -24,9 +24,10 @@ mod search;
 
 pub use association::NoteAssociationEntry;
 pub use context::BuildContextResponse;
-pub use djinn_core::models::NoteDedupCandidate;
+pub use djinn_core::models::{ContradictionCandidate, NoteDedupCandidate};
 pub use scoring::{
-    CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, USER_CONFIRM, bayesian_update,
+    CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
+    USER_CONFIRM, bayesian_update,
 };
 
 pub use indexing::UpdateNoteIndexParams;

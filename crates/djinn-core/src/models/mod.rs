@@ -16,9 +16,9 @@ pub use credential::Credential;
 pub use epic::Epic;
 pub use git_settings::GitSettings;
 pub use note::{
-    BrokenLink, BuildContextResponse, GitLogEntry, GraphEdge, GraphNode, GraphResponse,
-    HealthReport, Note, NoteAbstract, NoteCompact, NoteDedupCandidate, NoteOverview,
-    NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
+    BrokenLink, BuildContextResponse, ContradictionCandidate, GitLogEntry, GraphEdge, GraphNode,
+    GraphResponse, HealthReport, Note, NoteAbstract, NoteCompact, NoteDedupCandidate, NoteOverview,
+    NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder, TypeRisk,
 };
 pub use note_association::{NoteAssociation, canonical_pair};
 pub use project::Project;
