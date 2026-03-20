@@ -19,6 +19,8 @@ pub struct CoordinatorStatus {
     pub tasks_dispatched: u64,
     pub sessions_recovered: u64,
     pub unhealthy_projects: HashMap<String, String>,
+    /// Tasks merged per hour per epic in the past hour (epic_id → count).
+    pub epic_throughput: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone)]

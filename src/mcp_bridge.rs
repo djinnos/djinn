@@ -71,6 +71,7 @@ impl CoordinatorOps for CoordinatorBridge {
             tasks_dispatched: s.tasks_dispatched,
             sessions_recovered: s.sessions_recovered,
             unhealthy_projects: s.unhealthy_projects,
+            epic_throughput: s.epic_throughput,
         })
     }
 
@@ -84,6 +85,7 @@ impl CoordinatorOps for CoordinatorBridge {
             tasks_dispatched: s.tasks_dispatched,
             sessions_recovered: s.sessions_recovered,
             unhealthy_projects: s.unhealthy_projects,
+            epic_throughput: s.epic_throughput,
         })
     }
 

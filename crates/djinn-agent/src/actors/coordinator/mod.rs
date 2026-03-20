@@ -49,6 +49,7 @@ pub struct CoordinatorDeps {
 
 mod dispatch;
 mod health;
+mod rules;
 
 /// Interval between stuck-detection passes (AGENT-08).
 const STUCK_INTERVAL: Duration = Duration::from_secs(30);
@@ -61,6 +62,7 @@ const TASK_OUTCOME_FAILED_CLOSE: &str = "failed_closed";
 /// Cooldown before re-dispatching a task that failed lifecycle setup
 /// (e.g. missing credential).  Prevents hot dispatch loops.
 const DISPATCH_COOLDOWN: Duration = Duration::from_secs(60);
+
 
 /// If a task becomes dispatch-ready again within this threshold of its last
 /// dispatch, it is considered a rapid failure and placed in cooldown.
@@ -89,6 +91,8 @@ pub struct CoordinatorStatus {
     /// Per-project health errors (project_id → error message).
     /// Only populated when queried for a specific project.
     pub unhealthy_projects: HashMap<String, String>,
+    /// Tasks merged per hour per epic (rolling 1-hour window).
+    pub epic_throughput: HashMap<String, usize>,
 }
 
 /// Internal snapshot published via `watch` channel so `get_status()` reads
@@ -100,6 +104,8 @@ struct SharedCoordinatorState {
     unhealthy_project_errors: HashMap<String, String>,
     dispatched: u64,
     recovered: u64,
+    /// Tasks merged per hour per epic (rolling window snapshot).
+    epic_throughput: HashMap<String, usize>,
 }
 
 impl SharedCoordinatorState {
@@ -127,6 +133,7 @@ impl SharedCoordinatorState {
             tasks_dispatched: self.dispatched,
             sessions_recovered: self.recovered,
             unhealthy_projects,
+            epic_throughput: self.epic_throughput.clone(),
         }
     }
 }
@@ -210,6 +217,10 @@ struct CoordinatorActor {
     last_stale_sweep: StdInstant,
     /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
     prune_tick_counter: u32,
+    /// Tick counter for Architect patrol (fires every ARCHITECT_PATROL_TICKS ticks ≈ 5 min)
+    architect_tick_counter: u32,
+    /// Rolling-window throughput tracking: epic_id → Vec of merge event instants.
+    throughput_events: HashMap<String, Vec<StdInstant>>,
     // Metrics
     dispatched: u64,
     recovered: u64,
@@ -260,6 +271,8 @@ impl CoordinatorActor {
             verification_tracker,
             last_stale_sweep: StdInstant::now(),
             prune_tick_counter: 0,
+            architect_tick_counter: 0,
+            throughput_events: HashMap::new(),
             dispatched: 0,
             recovered: 0,
         }
@@ -340,6 +353,13 @@ impl CoordinatorActor {
                     if self.prune_tick_counter >= 120 {
                         self.prune_tick_counter = 0;
                         self.prune_note_associations().await;
+                        self.evict_throughput_events();
+                    }
+                    // Architect patrol every ~5 min (rules::ARCHITECT_PATROL_TICKS ticks at 30s)
+                    self.architect_tick_counter += 1;
+                    if self.architect_tick_counter >= rules::ARCHITECT_PATROL_TICKS {
+                        self.architect_tick_counter = 0;
+                        self.maybe_run_architect_patrol().await;
                     }
                 }
             }
@@ -355,6 +375,7 @@ impl CoordinatorActor {
             unhealthy_project_errors: self.unhealthy_projects.clone(),
             dispatched: self.dispatched,
             recovered: self.recovered,
+            epic_throughput: self.throughput_snapshot(),
         });
     }
 
@@ -544,6 +565,16 @@ impl CoordinatorActor {
                 else {
                     return;
                 };
+                if task.status == "closed" {
+                    // Record throughput event when a task with a merge commit closes.
+                    if task.merge_commit_sha.is_some()
+                        && let Some(epic_id) = task.epic_id.as_deref()
+                    {
+                        self.record_merge_event(epic_id);
+                    }
+                    // Fire epic completion rules (spike/batch).
+                    self.on_task_closed(&task).await;
+                }
                 if matches!(
                     task.status.as_str(),
                     "open" | "needs_task_review" | "needs_pm_intervention" | "closed"
@@ -824,6 +855,7 @@ impl CoordinatorHandle {
             unhealthy_project_errors: HashMap::new(),
             dispatched: 0,
             recovered: 0,
+            epic_throughput: HashMap::new(),
         };
         let (status_tx, status_rx) = watch::channel(initial_state);
         let actor = CoordinatorActor::new(deps, receiver, sender.clone(), status_tx);
