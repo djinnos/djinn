@@ -41,6 +41,13 @@ vi.mock("@/stores/projectStore", () => ({
 // Mock hugeicons to avoid import issues
 vi.mock("@hugeicons/core-free-icons", () => ({
   KanbanIcon: "KanbanIcon",
+  Robot01Icon: "Robot01Icon",
+  ChartHistogramIcon: "ChartHistogramIcon",
+  ChatIcon: "ChatIcon",
+  ArrowDown01Icon: "ArrowDown01Icon",
+  Folder02Icon: "Folder02Icon",
+  PlusSignIcon: "PlusSignIcon",
+  LogoutSquare01Icon: "LogoutSquare01Icon",
 }));
 vi.mock("@hugeicons/react", () => ({
   HugeiconsIcon: ({ children }: { children?: React.ReactNode }) => <span>{children}</span>,

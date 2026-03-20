@@ -26,6 +26,8 @@ function parseProjectIdFromPath(pathname: string): string | undefined {
 /** Derive the current view from the pathname */
 function parseViewFromPath(pathname: string): ProjectView | null {
   if (pathname.includes("/chat")) return "chat";
+  if (pathname.includes("/agents")) return "agents";
+  if (pathname.includes("/metrics")) return "metrics";
   if (pathname.includes("/kanban") || pathname === "/") return "kanban";
   return null;
 }

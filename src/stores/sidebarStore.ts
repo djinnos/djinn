@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-export type ActiveView = 'kanban' | 'chat' | 'settings';
+export type ActiveView = 'kanban' | 'chat' | 'settings' | 'agents' | 'metrics';
 
 export interface SidebarState {
   isCollapsed: boolean;

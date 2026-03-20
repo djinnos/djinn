@@ -9,13 +9,17 @@ import {
   Play,
   Pause,
   Loader2,
-  ChevronDown,
-  FolderOpen,
-  Plus,
-  MessageSquare,
-  LogOut,
 } from 'lucide-react';
-import { KanbanIcon } from '@hugeicons/core-free-icons';
+import {
+  KanbanIcon,
+  Robot01Icon,
+  ChartHistogramIcon,
+  ChatIcon,
+  ArrowDown01Icon,
+  Folder02Icon,
+  PlusSignIcon,
+  LogoutSquare01Icon,
+} from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
 import logoSvg from '@/assets/logo.svg';
 import { useEffect, useCallback, useState } from 'react';
@@ -269,7 +273,7 @@ function ProjectListItem({
               onClick={canOpenPanel ? () => setHealthPanelOpen(true) : undefined}
             />
           ) : (
-            icon ?? <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+            icon ?? <HugeiconsIcon icon={Folder02Icon} className="h-3.5 w-3.5 shrink-0" />
           )}
           {!isCollapsed && (
             <>
@@ -400,7 +404,7 @@ function UserFooter({ isCollapsed }: { isCollapsed: boolean }) {
         className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
         title="Sign out"
       >
-        <LogOut className="h-3.5 w-3.5" />
+        <HugeiconsIcon icon={LogoutSquare01Icon} className="h-3.5 w-3.5" />
       </button>
     </div>
   );
@@ -419,6 +423,10 @@ export function Sidebar() {
   useEffect(() => {
     if (location.pathname.includes('/chat')) {
       setActiveSection('chat');
+    } else if (location.pathname.includes('/agents')) {
+      setActiveSection('agents');
+    } else if (location.pathname.includes('/metrics')) {
+      setActiveSection('metrics');
     } else if (location.pathname.startsWith('/settings')) {
       setActiveSection('settings');
     } else {
@@ -445,6 +453,14 @@ export function Sidebar() {
       case 'k':
         e.preventDefault();
         navigateToView('kanban');
+        break;
+      case 'a':
+        e.preventDefault();
+        navigateToView('agents');
+        break;
+      case 'm':
+        e.preventDefault();
+        navigateToView('metrics');
         break;
       case 's':
         e.preventDefault();
@@ -507,7 +523,7 @@ export function Sidebar() {
       {/* Navigation */}
       <nav className="flex-1 p-2 space-y-1 overflow-y-auto">
         <NavItem
-          icon={<MessageSquare className="h-4 w-4" />}
+          icon={<HugeiconsIcon icon={ChatIcon} className="h-4 w-4" />}
           label="Chat"
           hotkey="C"
           isActive={activeSection === 'chat'}
@@ -522,6 +538,22 @@ export function Sidebar() {
           isCollapsed={isCollapsed}
           onClick={() => navigateToView('kanban')}
         />
+        <NavItem
+          icon={<HugeiconsIcon icon={Robot01Icon} className="h-4 w-4" />}
+          label="Agents"
+          hotkey="A"
+          isActive={activeSection === 'agents'}
+          isCollapsed={isCollapsed}
+          onClick={() => navigateToView('agents')}
+        />
+        <NavItem
+          icon={<HugeiconsIcon icon={ChartHistogramIcon} className="h-4 w-4" />}
+          label="Metrics"
+          hotkey="M"
+          isActive={activeSection === 'metrics'}
+          isCollapsed={isCollapsed}
+          onClick={() => navigateToView('metrics')}
+        />
 
         {/* Projects Section */}
         <div className="pt-2">
@@ -534,7 +566,7 @@ export function Sidebar() {
                 isCollapsed && "justify-center px-0"
               )}
             >
-              <ChevronDown className={cn("h-3 w-3 shrink-0 transition-transform", !projectsExpanded && "-rotate-90")} />
+              <HugeiconsIcon icon={ArrowDown01Icon} className={cn("h-3 w-3 shrink-0 transition-transform", !projectsExpanded && "-rotate-90")} />
               {!isCollapsed && <span className="font-medium">Projects</span>}
             </button>
             {!isCollapsed && (
@@ -544,7 +576,7 @@ export function Sidebar() {
                 className="flex h-6 w-6 items-center justify-center rounded-md transition-colors text-muted-foreground hover:bg-white/10 hover:text-foreground shrink-0 mr-1"
                 title="Project settings"
               >
-                <Plus className="h-3.5 w-3.5" />
+                <HugeiconsIcon icon={PlusSignIcon} className="h-3.5 w-3.5" />
               </button>
             )}
           </div>
@@ -555,7 +587,7 @@ export function Sidebar() {
               <ProjectRow
                 projectPath={null}
                 label="All Projects"
-                icon={<FolderOpen className="h-3.5 w-3.5" />}
+                icon={<HugeiconsIcon icon={Folder02Icon} className="h-3.5 w-3.5" />}
                 isSelected={isAll}
                 isCollapsed={isCollapsed}
                 onClick={() => navigateToProject(ALL_PROJECTS)}
@@ -567,7 +599,7 @@ export function Sidebar() {
                   key={project.id}
                   projectPath={project.path ?? null}
                   label={project.name}
-                  icon={<FolderOpen className="h-3.5 w-3.5" />}
+                  icon={<HugeiconsIcon icon={Folder02Icon} className="h-3.5 w-3.5" />}
                   isSelected={selectedProjectId === project.id}
                   isCollapsed={isCollapsed}
                   onClick={() => navigateToProject(project.id)}

@@ -12,8 +12,6 @@ import { Textarea } from '@/components/ui/textarea';
 import { InlineError } from '@/components/InlineError';
 import { EmptyState } from '@/components/EmptyState';
 import { AgentConfig } from '@/components/AgentConfig';
-import { AgentRoles } from '@/components/AgentRoles';
-import { AgentMetricsDashboard } from '@/components/AgentMetricsDashboard';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
@@ -21,14 +19,12 @@ import { selectDirectory } from '@/tauri/commands';
 import { toast } from 'sonner';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
-type SettingsCategory = 'providers' | 'projects' | 'agents' | 'roles' | 'metrics' | 'github';
+type SettingsCategory = 'providers' | 'projects' | 'models' | 'github';
 
 const categories: Array<{ key: SettingsCategory; label: string }> = [
   { key: 'providers', label: 'Providers' },
   { key: 'projects', label: 'Projects' },
-  { key: 'agents', label: 'Agents' },
-  { key: 'roles', label: 'Roles' },
-  { key: 'metrics', label: 'Metrics' },
+  { key: 'models', label: 'Models' },
   { key: 'github', label: 'GitHub' },
 ];
 
@@ -668,9 +664,7 @@ export function SettingsPage() {
         <section className="min-h-0 min-w-0 flex-1 flex flex-col overflow-y-auto pb-6">
           {category === 'providers' && <ProvidersSettings />}
           {category === 'projects' && <ProjectsSettings />}
-          {category === 'agents' && <AgentConfig {...agentConfig} />}
-          {category === 'roles' && <AgentRoles />}
-          {category === 'metrics' && <AgentMetricsDashboard />}
+          {category === 'models' && <AgentConfig {...agentConfig} />}
           {category === 'github' && <GitHubSettings />}
         </section>
       </div>
