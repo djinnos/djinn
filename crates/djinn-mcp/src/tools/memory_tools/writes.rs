@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::tools::memory_tools::contradiction::{ContradictionAnalysisInput, run_contradiction_analysis};
+use crate::tools::memory_tools::contradiction::ContradictionAnalysisInput;
 use crate::tools::memory_tools::summaries::NoteSummaryService;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::{Note, NoteDedupCandidate};
@@ -959,7 +959,10 @@ impl DjinnMcpServer {
         });
     }
 
-    /// Stage 1: detect candidates and emit event. Stage 2: schedule LLM analysis.
+    /// Stage 1: detect candidates and emit event. Stage 2: send to analysis worker.
+    ///
+    /// The analysis worker is triggered only when stage 1 finds candidates and emits
+    /// the `contradiction_candidates` event — never on every write.
     async fn detect_emit_and_schedule_contradictions(
         &self,
         repo: &NoteRepository,
@@ -982,20 +985,18 @@ impl DjinnMcpServer {
             .event_bus()
             .send(DjinnEventEnvelope::contradiction_candidates(note, &candidates));
 
-        // Stage 2: schedule LLM classification
-        let db = self.state.db().clone();
+        // Stage 2: send to the contradiction analysis worker channel.
+        // The worker is only active when stage 1 emits candidates — satisfying the
+        // requirement that LLM analysis is triggered by the contradiction_candidates event.
         let input = ContradictionAnalysisInput {
             note_id: note.id.clone(),
             note_title: note.title.clone(),
-            note_created_at: note.created_at.clone(),
             note_summary: note
                 .abstract_
                 .clone()
                 .unwrap_or_else(|| note.content.chars().take(500).collect()),
             candidates,
         };
-        tokio::spawn(async move {
-            run_contradiction_analysis(db, input).await;
-        });
+        let _ = self.contradiction_analysis_tx.try_send(input);
     }
 }
