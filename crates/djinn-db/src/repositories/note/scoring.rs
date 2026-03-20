@@ -81,6 +81,28 @@ mod tests {
 }
 
 impl NoteRepository {
+    /// Directly set the confidence of a note to `value`, clamped to
+    /// `[CONFIDENCE_FLOOR, CONFIDENCE_CEILING]`.
+    ///
+    /// Unlike `update_confidence` (which applies a Bayesian signal update),
+    /// this sets the absolute value. Use this when the initial confidence is
+    /// known at creation time rather than derived from a signal (e.g. session-
+    /// extracted notes that start at 0.5 rather than the human-written default
+    /// of 1.0).
+    pub async fn set_confidence(&self, note_id: &str, value: f64) -> Result<()> {
+        self.db.ensure_initialized().await?;
+
+        let clamped = value.clamp(CONFIDENCE_FLOOR, CONFIDENCE_CEILING);
+
+        sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
+            .bind(clamped)
+            .bind(note_id)
+            .execute(self.db.pool())
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn update_confidence(&self, note_id: &str, signal: f64) -> Result<f64> {
         self.db.ensure_initialized().await?;
 
