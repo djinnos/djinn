@@ -43,6 +43,8 @@ pub enum AgentType {
     Reviewer,
     Lead,
     Planner,
+    /// Architect: handles spike, review tasks and proactive health monitoring (ADR-034).
+    Architect,
 }
 
 impl AgentType {
@@ -70,19 +72,25 @@ impl AgentType {
     pub(crate) fn tool_schemas(&self) -> Vec<serde_json::Value> {
         (self.role_config().tool_schemas)()
     }
+
+    /// Parse from a DB/wire string, including the `architect` variant.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "worker" => Some(Self::Worker),
+            "reviewer" => Some(Self::Reviewer),
+            "lead" => Some(Self::Lead),
+            "planner" => Some(Self::Planner),
+            "architect" => Some(Self::Architect),
+            _ => None,
+        }
+    }
 }
 
 impl std::str::FromStr for AgentType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "worker" => Ok(Self::Worker),
-            "reviewer" => Ok(Self::Reviewer),
-            "lead" => Ok(Self::Lead),
-            "planner" => Ok(Self::Planner),
-            _ => Err(format!("unknown agent type: {s}")),
-        }
+        Self::parse(s).ok_or_else(|| format!("unknown agent type: {s}"))
     }
 }
 
@@ -136,6 +144,7 @@ mod tests {
             AgentType::Reviewer,
             AgentType::Lead,
             AgentType::Planner,
+            AgentType::Architect,
         ] {
             assert_equivalent_to_role_config(agent_type);
         }
@@ -170,6 +179,7 @@ mod tests {
         assert_eq!(AgentType::Reviewer.dispatch_role(), "reviewer");
         assert_eq!(AgentType::Lead.dispatch_role(), "lead");
         assert_eq!(AgentType::Planner.dispatch_role(), "planner");
+        assert_eq!(AgentType::Architect.dispatch_role(), "architect");
     }
 
     #[test]
@@ -192,6 +202,9 @@ mod tests {
 
         let cfg = AgentType::Planner.role_config();
         assert_eq!((cfg.start_action)("open"), None);
+
+        let cfg = AgentType::Architect.role_config();
+        assert_eq!((cfg.start_action)("open"), Some(TransitionAction::Start));
     }
 
     #[test]
@@ -210,6 +223,10 @@ mod tests {
         );
         assert_eq!(
             (AgentType::Planner.role_config().release_action)(),
+            TransitionAction::Release
+        );
+        assert_eq!(
+            (AgentType::Architect.role_config().release_action)(),
             TransitionAction::Release
         );
     }

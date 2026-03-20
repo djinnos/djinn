@@ -2,6 +2,64 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+// ── IssueType ─────────────────────────────────────────────────────────────────
+
+/// All recognised task issue types.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueType {
+    /// Standard implementation task — full worker lifecycle with verification and review.
+    Task,
+    /// A product feature — same full lifecycle as `task`.
+    Feature,
+    /// A bug fix — same full lifecycle as `task`.
+    Bug,
+    /// Feasibility investigation — simple lifecycle (open → in_progress → closed).
+    Spike,
+    /// Open-ended research — simple lifecycle (open → in_progress → closed).
+    Research,
+    /// Epic/task decomposition planning — simple lifecycle, routed to Planner.
+    Decomposition,
+    /// Architecture/code review — simple lifecycle, routed to Architect.
+    Review,
+}
+
+impl IssueType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::Feature => "feature",
+            Self::Bug => "bug",
+            Self::Spike => "spike",
+            Self::Research => "research",
+            Self::Decomposition => "decomposition",
+            Self::Review => "review",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self> {
+        match s {
+            "task" => Ok(Self::Task),
+            "feature" => Ok(Self::Feature),
+            "bug" => Ok(Self::Bug),
+            "spike" => Ok(Self::Spike),
+            "research" => Ok(Self::Research),
+            "decomposition" => Ok(Self::Decomposition),
+            "review" => Ok(Self::Review),
+            other => Err(Error::Internal(format!("unknown issue_type: {other}"))),
+        }
+    }
+
+    /// Returns `true` for types that use the simple lifecycle
+    /// (open → in_progress → closed), skipping verification and review phases.
+    pub fn uses_simple_lifecycle(&self) -> bool {
+        matches!(
+            self,
+            Self::Spike | Self::Research | Self::Decomposition | Self::Review
+        )
+    }
+}
+
 /// Task board work item, always scoped under an epic.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
@@ -525,6 +583,52 @@ pub fn compute_transition(
             }
         }
     })
+}
+
+/// Validate a transition, routing to the appropriate lifecycle based on `issue_type`.
+///
+/// For `spike`, `research`, `decomposition`, and `review` task types the simple
+/// lifecycle applies: `open → in_progress → closed`.  Actions that belong only to
+/// the full worker lifecycle (submit_verification, verification_*, task_review_*,
+/// pm_intervention_*) are rejected for these types.
+///
+/// All other issue types (task, feature, bug) use the full lifecycle via
+/// [`compute_transition`].
+pub fn compute_transition_for_issue_type(
+    action: &TransitionAction,
+    from: &TaskStatus,
+    target_override: Option<&TaskStatus>,
+    issue_type: &str,
+) -> Result<TransitionApply> {
+    let uses_simple = IssueType::parse(issue_type)
+        .map(|it| it.uses_simple_lifecycle())
+        .unwrap_or(false);
+
+    if uses_simple {
+        // Restrict to actions that make sense in the simple lifecycle.
+        let allowed = matches!(
+            action,
+            TransitionAction::Start
+                | TransitionAction::Close
+                | TransitionAction::ForceClose
+                | TransitionAction::Reopen
+                | TransitionAction::Release
+                | TransitionAction::UserOverride
+                | TransitionAction::Escalate
+                | TransitionAction::PmInterventionStart
+                | TransitionAction::PmInterventionRelease
+                | TransitionAction::PmInterventionComplete
+                | TransitionAction::PmApprove
+                | TransitionAction::PmApproveConflict
+        );
+        if !allowed {
+            return Err(Error::InvalidTransition(format!(
+                "action {action:?} is not valid for issue_type '{issue_type}' (simple lifecycle: open → in_progress → closed)"
+            )));
+        }
+    }
+
+    compute_transition(action, from, target_override)
 }
 
 #[cfg(test)]

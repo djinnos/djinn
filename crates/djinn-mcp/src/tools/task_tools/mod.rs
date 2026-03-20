@@ -28,9 +28,9 @@ pub use types::*;
 
 #[tool_router(router = task_tool_router, vis = "pub")]
 impl DjinnMcpServer {
-    /// Create a new work item (task, feature, or bug) under an epic.
+    /// Create a new work item under an epic.
     #[tool(
-        description = "Create a new work item (task, feature, or bug) under an epic. Accepts epic_id as UUID or short_id. Use blocked_by to set blocker dependencies atomically at creation."
+        description = "Create a new work item (task, feature, bug, spike, research, decomposition, or review) under an epic. Accepts epic_id as UUID or short_id. Use blocked_by to set blocker dependencies atomically at creation. Spike/research/decomposition/review use a simple lifecycle (open → in_progress → closed)."
     )]
     pub async fn task_create(
         &self,

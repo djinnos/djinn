@@ -27,7 +27,8 @@ pub use session::{SessionRecord, SessionStatus};
 pub use session_message::SessionMessage;
 pub use settings::{DjinnSettings, Setting};
 pub use task::{
-    ActivityEntry, Task, TaskStatus, TransitionAction, TransitionApply, compute_transition,
+    ActivityEntry, IssueType, Task, TaskStatus, TransitionAction, TransitionApply,
+    compute_transition, compute_transition_for_issue_type,
 };
 
 /// Parse a JSON array string (e.g. '["a","b"]') into a `Vec<String>`.
