@@ -3,7 +3,7 @@ use crate::roles::DispatchContext;
 use djinn_core::models::{TaskStatus, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRoleRepository;
-use djinn_provider::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
+use djinn_provider::oauth::github_app::{GITHUB_APP_OAUTH_DB_KEY, GITHUB_INSTALLATION_ID_KEY};
 
 /// Result of a single `try_dispatch_to_pool` attempt.
 enum DispatchOutcome {
@@ -93,7 +93,9 @@ impl CoordinatorActor {
                 self.db.clone(),
                 crate::events::event_bus_for(&self.events_tx),
             );
-            cred_repo.exists(GITHUB_APP_OAUTH_DB_KEY).await.unwrap_or(false)
+            let has_token = cred_repo.exists(GITHUB_APP_OAUTH_DB_KEY).await.unwrap_or(false);
+            let has_installation = cred_repo.exists(GITHUB_INSTALLATION_ID_KEY).await.unwrap_or(false);
+            has_token && has_installation
         }
     }
 

@@ -1,6 +1,6 @@
 use super::*;
 use djinn_db::ProjectRepository;
-use djinn_provider::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
+use djinn_provider::oauth::github_app::{GITHUB_APP_OAUTH_DB_KEY, GITHUB_INSTALLATION_ID_KEY, refresh_installation_id};
 
 pub(super) async fn board_health_impl(
     server: &DjinnMcpServer,
@@ -33,13 +33,29 @@ pub(super) async fn board_health_impl(
                         server.state.db().clone(),
                         server.state.event_bus(),
                     );
-                    let github_connected = cred_repo
+                    let has_token = cred_repo
                         .exists(GITHUB_APP_OAUTH_DB_KEY)
                         .await
                         .unwrap_or(false);
-                    if !github_connected {
+                    let has_installation = cred_repo
+                        .exists(GITHUB_INSTALLATION_ID_KEY)
+                        .await
+                        .unwrap_or(false);
+                    if !has_token {
                         let warnings = parsed.warnings.get_or_insert_with(Vec::new);
                         warnings.push("github_not_connected".to_string());
+                    } else if !has_installation {
+                        // Token exists but no installation ID — try to fetch it now.
+                        // This handles the case where the user just installed the app.
+                        match refresh_installation_id(&cred_repo).await {
+                            Ok(id) => {
+                                tracing::info!(installation_id = %id, "board_health: fetched missing installation ID");
+                            }
+                            Err(_) => {
+                                let warnings = parsed.warnings.get_or_insert_with(Vec::new);
+                                warnings.push("github_app_not_installed".to_string());
+                            }
+                        }
                     }
                 }
 

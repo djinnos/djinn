@@ -34,7 +34,7 @@ export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
     for (const result of results) {
       if (!result) continue;
       const warnings = result.warnings as string[] | undefined;
-      if (warnings?.includes("github_not_connected")) {
+      if (warnings?.includes("github_not_connected") || warnings?.includes("github_app_not_installed")) {
         return true;
       }
     }
