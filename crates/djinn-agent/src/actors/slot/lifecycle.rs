@@ -1128,20 +1128,32 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         )
         .await;
 
-        // Spawn structural extraction as a background job for completed sessions.
+        // Spawn structural extraction as a background job for completed sessions,
+        // then chain LLM knowledge extraction after it.
         if session_status == SessionStatus::Completed
             && let Some(ref record_id) = current_record_id
         {
             let session_id_for_extraction = record_id.clone();
+            let session_id_for_llm = record_id.clone();
             let messages_snapshot = conversation.messages.clone();
             let app_state_for_extraction = app_state.clone();
+            let app_state_for_llm = app_state.clone();
             tokio::spawn(async move {
-                super::session_extraction::run_structural_extraction(
+                let taxonomy = super::session_extraction::run_structural_extraction(
                     session_id_for_extraction,
                     messages_snapshot,
                     app_state_for_extraction,
                 )
                 .await;
+                // LLM knowledge extraction after structural extraction
+                if let Some(taxonomy) = taxonomy {
+                    super::llm_extraction::run_llm_extraction(
+                        session_id_for_llm,
+                        taxonomy,
+                        app_state_for_llm,
+                    )
+                    .await;
+                }
             });
         }
 
@@ -1739,20 +1751,32 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     )
     .await;
 
-    // Spawn structural extraction for completed project-lifecycle sessions.
+    // Spawn structural extraction for completed project-lifecycle sessions,
+    // then chain LLM knowledge extraction after it.
     if session_status == SessionStatus::Completed
         && let Some(ref record_id) = current_record_id
     {
         let session_id_for_extraction = record_id.clone();
+        let session_id_for_llm = record_id.clone();
         let messages_snapshot = conversation.messages.clone();
         let app_state_for_extraction = app_state.clone();
+        let app_state_for_llm = app_state.clone();
         tokio::spawn(async move {
-            super::session_extraction::run_structural_extraction(
+            let taxonomy = super::session_extraction::run_structural_extraction(
                 session_id_for_extraction,
                 messages_snapshot,
                 app_state_for_extraction,
             )
             .await;
+            // LLM knowledge extraction after structural extraction
+            if let Some(taxonomy) = taxonomy {
+                super::llm_extraction::run_llm_extraction(
+                    session_id_for_llm,
+                    taxonomy,
+                    app_state_for_llm,
+                )
+                .await;
+            }
         });
     }
 
