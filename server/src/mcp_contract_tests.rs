@@ -1651,6 +1651,93 @@ mod task_tools {
     }
 
     #[tokio::test]
+    async fn task_create_with_blocked_by_sets_blockers() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db.clone());
+        let sid = initialize_mcp_session(&app).await;
+
+        // Create a blocker task first.
+        let blocker = mcp_call_tool(
+            &app,
+            &sid,
+            "task_create",
+            json!({"project": project.path, "epic_id": epic.id, "title": "Blocker task"}),
+        )
+        .await;
+        let blocker_id = blocker["id"].as_str().unwrap();
+
+        // Create a task that is blocked by the first.
+        let blocked = mcp_call_tool(
+            &app,
+            &sid,
+            "task_create",
+            json!({
+                "project": project.path,
+                "epic_id": epic.id,
+                "title": "Blocked task",
+                "blocked_by": [blocker_id]
+            }),
+        )
+        .await;
+        assert!(blocked["id"].as_str().is_some(), "task should be created");
+        assert!(blocked["error"].is_null(), "should not have error");
+
+        // Verify blockers were persisted.
+        let blockers = mcp_call_tool(
+            &app,
+            &sid,
+            "task_blockers_list",
+            json!({"project": project.path, "id": blocked["id"].as_str().unwrap()}),
+        )
+        .await;
+        let blockers_arr = blockers["blockers"].as_array().unwrap();
+        assert_eq!(blockers_arr.len(), 1);
+        assert_eq!(blockers_arr[0]["blocking_task_id"], blocker_id);
+    }
+
+    #[tokio::test]
+    async fn task_create_with_invalid_blocked_by_rejects_without_creating_task() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db.clone());
+        let sid = initialize_mcp_session(&app).await;
+
+        let fake_id = "00000000-0000-0000-0000-000000000000";
+
+        // Attempt to create a task with a non-existent blocker.
+        let result = mcp_call_tool(
+            &app,
+            &sid,
+            "task_create",
+            json!({
+                "project": project.path,
+                "epic_id": epic.id,
+                "title": "Should not exist",
+                "blocked_by": [fake_id]
+            }),
+        )
+        .await;
+        assert!(result["error"].as_str().is_some(), "should return error for invalid blocker");
+
+        // Verify no task was created (the task should not be in the DB).
+        let list = mcp_call_tool(
+            &app,
+            &sid,
+            "task_list",
+            json!({"project": project.path, "text": "Should not exist"}),
+        )
+        .await;
+        assert_eq!(
+            list["total_count"].as_i64().unwrap(),
+            0,
+            "no task should have been created when blocked_by resolution fails"
+        );
+    }
+
+    #[tokio::test]
     async fn task_show_found_and_not_found_shapes() {
         let db = create_test_db();
         let project = create_test_project(&db).await;

@@ -101,6 +101,22 @@ impl DjinnMcpServer {
 
         let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
 
+        // Pre-resolve blocker IDs BEFORE inserting the task so we fail fast
+        // without leaving an orphaned unblocked task in the DB.
+        let resolved_blocker_ids = if let Some(ref blockers) = p.blocked_by {
+            let mut ids = Vec::with_capacity(blockers.len());
+            for blocker_ref in blockers {
+                let blocking_id = match self.resolve_task_not_epic(&project_id, blocker_ref).await {
+                    Ok(id) => id,
+                    Err(e) => return Json(ErrorOr::Error(e)),
+                };
+                ids.push(blocking_id);
+            }
+            ids
+        } else {
+            Vec::new()
+        };
+
         let task = match repo
             .create_in_project(
                 &project_id,
@@ -168,21 +184,11 @@ impl DjinnMcpServer {
             }
         }
 
-        // Apply blocked_by relationships atomically at creation to prevent a
-        // race where the dispatcher claims the task before blockers are set.
-        if let Some(ref blockers) = p.blocked_by {
-            let mut blocker_ids = Vec::new();
-            for blocker_ref in blockers {
-                let blocking_id = match self.resolve_task_not_epic(&project_id, blocker_ref).await {
-                    Ok(id) => id,
-                    Err(e) => return Json(ErrorOr::Error(e)),
-                };
-                blocker_ids.push(blocking_id);
-            }
-            if !blocker_ids.is_empty()
-                && let Err(e) = repo
-                    .update_blockers_atomic(&task.id, &blocker_ids, &[])
-                    .await
+        // Apply pre-resolved blocked_by relationships atomically.
+        if !resolved_blocker_ids.is_empty() {
+            if let Err(e) = repo
+                .update_blockers_atomic(&task.id, &resolved_blocker_ids, &[])
+                .await
             {
                 return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
             }
