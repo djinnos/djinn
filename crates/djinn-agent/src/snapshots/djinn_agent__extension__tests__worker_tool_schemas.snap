@@ -1,6 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension.rs
-assertion_line: 2881
+assertion_line: 2890
 expression: tool_schemas_worker()
 ---
 [
@@ -59,11 +59,11 @@ expression: tool_schemas_worker()
     "name": "task_list"
   },
   {
-    "description": "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect PM guidance, reviewer feedback, or verification history.",
+    "description": "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.",
     "inputSchema": {
       "properties": {
         "actor_role": {
-          "description": "Filter by actor: pm, task_reviewer, worker, verification, system",
+          "description": "Filter by actor: lead, reviewer, worker, verification, system",
           "type": "string"
         },
         "event_type": {
@@ -354,7 +354,7 @@ expression: tool_schemas_worker()
     "name": "apply_patch"
   },
   {
-    "description": "Request PM intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the PM queue. Your session will effectively end after this call.",
+    "description": "Request Lead intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the Lead queue. Your session will effectively end after this call.",
     "inputSchema": {
       "properties": {
         "id": {
@@ -362,11 +362,11 @@ expression: tool_schemas_worker()
           "type": "string"
         },
         "reason": {
-          "description": "Why PM intervention is needed (e.g. task too large, design ambiguous, blocked on decision)",
+          "description": "Why Lead intervention is needed (e.g. task too large, design ambiguous, blocked on decision)",
           "type": "string"
         },
         "suggested_breakdown": {
-          "description": "Optional suggested split: list of smaller tasks the PM should create",
+          "description": "Optional suggested split: list of smaller tasks the Lead should create",
           "type": "string"
         }
       },
