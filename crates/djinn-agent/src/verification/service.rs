@@ -3,10 +3,10 @@ use std::time::Instant;
 
 use crate::commands::run_commands;
 use anyhow::Result;
-use djinn_core::commands::CommandResult;
+use djinn_core::commands::{CommandResult, CommandSpec};
 use djinn_db::VerificationCacheRepository;
 
-use super::settings::load_commands;
+use super::settings::{load_commands, verification_cache_key};
 
 #[derive(Debug, Clone)]
 pub struct VerificationResult {
@@ -21,24 +21,41 @@ pub struct VerificationResult {
 ///
 /// Setup commands always run (even on cache hit).
 /// Verification commands are skipped when a passing cached result exists for
-/// (project_id, commit_sha).
+/// `(project_id, cache_key)` where `cache_key` encodes both the commit SHA and
+/// the resolved scoped command set.
+///
+/// `scoped_commands` is the pre-resolved list of shell command strings to run
+/// as the verification phase.  Pass an empty slice to skip verification
+/// (vacuous pass, no caching).
 pub async fn verify_commit(
     project_id: &str,
     commit_sha: &str,
     worktree_path: &Path,
     db: &djinn_db::Database,
+    scoped_commands: &[String],
 ) -> Result<VerificationResult> {
     let start = Instant::now();
     let cache_repo = VerificationCacheRepository::new(db.clone());
 
-    let (setup_commands, verification_commands) =
-        load_commands(worktree_path).map_err(anyhow::Error::msg)?;
+    let (setup_commands, _) = load_commands(worktree_path).map_err(anyhow::Error::msg)?;
 
     let setup_results = run_commands(&setup_commands, worktree_path)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let cached = cache_repo.get(project_id, commit_sha).await?.is_some();
+    let verification_specs: Vec<CommandSpec> = scoped_commands
+        .iter()
+        .enumerate()
+        .map(|(i, cmd)| CommandSpec {
+            name: format!("verify-{}", i + 1),
+            command: cmd.clone(),
+            timeout_secs: None,
+        })
+        .collect();
+
+    let cache_key = verification_cache_key(commit_sha, scoped_commands);
+
+    let cached = cache_repo.get(project_id, &cache_key).await?.is_some();
     if cached {
         let total_duration_ms = start.elapsed().as_millis() as u64;
         return Ok(VerificationResult {
@@ -50,7 +67,7 @@ pub async fn verify_commit(
         });
     }
 
-    let verification_results = run_commands(&verification_commands, worktree_path)
+    let verification_results = run_commands(&verification_specs, worktree_path)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     let passed = verification_results
@@ -66,7 +83,7 @@ pub async fn verify_commit(
         cache_repo
             .insert(
                 project_id,
-                commit_sha,
+                &cache_key,
                 &output_json,
                 verification_duration_ms as i64,
             )
@@ -95,7 +112,6 @@ mod tests {
         Database::open_in_memory().expect("in-memory db")
     }
 
-    /// Write a `.djinn/settings.json` into the given directory.
     fn write_settings(dir: &Path, setup_json: &str, verification_json: &str) {
         let djinn_dir = dir.join(".djinn");
         std::fs::create_dir_all(&djinn_dir).expect("create .djinn");
@@ -126,8 +142,9 @@ mod tests {
             r#"[{"name":"verify","command":"echo ok","timeout_secs":10}]"#,
         );
         let state = test_db();
+        let scoped = vec!["echo ok".to_string()];
 
-        let result = verify_commit("p1", "sha1", dir.path(), &state)
+        let result = verify_commit("p1", "sha1", dir.path(), &state, &scoped)
             .await
             .expect("verify");
 
@@ -138,7 +155,8 @@ mod tests {
         assert!(marker.exists());
 
         let repo = VerificationCacheRepository::new(state.clone());
-        let cached = repo.get("p1", "sha1").await.expect("get cache");
+        let cache_key = super::super::settings::verification_cache_key("sha1", &scoped);
+        let cached = repo.get("p1", &cache_key).await.expect("get cache");
         assert!(cached.is_some());
     }
 
@@ -160,20 +178,22 @@ mod tests {
         );
         let state = test_db();
         let repo = VerificationCacheRepository::new(state.clone());
+        let scoped = vec![format!("touch {}", verify_marker.display())];
+        let cache_key = super::super::settings::verification_cache_key("sha2", &scoped);
         let serialized = serde_json::to_string(&vec![CommandResult {
-            name: "verify".into(),
-            command: "echo ok".into(),
+            name: "verify-1".into(),
+            command: scoped[0].clone(),
             exit_code: 0,
             stdout: "ok".into(),
             stderr: String::new(),
             duration_ms: 1,
         }])
         .expect("serialize");
-        repo.insert("p1", "sha2", &serialized, 1)
+        repo.insert("p1", &cache_key, &serialized, 1)
             .await
             .expect("seed cache");
 
-        let result = verify_commit("p1", "sha2", dir.path(), &state)
+        let result = verify_commit("p1", "sha2", dir.path(), &state, &scoped)
             .await
             .expect("verify");
 
@@ -194,8 +214,9 @@ mod tests {
             r#"[{"name":"verify","command":"false","timeout_secs":10}]"#,
         );
         let state = test_db();
+        let scoped = vec!["false".to_string()];
 
-        let result = verify_commit("p1", "sha3", dir.path(), &state)
+        let result = verify_commit("p1", "sha3", dir.path(), &state, &scoped)
             .await
             .expect("verify");
 
@@ -205,16 +226,17 @@ mod tests {
         assert_ne!(result.verification_results[0].exit_code, 0);
 
         let repo = VerificationCacheRepository::new(state.clone());
-        let cached = repo.get("p1", "sha3").await.expect("get cache");
+        let cache_key = super::super::settings::verification_cache_key("sha3", &scoped);
+        let cached = repo.get("p1", &cache_key).await.expect("get cache");
         assert!(cached.is_none());
     }
 
     #[tokio::test]
-    async fn verify_commit_no_settings_file_passes_with_no_commands() {
+    async fn verify_commit_no_commands_passes_vacuously() {
         let dir = tempdir_in_tmp();
         let state = test_db();
 
-        let result = verify_commit("p1", "sha5", dir.path(), &state)
+        let result = verify_commit("p1", "sha5", dir.path(), &state, &[])
             .await
             .expect("verify");
 
@@ -222,5 +244,23 @@ mod tests {
         assert!(!result.cached);
         assert!(result.setup_results.is_empty());
         assert!(result.verification_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn verify_commit_different_scoped_commands_get_different_cache_keys() {
+        let dir = tempdir_in_tmp();
+        let state = test_db();
+
+        let full_cmds = vec!["echo full".to_string()];
+        let result = verify_commit("p1", "sha6", dir.path(), &state, &full_cmds)
+            .await
+            .expect("verify full");
+        assert!(result.passed);
+
+        let scoped_cmds = vec!["echo scoped".to_string()];
+        let result = verify_commit("p1", "sha6", dir.path(), &state, &scoped_cmds)
+            .await
+            .expect("verify scoped");
+        assert!(!result.cached);
     }
 }

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::context::AgentContext;
 use crate::verification::StepEvent;
+use crate::verification::scoped::resolve_scoped_commands;
 use crate::verification::service::verify_commit;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::TransitionAction;
@@ -152,6 +153,26 @@ pub(crate) fn spawn_verification(task_id: String, project_path: String, app_stat
     ));
 }
 
+/// Resolve the role-level `verification_command` override for the given task.
+///
+/// Returns `None` when the task has no `agent_type`, the role cannot be found,
+/// or the role's `verification_command` is `None` / empty.
+async fn role_verification_command_for_task(
+    task: &djinn_core::models::Task,
+    app_state: &AgentContext,
+) -> Option<String> {
+    let specialist_name = task.agent_type.as_deref().filter(|s| !s.is_empty())?;
+    let role_repo =
+        djinn_db::AgentRoleRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let role = role_repo
+        .get_by_name_for_project(&task.project_id, specialist_name)
+        .await
+        .ok()
+        .flatten()?;
+    role.verification_command
+        .filter(|cmd| !cmd.trim().is_empty())
+}
+
 async fn run_verification_pipeline(
     task_id: &str,
     project_path: &str,
@@ -165,8 +186,17 @@ async fn run_verification_pipeline(
     let (worktree_path, _) = prepare_worktree(&project_dir, &task, app_state).await?;
     let commit_sha = resolve_head_commit(&worktree_path)?;
 
+    // Resolve scoped verification commands (AC-1 through AC-7).
+    let role_cmd_override = role_verification_command_for_task(&task, app_state).await;
+    let target_branch = default_target_branch(&task.project_id, app_state).await;
+    let scoped_commands = resolve_scoped_commands(
+        &worktree_path,
+        &target_branch,
+        role_cmd_override.as_deref(),
+    );
+
     let result =
-        verify_commit(&task.project_id, &commit_sha, &worktree_path, &app_state.db).await?;
+        verify_commit(&task.project_id, &commit_sha, &worktree_path, &app_state.db, &scoped_commands).await?;
     emit_verification_steps(&task.project_id, Some(task_id), &result, app_state).await;
 
     if !result.passed {
@@ -239,7 +269,16 @@ pub(crate) async fn run_verification_gate(
         .await
         .map_err(|e| format!("failed to create verification worktree: {e}"))?;
 
-    let result = verify_commit(&task.project_id, &commit_sha, &worktree_path, &app_state.db)
+    // Resolve scoped verification commands (AC-1 through AC-7).
+    let role_cmd_override = role_verification_command_for_task(&task, app_state).await;
+    let target_branch = default_target_branch(&task.project_id, app_state).await;
+    let scoped_commands = resolve_scoped_commands(
+        &worktree_path,
+        &target_branch,
+        role_cmd_override.as_deref(),
+    );
+
+    let result = verify_commit(&task.project_id, &commit_sha, &worktree_path, &app_state.db, &scoped_commands)
         .await
         .map_err(|e| format!("verification execution failed: {e}"))?;
     emit_verification_steps(&task.project_id, Some(task_id), &result, app_state).await;

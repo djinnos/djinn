@@ -660,6 +660,7 @@ dependencies = [
  "djinn-provider",
  "futures",
  "git2",
+ "globset",
  "insta",
  "landlock",
  "libc",
