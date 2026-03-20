@@ -644,6 +644,135 @@ impl CoordinatorActor {
         }
     }
 
+    /// Dispatch an Architect escalation: create a review task, add a comment linking it
+    /// to the source task, then dispatch the Architect to it.
+    ///
+    /// Called when Lead calls `request_architect` or when auto-escalation fires on the
+    /// 2nd `request_pm` for the same task.
+    pub(super) async fn dispatch_architect_escalation(
+        &mut self,
+        source_task_id: &str,
+        reason: &str,
+        project_id: &str,
+    ) {
+        let model_ids = self.resolve_dispatch_models_for_role("architect").await;
+        if model_ids.is_empty() {
+            tracing::warn!(
+                source_task_id = %source_task_id,
+                "CoordinatorActor: architect escalation — no model configured for architect role"
+            );
+            return;
+        }
+
+        let Some(project_path) = self.project_path_for_id(project_id).await else {
+            tracing::warn!(
+                project_id = %project_id,
+                source_task_id = %source_task_id,
+                "CoordinatorActor: architect escalation — project path not found"
+            );
+            return;
+        };
+
+        let task_repo = TaskRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let title = format!("Architect escalation: {}", &reason[..reason.len().min(80)]);
+        let description = format!(
+            "Escalated from task {source_task_id}. Lead could not resolve — Architect review required.\n\nReason: {reason}"
+        );
+        let review_task = match task_repo
+            .create_in_project(
+                project_id,
+                None,
+                &title,
+                &description,
+                "Review the escalated task and either resolve it or leave a 'Requires human review' comment.",
+                "review",
+                0,
+                "system",
+                Some("open"),
+            )
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    project_id = %project_id,
+                    source_task_id = %source_task_id,
+                    "CoordinatorActor: architect escalation — failed to create review task"
+                );
+                return;
+            }
+        };
+
+        // Log a comment on the source task linking to the architect review task.
+        let comment_payload = serde_json::json!({
+            "body": format!(
+                "[ARCHITECT_ESCALATION] Escalated to Architect review task {}. Reason: {}",
+                review_task.short_id, reason
+            )
+        })
+        .to_string();
+        let _ = task_repo
+            .log_activity(
+                Some(source_task_id),
+                "coordinator",
+                "system",
+                "comment",
+                &comment_payload,
+            )
+            .await;
+
+        let task_id = review_task.id.clone();
+        let project_path_owned = project_path.clone();
+        let outcome = self
+            .try_dispatch_to_pool(
+                &review_task.short_id,
+                &model_ids,
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = task_id.clone();
+                    let pp = project_path_owned.clone();
+                    let mid = model_id.to_owned();
+                    async move { pool.dispatch(&tid, &pp, &mid).await }
+                },
+            )
+            .await;
+
+        match outcome {
+            DispatchOutcome::Dispatched => {
+                tracing::info!(
+                    review_task_id = %review_task.short_id,
+                    review_task_uuid = %review_task.id,
+                    source_task_id = %source_task_id,
+                    project_id = %project_id,
+                    "CoordinatorActor: Architect escalation dispatched"
+                );
+                self.last_dispatched
+                    .insert(review_task.id.clone(), StdInstant::now());
+                self.dispatched += 1;
+                self.publish_status();
+            }
+            DispatchOutcome::AtCapacity => {
+                tracing::debug!(
+                    "CoordinatorActor: architect escalation — Architect model at capacity, will retry next cycle"
+                );
+            }
+            DispatchOutcome::PoolDead => {
+                tracing::error!(
+                    "CoordinatorActor: architect escalation — slot pool actor dead"
+                );
+            }
+            DispatchOutcome::Failed => {
+                tracing::debug!(
+                    "CoordinatorActor: architect escalation — no model could accept Architect dispatch"
+                );
+            }
+        }
+    }
+
     /// Dispatch an Architect patrol session every 5 minutes when:
     ///   - At least one open epic exists (there is active work to review).
     ///   - No Architect session is currently running.
