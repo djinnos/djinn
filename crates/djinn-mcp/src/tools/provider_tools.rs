@@ -693,6 +693,12 @@ impl DjinnMcpServer {
                     .map(|_| ()),
                 Err(e) => Err(e),
             },
+            OAuthFlowKind::GitHubApp => {
+                use djinn_provider::oauth::github_app;
+                github_app::run_github_app_flow(&credential_repo)
+                    .await
+                    .map(|_| ())
+            }
         };
 
         match result {
@@ -927,10 +933,17 @@ impl DjinnMcpServer {
             // Delete the well-known OAuth DB credential keys for each OAuth key name.
             const CODEX_OAUTH_DB_KEY: &str = "__OAUTH_CHATGPT_CODEX";
             const COPILOT_OAUTH_DB_KEY: &str = "__OAUTH_GITHUB_COPILOT";
+            const GITHUB_APP_OAUTH_DB_KEY: &str = "__OAUTH_GITHUB_APP";
+            const GITHUB_INSTALLATION_ID_KEY: &str = "__GITHUB_INSTALLATION_ID";
             for key in &oauth_keys {
                 let db_key = match key.as_str() {
                     "CHATGPT_CODEX_TOKEN" => CODEX_OAUTH_DB_KEY,
                     "GITHUB_COPILOT_TOKEN" => COPILOT_OAUTH_DB_KEY,
+                    "GITHUB_APP_TOKEN" => {
+                        // Also remove the installation ID when clearing GitHub App tokens.
+                        let _ = credential_repo.delete(GITHUB_INSTALLATION_ID_KEY).await;
+                        GITHUB_APP_OAUTH_DB_KEY
+                    }
                     _ => continue,
                 };
                 let _ = credential_repo.delete(db_key).await;
