@@ -1,6 +1,5 @@
 ---
 source: src/server/mod.rs
-assertion_line: 583
 expression: signatures
 ---
 [
@@ -3189,6 +3188,29 @@ expression: signatures
     },
     "name": "project_config_get",
     "output_schema": {
+      "$defs": {
+        "VerificationRuleDto": {
+          "description": "A single verification rule returned in project config.",
+          "properties": {
+            "commands": {
+              "description": "One or more shell commands to run when the pattern matches.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "match_pattern": {
+              "description": "Glob pattern (e.g. `src/**/*.rs`, `**` for catch-all).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "match_pattern",
+            "commands"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "auto_merge": {
@@ -3209,6 +3231,13 @@ expression: signatures
         },
         "target_branch": {
           "type": "string"
+        },
+        "verification_rules": {
+          "description": "File-pattern-to-command mapping for selective verification.\nEmpty list means fall back to full-project verification.",
+          "items": {
+            "$ref": "#/$defs/VerificationRuleDto"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -3216,7 +3245,8 @@ expression: signatures
         "project",
         "target_branch",
         "auto_merge",
-        "sync_enabled"
+        "sync_enabled",
+        "verification_rules"
       ],
       "title": "ProjectConfigResponse",
       "type": "object"
@@ -3246,6 +3276,29 @@ expression: signatures
     },
     "name": "project_config_set",
     "output_schema": {
+      "$defs": {
+        "VerificationRuleDto": {
+          "description": "A single verification rule returned in project config.",
+          "properties": {
+            "commands": {
+              "description": "One or more shell commands to run when the pattern matches.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "match_pattern": {
+              "description": "Glob pattern (e.g. `src/**/*.rs`, `**` for catch-all).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "match_pattern",
+            "commands"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "auto_merge": {
@@ -3266,6 +3319,13 @@ expression: signatures
         },
         "target_branch": {
           "type": "string"
+        },
+        "verification_rules": {
+          "description": "File-pattern-to-command mapping for selective verification.\nEmpty list means fall back to full-project verification.",
+          "items": {
+            "$ref": "#/$defs/VerificationRuleDto"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -3273,7 +3333,8 @@ expression: signatures
         "project",
         "target_branch",
         "auto_merge",
-        "sync_enabled"
+        "sync_enabled",
+        "verification_rules"
       ],
       "title": "ProjectConfigResponse",
       "type": "object"
