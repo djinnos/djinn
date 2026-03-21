@@ -587,8 +587,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_contract_desktop_critical_tools_success_shapes() {
-        let (app, project_path, _project_dir) =
-            test_helpers::create_test_app_with_project().await;
+        let (app, project_path, _project_dir) = test_helpers::create_test_app_with_project().await;
         let session_id = test_helpers::initialize_mcp_session(&app).await;
 
         let provider_catalog = test_helpers::mcp_call_tool(
@@ -668,8 +667,7 @@ mod tests {
     async fn mcp_contract_task_and_epic_snapshot_shapes() {
         use insta::assert_json_snapshot;
 
-        let (app, project_path, _project_dir) =
-            test_helpers::create_test_app_with_project().await;
+        let (app, project_path, _project_dir) = test_helpers::create_test_app_with_project().await;
         let session_id = test_helpers::initialize_mcp_session(&app).await;
 
         let epic = test_helpers::mcp_call_tool(
@@ -933,8 +931,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_contract_board_health_response_shape_has_required_fields() {
-        let (app, project_path, _project_dir) =
-            test_helpers::create_test_app_with_project().await;
+        let (app, project_path, _project_dir) = test_helpers::create_test_app_with_project().await;
         let session_id = test_helpers::initialize_mcp_session(&app).await;
 
         let health = test_helpers::mcp_call_tool(
