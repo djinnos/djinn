@@ -24,7 +24,8 @@ export interface SettingsActions {
   addModel: (model: { model: string; provider: string }) => void;
   removeModel: (index: number) => void;
   reorderModels: (fromIndex: number, toIndex: number) => void;
-  updateMaxSessions: (index: number, maxConcurrent: number) => void;
+  updateMaxSessions: (indexOrModelId: number | string, maxConcurrent: number) => void;
+  toggleRoleForModel: (indexOrModelId: number | string, role: string) => void;
   removeModelsByProvider: (provider: string) => void;
   saveSettings: () => Promise<void>;
   resetError: () => void;
@@ -95,14 +96,27 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
     set({ models: newModels, hasUnsavedChanges: true });
   },
 
-  updateMaxSessions: (index: number, maxConcurrent: number) => {
+  updateMaxSessions: (indexOrModelId: number | string, maxConcurrent: number) => {
     const { models } = get();
+    const index = typeof indexOrModelId === 'number'
+      ? indexOrModelId
+      : models.findIndex((m) => m.model === indexOrModelId || `${m.provider}/${m.model}` === indexOrModelId);
     const entry = models[index];
     if (!entry) return;
 
     const newModels = [...models];
     newModels[index] = { ...entry, max_concurrent: maxConcurrent };
     set({ models: newModels, hasUnsavedChanges: true });
+  },
+
+  toggleRoleForModel: (indexOrModelId: number | string, _role: string) => {
+    const { models } = get();
+    const index = typeof indexOrModelId === 'number'
+      ? indexOrModelId
+      : models.findIndex((m) => m.model === indexOrModelId || `${m.provider}/${m.model}` === indexOrModelId);
+    if (index < 0 || !models[index]) return;
+    // Role toggling is a no-op at the store level for now (roles are managed server-side)
+    set({ hasUnsavedChanges: true });
   },
 
   removeModelsByProvider: (provider: string) => {
