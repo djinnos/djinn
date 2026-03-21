@@ -574,7 +574,7 @@ expression: tool_schemas_architect()
       },
       "type": "object"
     },
-    "name": "role_metrics"
+    "name": "agent_metrics"
   },
   {
     "description": "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer, resolver base_role). Do NOT use on architect, lead, or planner roles.",

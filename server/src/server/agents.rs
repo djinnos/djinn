@@ -18,11 +18,11 @@ use djinn_db::{
 pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/agents", get(list_agents).post(create_agent))
-        // /roles/metrics must be registered before /roles/:id to avoid being
+        // /agents/metrics must be registered before /agents/:id to avoid being
         // captured as a path parameter.
         .route("/agents/metrics", get(agent_metrics))
         .route(
-            "/roles/{id}/learned-prompt/history",
+            "/agents/{id}/learned-prompt/history",
             get(learned_prompt_history),
         )
         .route("/agents/{id}/learned-prompt", delete(clear_learned_prompt))
@@ -79,7 +79,7 @@ impl From<&Agent> for AgentResponse {
     }
 }
 
-// ── GET /roles ────────────────────────────────────────────────────────────────
+// ── GET /agents ───────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct ListQuery {
@@ -96,7 +96,7 @@ async fn list_agents(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<ListResponse>, (StatusCode, String)> {
     let repo = AgentRepository::new(state.db().clone(), state.event_bus());
-    let roles = if let Some(project_id) = q.project_id {
+    let agents = if let Some(project_id) = q.project_id {
         repo.list_for_project(AgentListQuery {
             project_id,
             base_role: None,
@@ -112,11 +112,11 @@ async fn list_agents(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     };
     Ok(Json(ListResponse {
-        agents: roles.iter().map(AgentResponse::from).collect(),
+        agents: agents.iter().map(AgentResponse::from).collect(),
     }))
 }
 
-// ── POST /roles ───────────────────────────────────────────────────────────────
+// ── POST /agents ──────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct CreateBody {
@@ -156,7 +156,7 @@ async fn create_agent(
     Ok(Json(AgentResponse::from(&role)))
 }
 
-// ── PUT /roles/:id ────────────────────────────────────────────────────────────
+// ── PUT /agents/:id ───────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct UpdateBody {
@@ -211,7 +211,7 @@ async fn update_agent(
     Ok(Json(AgentResponse::from(&updated)))
 }
 
-// ── DELETE /roles/:id ─────────────────────────────────────────────────────────
+// ── DELETE /agents/:id ────────────────────────────────────────────────────────
 
 async fn delete_agent(
     State(state): State<AppState>,
@@ -229,7 +229,7 @@ async fn delete_agent(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── GET /roles/metrics ────────────────────────────────────────────────────────
+// ── GET /agents/metrics ───────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct MetricsQuery {
@@ -282,7 +282,7 @@ async fn agent_metrics(
     };
 
     let repo = AgentRepository::new(state.db().clone(), state.event_bus());
-    let roles = repo
+    let agents = repo
         .list_for_project(AgentListQuery {
             project_id: project_id.clone(),
             base_role: None,
@@ -293,9 +293,9 @@ async fn agent_metrics(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .agents;
 
-    let mut metrics = Vec::with_capacity(roles.len());
-    for role in &roles {
-        let agent_type = base_role_to_agent_type(&role.base_role);
+    let mut metrics = Vec::with_capacity(agents.len());
+    for agent in &agents {
+        let agent_type = base_role_to_agent_type(&agent.base_role);
         let m = repo
             .get_metrics(&project_id, agent_type, 30)
             .await
@@ -309,10 +309,10 @@ async fn agent_metrics(
             });
         let has_data = m.completed_task_count > 0;
         metrics.push(AgentMetricsItem {
-            agent_id: role.id.clone(),
-            agent_name: role.name.clone(),
-            base_role: role.base_role.clone(),
-            is_default: role.is_default,
+            agent_id: agent.id.clone(),
+            agent_name: agent.name.clone(),
+            base_role: agent.base_role.clone(),
+            is_default: agent.is_default,
             task_count: m.completed_task_count,
             success_rate: has_data.then_some(m.success_rate),
             avg_token_usage: has_data.then_some(m.avg_tokens),
@@ -330,7 +330,7 @@ async fn agent_metrics(
     }))
 }
 
-// ── GET /roles/:id/learned-prompt/history ─────────────────────────────────────
+// ── GET /agents/:id/learned-prompt/history ────────────────────────────────────
 
 #[derive(Serialize)]
 struct AmendmentResponse {
@@ -390,7 +390,7 @@ async fn learned_prompt_history(
     }))
 }
 
-// ── DELETE /roles/:id/learned-prompt ─────────────────────────────────────────
+// ── DELETE /agents/:id/learned-prompt ────────────────────────────────────────
 
 async fn clear_learned_prompt(
     State(state): State<AppState>,

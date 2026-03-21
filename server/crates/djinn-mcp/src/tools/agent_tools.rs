@@ -64,7 +64,7 @@ fn parse_json_array_any(raw: &str) -> Vec<AnyJson> {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct AgentSingleResponse {
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    pub role: Option<AgentModel>,
+    pub agent: Option<AgentModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -118,7 +118,7 @@ fn validate_agent_name(name: &str) -> Result<String, String> {
 pub struct AgentCreateParams {
     /// Absolute project path.
     pub project: String,
-    /// Unique role name within the project.
+    /// Unique agent name within the project.
     pub name: String,
     /// Base role to extend. One of: worker, lead, planner, architect, reviewer, resolver.
     pub base_role: String,
@@ -129,9 +129,9 @@ pub struct AgentCreateParams {
     pub model_preference: Option<String>,
     /// Custom verification command (falls back to project default).
     pub verification_command: Option<String>,
-    /// Additional MCP server refs for this role.
+    /// Additional MCP server refs for this agent.
     pub mcp_servers: Option<Vec<AnyJson>>,
-    /// Skills (prompt templates) available to this role.
+    /// Skills (prompt templates) available to this agent.
     pub skills: Option<Vec<AnyJson>>,
 }
 
@@ -139,7 +139,7 @@ pub struct AgentCreateParams {
 pub struct AgentShowParams {
     /// Absolute project path.
     pub project: String,
-    /// Role UUID or name.
+    /// Agent UUID or name.
     pub id: String,
 }
 
@@ -157,7 +157,7 @@ pub struct AgentListParams {
 pub struct AgentUpdateParams {
     /// Absolute project path.
     pub project: String,
-    /// Role UUID or name.
+    /// Agent UUID or name.
     pub id: String,
     pub name: Option<String>,
     pub description: Option<String>,
@@ -176,9 +176,9 @@ pub struct AgentUpdateParams {
 
 #[tool_router(router = agent_tool_router, vis = "pub")]
 impl DjinnMcpServer {
-    /// Create a specialist agent role that extends a base role with domain-specific config.
+    /// Create a specialist agent that extends a base role with domain-specific config.
     #[tool(
-        description = "Create a specialist agent role extending a base role (worker, lead, planner, architect, reviewer, resolver). Returns the created role."
+        description = "Create a specialist agent extending a base role (worker, lead, planner, architect, reviewer, resolver). Returns the created agent."
     )]
     pub async fn agent_create(
         &self,
@@ -188,14 +188,14 @@ impl DjinnMcpServer {
             Ok(n) => n,
             Err(e) => {
                 return Json(AgentSingleResponse {
-                    role: None,
+                    agent: None,
                     error: Some(e),
                 });
             }
         };
         if let Err(e) = validate_base_role(&p.base_role) {
             return Json(AgentSingleResponse {
-                role: None,
+                agent: None,
                 error: Some(e),
             });
         }
@@ -203,7 +203,7 @@ impl DjinnMcpServer {
             Ok(id) => id,
             Err(e) => {
                 return Json(AgentSingleResponse {
-                    role: None,
+                    agent: None,
                     error: Some(e),
                 });
             }
@@ -215,7 +215,7 @@ impl DjinnMcpServer {
         match repo.get_by_name_for_project(&project_id, &name).await {
             Ok(Some(_)) => {
                 return Json(AgentSingleResponse {
-                    role: None,
+                    agent: None,
                     error: Some(format!(
                         "an agent named '{name}' already exists in this project"
                     )),
@@ -223,7 +223,7 @@ impl DjinnMcpServer {
             }
             Err(e) => {
                 return Json(AgentSingleResponse {
-                    role: None,
+                    agent: None,
                     error: Some(e.to_string()),
                 });
             }
@@ -257,18 +257,18 @@ impl DjinnMcpServer {
             .await
         {
             Ok(role) => Json(AgentSingleResponse {
-                role: Some(AgentModel::from(&role)),
+                agent: Some(AgentModel::from(&role)),
                 error: None,
             }),
             Err(e) => Json(AgentSingleResponse {
-                role: None,
+                agent: None,
                 error: Some(e.to_string()),
             }),
         }
     }
 
-    /// Show full details of an agent role by UUID or name.
-    #[tool(description = "Show full details of an agent role. Accepts role UUID or name.")]
+    /// Show full details of an agent by UUID or name.
+    #[tool(description = "Show full details of an agent. Accepts agent UUID or name.")]
     pub async fn agent_show(
         &self,
         Parameters(p): Parameters<AgentShowParams>,
@@ -277,7 +277,7 @@ impl DjinnMcpServer {
             Ok(id) => id,
             Err(e) => {
                 return Json(AgentSingleResponse {
-                    role: None,
+                    agent: None,
                     error: Some(e),
                 });
             }
@@ -288,25 +288,25 @@ impl DjinnMcpServer {
             Ok(Some(r)) => r,
             Ok(None) => {
                 return Json(AgentSingleResponse {
-                    role: None,
+                    agent: None,
                     error: Some(agent_not_found_error(&p.id)),
                 });
             }
             Err(e) => {
                 return Json(AgentSingleResponse {
-                    role: None,
+                    agent: None,
                     error: Some(e),
                 });
             }
         };
 
         Json(AgentSingleResponse {
-            role: Some(AgentModel::from(&role)),
+            agent: Some(AgentModel::from(&role)),
             error: None,
         })
     }
 
-    /// List agent roles for a project with optional base_role filter and pagination.
+    /// List agents for a project with optional base_role filter and pagination.
     #[tool(
         description = "List agents for a project with optional base_role filter. Returns {agents[], total_count, limit, offset, has_more}. Defaults are ordered by base_role then name."
     )]
@@ -370,9 +370,9 @@ impl DjinnMcpServer {
         }
     }
 
-    /// Update a non-default agent role's fields. Cannot modify is_default.
+    /// Update a non-default agent's fields. Cannot modify is_default.
     #[tool(
-        description = "Update a specialist agent role (name, description, system_prompt_extensions, model_preference, verification_command, mcp_servers, skills). Cannot modify default roles' is_default flag. Accepts role UUID or name."
+        description = "Update a specialist agent (name, description, system_prompt_extensions, model_preference, verification_command, mcp_servers, skills). Cannot modify default agents' is_default flag. Accepts agent UUID or name."
     )]
     pub async fn agent_update(
         &self,
@@ -382,7 +382,7 @@ impl DjinnMcpServer {
             Ok(id) => id,
             Err(e) => {
                 return Json(AgentSingleResponse {
-                    role: None,
+                    agent: None,
                     error: Some(e),
                 });
             }
@@ -393,13 +393,13 @@ impl DjinnMcpServer {
             Ok(Some(r)) => r,
             Ok(None) => {
                 return Json(AgentSingleResponse {
-                    role: None,
+                    agent: None,
                     error: Some(agent_not_found_error(&p.id)),
                 });
             }
             Err(e) => {
                 return Json(AgentSingleResponse {
-                    role: None,
+                    agent: None,
                     error: Some(e),
                 });
             }
@@ -411,7 +411,7 @@ impl DjinnMcpServer {
                 Ok(v) => v,
                 Err(e) => {
                     return Json(AgentSingleResponse {
-                        role: None,
+                        agent: None,
                         error: Some(e),
                     });
                 }
@@ -424,7 +424,7 @@ impl DjinnMcpServer {
             match repo.get_by_name_for_project(&project_id, &new_name).await {
                 Ok(Some(_)) => {
                     return Json(AgentSingleResponse {
-                        role: None,
+                        agent: None,
                         error: Some(format!(
                             "an agent named '{new_name}' already exists in this project"
                         )),
@@ -432,7 +432,7 @@ impl DjinnMcpServer {
                 }
                 Err(e) => {
                     return Json(AgentSingleResponse {
-                        role: None,
+                        agent: None,
                         error: Some(e.to_string()),
                     });
                 }
@@ -491,11 +491,11 @@ impl DjinnMcpServer {
             .await
         {
             Ok(updated) => Json(AgentSingleResponse {
-                role: Some(AgentModel::from(&updated)),
+                agent: Some(AgentModel::from(&updated)),
                 error: None,
             }),
             Err(e) => Json(AgentSingleResponse {
-                role: None,
+                agent: None,
                 error: Some(e.to_string()),
             }),
         }
@@ -558,11 +558,11 @@ fn base_role_to_agent_type(base_role: &str) -> &str {
 
 #[tool_router(router = agent_metrics_tool_router, vis = "pub")]
 impl DjinnMcpServer {
-    /// Aggregate effectiveness metrics per agent role: success rate, token usage,
+    /// Aggregate effectiveness metrics per agent: success rate, token usage,
     /// session duration, verification pass rate, reopen rate.
-    /// Optionally filter to a single role by UUID or name.
+    /// Optionally filter to a single agent by UUID or name.
     #[tool(
-        description = "Return aggregated effectiveness metrics per agent role (success_rate, avg_tokens, avg_time_seconds, verification_pass_rate, avg_reopens). Accepts optional role_id filter and window_days (default 30)."
+        description = "Return aggregated effectiveness metrics per agent (success_rate, avg_tokens, avg_time_seconds, verification_pass_rate, avg_reopens). Accepts optional agent_id filter and window_days (default 30)."
     )]
     pub async fn agent_metrics(
         &self,

@@ -538,7 +538,7 @@ expression: tool_schemas_architect()
       ],
       "type": "object"
     },
-    "name": "role_metrics"
+    "name": "agent_metrics"
   },
   {
     "description": "Append a learned amendment to a role prompt using observed failures or improvements.",

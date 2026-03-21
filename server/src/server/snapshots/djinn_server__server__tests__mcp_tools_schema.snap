@@ -5,6 +5,613 @@ expression: signatures
 [
   {
     "input_schema": {
+      "$defs": {
+        "AnyJson": {}
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "base_role": {
+          "description": "Base role to extend. One of: worker, lead, planner, architect, reviewer, resolver.",
+          "type": "string"
+        },
+        "description": {
+          "nullable": true,
+          "type": "string"
+        },
+        "mcp_servers": {
+          "description": "Additional MCP server refs for this agent.",
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "model_preference": {
+          "description": "Preferred model ID (falls back to project default).",
+          "nullable": true,
+          "type": "string"
+        },
+        "name": {
+          "description": "Unique agent name within the project.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "skills": {
+          "description": "Skills (prompt templates) available to this agent.",
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "system_prompt_extensions": {
+          "description": "Additional system prompt content appended to the base role prompt.",
+          "nullable": true,
+          "type": "string"
+        },
+        "verification_command": {
+          "description": "Custom verification command (falls back to project default).",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "name",
+        "base_role"
+      ],
+      "title": "AgentCreateParams",
+      "type": "object"
+    },
+    "name": "agent_create",
+    "output_schema": {
+      "$defs": {
+        "AnyJson": {}
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "base_role": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "is_default": {
+          "type": "boolean"
+        },
+        "learned_prompt": {
+          "description": "Auto-improvement loop amendments. None if not yet set.",
+          "nullable": true,
+          "type": "string"
+        },
+        "mcp_servers": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "type": "array"
+        },
+        "model_preference": {
+          "nullable": true,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "type": "array"
+        },
+        "system_prompt_extensions": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "verification_command": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "AgentSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "base_role": {
+          "description": "Filter by base role: worker, lead, planner, architect, reviewer, resolver.",
+          "nullable": true,
+          "type": "string"
+        },
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "AgentListParams",
+      "type": "object"
+    },
+    "name": "agent_list",
+    "output_schema": {
+      "$defs": {
+        "AgentModel": {
+          "properties": {
+            "base_role": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "is_default": {
+              "type": "boolean"
+            },
+            "learned_prompt": {
+              "description": "Auto-improvement loop amendments. None if not yet set.",
+              "nullable": true,
+              "type": "string"
+            },
+            "mcp_servers": {
+              "items": {
+                "$ref": "#/$defs/AnyJson"
+              },
+              "type": "array"
+            },
+            "model_preference": {
+              "nullable": true,
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "skills": {
+              "items": {
+                "$ref": "#/$defs/AnyJson"
+              },
+              "type": "array"
+            },
+            "system_prompt_extensions": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            },
+            "verification_command": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "project_id",
+            "name",
+            "base_role",
+            "description",
+            "system_prompt_extensions",
+            "mcp_servers",
+            "skills",
+            "is_default",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        },
+        "AnyJson": {}
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/$defs/AgentModel"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "has_more": {
+          "nullable": true,
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "total_count": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "title": "AgentListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "agent_id": {
+          "description": "Optional agent UUID or name — if omitted returns metrics for all agents.",
+          "nullable": true,
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "window_days": {
+          "description": "How many days back to include session data (default 30).",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "AgentMetricsParams",
+      "type": "object"
+    },
+    "name": "agent_metrics",
+    "output_schema": {
+      "$defs": {
+        "AgentMetricEntry": {
+          "properties": {
+            "agent_id": {
+              "type": "string"
+            },
+            "agent_name": {
+              "type": "string"
+            },
+            "avg_reopens": {
+              "description": "Average reopen_count across tasks dispatched to this role.",
+              "format": "double",
+              "type": "number"
+            },
+            "avg_time_seconds": {
+              "description": "Average session wall-clock duration in seconds (completed sessions only).",
+              "format": "double",
+              "type": "number"
+            },
+            "avg_tokens": {
+              "description": "Average total tokens (in + out) per completed session.",
+              "format": "double",
+              "type": "number"
+            },
+            "base_role": {
+              "type": "string"
+            },
+            "completed_task_count": {
+              "description": "Number of completed tasks included in the calculation.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "success_rate": {
+              "description": "Fraction of completed tasks that closed as \"completed\" (0.0–1.0).",
+              "format": "double",
+              "type": "number"
+            },
+            "verification_pass_rate": {
+              "description": "Fraction of tasks with zero verification failures (0.0–1.0).",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "agent_id",
+            "agent_name",
+            "base_role",
+            "success_rate",
+            "avg_tokens",
+            "avg_time_seconds",
+            "verification_pass_rate",
+            "avg_reopens",
+            "completed_task_count"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/$defs/AgentMetricEntry"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "window_days": {
+          "description": "Window used for session queries (days back from now).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "window_days"
+      ],
+      "title": "AgentMetricsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Agent UUID or name.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "AgentShowParams",
+      "type": "object"
+    },
+    "name": "agent_show",
+    "output_schema": {
+      "$defs": {
+        "AnyJson": {}
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "base_role": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "is_default": {
+          "type": "boolean"
+        },
+        "learned_prompt": {
+          "description": "Auto-improvement loop amendments. None if not yet set.",
+          "nullable": true,
+          "type": "string"
+        },
+        "mcp_servers": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "type": "array"
+        },
+        "model_preference": {
+          "nullable": true,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "type": "array"
+        },
+        "system_prompt_extensions": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "verification_command": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "AgentSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "AnyJson": {}
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "clear_learned_prompt": {
+          "description": "Set to true to clear learned_prompt back to NULL. Takes precedence over learned_prompt.",
+          "nullable": true,
+          "type": "boolean"
+        },
+        "description": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "description": "Agent UUID or name.",
+          "type": "string"
+        },
+        "learned_prompt": {
+          "description": "Set a new learned_prompt value (auto-improvement loop only).",
+          "nullable": true,
+          "type": "string"
+        },
+        "mcp_servers": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "model_preference": {
+          "nullable": true,
+          "type": "string"
+        },
+        "name": {
+          "nullable": true,
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "system_prompt_extensions": {
+          "nullable": true,
+          "type": "string"
+        },
+        "verification_command": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "AgentUpdateParams",
+      "type": "object"
+    },
+    "name": "agent_update",
+    "output_schema": {
+      "$defs": {
+        "AnyJson": {}
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "base_role": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "is_default": {
+          "type": "boolean"
+        },
+        "learned_prompt": {
+          "description": "Auto-improvement loop amendments. None if not yet set.",
+          "nullable": true,
+          "type": "string"
+        },
+        "mcp_servers": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "type": "array"
+        },
+        "model_preference": {
+          "nullable": true,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "type": "array"
+        },
+        "system_prompt_extensions": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "verification_command": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "AgentSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "project": {
@@ -4277,613 +4884,6 @@ expression: signatures
         "http_status"
       ],
       "title": "ProviderValidateResponse",
-      "type": "object"
-    }
-  },
-  {
-    "input_schema": {
-      "$defs": {
-        "AnyJson": {}
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "base_role": {
-          "description": "Base role to extend. One of: worker, lead, planner, architect, reviewer, resolver.",
-          "type": "string"
-        },
-        "description": {
-          "nullable": true,
-          "type": "string"
-        },
-        "mcp_servers": {
-          "description": "Additional MCP server refs for this role.",
-          "items": {
-            "$ref": "#/$defs/AnyJson"
-          },
-          "nullable": true,
-          "type": "array"
-        },
-        "model_preference": {
-          "description": "Preferred model ID (falls back to project default).",
-          "nullable": true,
-          "type": "string"
-        },
-        "name": {
-          "description": "Unique role name within the project.",
-          "type": "string"
-        },
-        "project": {
-          "description": "Absolute project path.",
-          "type": "string"
-        },
-        "skills": {
-          "description": "Skills (prompt templates) available to this role.",
-          "items": {
-            "$ref": "#/$defs/AnyJson"
-          },
-          "nullable": true,
-          "type": "array"
-        },
-        "system_prompt_extensions": {
-          "description": "Additional system prompt content appended to the base role prompt.",
-          "nullable": true,
-          "type": "string"
-        },
-        "verification_command": {
-          "description": "Custom verification command (falls back to project default).",
-          "nullable": true,
-          "type": "string"
-        }
-      },
-      "required": [
-        "project",
-        "name",
-        "base_role"
-      ],
-      "title": "RoleCreateParams",
-      "type": "object"
-    },
-    "name": "role_create",
-    "output_schema": {
-      "$defs": {
-        "AnyJson": {}
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "base_role": {
-          "type": "string"
-        },
-        "created_at": {
-          "type": "string"
-        },
-        "description": {
-          "type": "string"
-        },
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "id": {
-          "type": "string"
-        },
-        "is_default": {
-          "type": "boolean"
-        },
-        "learned_prompt": {
-          "description": "Auto-improvement loop amendments. None if not yet set.",
-          "nullable": true,
-          "type": "string"
-        },
-        "mcp_servers": {
-          "items": {
-            "$ref": "#/$defs/AnyJson"
-          },
-          "type": "array"
-        },
-        "model_preference": {
-          "nullable": true,
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        },
-        "project_id": {
-          "type": "string"
-        },
-        "skills": {
-          "items": {
-            "$ref": "#/$defs/AnyJson"
-          },
-          "type": "array"
-        },
-        "system_prompt_extensions": {
-          "type": "string"
-        },
-        "updated_at": {
-          "type": "string"
-        },
-        "verification_command": {
-          "nullable": true,
-          "type": "string"
-        }
-      },
-      "title": "RoleSingleResponse",
-      "type": "object"
-    }
-  },
-  {
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "base_role": {
-          "description": "Filter by base role: worker, lead, planner, architect, reviewer, resolver.",
-          "nullable": true,
-          "type": "string"
-        },
-        "limit": {
-          "format": "int64",
-          "nullable": true,
-          "type": "integer"
-        },
-        "offset": {
-          "format": "int64",
-          "nullable": true,
-          "type": "integer"
-        },
-        "project": {
-          "description": "Absolute project path.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "project"
-      ],
-      "title": "RoleListParams",
-      "type": "object"
-    },
-    "name": "role_list",
-    "output_schema": {
-      "$defs": {
-        "AgentRoleModel": {
-          "properties": {
-            "base_role": {
-              "type": "string"
-            },
-            "created_at": {
-              "type": "string"
-            },
-            "description": {
-              "type": "string"
-            },
-            "id": {
-              "type": "string"
-            },
-            "is_default": {
-              "type": "boolean"
-            },
-            "learned_prompt": {
-              "description": "Auto-improvement loop amendments. None if not yet set.",
-              "nullable": true,
-              "type": "string"
-            },
-            "mcp_servers": {
-              "items": {
-                "$ref": "#/$defs/AnyJson"
-              },
-              "type": "array"
-            },
-            "model_preference": {
-              "nullable": true,
-              "type": "string"
-            },
-            "name": {
-              "type": "string"
-            },
-            "project_id": {
-              "type": "string"
-            },
-            "skills": {
-              "items": {
-                "$ref": "#/$defs/AnyJson"
-              },
-              "type": "array"
-            },
-            "system_prompt_extensions": {
-              "type": "string"
-            },
-            "updated_at": {
-              "type": "string"
-            },
-            "verification_command": {
-              "nullable": true,
-              "type": "string"
-            }
-          },
-          "required": [
-            "id",
-            "project_id",
-            "name",
-            "base_role",
-            "description",
-            "system_prompt_extensions",
-            "mcp_servers",
-            "skills",
-            "is_default",
-            "created_at",
-            "updated_at"
-          ],
-          "type": "object"
-        },
-        "AnyJson": {}
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "has_more": {
-          "nullable": true,
-          "type": "boolean"
-        },
-        "limit": {
-          "format": "int64",
-          "nullable": true,
-          "type": "integer"
-        },
-        "offset": {
-          "format": "int64",
-          "nullable": true,
-          "type": "integer"
-        },
-        "roles": {
-          "items": {
-            "$ref": "#/$defs/AgentRoleModel"
-          },
-          "nullable": true,
-          "type": "array"
-        },
-        "total_count": {
-          "format": "int64",
-          "nullable": true,
-          "type": "integer"
-        }
-      },
-      "title": "RoleListResponse",
-      "type": "object"
-    }
-  },
-  {
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "project": {
-          "description": "Absolute project path.",
-          "type": "string"
-        },
-        "role_id": {
-          "description": "Optional role UUID or name — if omitted returns metrics for all roles.",
-          "nullable": true,
-          "type": "string"
-        },
-        "window_days": {
-          "description": "How many days back to include session data (default 30).",
-          "format": "int64",
-          "nullable": true,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "project"
-      ],
-      "title": "RoleMetricsParams",
-      "type": "object"
-    },
-    "name": "role_metrics",
-    "output_schema": {
-      "$defs": {
-        "RoleMetricEntry": {
-          "properties": {
-            "avg_reopens": {
-              "description": "Average reopen_count across tasks dispatched to this role.",
-              "format": "double",
-              "type": "number"
-            },
-            "avg_time_seconds": {
-              "description": "Average session wall-clock duration in seconds (completed sessions only).",
-              "format": "double",
-              "type": "number"
-            },
-            "avg_tokens": {
-              "description": "Average total tokens (in + out) per completed session.",
-              "format": "double",
-              "type": "number"
-            },
-            "base_role": {
-              "type": "string"
-            },
-            "completed_task_count": {
-              "description": "Number of completed tasks included in the calculation.",
-              "format": "int64",
-              "type": "integer"
-            },
-            "role_id": {
-              "type": "string"
-            },
-            "role_name": {
-              "type": "string"
-            },
-            "success_rate": {
-              "description": "Fraction of completed tasks that closed as \"completed\" (0.0–1.0).",
-              "format": "double",
-              "type": "number"
-            },
-            "verification_pass_rate": {
-              "description": "Fraction of tasks with zero verification failures (0.0–1.0).",
-              "format": "double",
-              "type": "number"
-            }
-          },
-          "required": [
-            "role_id",
-            "role_name",
-            "base_role",
-            "success_rate",
-            "avg_tokens",
-            "avg_time_seconds",
-            "verification_pass_rate",
-            "avg_reopens",
-            "completed_task_count"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "roles": {
-          "items": {
-            "$ref": "#/$defs/RoleMetricEntry"
-          },
-          "nullable": true,
-          "type": "array"
-        },
-        "window_days": {
-          "description": "Window used for session queries (days back from now).",
-          "format": "int64",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "window_days"
-      ],
-      "title": "RoleMetricsResponse",
-      "type": "object"
-    }
-  },
-  {
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "id": {
-          "description": "Role UUID or name.",
-          "type": "string"
-        },
-        "project": {
-          "description": "Absolute project path.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "project",
-        "id"
-      ],
-      "title": "RoleShowParams",
-      "type": "object"
-    },
-    "name": "role_show",
-    "output_schema": {
-      "$defs": {
-        "AnyJson": {}
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "base_role": {
-          "type": "string"
-        },
-        "created_at": {
-          "type": "string"
-        },
-        "description": {
-          "type": "string"
-        },
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "id": {
-          "type": "string"
-        },
-        "is_default": {
-          "type": "boolean"
-        },
-        "learned_prompt": {
-          "description": "Auto-improvement loop amendments. None if not yet set.",
-          "nullable": true,
-          "type": "string"
-        },
-        "mcp_servers": {
-          "items": {
-            "$ref": "#/$defs/AnyJson"
-          },
-          "type": "array"
-        },
-        "model_preference": {
-          "nullable": true,
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        },
-        "project_id": {
-          "type": "string"
-        },
-        "skills": {
-          "items": {
-            "$ref": "#/$defs/AnyJson"
-          },
-          "type": "array"
-        },
-        "system_prompt_extensions": {
-          "type": "string"
-        },
-        "updated_at": {
-          "type": "string"
-        },
-        "verification_command": {
-          "nullable": true,
-          "type": "string"
-        }
-      },
-      "title": "RoleSingleResponse",
-      "type": "object"
-    }
-  },
-  {
-    "input_schema": {
-      "$defs": {
-        "AnyJson": {}
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "clear_learned_prompt": {
-          "description": "Set to true to clear learned_prompt back to NULL. Takes precedence over learned_prompt.",
-          "nullable": true,
-          "type": "boolean"
-        },
-        "description": {
-          "nullable": true,
-          "type": "string"
-        },
-        "id": {
-          "description": "Role UUID or name.",
-          "type": "string"
-        },
-        "learned_prompt": {
-          "description": "Set a new learned_prompt value (auto-improvement loop only).",
-          "nullable": true,
-          "type": "string"
-        },
-        "mcp_servers": {
-          "items": {
-            "$ref": "#/$defs/AnyJson"
-          },
-          "nullable": true,
-          "type": "array"
-        },
-        "model_preference": {
-          "nullable": true,
-          "type": "string"
-        },
-        "name": {
-          "nullable": true,
-          "type": "string"
-        },
-        "project": {
-          "description": "Absolute project path.",
-          "type": "string"
-        },
-        "skills": {
-          "items": {
-            "$ref": "#/$defs/AnyJson"
-          },
-          "nullable": true,
-          "type": "array"
-        },
-        "system_prompt_extensions": {
-          "nullable": true,
-          "type": "string"
-        },
-        "verification_command": {
-          "nullable": true,
-          "type": "string"
-        }
-      },
-      "required": [
-        "project",
-        "id"
-      ],
-      "title": "RoleUpdateParams",
-      "type": "object"
-    },
-    "name": "role_update",
-    "output_schema": {
-      "$defs": {
-        "AnyJson": {}
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "base_role": {
-          "type": "string"
-        },
-        "created_at": {
-          "type": "string"
-        },
-        "description": {
-          "type": "string"
-        },
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "id": {
-          "type": "string"
-        },
-        "is_default": {
-          "type": "boolean"
-        },
-        "learned_prompt": {
-          "description": "Auto-improvement loop amendments. None if not yet set.",
-          "nullable": true,
-          "type": "string"
-        },
-        "mcp_servers": {
-          "items": {
-            "$ref": "#/$defs/AnyJson"
-          },
-          "type": "array"
-        },
-        "model_preference": {
-          "nullable": true,
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        },
-        "project_id": {
-          "type": "string"
-        },
-        "skills": {
-          "items": {
-            "$ref": "#/$defs/AnyJson"
-          },
-          "type": "array"
-        },
-        "system_prompt_extensions": {
-          "type": "string"
-        },
-        "updated_at": {
-          "type": "string"
-        },
-        "verification_command": {
-          "nullable": true,
-          "type": "string"
-        }
-      },
-      "title": "RoleSingleResponse",
       "type": "object"
     }
   },
