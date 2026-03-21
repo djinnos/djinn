@@ -189,7 +189,7 @@ pub fn greet(name: &str) -> String {
     format!("Hello, {}! You have been greeted from Rust!", name)
 }
 
-/// Get server port from app state
+/// Get server port from app state (backward-compatible).
 #[tauri::command]
 pub fn get_server_port(state: State<Mutex<ServerState>>) -> Result<u16, String> {
     let state = state
@@ -198,9 +198,22 @@ pub fn get_server_port(state: State<Mutex<ServerState>>) -> Result<u16, String> 
     state.port.ok_or_else(|| "Server not ready".to_string())
 }
 
+/// Get the full server base URL from app state.
+#[tauri::command]
+pub fn get_server_url(state: State<Mutex<ServerState>>) -> Result<String, String> {
+    let state = state
+        .lock()
+        .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+    state
+        .base_url
+        .clone()
+        .ok_or_else(|| "Server not ready".to_string())
+}
+
 /// Server status response
 #[derive(serde::Serialize)]
 pub struct ServerStatus {
+    pub base_url: Option<String>,
     pub port: Option<u16>,
     pub is_healthy: bool,
     pub has_error: bool,
@@ -215,6 +228,7 @@ pub fn get_server_status(state: State<Mutex<ServerState>>) -> Result<ServerStatu
         .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
 
     Ok(ServerStatus {
+        base_url: state.base_url.clone(),
         port: state.port,
         is_healthy: state.is_healthy,
         has_error: state.has_error,
@@ -222,10 +236,22 @@ pub fn get_server_status(state: State<Mutex<ServerState>>) -> Result<ServerStatu
     })
 }
 
-/// Retry server discovery/spawn
+/// Retry connecting to the server (works for both embedded and remote modes).
 #[tauri::command]
-pub async fn retry_server_discovery(app: AppHandle) -> Result<u16, String> {
-    crate::server::retry_server_discovery(&app).await
+pub async fn retry_server_connection(app: AppHandle) -> Result<String, String> {
+    crate::server::retry_connection(&app).await
+}
+
+/// Get the current connection mode.
+#[tauri::command]
+pub fn get_connection_mode() -> crate::connection_mode::ConnectionMode {
+    crate::connection_mode::load()
+}
+
+/// Persist a new connection mode. The app must be restarted to apply the change.
+#[tauri::command]
+pub fn set_connection_mode(mode: crate::connection_mode::ConnectionMode) -> Result<(), String> {
+    crate::connection_mode::save(&mode)
 }
 
 /// Get authentication token (from token refresh state or legacy session)

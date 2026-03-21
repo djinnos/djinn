@@ -23,6 +23,8 @@ import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
 import { useSelectedProjectId } from "@/stores/useProjectStore";
 import { Button } from "@/components/ui/button";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { useProviderGateStore } from "@/stores/providerGateStore";
+import { ProviderOnboarding } from "@/components/ProviderOnboarding";
 
 
 function WelcomeStep() {
@@ -103,12 +105,19 @@ export default function App() {
   const { isCompleted, resetWizard } = useWizardStore();
   const selectedProjectId = useSelectedProjectId();
   const navigate = useNavigate();
+  const { hasProvider, refresh: refreshGate } = useProviderGateStore();
 
   useProjectsBootstrap(status);
   const [showWizard, setShowWizard] = useState(false);
   const [showDoneState, setShowDoneState] = useState(false);
 
   useEventSource(selectedProjectId);
+
+  useEffect(() => {
+    if (status === 'connected') {
+      void refreshGate();
+    }
+  }, [status, refreshGate]);
 
   useEffect(() => {
     if (isFirstRunLoading) return;
@@ -181,6 +190,10 @@ export default function App() {
       setShowDoneState(false);
       navigate(path === "/" ? "/kanban" : path);
     }} />;
+  }
+
+  if (hasProvider === false) {
+    return <ProviderOnboarding />;
   }
 
   return <MainLayout />;

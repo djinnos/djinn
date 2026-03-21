@@ -42,10 +42,18 @@ export async function getServerPort(): Promise<number> {
 }
 
 /**
+ * Get the full server base URL from the Tauri backend.
+ */
+export async function getServerUrl(): Promise<string> {
+  return invoke("get_server_url");
+}
+
+/**
  * Get the server status from the Tauri backend.
  * @returns The current server status including health and error state
  */
 export async function getServerStatus(): Promise<{
+  base_url: string | null;
   port: number | null;
   is_healthy: boolean;
   has_error: boolean;
@@ -55,12 +63,31 @@ export async function getServerStatus(): Promise<{
 }
 
 /**
- * Retry server discovery/spawn.
+ * Retry connecting to the server (embedded or remote).
  * Called when the user clicks the retry button in the error state.
- * @returns The port number the server is running on
+ * @returns The base URL the server is reachable at
  */
+export async function retryServerConnection(): Promise<string> {
+  return invoke("retry_server_connection");
+}
+
+/** @deprecated Use retryServerConnection instead */
 export async function retryServerDiscovery(): Promise<number> {
-  return invoke("retry_server_discovery");
+  const url = await retryServerConnection();
+  const match = url.match(/:(\d+)/);
+  return match ? parseInt(match[1], 10) : 8372;
+}
+
+export type ConnectionMode =
+  | { type: "embedded" }
+  | { type: "remote"; url: string };
+
+export async function getConnectionMode(): Promise<ConnectionMode> {
+  return invoke("get_connection_mode");
+}
+
+export async function setConnectionMode(mode: ConnectionMode): Promise<void> {
+  return invoke("set_connection_mode", { mode });
 }
 
 /**

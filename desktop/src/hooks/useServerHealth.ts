@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { getServerStatus, retryServerDiscovery } from "@/tauri/commands";
+import { getServerStatus, retryServerConnection } from "@/tauri/commands";
 import { listen } from "@tauri-apps/api/event";
 
 export type ConnectionStatus = "loading" | "connected" | "error";
@@ -50,7 +50,7 @@ export function useServerHealth(): ServerHealthState {
     try {
       setStatus("loading");
       setError(null);
-      await retryServerDiscovery();
+      await retryServerConnection();
       // Wait a moment then check status
       await new Promise(resolve => setTimeout(resolve, 1000));
       await checkStatus();

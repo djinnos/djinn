@@ -13,7 +13,7 @@
 import { useEffect, useRef } from "react";
 import { sseStore, type SSEEvent, type SSEEventType } from "../stores/sseStore";
 import { getServerPort } from "../tauri";
-import { retryServerDiscovery } from "../tauri/commands";
+import { retryServerConnection } from "../tauri/commands";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
 import { fetchKanbanSnapshot } from "@/api/server";
 import { useSelectedProject } from "@/stores/useProjectStore";
@@ -243,7 +243,7 @@ export function useEventSource(projectId?: string | null) {
             if (!isActive) return;
             // Re-discover daemon port from daemon.json (handles server restart on new port)
             try {
-              await retryServerDiscovery();
+              await retryServerConnection();
               await resetMcpClient();
             } catch {
               // Discovery failed — server might not be up yet, connect() will fail and retry
