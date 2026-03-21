@@ -229,3 +229,126 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
 fn path_contains_segment(path: &Path, segment: &str) -> bool {
     path.components().any(|c| c.as_os_str() == segment)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tokio::sync::broadcast;
+    use tokio::time::{Duration, sleep};
+    use tokio_util::sync::CancellationToken;
+
+    use crate::events::event_bus_for;
+    use crate::test_helpers::create_test_db;
+    use djinn_db::ProjectRepository;
+
+    use super::*;
+
+    async fn wait_for<F, Fut>(mut condition: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        for _ in 0..50 {
+            if condition().await {
+                return;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        panic!("condition not met in time");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn add_watch_skips_missing_djinn_and_deduplicates_existing_watch() {
+        let db = create_test_db();
+        let (events_tx, _rx) = broadcast::channel(16);
+        let mut state = WatcherState {
+            watchers: HashMap::new(),
+            db,
+            events_tx,
+        };
+
+        let missing = tempfile::tempdir().unwrap();
+        add_watch(&mut state, "project-1", missing.path());
+        assert!(state.watchers.is_empty());
+
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".djinn/research")).unwrap();
+
+        add_watch(&mut state, "project-1", project.path());
+        assert_eq!(state.watchers.len(), 1);
+
+        add_watch(&mut state, "project-1", project.path());
+        assert_eq!(state.watchers.len(), 1);
+        assert!(state.watchers.contains_key(project.path()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_kb_watchers_tracks_project_create_and_delete_lifecycle() {
+        let db = create_test_db();
+        let (events_tx, _rx) = broadcast::channel(64);
+        let cancel = CancellationToken::new();
+
+        let initial_project_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(initial_project_dir.path().join(".djinn/research")).unwrap();
+        let project_repo = ProjectRepository::new(db.clone(), event_bus_for(&events_tx));
+        project_repo
+            .create(
+                "initial-project",
+                &initial_project_dir.path().to_string_lossy(),
+            )
+            .await
+            .unwrap();
+
+        spawn_kb_watchers(db.clone(), events_tx.clone(), cancel.clone());
+
+        wait_for(|| {
+            let db = db.clone();
+            let path = initial_project_dir.path().to_path_buf();
+            async move { project_path_exists(&db, &path).await }
+        })
+        .await;
+
+        let created_project_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(created_project_dir.path().join(".djinn/research")).unwrap();
+        let created_project = project_repo
+            .create(
+                "created-project",
+                &created_project_dir.path().to_string_lossy(),
+            )
+            .await
+            .unwrap();
+
+        wait_for(|| {
+            let db = db.clone();
+            let path = created_project_dir.path().to_path_buf();
+            async move { project_path_exists(&db, &path).await }
+        })
+        .await;
+
+        project_repo.delete(&created_project.id).await.unwrap();
+
+        wait_for(|| {
+            let db = db.clone();
+            let removed = created_project_dir.path().to_path_buf();
+            let kept = initial_project_dir.path().to_path_buf();
+            async move {
+                !project_path_exists(&db, &removed).await && project_path_exists(&db, &kept).await
+            }
+        })
+        .await;
+
+        cancel.cancel();
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    async fn project_path_exists(db: &djinn_db::Database, path: &PathBuf) -> bool {
+        let project_repo = ProjectRepository::new(db.clone(), crate::events::EventBus::noop());
+        let target = path.as_path();
+        project_repo
+            .list()
+            .await
+            .map(|projects| projects.into_iter().any(|p| std::path::Path::new(&p.path) == target))
+            .unwrap_or(false)
+    }
+}

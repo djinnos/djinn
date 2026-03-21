@@ -1208,9 +1208,7 @@ async fn resolve_github_owner_repo(worktree_path: &Path) -> Result<(String, Stri
         .or_else(|| remote_url.strip_prefix("http://github.com/"))
         .map(|p| p.to_string());
 
-    let path = path.ok_or_else(|| {
-        format!("remote URL is not a GitHub URL: {remote_url}")
-    })?;
+    let path = path.ok_or_else(|| format!("remote URL is not a GitHub URL: {remote_url}"))?;
 
     let path = path.trim_end_matches(".git");
     let mut parts = path.splitn(2, '/');
@@ -2202,5 +2200,4 @@ mod tests {
         let normalized = resolve_path("./src/../Cargo.toml", base);
         assert_eq!(normalized, PathBuf::from("/tmp/worktree/Cargo.toml"));
     }
-
 }
