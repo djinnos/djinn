@@ -141,13 +141,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
           ) : (
             <>
               <div className="space-y-2">
-                <h2 className="text-lg font-semibold">Sign in with GitHub to continue</h2>
+                <h2 className="text-lg font-semibold">Sign in required</h2>
                 <p className="text-sm text-muted-foreground">
-                  Djinn uses GitHub to read repositories, create branches, open pull requests, and keep tasks linked to code.
+                  {error ? error : "Please sign in to continue to Djinn."}
                 </p>
               </div>
-
-              {error && <p className="text-sm text-destructive">{error}</p>}
 
               <Button
                 onClick={() => void handleLogin()}
@@ -156,7 +154,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
                 className="!bg-white !text-black hover:!bg-gray-100 !border-gray-300 gap-2 px-6 h-11 text-base"
               >
                 <HugeiconsIcon icon={GithubIcon} size={20} />
-                {loginPending ? "Starting..." : "Continue with GitHub"}
+                {loginPending ? "Starting..." : "Sign in with GitHub"}
               </Button>
 
               <p className="text-xs text-muted-foreground">

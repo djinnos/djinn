@@ -60,7 +60,10 @@ const actions = {
   onAddModel: () => {},
   onRemoveModel: () => {},
   onReorderModels: () => {},
+  onToggleRole: () => {},
   onUpdateMaxSessions: () => {},
+  memoryModel: null,
+  onSetMemoryModel: () => {},
   onDismissError: () => {},
   onSave: () => {},
 };

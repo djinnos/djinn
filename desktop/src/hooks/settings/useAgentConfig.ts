@@ -45,6 +45,7 @@ export function useAgentConfig() {
     onUpdateMaxSessions: updateMaxSessions,
     onToggleRole: toggleRoleForModel,
     memoryModel: null as string | null,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     onSetMemoryModel: (_modelId: string) => { /* TODO: wire to settings */ },
     onDismissError: resetError,
     onSave: () => void saveSettings(),
