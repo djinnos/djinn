@@ -62,6 +62,7 @@ If a criterion requires changes to code that lives **outside this workspace** (a
 - Criterion requires code outside this workspace → mark as MET
 - Change fixes a build/lint/verification failure → NOT a scope violation
 - Snapshot file renames/updates due to module path changes → mark as MET (expected when code moves between modules; verify snapshot *content* is correct)
+- Formatting-only changes (whitespace, line wrapping, import ordering) from `cargo fmt` or linters → mark as MET. Focus on logic/behavior changes, not style differences that formatters handle.
 - Pre-existing issue on main surfaced during the task → acceptable to fix
 - Criterion clearly unmet → mark as NOT MET
 
