@@ -115,10 +115,19 @@ pub(crate) fn role_impl_for(agent_type: AgentType) -> Arc<dyn AgentRole> {
 
 /// Resolve `Arc<dyn AgentRole>` directly from a task and dispatch context,
 /// without exposing `AgentType` to the caller.
+///
+/// Checks `issue_type` first so decomposition/spike/review tasks get the
+/// correct role (Planner/Architect) instead of always defaulting to Worker.
 pub(crate) fn role_for_task_dispatch(
     task: &Task,
     _has_conflict_context: bool,
 ) -> Arc<dyn AgentRole> {
+    // Issue-type-specific routing takes priority over status-based routing.
+    match task.issue_type.as_str() {
+        "decomposition" => return role_impl_for(AgentType::Planner),
+        "spike" | "review" => return role_impl_for(AgentType::Architect),
+        _ => {}
+    }
     role_impl_for(AgentType::for_task_status(task.status.as_str(), false))
 }
 
