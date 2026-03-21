@@ -1,10 +1,30 @@
 import { useMemo, useState } from "react";
-
+import { Trash2 } from "lucide-react";
 import { ProviderModel } from "@/api/settings";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+
+/** Maps known provider IDs to display names. Falls back to title-casing the id. */
+function formatProvider(id: string): string {
+  const known: Record<string, string> = {
+    openai: "OpenAI",
+    anthropic: "Anthropic",
+    google: "Google",
+    azure: "Azure",
+    aws: "AWS",
+    mistral: "Mistral",
+    cohere: "Cohere",
+    groq: "Groq",
+    ollama: "Ollama",
+    lmstudio: "LM Studio",
+    moonshot: "Moonshot",
+    deepseek: "DeepSeek",
+    perplexity: "Perplexity",
+  };
+  return known[id.toLowerCase()] ?? id.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
 import {
   Combobox,
   ComboboxCollection,
@@ -68,7 +88,7 @@ function ModelPicker({
         <ComboboxList>
           {(group, index) => (
             <ComboboxGroup key={group.provider} items={group.items}>
-              <ComboboxLabel>{group.provider}</ComboboxLabel>
+              <ComboboxLabel>{formatProvider(group.provider)}</ComboboxLabel>
               <ComboboxCollection>
                 {(item) => {
                   const provId = item.provider_id ?? item.provider ?? "unknown";
@@ -197,7 +217,7 @@ export function AgentConfig({
                     {/* Model info */}
                     <div className="min-w-0 flex-1">
                       <div className="font-semibold truncate">{entry.model}</div>
-                      <div className="text-sm text-muted-foreground">{entry.provider}</div>
+                      <div className="text-xs text-muted-foreground/60 uppercase tracking-wide">{formatProvider(entry.provider)}</div>
                     </div>
                     {/* Max sessions */}
                     <div className="flex items-center gap-2 shrink-0">
@@ -216,12 +236,12 @@ export function AgentConfig({
                     </div>
                     {/* Remove */}
                     <Button
-                      variant="outline"
+                      variant="ghost"
                       size="sm"
                       onClick={() => onRemoveModel(index)}
-                      className="shrink-0"
+                      className="shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10 h-8 w-8 p-0"
                     >
-                      Remove
+                      <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
                 </div>
