@@ -7,6 +7,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 
+/** Strips provider prefix from a model id (e.g. "openai/gpt-4o" → "gpt-4o"). */
+function stripProviderPrefix(modelId: string): string {
+  const slash = modelId.indexOf('/');
+  return slash >= 0 ? modelId.slice(slash + 1) : modelId;
+}
+
 /** Maps known provider IDs to display names. Falls back to title-casing the id. */
 function formatProvider(id: string): string {
   const known: Record<string, string> = {
@@ -122,6 +128,8 @@ interface AgentConfigProps {
   onUpdateMaxSessions: (index: number, maxConcurrent: number) => void;
   onDismissError: () => void;
   onSave: () => void;
+  hideHeader?: boolean;
+  hideEmptyState?: boolean;
 }
 
 export function AgentConfig({
@@ -137,6 +145,8 @@ export function AgentConfig({
   onUpdateMaxSessions,
   onDismissError,
   onSave,
+  hideHeader,
+  hideEmptyState,
 }: AgentConfigProps) {
   const [draggedItem, setDraggedItem] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -164,19 +174,21 @@ export function AgentConfig({
         </div>
       )}
 
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h3 className="text-xl font-bold">Models</h3>
-          <p className="text-sm text-muted-foreground">Priority = top → bottom (fallback order)</p>
+      {!hideHeader && (
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-bold">Models</h3>
+            <p className="text-sm text-muted-foreground">Priority = top → bottom (fallback order)</p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {hasUnsavedChanges && (
+              <Button variant="outline" onClick={onSave} disabled={isSaving} size="sm">
+                {isSaving ? "Saving..." : "Save"}
+              </Button>
+            )}
+          </div>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {hasUnsavedChanges && (
-            <Button variant="outline" onClick={onSave} disabled={isSaving} size="sm">
-              {isSaving ? "Saving..." : "Save"}
-            </Button>
-          )}
-        </div>
-      </div>
+      )}
 
       {isLoading ? (
         <div className="py-8 text-center text-sm text-muted-foreground">Loading...</div>
@@ -184,13 +196,15 @@ export function AgentConfig({
         <>
           <ModelPicker
             availableModels={availableModels}
-            onSelect={(m) => onAddModel({ model: m.id, provider: m.provider_id ?? m.provider ?? "unknown" })}
+            onSelect={(m) => onAddModel({ model: stripProviderPrefix(m.id), provider: m.provider_id ?? m.provider ?? "unknown" })}
           />
 
           {models.length === 0 ? (
-            <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
-              No models configured. Search above to add models.
-            </div>
+            !hideEmptyState && (
+              <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
+                No models configured. Search above to add models.
+              </div>
+            )
           ) : (
             <div className="space-y-2">
               {models.map((entry, index) => (
@@ -218,13 +232,13 @@ export function AgentConfig({
                     {/* Model info */}
                     <div className="min-w-0 flex-1">
                       <div className="font-semibold truncate">
-                        {availableModels.find((m) => m.id === entry.model && (m.provider_id ?? m.provider) === entry.provider)?.name ?? entry.model}
+                        {(availableModels.find((m) => stripProviderPrefix(m.id) === stripProviderPrefix(entry.model) && (m.provider_id ?? m.provider) === entry.provider) ?? availableModels.find((m) => stripProviderPrefix(m.id) === stripProviderPrefix(entry.model)))?.name ?? stripProviderPrefix(entry.model)}
                       </div>
                       <div className="text-xs text-muted-foreground/60">{formatProvider(entry.provider)}</div>
                     </div>
                     {/* Max sessions */}
                     <div className="flex items-center gap-2 shrink-0">
-                      <Label className="text-sm text-muted-foreground">Max:</Label>
+                      <Label className="text-sm text-muted-foreground">Sessions:</Label>
                       <Input
                         type="number"
                         min={1}
@@ -234,7 +248,7 @@ export function AgentConfig({
                           const v = parseInt(e.target.value, 10);
                           if (!isNaN(v) && v >= 1 && v <= 10) onUpdateMaxSessions(index, v);
                         }}
-                        className="w-16 h-9 text-center"
+                        className="w-16 h-9 text-center [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                       />
                     </div>
                     {/* Remove */}

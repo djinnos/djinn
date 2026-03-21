@@ -11,7 +11,9 @@ import {
   ComboboxItem,
   ComboboxList,
 } from '@/components/ui/combobox';
-import { ChevronDown, HelpCircle, Loader2, Sparkles, Key, CheckCircle2, AlertCircle } from 'lucide-react';
+
+import { ArrowDown01Icon, CheckmarkCircle04Icon, AlertCircleIcon, HelpCircleIcon, Key01Icon, Loading02Icon, SparklesIcon } from '@hugeicons/core-free-icons';
+import { HugeiconsIcon } from '@hugeicons/react';
 import { cn } from '@/lib/utils';
 import logoSvg from '@/assets/logo.svg';
 import {
@@ -47,9 +49,9 @@ function ChatGPTCard({ onDone }: { onDone: () => void }) {
   return (
     <div className="flex flex-col gap-4 rounded-xl border border-primary/40 bg-card p-6 h-full">
       <div className="flex items-center gap-2 flex-wrap">
-        <Sparkles className="h-4 w-4 text-primary shrink-0" />
+        <HugeiconsIcon icon={SparklesIcon} size={16} className="text-primary shrink-0" />
         <span className="font-semibold text-foreground">ChatGPT / Codex</span>
-        <span className="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-medium text-primary whitespace-nowrap">
+        <span className="rounded-full bg-green-500/15 px-2 py-0.5 text-[10px] font-medium text-green-500 whitespace-nowrap">
           No API key needed
         </span>
       </div>
@@ -73,14 +75,14 @@ function ChatGPTCard({ onDone }: { onDone: () => void }) {
 
       {error && (
         <p className="flex items-center gap-1.5 text-xs text-destructive">
-          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+          <HugeiconsIcon icon={AlertCircleIcon} size={14} className="shrink-0" />
           {error}
         </p>
       )}
 
       <Button className="w-full" onClick={() => void handleConnect()} disabled={pending}>
         {pending ? (
-          <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Waiting for browser...</>
+          <><HugeiconsIcon icon={Loading02Icon} size={16} className="mr-2 animate-spin" />Waiting for browser...</>
         ) : (
           'Continue with ChatGPT'
         )}
@@ -151,7 +153,7 @@ function ApiKeyCard({ onDone }: { onDone: () => void }) {
   return (
     <div className="flex flex-col gap-4 rounded-xl border border-border bg-card p-6 h-full">
       <div className="flex items-center gap-2">
-        <Key className="h-4 w-4 text-muted-foreground shrink-0" />
+        <HugeiconsIcon icon={Key01Icon} size={16} className="text-muted-foreground shrink-0" />
         <span className="font-semibold text-foreground">API Key</span>
       </div>
 
@@ -197,13 +199,13 @@ function ApiKeyCard({ onDone }: { onDone: () => void }) {
 
             {validated && (
               <p className="flex items-center gap-1.5 text-xs text-emerald-500">
-                <CheckCircle2 className="h-3.5 w-3.5" />
+                <HugeiconsIcon icon={CheckmarkCircle04Icon} size={14} />
                 API key is valid
               </p>
             )}
             {error && (
               <p className="flex items-center gap-1.5 text-xs text-destructive">
-                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                <HugeiconsIcon icon={AlertCircleIcon} size={14} className="shrink-0" />
                 {error}
               </p>
             )}
@@ -218,7 +220,7 @@ function ApiKeyCard({ onDone }: { onDone: () => void }) {
         onClick={() => void handleSave()}
       >
         {saving ? (
-          <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</>
+          <><HugeiconsIcon icon={Loading02Icon} size={16} className="mr-2 animate-spin" />Saving...</>
         ) : (
           'Use API Key'
         )}
@@ -265,10 +267,10 @@ export function ProviderOnboarding() {
           <Collapsible open={faqOpen} onOpenChange={setFaqOpen}>
             <CollapsibleTrigger className="flex w-full items-center justify-between gap-2 rounded-md px-1 py-2 text-xs text-muted-foreground hover:text-foreground transition-colors">
               <span className="flex items-center gap-1.5">
-                <HelpCircle className="h-3.5 w-3.5 shrink-0" />
+                <HugeiconsIcon icon={HelpCircleIcon} size={14} className="shrink-0" />
                 Why can&apos;t I use my Claude Pro or Gemini subscription?
               </span>
-              <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', faqOpen && 'rotate-180')} />
+              <HugeiconsIcon icon={ArrowDown01Icon} size={14} className={cn('shrink-0 transition-transform', faqOpen && 'rotate-180')} />
             </CollapsibleTrigger>
             <CollapsibleContent className="overflow-hidden">
               <div className="rounded-md border border-border bg-card/50 p-4 mt-1 text-xs text-muted-foreground space-y-2">

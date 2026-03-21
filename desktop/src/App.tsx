@@ -25,6 +25,8 @@ import { Button } from "@/components/ui/button";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { useProviderGateStore } from "@/stores/providerGateStore";
 import { ProviderOnboarding } from "@/components/ProviderOnboarding";
+import { useModelGateStore } from "@/stores/modelGateStore";
+import { ModelOnboarding } from "@/components/ModelOnboarding";
 
 
 function WelcomeStep() {
@@ -106,6 +108,7 @@ export default function App() {
   const selectedProjectId = useSelectedProjectId();
   const navigate = useNavigate();
   const { hasProvider, refresh: refreshGate } = useProviderGateStore();
+  const { hasModels, refresh: refreshModelGate } = useModelGateStore();
 
   useProjectsBootstrap(status);
   const [showWizard, setShowWizard] = useState(false);
@@ -116,8 +119,9 @@ export default function App() {
   useEffect(() => {
     if (status === 'connected') {
       void refreshGate();
+      void refreshModelGate();
     }
-  }, [status, refreshGate]);
+  }, [status, refreshGate, refreshModelGate]);
 
   useEffect(() => {
     if (isFirstRunLoading) return;
@@ -194,6 +198,10 @@ export default function App() {
 
   if (hasProvider === false) {
     return <ProviderOnboarding />;
+  }
+
+  if (hasModels === false) {
+    return <ModelOnboarding />;
   }
 
   return <MainLayout />;
