@@ -10,23 +10,15 @@ const HOTNESS_ALPHA: f64 = 0.2;
 const HALF_LIFE_DAYS: f64 = 7.0;
 const MIN_ASSOCIATION_WEIGHT: f64 = 0.05;
 
-#[allow(dead_code)]
 pub const CONFIDENCE_FLOOR: f64 = 0.025;
-#[allow(dead_code)]
 pub const CONFIDENCE_CEILING: f64 = 0.975;
 
-#[allow(dead_code)]
-pub const TASK_SUCCESS: f64 = 0.65;
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code, reason = "Used by intra-crate tests in note::mod and scoring::tests"))]
+pub(crate) const TASK_SUCCESS: f64 = 0.65;
 pub const CO_ACCESS_HIGH: f64 = 0.65;
-#[allow(dead_code)]
-pub const USER_CONFIRM: f64 = 0.95;
-#[allow(dead_code)]
-pub const CONTRADICTION: f64 = 0.1;
-#[allow(dead_code)]
-pub const TASK_FAILURE: f64 = 0.1;
-#[allow(dead_code)]
 pub const STALE_CITATION: f64 = 0.3;
+pub const USER_CONFIRM: f64 = 0.95;
+pub const CONTRADICTION: f64 = 0.1;
 
 pub fn bayesian_update(prior: f64, signal: f64) -> f64 {
     let posterior = (prior * signal) / (prior * signal + (1.0 - prior) * (1.0 - signal));

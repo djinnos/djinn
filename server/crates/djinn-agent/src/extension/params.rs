@@ -141,7 +141,8 @@ pub(super) struct MemoryListParams {
 pub(super) struct MemoryBuildContextParams {
     pub(super) project: Option<String>,
     pub(super) url: String,
-    /// Link traversal depth (default 1). Currently unused at the dispatch layer.
+    /// Link traversal depth (default 1). Parsed for forward compatibility even
+    /// though the current dispatch layer does not inspect it yet.
     pub(super) _depth: Option<i64>,
     pub(super) max_related: Option<i64>,
     pub(super) budget: Option<i64>,
@@ -199,49 +200,4 @@ pub(super) struct ReadParams {
     pub(super) file_path: String,
     pub(super) offset: Option<usize>,
     pub(super) limit: Option<usize>,
-}
-
-#[expect(dead_code)]
-#[derive(Deserialize)]
-pub(super) struct LspParams {
-    pub(super) operation: String,
-    pub(super) file_path: String,
-    pub(super) line: Option<u32>,
-    pub(super) character: Option<u32>,
-}
-
-#[expect(dead_code)]
-#[derive(Deserialize)]
-pub(super) struct TaskTransitionParams {
-    pub(super) id: String,
-    pub(super) action: String,
-    pub(super) reason: Option<String>,
-    pub(super) target_status: Option<String>,
-    /// Required when action = "force_close". UUIDs or short IDs of replacement
-    /// tasks the Lead created before closing this one.
-    pub(super) replacement_task_ids: Option<Vec<String>>,
-}
-
-#[expect(dead_code)]
-#[derive(Deserialize)]
-pub(super) struct TaskDeleteBranchParams {
-    pub(super) id: String,
-}
-
-#[expect(dead_code)]
-#[derive(Deserialize)]
-pub(super) struct TaskArchiveActivityParams {
-    pub(super) id: String,
-}
-
-#[expect(dead_code)]
-#[derive(Deserialize)]
-pub(super) struct TaskResetCountersParams {
-    pub(super) id: String,
-}
-
-#[expect(dead_code)]
-#[derive(Deserialize)]
-pub(super) struct TaskKillSessionParams {
-    pub(super) id: String,
 }

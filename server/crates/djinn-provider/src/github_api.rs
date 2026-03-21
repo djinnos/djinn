@@ -884,12 +884,7 @@ impl GitHubApiClient {
     /// Uses `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs`.
     /// GitHub returns a 302 redirect to a temporary download URL; reqwest
     /// follows the redirect automatically.
-    pub async fn get_job_logs(
-        &self,
-        owner: &str,
-        repo: &str,
-        job_id: u64,
-    ) -> Result<String> {
+    pub async fn get_job_logs(&self, owner: &str, repo: &str, job_id: u64) -> Result<String> {
         let url = format!(
             "{}/repos/{}/{}/actions/jobs/{}/logs",
             self.base_url, owner, repo, job_id
@@ -1073,24 +1068,6 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0)
-    }
-
-    #[allow(dead_code)]
-    fn future_expires_at() -> String {
-        // One hour from now, formatted as ISO-8601.
-        let secs = now_secs() + 3600;
-        let days = secs / 86400;
-        let rem = secs % 86400;
-        let h = rem / 3600;
-        let m = (rem % 3600) / 60;
-        let s = rem % 60;
-        // Simple date reconstruction — good enough for test tokens.
-        // Epoch day → Gregorian: reuse the algorithm in reverse.
-        let (year, month, day) = epoch_days_to_ymd(days);
-        format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-            year, month, day, h, m, s
-        )
     }
 
     fn epoch_days_to_ymd(z: i64) -> (i64, i64, i64) {

@@ -1190,13 +1190,9 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         } else {
             None
         };
-        if let Err(e) = commit_final_work_if_needed(
-            &task_id,
-            &worktree_path,
-            &app_state,
-            commit_msg.as_deref(),
-        )
-        .await
+        if let Err(e) =
+            commit_final_work_if_needed(&task_id, &worktree_path, &app_state, commit_msg.as_deref())
+                .await
         {
             tracing::warn!(
                 task_id = %task_id,
