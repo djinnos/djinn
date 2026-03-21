@@ -81,7 +81,7 @@ function ProvidersSettings() {
                   className="flex items-center gap-1.5"
                 >
                   {provider.name}
-                  <HugeiconsIcon icon={Delete02Icon} size={13} className="text-muted-foreground/60" />
+                  <HugeiconsIcon icon={Delete02Icon} size={13} className="text-destructive" />
                 </ConfirmButton>
               ))
             )}
