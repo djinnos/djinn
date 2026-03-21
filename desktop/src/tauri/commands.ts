@@ -71,11 +71,8 @@ export async function retryServerConnection(): Promise<string> {
   return invoke("retry_server_connection");
 }
 
-/** @deprecated Use retryServerConnection instead */
 export async function retryServerDiscovery(): Promise<number> {
-  const url = await retryServerConnection();
-  const match = url.match(/:(\d+)/);
-  return match ? parseInt(match[1], 10) : 8372;
+  return invoke("retry_server_discovery");
 }
 
 export type ConnectionMode =

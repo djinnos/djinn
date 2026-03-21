@@ -56,13 +56,27 @@ pub fn init_server_state() -> ServerState {
 }
 
 /// Start the djinn server embedded in-process and return the base URL.
+///
+/// If port 8372 is already in use (e.g. a dev server is running), falls back
+/// to connecting to that existing server rather than returning an error.
 pub async fn start_embedded(cancel: CancellationToken) -> Result<String, String> {
     let config = djinn_server::embedded::Config {
         port: 8372,
         db_path: None,
     };
-    let port = djinn_server::embedded::start(config, cancel).await?;
-    Ok(format!("http://127.0.0.1:{port}"))
+    match djinn_server::embedded::start(config, cancel).await {
+        Ok(port) => Ok(format!("http://127.0.0.1:{port}")),
+        Err(e) => {
+            // If the port is already in use, reuse the existing server.
+            let fallback = "http://127.0.0.1:8372";
+            if health_check(fallback).await {
+                log::info!("Port in use; reusing existing server at {fallback}");
+                Ok(fallback.to_string())
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Verify a remote server URL is reachable.

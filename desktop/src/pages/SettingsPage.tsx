@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { NavLink, Navigate, useParams } from 'react-router-dom';
@@ -19,13 +18,11 @@ import { AddProviderModal } from '@/components/AddProviderModal';
 import { selectDirectory } from '@/tauri/commands';
 import { toast } from 'sonner';
 
-type SettingsCategory = 'providers' | 'projects' | 'models' | 'server';
+type SettingsCategory = 'providers' | 'projects';
 
 const categories: Array<{ key: SettingsCategory; label: string }> = [
   { key: 'providers', label: 'Providers' },
   { key: 'projects', label: 'Projects' },
-  { key: 'models', label: 'Models' },
-  { key: 'server', label: 'Server' },
 ];
 
 function ProvidersSettings() {
@@ -37,6 +34,8 @@ function ProvidersSettings() {
     loadData,
     removeProvider,
   } = useProviders();
+
+  const agentConfig = useAgentConfig();
 
   const [isAddOpen, setIsAddOpen] = useState(false);
 
@@ -61,39 +60,45 @@ function ProvidersSettings() {
   }
 
   return (
-    <div className="flex flex-col gap-4 flex-1 min-h-0">
-      <div className="flex items-center justify-between shrink-0">
-        <h2 className="text-lg font-semibold text-foreground">Configured Providers</h2>
-        <Button onClick={() => setIsAddOpen(true)}>Add Provider</Button>
-      </div>
+    <div className="flex flex-col gap-6 flex-1 min-h-0">
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center justify-between shrink-0">
+          <h2 className="text-lg font-semibold text-foreground">Providers</h2>
+          <Button onClick={() => setIsAddOpen(true)}>Add Provider</Button>
+        </div>
 
-      <AddProviderModal
-        open={isAddOpen}
-        onOpenChange={setIsAddOpen}
-        configuredProviderIds={configuredProviders.map((p) => p.id)}
-        onDone={() => void loadData()}
-      />
+        <AddProviderModal
+          open={isAddOpen}
+          onOpenChange={setIsAddOpen}
+          configuredProviderIds={configuredProviders.map((p) => p.id)}
+          onDone={() => void loadData()}
+        />
 
-      <div className="space-y-2 shrink-0">
-        {configuredProviders.map((provider) => (
-          <div key={provider.id} className="flex items-center justify-between rounded-lg border border-border bg-card p-4">
-            <div>
-              <p className="font-medium">{provider.name}</p>
-              <p className="text-xs text-muted-foreground">Configured</p>
+        <div className="space-y-2 shrink-0">
+          {configuredProviders.map((provider) => (
+            <div key={provider.id} className="flex items-center justify-between rounded-lg border border-border bg-card p-4">
+              <div>
+                <p className="font-medium">{provider.name}</p>
+                <p className="text-xs text-muted-foreground">Configured</p>
+              </div>
+              <ConfirmButton
+                title="Remove provider"
+                description={`Remove "${provider.name}" and its credentials?`}
+                confirmLabel="Remove"
+                onConfirm={() => removeProvider(provider.id)}
+                size="sm"
+              >
+                Remove
+              </ConfirmButton>
             </div>
-            <ConfirmButton
-              title="Remove provider"
-              description={`Remove "${provider.name}" and its credentials?`}
-              confirmLabel="Remove"
-              onConfirm={() => removeProvider(provider.id)}
-              size="sm"
-            >
-              Remove
-            </ConfirmButton>
-          </div>
-        ))}
-        {configuredProviders.length === 0 && <p className="text-sm text-muted-foreground">No providers configured yet.</p>}
+          ))}
+          {configuredProviders.length === 0 && <p className="text-sm text-muted-foreground">No providers configured yet.</p>}
+        </div>
       </div>
+
+      <div className="border-t border-border" />
+
+      <AgentConfig {...agentConfig} />
     </div>
   );
 }
@@ -411,111 +416,6 @@ function ProjectsSettings() {
   );
 }
 
-type ConnectionMode =
-  | { type: 'embedded' }
-  | { type: 'remote'; url: string };
-
-function ServerSettings() {
-  const [mode, setMode] = useState<ConnectionMode>({ type: 'embedded' });
-  const [remoteUrl, setRemoteUrl] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-
-  useEffect(() => {
-    invoke<ConnectionMode>('get_connection_mode')
-      .then((current) => {
-        setMode(current);
-        if (current.type === 'remote') {
-          setRemoteUrl(current.url);
-        }
-      })
-      .catch((err: unknown) => {
-        toast.error('Could not load connection mode', {
-          description: err instanceof Error ? err.message : String(err),
-        });
-      })
-      .finally(() => setLoading(false));
-  }, []);
-
-  const currentMode: ConnectionMode =
-    mode.type === 'remote' ? { type: 'remote', url: remoteUrl } : { type: 'embedded' };
-
-  const handleSave = async () => {
-    setSaving(true);
-    setSaved(false);
-    try {
-      await invoke('set_connection_mode', { mode: currentMode });
-      setSaved(true);
-    } catch (err) {
-      toast.error('Could not save connection mode', {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (loading) {
-    return <div className="rounded-lg border border-border bg-card p-6">Loading server settings...</div>;
-  }
-
-  return (
-    <div className="space-y-4">
-      <div>
-        <h2 className="text-lg font-semibold text-foreground">Server</h2>
-        <p className="text-sm text-muted-foreground">Configure how the desktop app connects to the djinn server.</p>
-      </div>
-
-      <div className="bg-card border border-border rounded-lg p-4 space-y-3">
-        <p className="text-sm font-medium text-foreground">Connection mode</p>
-
-        <div className="space-y-2">
-          <button
-            type="button"
-            className={cn(
-              'w-full rounded-md border p-3 text-left transition-colors',
-              mode.type === 'embedded' ? 'border-primary' : 'border-border hover:border-muted-foreground',
-            )}
-            onClick={() => setMode({ type: 'embedded' })}
-          >
-            <p className="font-medium text-sm text-foreground">Embedded</p>
-            <p className="text-xs text-muted-foreground">Run the server inside the app process (default).</p>
-          </button>
-
-          <button
-            type="button"
-            className={cn(
-              'w-full rounded-md border p-3 text-left transition-colors',
-              mode.type === 'remote' ? 'border-primary' : 'border-border hover:border-muted-foreground',
-            )}
-            onClick={() => setMode({ type: 'remote', url: remoteUrl })}
-          >
-            <p className="font-medium text-sm text-foreground">Remote</p>
-            <p className="text-xs text-muted-foreground">Connect to an already-running djinn server over HTTP.</p>
-          </button>
-        </div>
-
-        {mode.type === 'remote' && (
-          <Input
-            placeholder="http://localhost:8372"
-            value={remoteUrl}
-            onChange={(e) => setRemoteUrl(e.target.value)}
-          />
-        )}
-
-        <div className="flex items-center gap-3">
-          <Button onClick={() => void handleSave()} disabled={saving}>
-            {saving ? 'Saving...' : 'Save'}
-          </Button>
-          {saved && (
-            <p className="text-xs text-muted-foreground">Restart the app to apply changes.</p>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 export function SettingsPage() {
   const params = useParams<{ category?: string }>();
@@ -528,8 +428,6 @@ export function SettingsPage() {
   if (!categories.some((item) => item.key === category)) {
     return <Navigate to="/settings/providers" replace />;
   }
-
-  const agentConfig = useAgentConfig();
 
   return (
     <div className="flex h-full flex-col overflow-hidden p-6">
@@ -559,8 +457,6 @@ export function SettingsPage() {
         <section className="min-h-0 min-w-0 flex-1 flex flex-col overflow-x-hidden overflow-y-auto pb-6">
           {category === 'providers' && <ProvidersSettings />}
           {category === 'projects' && <ProjectsSettings />}
-          {category === 'models' && <AgentConfig {...agentConfig} />}
-          {category === 'server' && <ServerSettings />}
         </section>
       </div>
     </div>
