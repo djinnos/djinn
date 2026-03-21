@@ -213,13 +213,15 @@ mod tests {
             .unwrap();
 
         let task_id = uuid::Uuid::now_v7().to_string();
+        let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                                 issue_type, priority, owner, status, continuation_count, memory_refs)
-             VALUES (?1, ?2, 'tsst', ?3, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
+             VALUES (?1, ?2, ?3, ?4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
         )
         .bind(&task_id)
         .bind(&epic.project_id)
+        .bind(&short_id)
         .bind(&epic.id)
         .execute(db.pool())
         .await
@@ -314,5 +316,90 @@ mod tests {
 
         let conv = repo.load_conversation(&session_id).await.unwrap();
         assert!(conv.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_for_sessions_keeps_messages_scoped_and_ordered_by_session() {
+        let db = test_db();
+        let (_project_id, task_id, first_session_id) =
+            create_session(db.clone(), EventBus::noop()).await;
+        let (_project_id, _other_task_id, second_session_id) =
+            create_session(db.clone(), EventBus::noop()).await;
+
+        let repo = SessionMessageRepository::new(db, EventBus::noop());
+
+        repo.insert_message(
+            &first_session_id,
+            &task_id,
+            "user",
+            r#"[{"type":"text","text":"first-user"}]"#,
+            Some(11),
+        )
+        .await
+        .unwrap();
+        repo.insert_message(
+            &first_session_id,
+            &task_id,
+            "assistant",
+            r#"[{"type":"text","text":"first-assistant"}]"#,
+            Some(13),
+        )
+        .await
+        .unwrap();
+        repo.insert_message(
+            &second_session_id,
+            &task_id,
+            "user",
+            r#"[{"type":"text","text":"second-user"}]"#,
+            Some(17),
+        )
+        .await
+        .unwrap();
+
+        let rows = repo
+            .load_for_sessions(&[first_session_id.clone(), second_session_id.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].0, first_session_id);
+        assert_eq!(rows[0].1, "user");
+        assert!(rows[0].2.contains("first-user"));
+        assert_eq!(rows[1].0, first_session_id);
+        assert_eq!(rows[1].1, "assistant");
+        assert!(rows[1].2.contains("first-assistant"));
+        assert_eq!(rows[2].0, second_session_id);
+        assert_eq!(rows[2].1, "user");
+        assert!(rows[2].2.contains("second-user"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn single_insert_persists_token_count_and_round_trips_content() {
+        let db = test_db();
+        let (_project_id, task_id, session_id) = create_session(db.clone(), EventBus::noop()).await;
+
+        let repo = SessionMessageRepository::new(db, EventBus::noop());
+
+        let inserted = repo
+            .insert_message(
+                &session_id,
+                &task_id,
+                "assistant",
+                r#"[{"type":"text","text":"persist me"}]"#,
+                Some(42),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(inserted.session_id, session_id);
+        assert_eq!(inserted.role, "assistant");
+        assert_eq!(inserted.token_count, Some(42));
+        assert!(inserted.content_json.contains("persist me"));
+
+        let conv = repo.load_conversation(&session_id).await.unwrap();
+        assert_eq!(conv.messages.len(), 1);
+        assert_eq!(conv.messages[0].role, Role::Assistant);
+        let content_json = serde_json::to_string(&conv.messages[0].content).unwrap();
+        assert!(content_json.contains("persist me"));
     }
 }

@@ -412,13 +412,15 @@ mod tests {
             .unwrap();
 
         let task_id = uuid::Uuid::now_v7().to_string();
+        let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                                 issue_type, priority, owner, status, continuation_count, memory_refs)
-             VALUES (?1, ?2, 'tsst', ?3, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
+             VALUES (?1, ?2, ?3, ?4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
         )
         .bind(&task_id)
         .bind(&epic.project_id)
+        .bind(&short_id)
         .bind(&epic.id)
         .execute(db.pool())
         .await
@@ -476,5 +478,152 @@ mod tests {
         assert!(completed.is_some(), "expected session.completed event");
         let s: SessionRecord = serde_json::from_value(completed.unwrap().payload.clone()).unwrap();
         assert_eq!(s.id, created.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pause_and_resume_preserve_session_identity_and_worktree() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                worktree_path: Some("/tmp/djinn-worktree-resume"),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(created.status, SessionStatus::Running.as_str());
+        assert_eq!(
+            created.worktree_path.as_deref(),
+            Some("/tmp/djinn-worktree-resume")
+        );
+        assert!(
+            created.ended_at.is_none(),
+            "new sessions should start without ended_at"
+        );
+
+        let paused = repo.pause(&created.id, 12, 34).await.unwrap();
+        assert_eq!(paused.id, created.id);
+        assert_eq!(paused.status, SessionStatus::Paused.as_str());
+        assert_eq!(paused.tokens_in, 12);
+        assert_eq!(paused.tokens_out, 34);
+        assert!(paused.ended_at.is_none(), "paused sessions stay resumable");
+        assert_eq!(paused.worktree_path, created.worktree_path);
+
+        let paused_lookup = repo.paused_for_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(paused_lookup.id, created.id);
+        assert_eq!(paused_lookup.status, SessionStatus::Paused.as_str());
+
+        let resumed = repo.set_running(&created.id).await.unwrap();
+        assert_eq!(resumed.id, created.id);
+        assert_eq!(resumed.status, SessionStatus::Running.as_str());
+        assert!(
+            resumed.ended_at.is_none(),
+            "resumed session should remain open"
+        );
+        assert_eq!(resumed.worktree_path, created.worktree_path);
+
+        let active = repo.active_for_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(active.id, created.id);
+        assert_eq!(active.status, SessionStatus::Running.as_str());
+
+        let sessions = repo.list_for_task(&task_id).await.unwrap();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "resume should reuse existing session row"
+        );
+        assert_eq!(sessions[0].id, created.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn interrupt_running_for_task_only_updates_running_sessions_for_target_task() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let (other_project_id, other_task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let first_running_target = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                worktree_path: Some("/tmp/target-running"),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        let paused_target = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5-pause",
+                agent_type: "worker",
+                worktree_path: Some("/tmp/target-paused"),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let paused_target = repo.pause(&paused_target.id, 7, 8).await.unwrap();
+
+        let second_running_target = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5-mini",
+                agent_type: "worker",
+                worktree_path: Some("/tmp/target-running-2"),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        let other_task_running = repo
+            .create(CreateSessionParams {
+                project_id: &other_project_id,
+                task_id: Some(&other_task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                worktree_path: Some("/tmp/other-running"),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        let interrupted = repo.interrupt_running_for_task(&task_id).await.unwrap();
+        assert_eq!(
+            interrupted, 2,
+            "only running rows for the target task should be interrupted"
+        );
+
+        let first = repo.get(&first_running_target.id).await.unwrap().unwrap();
+        assert_eq!(first.status, SessionStatus::Interrupted.as_str());
+        assert!(
+            first.ended_at.is_some(),
+            "interrupted sessions should be closed"
+        );
+
+        let second = repo.get(&second_running_target.id).await.unwrap().unwrap();
+        assert_eq!(second.status, SessionStatus::Interrupted.as_str());
+        assert!(second.ended_at.is_some());
+
+        let paused_after = repo.get(&paused_target.id).await.unwrap().unwrap();
+        assert_eq!(paused_after.status, SessionStatus::Paused.as_str());
+        assert!(
+            paused_after.ended_at.is_none(),
+            "paused resumable session must remain open"
+        );
+
+        let other_after = repo.get(&other_task_running.id).await.unwrap().unwrap();
+        assert_eq!(other_after.status, SessionStatus::Running.as_str());
+        assert!(other_after.ended_at.is_none());
     }
 }
