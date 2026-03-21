@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Sparkles } from "lucide-react";
+
 import { ProviderModel } from "@/api/settings";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -194,8 +194,6 @@ export function AgentConfig({
                         <circle cx="15" cy="5" r="1.5" /><circle cx="15" cy="12" r="1.5" /><circle cx="15" cy="19" r="1.5" />
                       </svg>
                     </div>
-                    {/* Sparkles icon */}
-                    <Sparkles className="h-4 w-4 text-muted-foreground/50 shrink-0" />
                     {/* Model info */}
                     <div className="min-w-0 flex-1">
                       <div className="font-semibold truncate">{entry.model}</div>
