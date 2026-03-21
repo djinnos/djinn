@@ -14,7 +14,7 @@ use crate::tools::validation::{
     validate_task_create_status, validate_title,
 };
 use djinn_core::models::SessionStatus;
-use djinn_core::models::{Task, TaskStatus, TransitionAction};
+use djinn_core::models::{IssueType, Task, TaskStatus, TransitionAction};
 use djinn_db::EpicRepository;
 use djinn_db::SessionRepository;
 use djinn_db::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository};
@@ -30,7 +30,7 @@ pub use types::*;
 impl DjinnMcpServer {
     /// Create a new work item under an epic.
     #[tool(
-        description = "Create a new work item (task, feature, bug, spike, research, decomposition, or review) under an epic. Accepts epic_id as UUID or short_id. Use blocked_by to set blocker dependencies atomically at creation. Spike/research/decomposition/review use a simple lifecycle (open → in_progress → closed)."
+        description = "Create a new work item (task, feature, bug, spike, research, decomposition, or review) under an epic. Accepts epic_id as UUID or short_id. Use blocked_by to set blocker dependencies atomically at creation. Spike/research/decomposition/review use a simple lifecycle (open → in_progress → closed). acceptance_criteria is required for task/feature/bug types."
     )]
     pub async fn task_create(
         &self,
@@ -74,6 +74,24 @@ impl DjinnMcpServer {
             && let Err(e) = validate_ac_count(ac.len())
         {
             return Json(ErrorOr::Error(ErrorResponse::new(e)));
+        }
+        // Non-simple-lifecycle tasks (task, feature, bug) require acceptance criteria.
+        // Simple-lifecycle types (decomposition, spike, research, review) are created
+        // by the system without AC — the work product IS the output of their session.
+        let uses_simple = IssueType::parse(issue_type)
+            .map(|it| it.uses_simple_lifecycle())
+            .unwrap_or(false);
+        if !uses_simple {
+            let ac_empty = p
+                .acceptance_criteria
+                .as_ref()
+                .map(|ac| ac.is_empty())
+                .unwrap_or(true);
+            if ac_empty {
+                return Json(ErrorOr::Error(ErrorResponse::new(
+                    "acceptance_criteria is required for task/feature/bug issue types",
+                )));
+            }
         }
 
         let project_id = match self.require_project_id(&p.project).await {
