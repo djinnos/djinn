@@ -218,7 +218,7 @@ export function AgentConfig({
                     {/* Model info */}
                     <div className="min-w-0 flex-1">
                       <div className="font-semibold truncate">{entry.model}</div>
-                      <div className="text-xs text-muted-foreground/60 uppercase tracking-wide">{formatProvider(entry.provider)}</div>
+                      <div className="text-xs text-muted-foreground/60">{formatProvider(entry.provider)}</div>
                     </div>
                     {/* Max sessions */}
                     <div className="flex items-center gap-2 shrink-0">
