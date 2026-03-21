@@ -776,30 +776,40 @@ impl GitHubApiClient {
 
     /// Mark a draft PR as ready for review (undraft it).
     ///
-    /// Uses `PATCH /repos/{owner}/{repo}/pulls/{pull_number}` with `{"draft": false}`.
+    /// Uses the GraphQL `markPullRequestReadyForReview` mutation.  The REST
+    /// `PATCH /pulls/{number}` endpoint silently ignores `{"draft": false}`, so
+    /// GraphQL is the only supported path for converting a draft PR.
+    ///
+    /// `node_id` is the GraphQL node ID of the pull request (available as
+    /// `PullRequest::node_id` from `get_pull_request`).
     pub async fn mark_pr_ready_for_review(
         &self,
-        owner: &str,
-        repo: &str,
-        pull_number: u64,
+        node_id: &str,
     ) -> Result<serde_json::Value> {
-        let url = format!(
-            "{}/repos/{}/{}/pulls/{}",
-            self.base_url, owner, repo, pull_number
-        );
-        let body = serde_json::json!({ "draft": false });
+        let query = r#"
+            mutation MarkPullRequestReadyForReview($pullRequestId: ID!) {
+                markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) {
+                    pullRequest { number isDraft }
+                }
+            }
+        "#;
 
+        let body = serde_json::json!({
+            "query": query,
+            "variables": { "pullRequestId": node_id }
+        });
+
+        let base_url = self.base_url.clone();
         let resp = self
             .send_with_retry(|token| {
-                let url = url.clone();
                 let body = body.clone();
                 let http = self.http.clone();
+                let base_url = base_url.clone();
                 async move {
+                    let graphql_url = format!("{}/graphql", base_url);
                     let resp = http
-                        .patch(&url)
+                        .post(&graphql_url)
                         .bearer_auth(&token)
-                        .header("Accept", "application/vnd.github+json")
-                        .header("X-GitHub-Api-Version", "2022-11-28")
                         .json(&body)
                         .send()
                         .await?;
@@ -817,7 +827,15 @@ impl GitHubApiClient {
                 body
             ));
         }
-        Ok(resp.json().await?)
+
+        let json: serde_json::Value = resp.json().await?;
+
+        // GraphQL returns 200 even on errors — check the `errors` field.
+        if let Some(errors) = json.get("errors") {
+            return Err(anyhow!("mark_pr_ready_for_review GraphQL error: {}", errors));
+        }
+
+        Ok(json)
     }
 
     /// List jobs for a workflow run.
@@ -1210,6 +1228,60 @@ mod tests {
             .unwrap();
 
         assert!(result["data"]["enablePullRequestAutoMerge"]["pullRequest"]["number"] == 42);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mark_pr_ready_for_review_uses_graphql_mutation() {
+        let server = MockServer::start().await;
+        let repo = make_repo();
+        seed_tokens(&repo, "ghu_user").await;
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(header("Authorization", "Bearer ghu_user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "markPullRequestReadyForReview": {
+                        "pullRequest": { "number": 8, "isDraft": false }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = GitHubApiClient::with_base_url(repo, server.uri());
+        let result = client
+            .mark_pr_ready_for_review("PR_node456")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result["data"]["markPullRequestReadyForReview"]["pullRequest"]["isDraft"],
+            false
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mark_pr_ready_for_review_propagates_graphql_error() {
+        let server = MockServer::start().await;
+        let repo = make_repo();
+        seed_tokens(&repo, "ghu_user").await;
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [{ "message": "Resource not accessible by integration" }]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = GitHubApiClient::with_base_url(repo, server.uri());
+        let err = client
+            .mark_pr_ready_for_review("PR_node456")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("GraphQL error"), "got: {err}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

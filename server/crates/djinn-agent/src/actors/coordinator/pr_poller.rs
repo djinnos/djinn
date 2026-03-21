@@ -208,7 +208,7 @@ impl CoordinatorActor {
                     "PR poller: CI passed on draft PR → marking ready for review"
                 );
                 if let Err(e) = gh_client
-                    .mark_pr_ready_for_review(&owner, &repo, pull_number)
+                    .mark_pr_ready_for_review(&pr.node_id)
                     .await
                 {
                     tracing::warn!(
