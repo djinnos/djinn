@@ -1,7 +1,7 @@
 ---
-source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 2184
-expression: tool_schemas_lead()
+source: crates/djinn-agent/src/extension/schemas.rs
+assertion_line: 818
+expression: tool_schemas_architect()
 ---
 [
   {
@@ -355,107 +355,46 @@ expression: tool_schemas_lead()
     "name": "task_create"
   },
   {
-    "description": "Update task fields and append/remove memory refs when supported by the workflow.",
+    "description": "Add a comment or strategic observation to a task's activity log.",
     "inputSchema": {
       "properties": {
-        "acceptance_criteria": {
-          "items": {
-            "type": "object"
-          },
-          "type": "array"
-        },
-        "description": {
-          "type": "string"
-        },
-        "design": {
-          "type": "string"
-        },
-        "epic_id": {
+        "body": {
+          "description": "Comment body to add to the activity log",
           "type": "string"
         },
         "id": {
           "description": "Task UUID or short ID",
           "type": "string"
-        },
-        "memory_refs_add": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "memory_refs_remove": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "owner": {
-          "type": "string"
-        },
-        "priority": {
-          "type": "integer"
-        },
-        "status": {
-          "type": "string"
-        },
-        "title": {
-          "type": "string"
         }
       },
       "required": [
-        "id"
+        "id",
+        "body"
       ],
       "type": "object"
     },
-    "name": "task_update"
+    "name": "task_comment_add"
   },
   {
-    "description": "Delete the task worktree and branch so a fresh implementation can restart from target branch state.",
+    "description": "Transition a task using a named workflow action.",
     "inputSchema": {
       "properties": {
+        "action": {
+          "description": "Transition action name",
+          "type": "string"
+        },
         "id": {
           "description": "Task UUID or short ID",
           "type": "string"
         }
       },
       "required": [
-        "id"
+        "id",
+        "action"
       ],
       "type": "object"
     },
-    "name": "task_delete_branch"
-  },
-  {
-    "description": "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_archive_activity"
-  },
-  {
-    "description": "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_reset_counters"
+    "name": "task_transition"
   },
   {
     "description": "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.",
@@ -565,49 +504,87 @@ expression: tool_schemas_lead()
     "name": "epic_tasks"
   },
   {
-    "description": "Escalate a task to the Architect role when implementation is blocked on codebase analysis, root-cause investigation, or cross-cutting technical design. This is for strategic technical intervention rather than PM/lead triage.",
+    "description": "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.",
     "inputSchema": {
       "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
+        "limit": {
+          "description": "Maximum notes to include (default 8)",
+          "type": "integer"
+        },
+        "query": {
+          "description": "Optional free-text query to bias retrieval",
           "type": "string"
         },
-        "reason": {
-          "description": "Why Architect intervention is needed (e.g. root cause unclear, design blocked, need codebase-wide analysis)",
+        "task_id": {
+          "description": "Task ID to gather related memory for; defaults to current session task when omitted",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "memory_build_context"
+  },
+  {
+    "description": "Show execution quality metrics for a role to support prompt tuning and intervention decisions.",
+    "inputSchema": {
+      "properties": {
+        "role": {
+          "description": "Role name (worker, reviewer, lead, planner, architect)",
           "type": "string"
         }
       },
       "required": [
-        "id",
-        "reason"
+        "role"
       ],
       "type": "object"
     },
-    "name": "request_architect"
+    "name": "role_metrics"
   },
   {
-    "description": "Submit the Lead intervention decision and release the task back to the worker queue. Your session ends after this call.",
+    "description": "Append a learned amendment to a role prompt using observed failures or improvements.",
     "inputSchema": {
       "properties": {
-        "created_tasks": {
-          "description": "IDs of tasks created during this intervention (for decompose decisions)",
+        "amendment": {
+          "description": "Instruction text to append to the role prompt",
+          "type": "string"
+        },
+        "metrics_snapshot": {
+          "description": "JSON string of current metrics for the history record",
+          "type": "string"
+        },
+        "role": {
+          "description": "Role name to amend",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "amendment"
+      ],
+      "type": "object"
+    },
+    "name": "role_amend_prompt"
+  },
+  {
+    "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",
+    "inputSchema": {
+      "properties": {
+        "files_changed": {
+          "description": "List of files modified during this session",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
-        "decision": {
-          "description": "The decision taken: reopen (send back to worker), decompose (split into subtasks), force_close, or escalate (release back to Lead queue)",
-          "enum": [
-            "reopen",
-            "decompose",
-            "force_close",
-            "escalate"
-          ],
-          "type": "string"
+        "remaining_concerns": {
+          "description": "Any outstanding concerns or caveats for the reviewer",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
-        "rationale": {
-          "description": "Explanation for the decision",
+        "summary": {
+          "description": "Brief summary of the work completed",
           "type": "string"
         },
         "task_id": {
@@ -617,10 +594,10 @@ expression: tool_schemas_lead()
       },
       "required": [
         "task_id",
-        "decision"
+        "summary"
       ],
       "type": "object"
     },
-    "name": "submit_decision"
+    "name": "submit_work"
   }
 ]

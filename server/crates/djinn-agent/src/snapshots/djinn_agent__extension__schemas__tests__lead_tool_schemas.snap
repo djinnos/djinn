@@ -1,6 +1,6 @@
 ---
-source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 2184
+source: crates/djinn-agent/src/extension/schemas.rs
+assertion_line: 778
 expression: tool_schemas_lead()
 ---
 [
