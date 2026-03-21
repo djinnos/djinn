@@ -19,7 +19,8 @@ import {
   UnavailableIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { GitMerge, Play, Square, RotateCcw, X } from "lucide-react";
+import { ExternalLink, GitMerge, Play, Square, RotateCcw, X } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useState } from "react";
 import { useTaskActions } from "@/hooks/useTaskActions";
@@ -405,17 +406,22 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
             </span>
           )}
 
-          {/* PR URL badge */}
+          {/* PR URL link */}
           {task.pr_url && (
             <a
               href={task.pr_url}
               target="_blank"
               rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="inline-flex items-center gap-0.5 rounded bg-violet-500/15 px-1 py-px text-[10px] font-medium text-violet-400 hover:text-violet-300"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                openUrl(task.pr_url!);
+              }}
+              className="inline-flex items-center gap-0.5 text-[10px] font-medium text-violet-400 hover:text-violet-300 hover:underline"
               title={task.pr_url}
             >
-              PR
+              <ExternalLink className="h-2.5 w-2.5 shrink-0" />
+              {task.pr_url.match(/\/pull\/(\d+)/)?.[0]?.replace("/pull/", "PR #") ?? "PR"}
             </a>
           )}
 
