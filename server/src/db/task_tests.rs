@@ -861,6 +861,27 @@ async fn start_allows_when_acceptance_criteria_present() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_allows_decomposition_without_acceptance_criteria() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
+    let repo = TaskRepository::new(db, event_bus_for(&tx));
+
+    // Decomposition tasks have no AC by design — the planner produces the breakdown.
+    let task = repo
+        .create(&epic.id, "Plan next wave", "", "", "decomposition", 0, "", Some("open"))
+        .await
+        .unwrap();
+    assert_eq!(task.acceptance_criteria, "[]");
+
+    let started = repo
+        .transition(&task.id, TransitionAction::Start, "", "system", None, None)
+        .await
+        .unwrap();
+    assert_eq!(started.status, "in_progress");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_blocked_by_unresolved_blockers() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
