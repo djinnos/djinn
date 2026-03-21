@@ -453,6 +453,13 @@ mod tests {
         // Create working repo and add origin.
         tokio::fs::create_dir_all(&repo).await.unwrap();
         git(&repo, &["init"]).await.unwrap();
+        // Set git identity so commits work in CI (no global user.name/email).
+        git(&repo, &["config", "user.email", "ci@test.local"])
+            .await
+            .unwrap();
+        git(&repo, &["config", "user.name", "CI Test"])
+            .await
+            .unwrap();
         git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()])
             .await
             .unwrap();
