@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { Trash2 } from "lucide-react";
+import { Delete02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { ProviderModel } from "@/api/settings";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -241,7 +242,7 @@ export function AgentConfig({
                       onClick={() => onRemoveModel(index)}
                       className="shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10 h-8 w-8 p-0"
                     >
-                      <Trash2 className="h-4 w-4" />
+                      <HugeiconsIcon icon={Delete02Icon} size={16} />
                     </Button>
                   </div>
                 </div>
