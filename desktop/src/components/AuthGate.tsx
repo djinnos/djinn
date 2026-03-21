@@ -3,10 +3,10 @@ import { startGithubLogin, type AuthUser } from "@/tauri/commands";
 import { listen } from "@tauri-apps/api/event";
 import { type ReactNode, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Copy, Check } from "lucide-react";
-import { GithubIcon } from "@hugeicons/core-free-icons";
+import { GithubIcon, Copy01Icon, Tick01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import logoSvg from "@/assets/logo.svg";
+import { LoadingScreen } from "@/components/LoadingScreen";
 
 export function AuthGate({ children }: { children: ReactNode }) {
   const { isAuthenticated, isLoading, error, fetchState, setState } =
@@ -86,11 +86,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   };
 
   if (isLoading) {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-background text-foreground">
-        <p className="text-sm text-muted-foreground">Checking authentication...</p>
-      </main>
-    );
+    return <LoadingScreen message="Checking authentication..." />;
   }
 
   if (!isAuthenticated) {
@@ -124,7 +120,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
                 <code className="select-all text-2xl font-bold tracking-[0.3em]">
                   {deviceCode.userCode}
                 </code>
-                {copied ? <Check className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4 text-muted-foreground group-hover:text-foreground transition-colors" />}
+                {copied ? <HugeiconsIcon icon={Tick01Icon} size={16} className="text-emerald-500" /> : <HugeiconsIcon icon={Copy01Icon} size={16} className="text-muted-foreground group-hover:text-foreground transition-colors" />}
               </button>
               <a
                 href={deviceCode.verificationUri}
