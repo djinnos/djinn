@@ -1,7 +1,7 @@
 import { callMcpTool } from "@/api/mcpClient";
 import type { McpToolOutput, ProviderModelsConnectedOutputSchema } from "@/api/generated/mcp-tools.gen";
 
-export type AgentRole = "worker" | "reviewer" | "lead" | "planner";
+export type AgentRole = "worker" | "reviewer" | "lead" | "planner" | "architect";
 
 export interface ModelPriorityItem {
   model: string;
@@ -93,6 +93,7 @@ export async function fetchSettings(): Promise<SettingsResponse> {
         reviewer: toPriorityItems(modelPriority.reviewer),
         lead: toPriorityItems(modelPriority.lead),
         planner: toPriorityItems(modelPriority.planner),
+        architect: toPriorityItems(modelPriority.architect),
       },
       session_limits: sessionLimits,
     },
@@ -120,6 +121,9 @@ export async function saveSettings(settings: SettingsResponse): Promise<void> {
       combineModelId(item.provider, item.model)
     ),
     model_priority_planner: settings.agents.model_priorities.planner.map((item) =>
+      combineModelId(item.provider, item.model)
+    ),
+    model_priority_architect: settings.agents.model_priorities.architect.map((item) =>
       combineModelId(item.provider, item.model)
     ),
     max_sessions: maxSessions,

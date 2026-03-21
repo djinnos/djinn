@@ -847,7 +847,17 @@ impl CoordinatorActor {
             let mut selected = Vec::new();
             let mut seen = HashSet::new();
 
-            if let Some(priority_models) = self.model_priorities.get(_role) {
+            // Fallback: if "architect" has no configured priorities, use
+            // "worker" priorities so architect dispatch works out-of-the-box.
+            let effective_priorities = self.model_priorities.get(_role).or_else(|| {
+                if _role == "architect" {
+                    self.model_priorities.get("worker")
+                } else {
+                    None
+                }
+            });
+
+            if let Some(priority_models) = effective_priorities {
                 for configured in priority_models {
                     if let Some((provider_id, model_name)) = configured.split_once('/') {
                         if !credential_provider_ids.contains(provider_id) {

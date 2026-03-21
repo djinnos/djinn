@@ -39,6 +39,8 @@ pub struct SettingsSetParams {
     pub model_priority_lead: Option<Vec<String>>,
     /// Ordered model list for the 'planner' role. Omit to keep current value.
     pub model_priority_planner: Option<Vec<String>>,
+    /// Ordered model list for the 'architect' role. Omit to keep current value.
+    pub model_priority_architect: Option<Vec<String>>,
     /// Per-model concurrent session caps (e.g. {"chatgpt_codex/gpt-5.3-codex": 4}). Omit to keep current value.
     #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
@@ -161,6 +163,12 @@ impl DjinnMcpServer {
                 .model_priority
                 .get_or_insert_with(HashMap::new)
                 .insert("planner".to_string(), v);
+        }
+        if let Some(v) = p.model_priority_architect {
+            settings
+                .model_priority
+                .get_or_insert_with(HashMap::new)
+                .insert("architect".to_string(), v);
         }
         if let Some(v) = p.memory_model {
             settings.memory_model = if v.is_empty() { None } else { Some(v) };

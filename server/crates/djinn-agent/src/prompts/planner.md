@@ -79,7 +79,7 @@ memory_write(
   path="planning/<epic-short-id>-roadmap",
   title="<Epic Title> — Roadmap",
   body="<Your decomposition plan: goal, waves, decisions>",
-  note_type="research"
+  note_type="requirement"
 )
 ```
 Then update the epic to reference it: `epic_update(id, memory_refs=[..., "<roadmap-permalink>"])`.

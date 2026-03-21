@@ -5462,6 +5462,14 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "model_priority_architect": {
+          "description": "Ordered model list for the 'architect' role. Omit to keep current value.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
         "model_priority_lead": {
           "description": "Ordered model list for the 'lead' role. Omit to keep current value.",
           "items": {
