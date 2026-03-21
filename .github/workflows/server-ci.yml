@@ -36,5 +36,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Configure git identity for tests
+        run: |
+          git config --global user.email "ci@test.local"
+          git config --global user.name "CI Test"
+
       - name: Tests
         run: cargo test --all-targets --all-features

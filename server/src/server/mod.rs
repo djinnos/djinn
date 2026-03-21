@@ -587,19 +587,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_contract_desktop_critical_tools_success_shapes() {
-        let app = test_helpers::create_test_app_with_github_creds().await;
+        let (app, project_path, _project_dir) =
+            test_helpers::create_test_app_with_project().await;
         let session_id = test_helpers::initialize_mcp_session(&app).await;
-
-        let _ = test_helpers::mcp_call_tool(
-            &app,
-            &session_id,
-            "project_add",
-            serde_json::json!({
-                "name": "contract-shape-project",
-                "path": CONTRACT_PROJECT_PATH,
-            }),
-        )
-        .await;
 
         let provider_catalog = test_helpers::mcp_call_tool(
             &app,
@@ -641,7 +631,7 @@ mod tests {
             &app,
             &session_id,
             "task_list",
-            serde_json::json!({ "project": CONTRACT_PROJECT_PATH }),
+            serde_json::json!({ "project": project_path }),
         )
         .await;
         assert!(task_list.get("tasks").and_then(Value::as_array).is_some());
@@ -659,7 +649,7 @@ mod tests {
             &app,
             &session_id,
             "epic_list",
-            serde_json::json!({ "project": CONTRACT_PROJECT_PATH }),
+            serde_json::json!({ "project": project_path }),
         )
         .await;
         assert!(epic_list.get("epics").and_then(Value::as_array).is_some());
@@ -678,26 +668,16 @@ mod tests {
     async fn mcp_contract_task_and_epic_snapshot_shapes() {
         use insta::assert_json_snapshot;
 
-        let app = test_helpers::create_test_app_with_github_creds().await;
+        let (app, project_path, _project_dir) =
+            test_helpers::create_test_app_with_project().await;
         let session_id = test_helpers::initialize_mcp_session(&app).await;
-
-        let _ = test_helpers::mcp_call_tool(
-            &app,
-            &session_id,
-            "project_add",
-            serde_json::json!({
-                "name": "contract-task-epic-snapshots",
-                "path": CONTRACT_PROJECT_PATH,
-            }),
-        )
-        .await;
 
         let epic = test_helpers::mcp_call_tool(
             &app,
             &session_id,
             "epic_create",
             serde_json::json!({
-                "project": CONTRACT_PROJECT_PATH,
+                "project": project_path,
                 "title": "Snapshot Epic",
                 "description": "Epic used for MCP snapshot contract testing"
             }),
@@ -709,7 +689,7 @@ mod tests {
             &session_id,
             "task_create",
             serde_json::json!({
-                "project": CONTRACT_PROJECT_PATH,
+                "project": project_path,
                 "epic_id": epic["id"],
                 "title": "Snapshot Task",
                 "description": "Task used for MCP snapshot contract testing"
@@ -722,7 +702,7 @@ mod tests {
             &session_id,
             "task_show",
             serde_json::json!({
-                "project": CONTRACT_PROJECT_PATH,
+                "project": project_path,
                 "id": task["id"],
             }),
         )
@@ -740,7 +720,7 @@ mod tests {
             &app,
             &session_id,
             "task_list",
-            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "limit": 10, "offset": 0 }),
+            serde_json::json!({ "project": project_path, "limit": 10, "offset": 0 }),
         )
         .await;
         assert_json_snapshot!("task_list_response", task_list, {
@@ -756,7 +736,7 @@ mod tests {
             &app,
             &session_id,
             "task_count",
-            serde_json::json!({ "project": CONTRACT_PROJECT_PATH }),
+            serde_json::json!({ "project": project_path }),
         )
         .await;
         assert_json_snapshot!("task_count_plain_response", task_count_plain);
@@ -765,7 +745,7 @@ mod tests {
             &app,
             &session_id,
             "task_count",
-            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "group_by": "status" }),
+            serde_json::json!({ "project": project_path, "group_by": "status" }),
         )
         .await;
         assert_json_snapshot!("task_count_grouped_by_status_response", task_count_status);
@@ -774,7 +754,7 @@ mod tests {
             &app,
             &session_id,
             "task_count",
-            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "group_by": "priority" }),
+            serde_json::json!({ "project": project_path, "group_by": "priority" }),
         )
         .await;
         assert_json_snapshot!(
@@ -787,7 +767,7 @@ mod tests {
             &session_id,
             "task_comment_add",
             serde_json::json!({
-                "project": CONTRACT_PROJECT_PATH,
+                "project": project_path,
                 "id": task["id"],
                 "actor_id": "u1",
                 "actor_role": "user",
@@ -800,7 +780,7 @@ mod tests {
             &app,
             &session_id,
             "task_activity_list",
-            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "id": task["id"] }),
+            serde_json::json!({ "project": project_path, "id": task["id"] }),
         )
         .await;
         assert_json_snapshot!("task_activity_list_response", task_activity, {
@@ -815,7 +795,7 @@ mod tests {
             &app,
             &session_id,
             "epic_show",
-            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "id": epic["id"] }),
+            serde_json::json!({ "project": project_path, "id": epic["id"] }),
         )
         .await;
         assert_json_snapshot!("epic_show_response", epic_show, {
@@ -830,7 +810,7 @@ mod tests {
             &app,
             &session_id,
             "epic_list",
-            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "limit": 10, "offset": 0 }),
+            serde_json::json!({ "project": project_path, "limit": 10, "offset": 0 }),
         )
         .await;
         assert_json_snapshot!("epic_list_response", epic_list, {
@@ -845,7 +825,7 @@ mod tests {
             &app,
             &session_id,
             "task_blockers_list",
-            serde_json::json!({ "project": CONTRACT_PROJECT_PATH, "id": task["id"] }),
+            serde_json::json!({ "project": project_path, "id": task["id"] }),
         )
         .await;
         assert_json_snapshot!("task_blockers_list_response", blockers, {
@@ -953,25 +933,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mcp_contract_board_health_response_shape_has_required_fields() {
-        let app = test_helpers::create_test_app_with_github_creds().await;
+        let (app, project_path, _project_dir) =
+            test_helpers::create_test_app_with_project().await;
         let session_id = test_helpers::initialize_mcp_session(&app).await;
-
-        let _ = test_helpers::mcp_call_tool(
-            &app,
-            &session_id,
-            "project_add",
-            serde_json::json!({
-                "name": "contract-board-health-shape",
-                "path": CONTRACT_PROJECT_PATH,
-            }),
-        )
-        .await;
 
         let health = test_helpers::mcp_call_tool(
             &app,
             &session_id,
             "board_health",
-            serde_json::json!({ "project": CONTRACT_PROJECT_PATH }),
+            serde_json::json!({ "project": project_path }),
         )
         .await;
 
