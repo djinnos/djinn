@@ -1,0 +1,648 @@
+---
+source: crates/djinn-agent/src/extension/mod.rs
+assertion_line: 3242
+expression: tool_schemas_lead()
+---
+[
+  {
+    "description": "Show details of a work item including recent activity and blockers.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_show"
+  },
+  {
+    "description": "List tasks with optional filters and pagination.",
+    "inputSchema": {
+      "properties": {
+        "issue_type": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "parent": {
+          "description": "Epic ID to filter by",
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "sort": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "text": {
+          "description": "Free-text search in title/description",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "task_list"
+  },
+  {
+    "description": "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.",
+    "inputSchema": {
+      "properties": {
+        "actor_role": {
+          "description": "Filter by actor: lead, reviewer, worker, verification, system",
+          "type": "string"
+        },
+        "event_type": {
+          "description": "Filter by event type: comment, status_changed, commands_run, merge_conflict, task_review_start",
+          "type": "string"
+        },
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max entries to return (default 30, max 50)",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_activity_list"
+  },
+  {
+    "description": "Read a note by permalink or title.",
+    "inputSchema": {
+      "properties": {
+        "identifier": {
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier"
+      ],
+      "type": "object"
+    },
+    "name": "memory_read"
+  },
+  {
+    "description": "Search notes in project memory.",
+    "inputSchema": {
+      "properties": {
+        "folder": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "project": {
+          "description": "Absolute project path",
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task ID for affinity scoring; defaults to the current session task",
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "memory_search"
+  },
+  {
+    "description": "List notes in project memory. Returns compact summaries without full content.",
+    "inputSchema": {
+      "properties": {
+        "depth": {
+          "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels",
+          "type": "integer"
+        },
+        "folder": {
+          "description": "Filter by folder (e.g. \"decisions\")",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path",
+          "type": "string"
+        },
+        "type": {
+          "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\")",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "memory_list"
+  },
+  {
+    "description": "Execute shell commands in the task worktree. Commands always run from the worktree root.",
+    "inputSchema": {
+      "properties": {
+        "command": {
+          "description": "Shell command to execute",
+          "type": "string"
+        },
+        "timeout_ms": {
+          "description": "Timeout in milliseconds (default 120000, max 600000)",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "name": "shell"
+  },
+  {
+    "description": "Read a file with line numbers and pagination. Rejects binary files.",
+    "inputSchema": {
+      "properties": {
+        "file_path": {
+          "type": "string"
+        },
+        "limit": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file_path"
+      ],
+      "type": "object"
+    },
+    "name": "read"
+  },
+  {
+    "description": "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols). Line and character are 1-based.",
+    "inputSchema": {
+      "properties": {
+        "character": {
+          "description": "1-based column number (required for hover, definition, references)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "file_path": {
+          "description": "Absolute or worktree-relative file path",
+          "type": "string"
+        },
+        "line": {
+          "description": "1-based line number (required for hover, definition, references)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "operation": {
+          "description": "LSP operation to perform",
+          "enum": [
+            "hover",
+            "definition",
+            "references",
+            "symbols"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "file_path"
+      ],
+      "type": "object"
+    },
+    "name": "lsp"
+  },
+  {
+    "description": "Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "description": "Number of lines to return (default 200)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Line offset (0-based, default 0)",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool_use_id": {
+          "description": "The tool_use_id from the truncated result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_use_id"
+      ],
+      "type": "object"
+    },
+    "name": "output_view"
+  },
+  {
+    "description": "Regex search within a truncated tool output. Returns matching lines with context from the full stashed output.",
+    "inputSchema": {
+      "properties": {
+        "context_lines": {
+          "description": "Lines of context around each match (default 3)",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pattern": {
+          "description": "Regex pattern to search for",
+          "type": "string"
+        },
+        "tool_use_id": {
+          "description": "The tool_use_id from the truncated result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_use_id",
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "name": "output_grep"
+  },
+  {
+    "description": "Create a new task under an epic. Use blocked_by to set dependencies and acceptance_criteria to define success criteria at creation.",
+    "inputSchema": {
+      "properties": {
+        "acceptance_criteria": {
+          "description": "List of acceptance criteria strings.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "agent_type": {
+          "description": "Specialist role name to route this task (e.g. 'rust-expert'). Must match a configured AgentRole name for this project.",
+          "type": "string"
+        },
+        "blocked_by": {
+          "description": "Task IDs (UUID or short_id) that block this task.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "design": {
+          "type": "string"
+        },
+        "epic_id": {
+          "type": "string"
+        },
+        "issue_type": {
+          "type": "string"
+        },
+        "memory_refs": {
+          "description": "Memory note permalinks to attach.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "status": {
+          "description": "Optional initial status. Allowed: open (default).",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "epic_id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "name": "task_create"
+  },
+  {
+    "description": "Update task fields: title, description, design, priority, owner, labels, acceptance_criteria, memory_refs, blocked_by.",
+    "inputSchema": {
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "blocked_by_add": {
+          "description": "Task IDs to add as blockers",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "blocked_by_remove": {
+          "description": "Task IDs to remove as blockers",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "design": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "labels_add": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "labels_remove": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "memory_refs_add": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "memory_refs_remove": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_update"
+  },
+  {
+    "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_delete_branch"
+  },
+  {
+    "description": "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_archive_activity"
+  },
+  {
+    "description": "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_reset_counters"
+  },
+  {
+    "description": "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_kill_session"
+  },
+  {
+    "description": "List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_blocked_list"
+  },
+  {
+    "description": "Show details for an epic by UUID or short ID.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "epic_show"
+  },
+  {
+    "description": "Update epic fields (title/description) and accept memory ref delta args for planner workflows.",
+    "inputSchema": {
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "description": "Epic UUID or short ID",
+          "type": "string"
+        },
+        "memory_refs_add": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "memory_refs_remove": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "epic_update"
+  },
+  {
+    "description": "List tasks for an epic with pagination.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short ID",
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "epic_tasks"
+  },
+  {
+    "description": "Escalate to the Architect when the task requires strategic technical review that is beyond Lead intervention scope. Use when the problem is architectural, requires codebase-wide analysis, or has failed multiple Lead interventions. Adds a comment and dispatches the Architect. Your session should end after this call.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short_id",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why Architect escalation is needed (e.g. architectural ambiguity, repeated Lead failures, codebase-wide impact)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "name": "request_architect"
+  },
+  {
+    "description": "Submit the Lead intervention decision and release the task back to the worker queue. Your session ends after this call.",
+    "inputSchema": {
+      "properties": {
+        "created_tasks": {
+          "description": "IDs of tasks created during this intervention (for decompose decisions)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "decision": {
+          "description": "The decision taken: reopen (send back to worker), decompose (split into subtasks), force_close, or escalate (release back to Lead queue)",
+          "enum": [
+            "reopen",
+            "decompose",
+            "force_close",
+            "escalate"
+          ],
+          "type": "string"
+        },
+        "rationale": {
+          "description": "Explanation for the decision",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task UUID or short_id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "decision"
+      ],
+      "type": "object"
+    },
+    "name": "submit_decision"
+  }
+]
