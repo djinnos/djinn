@@ -436,12 +436,18 @@ impl SlotHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use tempfile::TempDir;
+    use tokio::process::Command;
 
     use super::*;
+    use crate::AgentType;
+    use crate::roles::role_impl_for;
     use crate::test_helpers;
+    use djinn_db::{ProjectRepository, SessionRepository};
 
     fn test_app_state() -> (AgentContext, CancellationToken, TempDir) {
         let db = test_helpers::create_test_db();
@@ -452,6 +458,50 @@ mod tests {
             cancel,
             temp,
         )
+    }
+
+    async fn create_git_repo() -> TempDir {
+        let tmp = tempfile::Builder::new()
+            .prefix("djinn-slot-actor-project-")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
+        let p = tmp.path();
+
+        let run = |args: &[&str]| {
+            let p = p.to_path_buf();
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            async move {
+                Command::new("git")
+                    .args(&args)
+                    .current_dir(&p)
+                    .output()
+                    .await
+                    .expect("git command")
+            }
+        };
+
+        run(&["init"]).await;
+        run(&["config", "user.email", "test@djinn.test"]).await;
+        run(&["config", "user.name", "Test"]).await;
+        tokio::fs::write(p.join("README.md"), "# test")
+            .await
+            .unwrap();
+        run(&["add", "README.md"]).await;
+        run(&["commit", "-m", "init"]).await;
+        run(&["branch", "-M", "main"]).await;
+
+        tmp
+    }
+
+    async fn register_project(
+        db: &djinn_db::Database,
+        repo_path: &Path,
+    ) -> djinn_core::models::Project {
+        let repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let id = uuid::Uuid::now_v7();
+        let path = repo_path.to_str().unwrap().to_string();
+        let name = format!("slot-actor-project-{id}");
+        repo.create(&name, &path).await.expect("create project")
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -498,5 +548,163 @@ mod tests {
             }
             other => panic!("expected SlotEvent::Free, got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_project_uses_synthetic_task_id_and_frees_slot_on_completion() {
+        let repo = create_git_repo().await;
+        let db = test_helpers::create_test_db();
+        let cancel = CancellationToken::new();
+        let app_state = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+        let project = register_project(&db, repo.path()).await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen_clone = Arc::clone(&seen);
+        let runner: LifecycleRunner = Arc::new(
+            move |_task_id, _project_path, _model_id, _app_state, _kill, _pause| {
+                let seen = Arc::clone(&seen_clone);
+                Box::pin(async move {
+                    seen.lock().unwrap().push("task-runner-called".to_string());
+                    Ok(())
+                })
+            },
+        );
+
+        let slot = SlotHandle::spawn_with_runner(
+            9,
+            "test/mock".to_string(),
+            event_tx,
+            app_state,
+            cancel,
+            runner,
+        );
+
+        slot.run_project(
+            project.id.clone(),
+            project.path.clone(),
+            "planner".to_string(),
+            "invalid-model-id".to_string(),
+        )
+        .await
+        .expect("project dispatch should be accepted");
+
+        let evt = tokio::time::timeout(Duration::from_secs(3), event_rx.recv())
+            .await
+            .expect("event should arrive")
+            .expect("event channel should stay open");
+
+        match evt {
+            SlotEvent::Free {
+                slot_id,
+                model_id,
+                task_id,
+            } => {
+                assert_eq!(slot_id, 9);
+                assert_eq!(model_id, "test/mock");
+                assert_eq!(task_id, format!("project:{}:planner", project.id));
+            }
+            other => panic!("expected SlotEvent::Free for project session, got {other:?}"),
+        }
+
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "RunProject should bypass the task lifecycle runner and invoke project lifecycle directly"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn project_lifecycle_persists_null_task_id_for_project_scoped_sessions() {
+        let repo = create_git_repo().await;
+        let db = test_helpers::create_test_db();
+        let cancel = CancellationToken::new();
+        let app_state = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+        let project = register_project(&db, repo.path()).await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+
+        let slot = SlotHandle::spawn_with_test_runner(
+            10,
+            "test/mock".to_string(),
+            event_tx,
+            app_state.clone(),
+            cancel,
+            Arc::new(|_, _, _, _, _, _| Box::pin(async { Ok(()) })),
+        );
+
+        let provider = Arc::new(test_helpers::FakeProvider::tool_call(
+            "finalize-1",
+            "submit_grooming",
+            serde_json::json!({
+                "summary": "Planning complete",
+                "tasks_reviewed": []
+            }),
+        ));
+
+        let role = role_impl_for(AgentType::Planner);
+        let synthetic_task_id = format!("project:{}:{}", project.id, role.config().name);
+
+        let session_repo = SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let created = session_repo
+            .create(djinn_db::CreateSessionParams {
+                project_id: &project.id,
+                task_id: None,
+                model: "test/mock",
+                agent_type: role.config().name,
+                worktree_path: Some(&project.path),
+                metadata_json: None,
+            })
+            .await
+            .expect("create project-scoped session");
+        session_repo
+            .update(
+                &created.id,
+                djinn_core::models::SessionStatus::Completed,
+                0,
+                0,
+            )
+            .await
+            .expect("complete project-scoped session");
+
+        slot.run_project(
+            project.id.clone(),
+            project.path.clone(),
+            "planner".to_string(),
+            "invalid-model-id".to_string(),
+        )
+        .await
+        .expect("project dispatch should be accepted");
+
+        let evt = tokio::time::timeout(Duration::from_secs(3), event_rx.recv())
+            .await
+            .expect("event should arrive")
+            .expect("event channel should stay open");
+        assert!(matches!(evt, SlotEvent::Free { .. }));
+
+        let by_synthetic = session_repo
+            .list_for_task_in_project(&project.id, &synthetic_task_id)
+            .await
+            .expect("list by synthetic task id");
+        assert!(
+            by_synthetic.is_empty(),
+            "project-scoped sessions must not be stored under synthetic task ids"
+        );
+
+        let rows = sqlx::query_as::<_, djinn_core::models::SessionRecord>(
+            "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at, status, tokens_in, tokens_out, worktree_path FROM sessions WHERE project_id = ?1 ORDER BY started_at ASC",
+        )
+        .bind(&project.id)
+        .fetch_all(db.pool())
+        .await
+        .expect("fetch sessions");
+        assert!(
+            !rows.is_empty(),
+            "expected at least one project-scoped session row"
+        );
+        assert!(
+            rows.iter().all(|row| row.task_id.is_none()),
+            "all project-scoped session rows should persist NULL task_id"
+        );
+
+        let _ = provider;
     }
 }

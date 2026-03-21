@@ -232,7 +232,8 @@ fn tool_role_metrics() -> RmcpTool {
 fn tool_role_amend_prompt() -> RmcpTool {
     RmcpTool::new(
         "role_amend_prompt".to_string(),
-        "Append a learned amendment to a role prompt using observed failures or improvements.".to_string(),
+        "Append a learned amendment to a role prompt using observed failures or improvements."
+            .to_string(),
         object!({
             "type": "object",
             "required": ["role", "amendment"],
@@ -248,7 +249,8 @@ fn tool_role_amend_prompt() -> RmcpTool {
 fn tool_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
-        "Execute shell commands in the task worktree. Commands always run from the worktree root.".to_string(),
+        "Execute shell commands in the task worktree. Commands always run from the worktree root."
+            .to_string(),
         object!({
             "type": "object",
             "required": ["command"],
@@ -334,7 +336,8 @@ fn tool_task_create() -> RmcpTool {
 fn tool_task_update() -> RmcpTool {
     RmcpTool::new(
         "task_update".to_string(),
-        "Update task fields and append/remove memory refs when supported by the workflow.".to_string(),
+        "Update task fields and append/remove memory refs when supported by the workflow."
+            .to_string(),
         object!({
             "type": "object",
             "required": ["id"],
