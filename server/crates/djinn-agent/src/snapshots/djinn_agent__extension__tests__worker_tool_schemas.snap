@@ -365,6 +365,26 @@ expression: tool_schemas_worker()
     "name": "apply_patch"
   },
   {
+    "description": "Fetch GitHub Actions CI logs for a workflow run. Use this when CI checks fail and you need to read the full log output. Pass the run_id from the Actions URL (e.g. /actions/runs/12345). The repository is inferred from the project — do not pass owner or repo. Optionally pass job_id to fetch logs for a specific job only.",
+    "inputSchema": {
+      "properties": {
+        "job_id": {
+          "description": "Optional: specific job ID to fetch logs for. If omitted, logs for all failed jobs are returned.",
+          "type": "integer"
+        },
+        "run_id": {
+          "description": "GitHub Actions workflow run ID (from the Actions URL)",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_id"
+      ],
+      "type": "object"
+    },
+    "name": "github_action_logs"
+  },
+  {
     "description": "Request Lead intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the Lead queue. Your session will effectively end after this call.",
     "inputSchema": {
       "properties": {

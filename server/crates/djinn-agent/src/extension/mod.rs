@@ -19,6 +19,8 @@ use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
+use djinn_provider::github_api::GitHubApiClient;
+use djinn_provider::repos::CredentialRepository;
 
 #[derive(Deserialize, Serialize)]
 struct IncomingToolCall {
@@ -104,6 +106,9 @@ where
         "role_metrics" => call_role_metrics(state, &call.arguments).await,
         "role_amend_prompt" => call_role_amend_prompt(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
+        "github_action_logs" => {
+            call_github_action_logs(state, &call.arguments, worktree_path).await
+        }
         "read" => call_read(state, &call.arguments, worktree_path).await,
         "write" => call_write(state, &call.arguments, worktree_path).await,
         "edit" => call_edit(state, &call.arguments, worktree_path).await,
@@ -1090,6 +1095,137 @@ async fn call_shell(
         "stderr": stderr,
         "workdir": worktree_path,
     }))
+}
+
+/// Fetch GitHub Actions CI logs for a workflow run.
+///
+/// Resolves owner/repo from the worktree's git remote so the agent can't
+/// accidentally access logs from other projects.
+async fn call_github_action_logs(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    worktree_path: &Path,
+) -> Result<serde_json::Value, String> {
+    use std::sync::Arc;
+
+    let p: GithubActionLogsParams = parse_args(arguments)?;
+
+    // Resolve owner/repo from the worktree's git remote.
+    let (owner, repo) = resolve_github_owner_repo(worktree_path).await?;
+
+    let cred_repo = Arc::new(CredentialRepository::new(
+        state.db.clone(),
+        state.event_bus.clone(),
+    ));
+    let gh = GitHubApiClient::new(cred_repo);
+
+    // Determine which job(s) to fetch logs for.
+    let job_ids: Vec<u64> = if let Some(job_id) = p.job_id {
+        vec![job_id]
+    } else {
+        // List all jobs for the run; fetch logs for failed/cancelled ones.
+        let jobs = gh
+            .list_run_jobs(&owner, &repo, p.run_id)
+            .await
+            .map_err(|e| format!("failed to list jobs for run {}: {e}", p.run_id))?;
+
+        let failed: Vec<u64> = jobs
+            .iter()
+            .filter(|j| {
+                matches!(
+                    j.conclusion.as_deref(),
+                    Some("failure") | Some("cancelled") | Some("timed_out")
+                )
+            })
+            .map(|j| j.id)
+            .collect();
+
+        if failed.is_empty() {
+            // No failed jobs — return job summary instead.
+            let summary: Vec<serde_json::Value> = jobs
+                .iter()
+                .map(|j| {
+                    serde_json::json!({
+                        "id": j.id,
+                        "name": j.name,
+                        "status": j.status,
+                        "conclusion": j.conclusion,
+                    })
+                })
+                .collect();
+            return Ok(serde_json::json!({
+                "run_id": p.run_id,
+                "message": "no failed jobs found",
+                "jobs": summary,
+            }));
+        }
+        failed
+    };
+
+    const MAX_LOG_BYTES: usize = 50_000;
+    let mut sections: Vec<String> = Vec::new();
+
+    for job_id in &job_ids {
+        match gh.get_job_logs(&owner, &repo, *job_id).await {
+            Ok(logs) => {
+                let truncated = crate::truncate::smart_truncate(&logs, MAX_LOG_BYTES);
+                sections.push(format!("=== Job {job_id} ===\n{truncated}"));
+            }
+            Err(e) => {
+                sections.push(format!("=== Job {job_id} === (failed to fetch: {e})"));
+            }
+        }
+    }
+
+    let combined = sections.join("\n\n");
+    let output = crate::truncate::smart_truncate(&combined, MAX_LOG_BYTES);
+
+    Ok(serde_json::json!({
+        "run_id": p.run_id,
+        "logs": output,
+    }))
+}
+
+/// Parse owner and repo from a GitHub remote URL (SSH or HTTPS).
+async fn resolve_github_owner_repo(worktree_path: &Path) -> Result<(String, String), String> {
+    let output = tokio::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .map_err(|e| format!("failed to run git remote get-url: {e}"))?;
+
+    if !output.status.success() {
+        return Err("could not determine git remote — no origin configured".to_string());
+    }
+
+    let remote_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // SSH: git@github.com:owner/repo.git or HTTPS
+    let path = remote_url
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote_url.strip_prefix("https://github.com/"))
+        .or_else(|| remote_url.strip_prefix("http://github.com/"))
+        .map(|p| p.to_string());
+
+    let path = path.ok_or_else(|| {
+        format!("remote URL is not a GitHub URL: {remote_url}")
+    })?;
+
+    let path = path.trim_end_matches(".git");
+    let mut parts = path.splitn(2, '/');
+    let owner = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or("could not parse owner from remote URL")?
+        .to_string();
+    let repo = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or("could not parse repo from remote URL")?
+        .to_string();
+
+    Ok((owner, repo))
 }
 
 async fn call_read(

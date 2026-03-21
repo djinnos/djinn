@@ -573,6 +573,7 @@ pub(crate) async fn commit_final_work_if_needed(
     task_id: &str,
     worktree_path: &Path,
     app_state: &AgentContext,
+    commit_message: Option<&str>,
 ) -> Result<(), String> {
     let git = app_state
         .git_actor(worktree_path)
@@ -592,7 +593,10 @@ pub(crate) async fn commit_final_work_if_needed(
         .await
         .map_err(|e| format!("failed to stage completed session changes: {e}"))?;
 
-    let message = format!("WIP: auto-save completed session {task_id}");
+    let message = match commit_message {
+        Some(msg) if !msg.trim().is_empty() => msg.to_string(),
+        _ => format!("WIP: auto-save completed session {task_id}"),
+    };
     git.run_command(vec![
         "commit".into(),
         "--no-verify".into(),

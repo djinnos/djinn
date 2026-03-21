@@ -1175,14 +1175,35 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     // Worktree: commit final work.  For workers, preserve the worktree and
     // save the conversation so the session can be resumed after review.
     // Non-workers (reviewers, PM) still clean up immediately.
-    if is_worker_done
-        && let Err(e) = commit_final_work_if_needed(&task_id, &worktree_path, &app_state).await
-    {
-        tracing::warn!(
-            task_id = %task_id,
-            error = %e,
-            "Lifecycle: failed to commit final work"
-        );
+    if is_worker_done {
+        let commit_msg = if final_output
+            .finalize_tool_name
+            .as_deref()
+            .is_some_and(|n| n == "submit_work")
+        {
+            final_output
+                .finalize_payload
+                .as_ref()
+                .and_then(|p| p.get("summary"))
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+        if let Err(e) = commit_final_work_if_needed(
+            &task_id,
+            &worktree_path,
+            &app_state,
+            commit_msg.as_deref(),
+        )
+        .await
+        {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "Lifecycle: failed to commit final work"
+            );
+        }
     }
     if is_worker_done {
         // Save conversation for potential resume after review cycle.

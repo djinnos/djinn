@@ -170,6 +170,12 @@ pub(super) struct ShellParams {
 }
 
 #[derive(Deserialize)]
+pub(super) struct GithubActionLogsParams {
+    pub(super) run_id: u64,
+    pub(super) job_id: Option<u64>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct WriteParams {
     pub(super) path: String,
     pub(super) content: String,

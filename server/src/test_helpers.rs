@@ -27,33 +27,21 @@ pub fn create_test_app() -> axum::Router {
     create_test_app_with_db(db)
 }
 
-/// Create an Axum router with pre-seeded GitHub credentials (for contract tests
-/// that call `project_add` which requires GitHub validation).
-pub async fn create_test_app_with_github_creds() -> axum::Router {
+/// Create an Axum router with a test project pre-registered in the DB (bypasses
+/// `project_add` path and GitHub validation for CI compatibility).
+///
+/// Returns `(Router, project_path, TempDir)`. The `TempDir` guard must be kept
+/// alive for the duration of the test or the temp directory will be deleted.
+pub async fn create_test_app_with_project() -> (axum::Router, String, tempfile::TempDir) {
     let db = create_test_db();
-    // Seed a dummy GitHub App OAuth token so project_add validation passes.
-    let cred_repo = djinn_provider::repos::CredentialRepository::new(db.clone(), EventBus::noop());
-    let dummy_tokens = serde_json::json!({
-        "access_token": "ghu_test_token",
-        "refresh_token": "ghr_test_refresh",
-        "expires_at": 9999999999_i64,
-        "refresh_token_expires_at": null,
-        "user_login": "test-user"
-    });
-    cred_repo
-        .set(
-            "github_app",
-            "__OAUTH_GITHUB_APP",
-            &dummy_tokens.to_string(),
-        )
+    let dir = tempfile::tempdir().expect("failed to create temp dir for test project");
+    let path = dir.path().to_string_lossy().to_string();
+    let repo = ProjectRepository::new(db.clone(), test_events());
+    repo.create("test-project", &path)
         .await
-        .expect("failed to seed GitHub credentials");
-    // Also seed the installation ID.
-    cred_repo
-        .set("github_app", "__GITHUB_INSTALLATION_ID", "12345678")
-        .await
-        .expect("failed to seed installation ID");
-    create_test_app_with_db(db)
+        .expect("failed to register test project");
+    let app = create_test_app_with_db(db);
+    (app, path, dir)
 }
 
 /// Create an Axum router wired to the given database (for tests that seed data externally).
