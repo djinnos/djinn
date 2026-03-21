@@ -112,6 +112,16 @@ pub struct PullRequest {
     pub base: PrRef,
     pub auto_merge: Option<serde_json::Value>,
     pub node_id: String,
+    /// Whether the PR can be merged (no conflicts). `None` when GitHub hasn't
+    /// computed mergeability yet.
+    #[serde(default)]
+    pub mergeable: Option<bool>,
+    /// Mergeable state: `"clean"`, `"dirty"`, `"blocked"`, `"behind"`, `"unknown"`, etc.
+    #[serde(default)]
+    pub mergeable_state: Option<String>,
+    /// Whether the PR is a draft.
+    #[serde(default)]
+    pub draft: Option<bool>,
 }
 
 /// A branch/commit reference embedded in a PR.
@@ -637,6 +647,105 @@ impl GitHubApiClient {
             return Err(anyhow!("re_request_review failed ({}): {}", status, body));
         }
         Ok(())
+    }
+
+    /// Merge a pull request via the REST API.
+    ///
+    /// Uses `PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge` with the
+    /// specified merge method and commit title.
+    pub async fn merge_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+        method: MergeMethod,
+        commit_title: &str,
+    ) -> Result<serde_json::Value> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{}/merge",
+            self.base_url, owner, repo, pull_number
+        );
+        let merge_method_str = match method {
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+            MergeMethod::Merge => "merge",
+        };
+        let body = serde_json::json!({
+            "merge_method": merge_method_str,
+            "commit_title": commit_title,
+        });
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let body = body.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .put(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("merge_pull_request failed ({}): {}", status, body));
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// Mark a draft PR as ready for review (undraft it).
+    ///
+    /// Uses `PATCH /repos/{owner}/{repo}/pulls/{pull_number}` with `{"draft": false}`.
+    pub async fn mark_pr_ready_for_review(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) -> Result<serde_json::Value> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{}",
+            self.base_url, owner, repo, pull_number
+        );
+        let body = serde_json::json!({ "draft": false });
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let body = body.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .patch(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "mark_pr_ready_for_review failed ({}): {}",
+                status,
+                body
+            ));
+        }
+        Ok(resp.json().await?)
     }
 }
 

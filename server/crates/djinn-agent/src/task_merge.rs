@@ -7,7 +7,7 @@ use crate::context::AgentContext;
 use djinn_core::models::{SessionStatus, TransitionAction};
 use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
 use djinn_git::GitError;
-use djinn_provider::github_api::{CreatePrParams, GitHubApiClient, MergeMethod};
+use djinn_provider::github_api::{CreatePrParams, GitHubApiClient};
 use djinn_provider::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
 use djinn_provider::repos::CredentialRepository;
 
@@ -237,33 +237,11 @@ async fn try_create_github_pr(
                 head: base_branch.to_string(),
                 base: merge_target.to_string(),
                 maintainer_can_modify: Some(true),
-                draft: Some(false),
+                draft: Some(true),
             },
         )
         .await
         .map_err(|e| format!("GitHub PR creation failed: {e}"))?;
-
-    // Enable auto-merge (best-effort — log failure but don't block).
-    // Uses the GraphQL enablePullRequestAutoMerge mutation so the PR is only
-    // merged after required status checks pass.
-    let commit_headline = format!("{}({}): {}", commit_type, task.short_id, task.title);
-    if let Err(e) = github_client
-        .enable_auto_merge(
-            &owner,
-            &repo_name,
-            pr.number,
-            MergeMethod::Squash,
-            &pr.node_id,
-            &commit_headline,
-        )
-        .await
-    {
-        tracing::warn!(
-            pr_number = pr.number,
-            error = %e,
-            "enable_auto_merge failed (non-fatal)"
-        );
-    }
 
     // Store the PR URL on the task record.
     if let Err(e) = task_repo.set_pr_url(task_id, &pr.html_url).await {
@@ -395,9 +373,11 @@ pub(crate) async fn merge_and_transition(
     .await
     {
         Ok(Some(pr_url)) => {
-            // PR created and auto-merge enabled. Teardown worktree and transition
-            // to pr_ready (if configured) so the PR poller closes the task when
-            // the PR is actually merged on GitHub.
+            // PR created and auto-merge enabled. Teardown worktree but keep
+            // the branch — it must stay on the remote for the PR to merge.
+            // The branch will be cleaned up by GitHub when the PR is merged
+            // (if "Automatically delete head branches" is enabled in repo settings)
+            // or by the PR poller after merge.
             let worktree_path = project_dir
                 .join(".djinn")
                 .join("worktrees")
@@ -407,7 +387,7 @@ pub(crate) async fn merge_and_transition(
                 &worktree_path,
                 &project_dir,
                 app_state,
-                true,
+                false, // keep the branch — PR needs it
             )
             .await;
             cleanup_paused_worker_session(task_id, app_state).await;

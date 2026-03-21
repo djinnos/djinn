@@ -688,6 +688,7 @@ mod tests {
                 0,
                 "",
                 Some("open"),
+                None,
             )
             .await
             .unwrap();
@@ -702,6 +703,7 @@ mod tests {
                 0,
                 "",
                 Some("open"),
+                None,
             )
             .await
             .unwrap();

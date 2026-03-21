@@ -1398,7 +1398,7 @@ mod tests {
 
         let seed_id = a.id.clone();
         let scores = repo
-            .graph_proximity_scores(&[seed_id.clone()], 2)
+            .graph_proximity_scores(std::slice::from_ref(&seed_id), 2)
             .await
             .unwrap();
         let m: std::collections::HashMap<_, _> = scores.into_iter().collect();
@@ -1473,7 +1473,7 @@ mod tests {
 
         let seed_id = a.id.clone();
         let scores = repo
-            .graph_proximity_scores(&[seed_id.clone()], 2)
+            .graph_proximity_scores(std::slice::from_ref(&seed_id), 2)
             .await
             .unwrap();
         let ids: std::collections::HashSet<_> = scores.into_iter().map(|(id, _)| id).collect();
@@ -1516,7 +1516,7 @@ mod tests {
         .unwrap();
 
         let scores = repo
-            .graph_proximity_scores(&[a.id.clone()], 2)
+            .graph_proximity_scores(std::slice::from_ref(&a.id), 2)
             .await
             .unwrap();
         let m: std::collections::HashMap<_, _> = scores.into_iter().collect();

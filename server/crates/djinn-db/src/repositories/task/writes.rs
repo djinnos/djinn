@@ -13,6 +13,33 @@ impl TaskRepository {
         owner: &str,
         status: Option<&str>,
     ) -> Result<Task> {
+        self.create_with_ac(
+            epic_id,
+            title,
+            description,
+            design,
+            issue_type,
+            priority,
+            owner,
+            status,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_with_ac(
+        &self,
+        epic_id: &str,
+        title: &str,
+        description: &str,
+        design: &str,
+        issue_type: &str,
+        priority: i64,
+        owner: &str,
+        status: Option<&str>,
+        acceptance_criteria: Option<&str>,
+    ) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let project_id =
             sqlx::query_scalar::<_, String>("SELECT project_id FROM epics WHERE id = ?1")
@@ -30,6 +57,7 @@ impl TaskRepository {
             priority,
             owner,
             status,
+            acceptance_criteria,
         )
         .await
     }
@@ -46,15 +74,17 @@ impl TaskRepository {
         priority: i64,
         owner: &str,
         status: Option<&str>,
+        acceptance_criteria: Option<&str>,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
+        let ac = acceptance_criteria.unwrap_or("[]");
         sqlx::query(
             "INSERT INTO tasks
                 (id, project_id, short_id, epic_id, title, description, design,
-                 issue_type, priority, owner, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, 'open'))",
+                 issue_type, priority, owner, status, acceptance_criteria)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, 'open'), ?12)",
         )
         .bind(&id)
         .bind(project_id)
@@ -67,6 +97,7 @@ impl TaskRepository {
         .bind(priority)
         .bind(owner)
         .bind(status)
+        .bind(ac)
         .execute(self.db.pool())
         .await?;
         let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)

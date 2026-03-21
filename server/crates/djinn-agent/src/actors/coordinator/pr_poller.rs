@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use djinn_core::models::TransitionAction;
 use djinn_db::ActivityQuery;
-use djinn_provider::github_api::{CheckRun, GitHubApiClient, PrReviewFeedback, PrState};
+use djinn_provider::github_api::{
+    CheckRun, GitHubApiClient, MergeMethod, PrReviewFeedback, PrState,
+};
 use djinn_provider::repos::CredentialRepository;
 
 use super::*;
@@ -28,20 +30,15 @@ impl CoordinatorActor {
     /// Runs on every 30-second tick.  Returns immediately when no `pr_ready`
     /// tasks exist so no GitHub API calls are made during idle periods.
     ///
-    /// On each task:
-    /// - **Merged PR** → `PrMerge` transition (pr_ready → closed), unblocking dependents.
-    ///   Dependent tasks that were blocked by this task are automatically unblocked via the
-    ///   event system (`emit_unblocked_tasks` fires on close, coordinator dispatches them).
-    /// - **CI check failure** → `PrChangesRequested` (pr_ready → open) for agent rework.
-    ///   CI failure details are logged as a task comment so the worker has context on re-dispatch.
-    ///   CI results are cached by head SHA so unchanged commits are not re-checked.
-    /// - **PR closed without merge** → `ForceClose` (pr_ready → closed/force_closed).
-    ///   The PR was manually closed without merging; task is force-closed.
-    /// - **Changes requested review** → `PrChangesRequested` (pr_ready → open) +
-    ///   fetch+store review feedback + track review round counter.
-    ///   After `PR_REVIEW_ROUND_THRESHOLD` rounds, escalate to Lead instead.
-    /// - **Task with pending re-review** (has prior review feedback, no outstanding
-    ///   changes-requested) → re-request review from the original reviewers.
+    /// Full lifecycle:
+    /// - **PR is merged** → `PrMerge` transition (pr_ready → closed).
+    /// - **PR is closed without merge** → `ForceClose`.
+    /// - **PR has changes-requested review** → `PrChangesRequested` to send back to worker.
+    /// - **PR is draft, CI checks still running** → skip, check next tick.
+    /// - **PR is draft, CI checks ALL passed, no merge conflicts** → undraft (mark ready for review).
+    /// - **PR is draft, CI checks failed** → `PrChangesRequested` with CI failure details.
+    /// - **PR is not draft, mergeable, approved (or no approval required)** → squash merge.
+    /// - **PR is not draft, requires approval but not yet approved** → skip, wait for approval.
     pub(super) async fn poll_pr_statuses(&mut self) {
         let task_repo = self.task_repo();
         let pr_ready_tasks = match task_repo.list_by_status("pr_ready").await {
@@ -129,8 +126,158 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // ── CI checks (cached per head SHA) ───────────────────────────────
             let current_sha = pr.head.sha.clone();
+            let is_draft = pr.draft == Some(true);
+
+            // ── Draft PR handling ─────────────────────────────────────────────
+            if is_draft {
+                // Check CI status for draft PRs.
+                if checks.check_runs.is_empty() {
+                    // No checks registered yet — skip, wait for next tick.
+                    continue;
+                }
+
+                let all_completed = checks.check_runs.iter().all(|cr| cr.status == "completed");
+
+                if !all_completed {
+                    // CI checks still running — skip, check next tick.
+                    continue;
+                }
+
+                // All checks completed — check for failures.
+                let failed_checks: Vec<&CheckRun> = checks
+                    .check_runs
+                    .iter()
+                    .filter(|cr| {
+                        matches!(
+                            cr.conclusion.as_deref(),
+                            Some("failure") | Some("timed_out") | Some("cancelled")
+                        )
+                    })
+                    .collect();
+
+                if !failed_checks.is_empty() {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        sha = %current_sha,
+                        failed_count = failed_checks.len(),
+                        "PR poller: CI check failed on draft PR → reopening task for rework"
+                    );
+                    self.apply_pr_transition(
+                        &task.id,
+                        TransitionAction::PrChangesRequested,
+                        Some("CI checks failed on PR"),
+                    )
+                    .await;
+                    self.log_ci_failure_comment(&task.id, &failed_checks, pr_url, &current_sha)
+                        .await;
+                    self.pr_status_cache.remove(&task.id);
+                    continue;
+                }
+
+                // All CI checks passed. Check for merge conflicts before undrafting.
+                if pr.mergeable == Some(false) {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        "PR poller: draft PR has merge conflicts → reopening task for rework"
+                    );
+                    self.apply_pr_transition(
+                        &task.id,
+                        TransitionAction::PrChangesRequested,
+                        Some("PR has merge conflicts"),
+                    )
+                    .await;
+                    self.pr_status_cache.remove(&task.id);
+                    continue;
+                }
+
+                // All CI passed and no merge conflicts — undraft the PR.
+                tracing::info!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    "PR poller: CI passed on draft PR → marking ready for review"
+                );
+                if let Err(e) = gh_client
+                    .mark_pr_ready_for_review(&owner, &repo, pull_number)
+                    .await
+                {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        error = %e,
+                        "PR poller: failed to undraft PR (will retry next tick)"
+                    );
+                }
+                continue;
+            }
+
+            // ── Non-draft PR handling ─────────────────────────────────────────
+
+            // Check for changes-requested reviews first.
+            let reviews = match gh_client
+                .list_pr_review_states(&owner, &repo, pull_number)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "PR poller: failed to fetch PR reviews, will retry next tick"
+                    );
+                    continue;
+                }
+            };
+
+            let changes_requested = reviews
+                .iter()
+                .any(|r| r.state.as_str() == "CHANGES_REQUESTED");
+
+            if changes_requested {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    "PR poller: reviewer requested changes → dispatching review feedback loop"
+                );
+
+                // Fetch aggregated feedback (reviews + inline comments).
+                let feedback = match gh_client
+                    .fetch_pr_review_feedback(&owner, &repo, pull_number, pr_url)
+                    .await
+                {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            error = %e,
+                            "PR poller: failed to fetch PR review feedback, using empty"
+                        );
+                        PrReviewFeedback {
+                            pull_number,
+                            pr_url: pr_url.to_owned(),
+                            change_request_reviews: Vec::new(),
+                            inline_comments: Vec::new(),
+                        }
+                    }
+                };
+
+                // Attach feedback + handle escalation threshold.
+                self.attach_pr_review_feedback(&task.id, &task.short_id, feedback)
+                    .await;
+
+                self.apply_pr_transition(
+                    &task.id,
+                    TransitionAction::PrChangesRequested,
+                    Some("Reviewer requested changes on PR"),
+                )
+                .await;
+                self.pr_status_cache.remove(&task.id);
+                continue;
+            }
+
+            // ── CI checks on non-draft (cached per head SHA) ─────────────────
             let sha_changed = self
                 .pr_status_cache
                 .get(&task.id)
@@ -138,8 +285,6 @@ impl CoordinatorActor {
                 .unwrap_or(true);
 
             if sha_changed {
-                // Update cache before any early-continue so subsequent ticks
-                // don't re-evaluate the same SHA.
                 self.pr_status_cache
                     .insert(task.id.clone(), current_sha.clone());
 
@@ -169,8 +314,6 @@ impl CoordinatorActor {
                             Some("CI checks failed on PR"),
                         )
                         .await;
-                        // Log CI failure details as a comment so the re-dispatched worker
-                        // has full context on which checks failed and where to look.
                         self.log_ci_failure_comment(&task.id, &failed_checks, pr_url, &current_sha)
                             .await;
                         self.pr_status_cache.remove(&task.id);
@@ -179,79 +322,81 @@ impl CoordinatorActor {
                 }
             }
 
-            // ── Review state ──────────────────────────────────────────────────
+            // ── Merge eligibility check ──────────────────────────────────────
+            // PR is not draft, no changes requested, CI is green.
+            // Check if it's mergeable and whether approval is sufficient.
+
+            if pr.mergeable == Some(false) {
+                // PR has merge conflicts — send back for rework.
+                tracing::info!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    "PR poller: PR has merge conflicts → reopening task for rework"
+                );
+                self.apply_pr_transition(
+                    &task.id,
+                    TransitionAction::PrChangesRequested,
+                    Some("PR has merge conflicts"),
+                )
+                .await;
+                self.pr_status_cache.remove(&task.id);
+                continue;
+            }
+
+            // Check approval status. If any review is APPROVED and none are
+            // CHANGES_REQUESTED, we consider the PR approved. If there are no
+            // reviews at all and the PR is mergeable, try to merge — GitHub will
+            // reject if branch protection requires reviews.
+            let has_approved = reviews.iter().any(|r| r.state.as_str() == "APPROVED");
+            let has_reviews = !reviews.is_empty();
+
+            if has_reviews && !has_approved {
+                // There are reviews but none are APPROVED (and no CHANGES_REQUESTED
+                // since we handled that above). This means reviews are pending or
+                // only COMMENTED. Wait for approval or re-request review.
+                self.maybe_re_request_review(
+                    &task.id,
+                    &task.short_id,
+                    &gh_client,
+                    &owner,
+                    &repo,
+                    pull_number,
+                )
+                .await;
+                continue;
+            }
+
+            // Either approved or no reviews — attempt squash merge.
+            tracing::info!(
+                task_id = %task.short_id,
+                pr = pull_number,
+                approved = has_approved,
+                "PR poller: attempting squash merge"
+            );
+
             match gh_client
-                .list_pr_review_states(&owner, &repo, pull_number)
+                .merge_pull_request(&owner, &repo, pull_number, MergeMethod::Squash, &pr.title)
                 .await
             {
-                Ok(reviews) => {
-                    // Only the most recent review per reviewer counts.  If the
-                    // latest review from any reviewer is CHANGES_REQUESTED, reopen.
-                    let changes_requested = reviews
-                        .iter()
-                        .any(|r| r.state.as_str() == "CHANGES_REQUESTED");
-
-                    if changes_requested {
-                        tracing::info!(
-                            task_id = %task.short_id,
-                            pr = pull_number,
-                            "PR poller: reviewer requested changes → dispatching review feedback loop"
-                        );
-
-                        // Fetch aggregated feedback (reviews + inline comments).
-                        let feedback = match gh_client
-                            .fetch_pr_review_feedback(&owner, &repo, pull_number, pr_url)
-                            .await
-                        {
-                            Ok(f) => f,
-                            Err(e) => {
-                                tracing::warn!(
-                                    task_id = %task.short_id,
-                                    error = %e,
-                                    "PR poller: failed to fetch PR review feedback, using empty"
-                                );
-                                PrReviewFeedback {
-                                    pull_number,
-                                    pr_url: pr_url.to_owned(),
-                                    change_request_reviews: Vec::new(),
-                                    inline_comments: Vec::new(),
-                                }
-                            }
-                        };
-
-                        // Attach feedback + handle escalation threshold.
-                        self.attach_pr_review_feedback(&task.id, &task.short_id, feedback)
-                            .await;
-
-                        self.apply_pr_transition(
-                            &task.id,
-                            TransitionAction::PrChangesRequested,
-                            Some("Reviewer requested changes on PR"),
-                        )
+                Ok(_) => {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        "PR poller: squash merge succeeded → closing task"
+                    );
+                    self.apply_pr_transition(&task.id, TransitionAction::PrMerge, None)
                         .await;
-                        self.pr_status_cache.remove(&task.id);
-                    } else {
-                        // No changes requested.  If this task has prior review
-                        // feedback (meaning the worker already pushed fixup
-                        // commits) and no outstanding changes-requested, re-request
-                        // review from the original reviewers.
-                        self.maybe_re_request_review(
-                            &task.id,
-                            &task.short_id,
-                            &gh_client,
-                            &owner,
-                            &repo,
-                            pull_number,
-                        )
-                        .await;
-                    }
+                    self.pr_status_cache.remove(&task.id);
                 }
                 Err(e) => {
                     tracing::warn!(
                         task_id = %task.short_id,
+                        pr = pull_number,
                         error = %e,
-                        "PR poller: failed to fetch PR reviews, will retry next tick"
+                        "PR poller: merge failed (will retry next tick)"
                     );
+                    // Don't transition — the merge may have been blocked by branch
+                    // protection requiring reviews. The poller will retry next tick.
                 }
             }
         }

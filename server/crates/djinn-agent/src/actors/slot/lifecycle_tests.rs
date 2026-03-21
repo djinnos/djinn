@@ -90,6 +90,7 @@ async fn create_open_task(
             2,
             "dev@test",
             None,
+            None,
         )
         .await
         .expect("create task");

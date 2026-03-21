@@ -117,6 +117,12 @@ impl DjinnMcpServer {
             Vec::new()
         };
 
+        let ac_json = p
+            .acceptance_criteria
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()));
+
         let task = match repo
             .create_in_project(
                 &project_id,
@@ -128,6 +134,7 @@ impl DjinnMcpServer {
                 priority,
                 &owner,
                 status,
+                ac_json.as_deref(),
             )
             .await
         {
@@ -135,27 +142,17 @@ impl DjinnMcpServer {
             Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
         };
 
-        // Apply labels / ac if provided.
+        // Apply labels if provided.
         let has_labels = p.labels.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
-        let has_ac = p
-            .acceptance_criteria
-            .as_ref()
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
 
         let mut task = task;
 
-        if has_labels || has_ac {
+        if has_labels {
             let labels_json = p
                 .labels
                 .as_ref()
                 .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
                 .unwrap_or_else(|| task.labels.clone());
-            let ac_json = p
-                .acceptance_criteria
-                .as_ref()
-                .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
-                .unwrap_or_else(|| task.acceptance_criteria.clone());
 
             if let Ok(t) = repo
                 .update(
@@ -166,7 +163,7 @@ impl DjinnMcpServer {
                     task.priority,
                     &task.owner,
                     &labels_json,
-                    &ac_json,
+                    &task.acceptance_criteria,
                 )
                 .await
             {

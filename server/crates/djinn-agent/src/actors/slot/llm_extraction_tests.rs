@@ -86,6 +86,7 @@ async fn make_fixture() -> TestFixture {
             2,
             "test",
             None,
+            None,
         )
         .await
         .expect("create task");

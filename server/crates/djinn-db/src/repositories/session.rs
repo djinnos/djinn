@@ -447,14 +447,16 @@ mod tests {
             .unwrap();
         assert_eq!(created.status, "running");
 
-        let events = captured.lock().unwrap();
-        let started = events
-            .iter()
-            .find(|e| e.entity_type == "session" && e.action == "started");
-        assert!(started.is_some(), "expected session.started event");
-        let s: SessionRecord = serde_json::from_value(started.unwrap().payload.clone()).unwrap();
-        assert_eq!(s.id, created.id);
-        drop(events);
+        {
+            let events = captured.lock().unwrap();
+            let started = events
+                .iter()
+                .find(|e| e.entity_type == "session" && e.action == "started");
+            assert!(started.is_some(), "expected session.started event");
+            let s: SessionRecord =
+                serde_json::from_value(started.unwrap().payload.clone()).unwrap();
+            assert_eq!(s.id, created.id);
+        }
 
         captured.lock().unwrap().clear();
 

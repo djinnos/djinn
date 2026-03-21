@@ -742,6 +742,7 @@ impl CoordinatorActor {
                 0,
                 "system",
                 Some("open"),
+                None,
             )
             .await
         {
@@ -929,6 +930,7 @@ impl CoordinatorActor {
                 0,
                 "system",
                 Some("open"),
+                None,
             )
             .await
         {

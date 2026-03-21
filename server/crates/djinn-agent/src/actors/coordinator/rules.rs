@@ -159,6 +159,7 @@ impl CoordinatorActor {
                 0,
                 "system",
                 Some("open"),
+                None,
             )
             .await
         {
@@ -306,6 +307,7 @@ mod tests {
                 0,
                 "",
                 Some("open"),
+                None,
             )
             .await
             .unwrap()

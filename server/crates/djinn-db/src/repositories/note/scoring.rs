@@ -39,47 +39,6 @@ struct ProximityEdge {
     multiplier: f64,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bayesian_update_low_signal_reduces_from_near_one() {
-        let updated = bayesian_update(0.95, 0.1);
-        assert!(
-            updated < 0.7,
-            "expected a significant decrease, got {updated}"
-        );
-        assert!(updated >= CONFIDENCE_FLOOR);
-    }
-
-    #[test]
-    fn bayesian_update_medium_positive_signal_increases_from_half() {
-        let updated = bayesian_update(0.5, TASK_SUCCESS);
-        assert!(updated > 0.5);
-    }
-
-    #[test]
-    fn repeated_low_signals_never_cross_floor() {
-        let mut confidence = 0.5;
-        for _ in 0..50 {
-            confidence = bayesian_update(confidence, CONTRADICTION);
-        }
-        assert!(confidence >= CONFIDENCE_FLOOR);
-        assert!((confidence - CONFIDENCE_FLOOR).abs() < 1e-9);
-    }
-
-    #[test]
-    fn repeated_high_signals_never_cross_ceiling() {
-        let mut confidence = 0.5;
-        for _ in 0..50 {
-            confidence = bayesian_update(confidence, USER_CONFIRM);
-        }
-        assert!(confidence <= CONFIDENCE_CEILING);
-        assert!((confidence - CONFIDENCE_CEILING).abs() < 1e-9);
-    }
-}
-
 impl NoteRepository {
     /// Directly set the confidence of a note to `value`, clamped to
     /// `[CONFIDENCE_FLOOR, CONFIDENCE_CEILING]`.
@@ -347,4 +306,45 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
     let doy = (153 * mp + 2) / 5 + day as i32 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     (era as i64) * 146_097 + doe as i64 - 719_468
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bayesian_update_low_signal_reduces_from_near_one() {
+        let updated = bayesian_update(0.95, 0.1);
+        assert!(
+            updated < 0.7,
+            "expected a significant decrease, got {updated}"
+        );
+        assert!(updated >= CONFIDENCE_FLOOR);
+    }
+
+    #[test]
+    fn bayesian_update_medium_positive_signal_increases_from_half() {
+        let updated = bayesian_update(0.5, TASK_SUCCESS);
+        assert!(updated > 0.5);
+    }
+
+    #[test]
+    fn repeated_low_signals_never_cross_floor() {
+        let mut confidence = 0.5;
+        for _ in 0..50 {
+            confidence = bayesian_update(confidence, CONTRADICTION);
+        }
+        assert!(confidence >= CONFIDENCE_FLOOR);
+        assert!((confidence - CONFIDENCE_FLOOR).abs() < 1e-9);
+    }
+
+    #[test]
+    fn repeated_high_signals_never_cross_ceiling() {
+        let mut confidence = 0.5;
+        for _ in 0..50 {
+            confidence = bayesian_update(confidence, USER_CONFIRM);
+        }
+        assert!(confidence <= CONFIDENCE_CEILING);
+        assert!((confidence - CONFIDENCE_CEILING).abs() < 1e-9);
+    }
 }

@@ -509,6 +509,7 @@ mod tests {
                 2,
                 "test",
                 None,
+                None,
             )
             .await
             .expect("create task");

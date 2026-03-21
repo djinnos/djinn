@@ -164,8 +164,14 @@ impl CoordinatorActor {
             epic.title, epic.short_id, epic.memory_refs, epic.short_id
         );
 
+        let ac = serde_json::json!([
+            {"criterion": "Epic roadmap/design note reviewed and updated with next-wave plan", "met": false},
+            {"criterion": "3–5 worker tasks (or a spike) created under the epic with acceptance criteria", "met": false},
+            {"criterion": "submit_grooming called to finalize the wave", "met": false},
+        ]).to_string();
+
         match task_repo
-            .create(
+            .create_with_ac(
                 &epic.id,
                 &title,
                 &description,
@@ -174,6 +180,7 @@ impl CoordinatorActor {
                 0,
                 "planner",
                 Some("open"),
+                Some(&ac),
             )
             .await
         {
