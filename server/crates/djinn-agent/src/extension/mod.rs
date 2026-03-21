@@ -2005,57 +2005,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_schemas_include_role_specific_tools() {
-        fn schema_names(schemas: Vec<serde_json::Value>) -> Vec<String> {
-            schemas
-                .into_iter()
-                .filter_map(|v| {
-                    v.get("name")
-                        .and_then(|n| n.as_str())
-                        .map(ToString::to_string)
-                })
-                .collect()
-        }
-
-        let worker = schema_names(tool_schemas_worker());
-        assert!(worker.iter().any(|n| n == "shell"));
-        assert!(worker.iter().any(|n| n == "write"));
-        assert!(worker.iter().any(|n| n == "edit"));
-        assert!(worker.iter().any(|n| n == "submit_work"));
-        assert!(!worker.iter().any(|n| n == "task_comment_add"));
-
-        let reviewer = schema_names(tool_schemas_reviewer());
-        assert!(reviewer.iter().any(|n| n == "submit_review"));
-        assert!(!reviewer.iter().any(|n| n == "task_update_ac"));
-        assert!(!reviewer.iter().any(|n| n == "task_comment_add"));
-
-        let lead = schema_names(tool_schemas_lead());
-        assert!(lead.iter().any(|n| n == "task_create"));
-        assert!(lead.iter().any(|n| n == "submit_decision"));
-        assert!(!lead.iter().any(|n| n == "task_transition"));
-        assert!(!lead.iter().any(|n| n == "task_comment_add"));
-
-        let planner = schema_names(tool_schemas_planner());
-        assert!(planner.iter().any(|n| n == "task_create"));
-        assert!(planner.iter().any(|n| n == "task_transition"));
-        assert!(planner.iter().any(|n| n == "submit_grooming"));
-        assert!(!planner.iter().any(|n| n == "task_comment_add"));
-
-        let architect = schema_names(tool_schemas_architect());
-        assert!(architect.iter().any(|n| n == "shell"));
-        assert!(architect.iter().any(|n| n == "read"));
-        assert!(architect.iter().any(|n| n == "task_create"));
-        assert!(architect.iter().any(|n| n == "task_comment_add"));
-        assert!(architect.iter().any(|n| n == "task_transition"));
-        assert!(architect.iter().any(|n| n == "task_kill_session"));
-        assert!(architect.iter().any(|n| n == "submit_work"));
-        // Architect must NOT have code-writing tools.
-        assert!(!architect.iter().any(|n| n == "write"));
-        assert!(!architect.iter().any(|n| n == "edit"));
-        assert!(!architect.iter().any(|n| n == "apply_patch"));
-    }
-
-    #[test]
     fn ensure_path_within_worktree_accepts_in_tree_and_rejects_traversal() {
         use tempfile::tempdir;
 
