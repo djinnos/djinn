@@ -9,7 +9,9 @@ import { useExecutionControl } from "@/hooks/useExecutionControl";
 import { useSelectedProject } from "@/stores/useProjectStore";
 import { verificationStore } from "@/stores/verificationStore";
 import { Button } from "@/components/ui/button";
-import { ChevronDown, ChevronRight, Play, Square, RotateCcw, X } from "lucide-react";
+import { RotateCcw } from "lucide-react";
+import { ArrowDown01Icon, ArrowRight01Icon, PlayIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
   areSetupVerificationViewsEqual,
   buildSetupVerificationView,
@@ -100,7 +102,7 @@ function TaskActions({ task }: { task: Task }) {
           onClick={() => transition(task.id, projectPath, "start")}
           className="gap-1.5 bg-emerald-600 hover:bg-emerald-700"
         >
-          <Play className="h-3.5 w-3.5" />
+          <HugeiconsIcon icon={PlayIcon} size={14} />
           Start
         </Button>
       )}
@@ -112,7 +114,7 @@ function TaskActions({ task }: { task: Task }) {
           onClick={() => killTask(task.id)}
           className="gap-1.5"
         >
-          <Square className="h-3.5 w-3.5" />
+          <HugeiconsIcon icon={StopIcon} size={14} />
           Stop
         </Button>
       )}
@@ -136,7 +138,7 @@ function TaskActions({ task }: { task: Task }) {
           onClick={() => transition(task.id, projectPath, "force_close", "Closed from desktop")}
           className="gap-1.5 text-muted-foreground hover:text-destructive"
         >
-          <X className="h-3.5 w-3.5" />
+          <HugeiconsIcon icon={Cancel01Icon} size={14} />
           Close
         </Button>
       )}
@@ -235,7 +237,7 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
                   onClick={() => setIsCollapsed((value) => !value)}
                 >
                   <span className={setupVerification.hasFailed ? "font-medium text-red-500" : "text-muted-foreground"}>{summary}</span>
-                  {isCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                  {isCollapsed ? <HugeiconsIcon icon={ArrowRight01Icon} size={16} /> : <HugeiconsIcon icon={ArrowDown01Icon} size={16} />}
                 </button>
                 {!isCollapsed && (
                   <StepLog

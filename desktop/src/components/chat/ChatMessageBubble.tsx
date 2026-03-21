@@ -1,7 +1,8 @@
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import type { ChatMessage } from '@/stores/chatStore';
-import { ChevronRight, Copy } from 'lucide-react';
+import { ArrowRight01Icon, Copy01Icon } from '@hugeicons/core-free-icons';
+import { HugeiconsIcon } from '@hugeicons/react';
 import { AnimatePresence, motion } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
@@ -42,7 +43,7 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
             aria-label="Copy message"
             className="absolute -top-2 -right-2 rounded-md border border-border bg-background/95 p-1 text-muted-foreground opacity-0 shadow-sm transition-opacity hover:text-foreground group-hover:opacity-100"
           >
-            <Copy className="h-3.5 w-3.5" />
+            <HugeiconsIcon icon={Copy01Icon} size={14} />
           </button>
         )}
         {isUser ? (
@@ -68,7 +69,7 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
                 transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
                 className="inline-flex"
               >
-                <ChevronRight className="h-3.5 w-3.5" />
+                <HugeiconsIcon icon={ArrowRight01Icon} size={14} />
               </motion.span>
             </button>
 

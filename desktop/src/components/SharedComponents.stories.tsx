@@ -23,14 +23,12 @@ const withRouter = (Story: any) => (
   </MemoryRouter>
 );
 
-const SidebarState = ({ collapsed = false, section = 'kanban' }: { collapsed?: boolean; section?: 'kanban' | 'chat' | 'settings' }) => {
-  const setCollapsed = useSidebarStore((s) => s.setCollapsed);
+const SidebarState = ({ section = 'kanban' }: { section?: 'kanban' | 'chat' | 'settings' }) => {
   const setActiveSection = useSidebarStore((s) => s.setActiveSection);
 
   useEffect(() => {
-    setCollapsed(collapsed);
     setActiveSection(section);
-  }, [collapsed, section, setActiveSection, setCollapsed]);
+  }, [section, setActiveSection]);
 
   return <Sidebar />;
 };
@@ -185,16 +183,16 @@ export const WizardStepIndicatorWithSkipped = {
   render: () => <WizardStepIndicator currentStep={4} totalSteps={5} completedSteps={[1, 2, 3]} skippedSteps={[2]} />,
 };
 
-export const SidebarExpandedKanban = {
-  name: 'Sidebar / Expanded Kanban',
+export const SidebarKanban = {
+  name: 'Sidebar / Kanban',
   decorators: [withRouter],
-  render: () => <SidebarState collapsed={false} section="kanban" />,
+  render: () => <SidebarState section="kanban" />,
 };
 
-export const SidebarCollapsedSettings = {
-  name: 'Sidebar / Collapsed Settings',
+export const SidebarSettings = {
+  name: 'Sidebar / Settings',
   decorators: [withRouter],
-  render: () => <SidebarState collapsed section="settings" />,
+  render: () => <SidebarState section="settings" />,
 };
 
 export const ProjectSelectorDefault = {

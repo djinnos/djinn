@@ -1,5 +1,6 @@
 import * as React from "react";
-import { Search } from "lucide-react";
+import { Search01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 import { cn } from "@/lib/utils";
 import {
@@ -66,7 +67,7 @@ function CommandInput({ className, ...props }: React.ComponentProps<"input">) {
 
   return (
     <div data-slot="command-input-wrapper" className="flex h-9 items-center gap-2 border-b px-3">
-      <Search className="size-4 shrink-0 opacity-50" />
+      <HugeiconsIcon icon={Search01Icon} size={16} className="shrink-0 opacity-50" />
       <input
         data-slot="command-input"
         value={query}

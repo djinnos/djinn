@@ -17,7 +17,7 @@ import {
   CircleIcon,
   FullSignalIcon,
   GitPullRequestIcon,
-  Loading03Icon,
+  Loading02Icon,
   LowSignalIcon,
   MediumSignalIcon,
   NoSignalIcon,
@@ -465,7 +465,7 @@ export function KanbanBoard({
                   <div className="flex items-center gap-2.5">
                     {column.key === "in_progress" ? (
                       <HugeiconsIcon
-                        icon={Loading03Icon}
+                        icon={Loading02Icon}
                         className="size-4 shrink-0 animate-spin text-blue-400"
                       />
                     ) : (

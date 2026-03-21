@@ -1,4 +1,6 @@
-import { Loader2Icon, CheckCircle2Icon, AlertCircleIcon, FolderIcon } from 'lucide-react';
+
+import { CheckmarkCircle04Icon, AlertCircleIcon, Loading02Icon, Folder02Icon } from '@hugeicons/core-free-icons';
+import { HugeiconsIcon } from '@hugeicons/react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -24,7 +26,7 @@ function ServerCheckChecking() {
   return (
     <div className="flex flex-col items-center gap-6 text-center">
       <div className="flex flex-col items-center gap-4">
-        <Loader2Icon className="h-12 w-12 animate-spin text-primary" />
+        <HugeiconsIcon icon={Loading02Icon} size={48} className="animate-spin text-primary" />
         <div>
           <h2 className="text-xl font-semibold">Connecting to Server</h2>
           <p className="text-sm text-muted-foreground">Checking server health...</p>
@@ -38,7 +40,7 @@ function ServerCheckSuccess() {
   return (
     <div className="flex flex-col items-center gap-6 text-center">
       <div className="flex flex-col items-center gap-4">
-        <CheckCircle2Icon className="h-12 w-12 text-green-500" />
+        <HugeiconsIcon icon={CheckmarkCircle04Icon} size={48} className="text-green-500" />
         <div>
           <h2 className="text-xl font-semibold">Server Connected</h2>
           <p className="text-sm text-muted-foreground">
@@ -54,7 +56,7 @@ function ServerCheckError() {
   return (
     <div className="flex flex-col items-center gap-6 text-center">
       <div className="flex flex-col items-center gap-4">
-        <AlertCircleIcon className="h-12 w-12 text-destructive" />
+        <HugeiconsIcon icon={AlertCircleIcon} size={48} className="text-destructive" />
         <div>
           <h2 className="text-xl font-semibold">Connection Failed</h2>
           <p className="text-sm text-muted-foreground">
@@ -89,7 +91,7 @@ function ProjectSetupEmpty() {
           <div className="flex gap-2">
             <Input placeholder="Select a directory..." value="" readOnly className="flex-1" />
             <Button variant="secondary">
-              <FolderIcon className="mr-2 h-4 w-4" />
+              <HugeiconsIcon icon={Folder02Icon} size={16} className="mr-2" />
               Browse
             </Button>
           </div>
@@ -125,7 +127,7 @@ function ProjectSetupWithPath() {
               className="flex-1"
             />
             <Button variant="secondary">
-              <FolderIcon className="mr-2 h-4 w-4" />
+              <HugeiconsIcon icon={Folder02Icon} size={16} className="mr-2" />
               Browse
             </Button>
           </div>
@@ -165,7 +167,7 @@ function ProjectSetupRegistered() {
               className="flex-1"
             />
             <Button variant="secondary">
-              <FolderIcon className="mr-2 h-4 w-4" />
+              <HugeiconsIcon icon={Folder02Icon} size={16} className="mr-2" />
               Browse
             </Button>
           </div>
@@ -179,12 +181,12 @@ function ProjectSetupRegistered() {
         </Field>
 
         <div className="flex items-center gap-2 rounded-md bg-green-500/10 p-3 text-sm text-green-600">
-          <CheckCircle2Icon className="h-4 w-4 flex-shrink-0" />
+          <HugeiconsIcon icon={CheckmarkCircle04Icon} size={16} className="flex-shrink-0" />
           <span>Project registered successfully!</span>
         </div>
 
         <Button disabled className="w-full">
-          <CheckCircle2Icon className="mr-2 h-4 w-4" />
+          <HugeiconsIcon icon={CheckmarkCircle04Icon} size={16} className="mr-2" />
           Registered
         </Button>
       </div>
@@ -213,7 +215,7 @@ function ProjectSetupError() {
               className="flex-1"
             />
             <Button variant="secondary">
-              <FolderIcon className="mr-2 h-4 w-4" />
+              <HugeiconsIcon icon={Folder02Icon} size={16} className="mr-2" />
               Browse
             </Button>
           </div>
@@ -227,7 +229,7 @@ function ProjectSetupError() {
         </Field>
 
         <div className="flex items-center gap-2 rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-          <AlertCircleIcon className="h-4 w-4 flex-shrink-0" />
+          <HugeiconsIcon icon={AlertCircleIcon} size={16} className="flex-shrink-0" />
           <span>Failed to register project: directory not found</span>
         </div>
 
@@ -244,7 +246,7 @@ function ProjectSetupError() {
 function ProviderSetupLoading() {
   return (
     <div className="flex flex-col items-center gap-4 text-center">
-      <Loader2Icon className="h-8 w-8 animate-spin text-primary" />
+      <HugeiconsIcon icon={Loading02Icon} size={32} className="animate-spin text-primary" />
       <p className="text-sm text-muted-foreground">Loading providers...</p>
     </div>
   );
@@ -253,7 +255,7 @@ function ProviderSetupLoading() {
 function ProviderSetupLoadError() {
   return (
     <div className="flex flex-col items-center gap-4 text-center">
-      <AlertCircleIcon className="h-12 w-12 text-destructive" />
+      <HugeiconsIcon icon={AlertCircleIcon} size={48} className="text-destructive" />
       <div>
         <h2 className="text-xl font-semibold">Failed to Load Providers</h2>
         <p className="text-sm text-muted-foreground">
@@ -394,7 +396,7 @@ function ProviderSetupValidated() {
             Your API key will be securely stored and never shared.
           </FieldDescription>
           <div className="flex items-center gap-2 text-sm text-green-500">
-            <CheckCircle2Icon className="h-4 w-4" />
+            <HugeiconsIcon icon={CheckmarkCircle04Icon} size={16} />
             <span>API key is valid</span>
           </div>
         </Field>

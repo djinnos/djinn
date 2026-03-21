@@ -3,7 +3,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Alert02Icon, Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Loader2Icon } from "lucide-react";
+import { Loading02Icon } from "@hugeicons/core-free-icons";
 import { callMcpTool } from "@/api/mcpClient";
 import { showToast } from "@/lib/toast";
 
@@ -129,7 +129,7 @@ export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
             disabled={checking}
           >
             {checking ? (
-              <Loader2Icon className="h-3.5 w-3.5 animate-spin" />
+              <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
             ) : (
               "Check again"
             )}

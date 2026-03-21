@@ -17,10 +17,9 @@ import {
   ComboboxItem,
   ComboboxList,
 } from '@/components/ui/combobox';
-import {
-  Sparkles, Key, ChevronDown, HelpCircle,
-  Loader2, CheckCircle2, AlertCircle, X,
-} from 'lucide-react';
+
+import { ArrowDown01Icon, CheckmarkCircle04Icon, AlertCircleIcon, HelpCircleIcon, Key01Icon, Loading02Icon, SparklesIcon, Cancel01Icon } from '@hugeicons/core-free-icons';
+import { HugeiconsIcon } from '@hugeicons/react';
 import { cn } from '@/lib/utils';
 import {
   fetchProviderCatalog,
@@ -67,7 +66,7 @@ function ChatGPTCard({ onDone }: { onDone: () => void }) {
 
       <div className="flex items-center gap-2">
         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/15">
-          <Sparkles className="h-3.5 w-3.5 text-primary" />
+          <HugeiconsIcon icon={SparklesIcon} size={14} className="text-primary" />
         </div>
         <span className="font-semibold text-sm text-foreground">ChatGPT / Codex</span>
         <span className="ml-auto rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary whitespace-nowrap">
@@ -90,13 +89,13 @@ function ChatGPTCard({ onDone }: { onDone: () => void }) {
 
       {error && (
         <p className="flex items-center gap-1.5 text-xs text-destructive">
-          <AlertCircle className="h-3.5 w-3.5 shrink-0" />{error}
+          <HugeiconsIcon icon={AlertCircleIcon} size={14} className="shrink-0" />{error}
         </p>
       )}
 
       <Button className="w-full" onClick={() => void handleConnect()} disabled={pending}>
         {pending
-          ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Waiting for browser...</>
+          ? <><HugeiconsIcon icon={Loading02Icon} size={16} className="mr-2 animate-spin" />Waiting for browser...</>
           : 'Continue with ChatGPT'}
       </Button>
     </div>
@@ -188,12 +187,12 @@ function ApiKeyFields({ onDone }: { onDone: () => void }) {
           />
           {validated && (
             <p className="flex items-center gap-1.5 text-xs text-emerald-500">
-              <CheckCircle2 className="h-3.5 w-3.5" />API key is valid
+              <HugeiconsIcon icon={CheckmarkCircle04Icon} size={14} />API key is valid
             </p>
           )}
           {error && (
             <p className="flex items-center gap-1.5 text-xs text-destructive">
-              <AlertCircle className="h-3.5 w-3.5 shrink-0" />{error}
+              <HugeiconsIcon icon={AlertCircleIcon} size={14} className="shrink-0" />{error}
             </p>
           )}
         </>
@@ -205,7 +204,7 @@ function ApiKeyFields({ onDone }: { onDone: () => void }) {
         onClick={() => void handleSave()}
       >
         {saving
-          ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</>
+          ? <><HugeiconsIcon icon={Loading02Icon} size={16} className="mr-2 animate-spin" />Saving...</>
           : 'Use API Key'}
       </Button>
     </div>
@@ -217,9 +216,9 @@ function FaqSection() {
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger className="flex w-full items-center gap-2 py-2 text-xs text-muted-foreground transition-colors hover:text-foreground">
-        <HelpCircle className="h-3.5 w-3.5 shrink-0" />
+        <HugeiconsIcon icon={HelpCircleIcon} size={14} className="shrink-0" />
         <span>Why can&apos;t I use my Claude Pro or Gemini subscription?</span>
-        <ChevronDown className={cn('ml-auto h-3.5 w-3.5 shrink-0 transition-transform duration-200', open && 'rotate-180')} />
+        <HugeiconsIcon icon={ArrowDown01Icon} size={14} className={cn('ml-auto shrink-0 transition-transform duration-200', open && 'rotate-180')} />
       </CollapsibleTrigger>
       <CollapsibleContent className="overflow-hidden">
         <div className="space-y-1.5 pb-1 pl-5 text-xs text-muted-foreground">
@@ -249,7 +248,7 @@ export function AddProviderModal({ open, onOpenChange, configuredProviderIds, on
           <div className="flex items-center justify-between border-b border-border px-5 py-4">
             <h2 className="text-sm font-semibold tracking-tight">Add Provider</h2>
             <Button variant="ghost" size="icon" className="h-7 w-7 -mr-1" onClick={() => onOpenChange(false)}>
-              <X className="h-3.5 w-3.5" />
+              <HugeiconsIcon icon={Cancel01Icon} size={14} />
             </Button>
           </div>
 
@@ -260,7 +259,7 @@ export function AddProviderModal({ open, onOpenChange, configuredProviderIds, on
               {/* Section header + provider badges */}
               <div className="flex items-center gap-2">
                 <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-muted">
-                  <Key className="h-3 w-3 text-muted-foreground" />
+                  <HugeiconsIcon icon={Key01Icon} size={12} className="text-muted-foreground" />
                 </div>
                 <div>
                   <span className="text-sm font-medium text-foreground">Connect via API Key</span>
@@ -293,7 +292,7 @@ export function AddProviderModal({ open, onOpenChange, configuredProviderIds, on
                 <div className="flex flex-col gap-3">
                   <div className="flex items-center gap-2">
                     <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted">
-                      <Key className="h-3.5 w-3.5 text-muted-foreground" />
+                      <HugeiconsIcon icon={Key01Icon} size={14} className="text-muted-foreground" />
                     </div>
                     <span className="text-sm font-semibold text-foreground">API Key</span>
                   </div>

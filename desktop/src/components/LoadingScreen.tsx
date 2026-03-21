@@ -1,4 +1,6 @@
-import { Loader2, AlertCircle, RefreshCw } from "lucide-react";
+
+import { AlertCircleIcon, Loading02Icon, Refresh01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@/components/ui/button";
 
 interface LoadingScreenProps {
@@ -18,7 +20,7 @@ export function LoadingScreen({
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-6 bg-background p-4">
         <div className="flex flex-col items-center gap-4 max-w-md text-center">
-          <AlertCircle className="h-16 w-16 text-destructive" />
+          <HugeiconsIcon icon={AlertCircleIcon} size={64} className="text-destructive" />
           <h1 className="text-2xl font-bold text-foreground">Server Connection Failed</h1>
           <p className="text-muted-foreground">{message}</p>
           <p className="text-sm text-muted-foreground">
@@ -33,12 +35,12 @@ export function LoadingScreen({
             >
               {isRetrying ? (
                 <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <HugeiconsIcon icon={Loading02Icon} size={16} className="animate-spin" />
                   Retrying...
                 </>
               ) : (
                 <>
-                  <RefreshCw className="h-5 w-5" />
+                  <HugeiconsIcon icon={Refresh01Icon} size={20} />
                   Retry Connection
                 </>
               )}
@@ -52,7 +54,7 @@ export function LoadingScreen({
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-6 bg-background">
       <div className="flex flex-col items-center gap-4">
-        <Loader2 className="h-12 w-12 animate-spin text-primary" />
+        <HugeiconsIcon icon={Loading02Icon} size={48} className="animate-spin text-primary" />
         <h1 className="text-2xl font-semibold text-foreground">Djinn</h1>
         <p className="text-muted-foreground">{message}</p>
       </div>

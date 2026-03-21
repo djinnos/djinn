@@ -9,7 +9,7 @@ import {
   LinkSquare02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Loader2Icon } from "lucide-react";
+import { Loading02Icon } from "@hugeicons/core-free-icons";
 import { checkGitRemote, setupGitRemote } from "@/tauri/commands";
 import { showToast } from "@/lib/toast";
 
@@ -154,7 +154,7 @@ export function GitRemoteSetupBanner({ projectPath, onResolved }: GitRemoteSetup
                     disabled={state === "running" || !remoteUrl.trim()}
                   >
                     {state === "running" ? (
-                      <Loader2Icon className="h-4 w-4 animate-spin" />
+                      <HugeiconsIcon icon={Loading02Icon} size={16} className="animate-spin" />
                     ) : (
                       "Setup Remote"
                     )}

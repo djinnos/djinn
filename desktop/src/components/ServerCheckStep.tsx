@@ -1,7 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
 import { checkServerHealth } from "@/api/server";
 import { useWizardStore } from "@/stores/wizardStore";
-import { Loader2Icon, CheckCircle2Icon, AlertCircleIcon } from "lucide-react";
+import { CheckmarkCircle04Icon, AlertCircleIcon, Loading02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@/components/ui/button";
 
 export function ServerCheckStep() {
@@ -39,7 +40,7 @@ export function ServerCheckStep() {
       <div className="flex flex-col items-center gap-4">
         {status === "checking" && (
           <>
-            <Loader2Icon className="h-12 w-12 animate-spin text-primary" />
+            <HugeiconsIcon icon={Loading02Icon} size={48} className="animate-spin text-primary" />
             <div>
               <h2 className="text-xl font-semibold">Connecting to Server</h2>
               <p className="text-sm text-muted-foreground">
@@ -51,7 +52,7 @@ export function ServerCheckStep() {
         
         {status === "success" && (
           <>
-            <CheckCircle2Icon className="h-12 w-12 text-green-500" />
+            <HugeiconsIcon icon={CheckmarkCircle04Icon} size={48} className="text-green-500" />
             <div>
               <h2 className="text-xl font-semibold">Server Connected</h2>
               <p className="text-sm text-muted-foreground">
@@ -63,7 +64,7 @@ export function ServerCheckStep() {
         
         {status === "error" && (
           <>
-            <AlertCircleIcon className="h-12 w-12 text-destructive" />
+            <HugeiconsIcon icon={AlertCircleIcon} size={48} className="text-destructive" />
             <div>
               <h2 className="text-xl font-semibold">Connection Failed</h2>
               <p className="text-sm text-muted-foreground">

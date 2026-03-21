@@ -1,15 +1,9 @@
 import { useSidebarStore } from '@/stores/sidebarStore';
 import { useAuthStore } from '@/stores/authStore';
 import { Button } from '@/components/ui/button';
+import { Kbd } from '@/components/ui/kbd';
 import { cn } from '@/lib/utils';
-import {
-  Settings,
-  PanelLeft,
-  Command,
-  Play,
-  Pause,
-  Loader2,
-} from 'lucide-react';
+
 import {
   KanbanIcon,
   Robot01Icon,
@@ -18,6 +12,11 @@ import {
   Folder02Icon,
   PlusSignIcon,
   LogoutSquare01Icon,
+  PlayIcon,
+  PauseIcon,
+  Loading02Icon,
+  CommandIcon,
+  Settings01Icon,
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
 import logoSvg from '@/assets/logo.svg';
@@ -50,35 +49,27 @@ interface NavItemProps {
   label: string;
   hotkey?: string;
   isActive: boolean;
-  isCollapsed: boolean;
   onClick: () => void;
 }
 
-function NavItem({ icon, label, hotkey, isActive, isCollapsed, onClick }: NavItemProps) {
+function NavItem({ icon, label, hotkey, isActive, onClick }: NavItemProps) {
   return (
     <Button
       variant={isActive ? 'secondary' : 'ghost'}
-      size={isCollapsed ? 'icon' : 'default'}
+      size="default"
       onClick={onClick}
       className={cn(
         'w-full justify-start gap-3 transition-all duration-200',
-        isCollapsed ? 'h-10 w-10 justify-center' : 'h-9 px-3',
+        'h-9 px-3',
         isActive && 'bg-white/[0.05] text-foreground'
       )}
-      title={isCollapsed ? `${label}${hotkey ? ` (${hotkey.toUpperCase()})` : ''}` : undefined}
     >
       <span className="flex h-4 w-4 items-center justify-center shrink-0">
         {icon}
       </span>
-      {!isCollapsed && (
-        <>
-          <span className="text-sm font-medium truncate flex-1 text-left">{label}</span>
-          {hotkey && (
-            <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono text-[10px] text-muted-foreground/50">
-              {hotkey.toUpperCase()}
-            </kbd>
-          )}
-        </>
+      <span className="text-sm font-medium truncate flex-1 text-left">{label}</span>
+      {hotkey && (
+        <Kbd>{hotkey.toUpperCase()}</Kbd>
       )}
     </Button>
   );
@@ -163,11 +154,11 @@ function ProjectExecToggle({
         }
       >
         {confirming ? (
-          <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+          <HugeiconsIcon icon={Loading02Icon} size={12} className="animate-spin text-muted-foreground" />
         ) : isRunning ? (
-          <Pause className="h-3 w-3 text-red-400" />
+          <HugeiconsIcon icon={PauseIcon} size={12} className="text-red-400" />
         ) : (
-          <Play className="h-3 w-3 text-muted-foreground" />
+          <HugeiconsIcon icon={PlayIcon} size={12} className="text-emerald-400" />
         )}
       </AlertDialogTrigger>
       <AlertDialogContent size="sm">
@@ -190,7 +181,7 @@ function ProjectExecToggle({
           >
             {confirming ? (
               <>
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <HugeiconsIcon icon={Loading02Icon} size={16} className="animate-spin" />
                 {progressLabel}
               </>
             ) : (
@@ -207,7 +198,6 @@ function ProjectListItem({
   name,
   icon,
   isSelected,
-  isCollapsed,
   execState,
   healthRun,
   onClick,
@@ -217,7 +207,6 @@ function ProjectListItem({
   name: string;
   icon?: React.ReactNode;
   isSelected: boolean;
-  isCollapsed: boolean;
   execState?: ProjectExecState;
   healthRun: VerificationRun | null;
   onClick: () => void;
@@ -262,12 +251,10 @@ function ProjectListItem({
           onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
           className={cn(
             'flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors cursor-pointer',
-            isCollapsed ? 'justify-center px-0' : '',
             isSelected
               ? 'bg-white/[0.07] text-foreground font-medium'
               : 'text-muted-foreground hover:bg-white/[0.04] hover:text-foreground'
           )}
-          title={isCollapsed ? name : undefined}
         >
           {(isActive || healthState) ? (
             <StatusDot
@@ -279,18 +266,12 @@ function ProjectListItem({
           ) : (
             icon ?? <HugeiconsIcon icon={Folder02Icon} className="h-3.5 w-3.5 shrink-0" />
           )}
-          {!isCollapsed && (
-            <>
-              <span className="truncate flex-1 text-left">{name}</span>
-              {toggleSlot && (
-                <span className="shrink-0">{toggleSlot}</span>
-              )}
-              {hotkey && (
-                <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono text-[10px] text-muted-foreground/50 shrink-0">
-                  {hotkey}
-                </kbd>
-              )}
-            </>
+          <span className="truncate flex-1 text-left">{name}</span>
+          {toggleSlot && (
+            <span className="shrink-0">{toggleSlot}</span>
+          )}
+          {hotkey && (
+            <Kbd className="shrink-0">{hotkey}</Kbd>
           )}
         </div>
       </div>
@@ -310,7 +291,6 @@ function ProjectRow({
   label,
   icon,
   isSelected,
-  isCollapsed,
   onClick,
   hotkey,
 }: {
@@ -318,7 +298,6 @@ function ProjectRow({
   label: string;
   icon?: React.ReactNode;
   isSelected: boolean;
-  isCollapsed: boolean;
   onClick: () => void;
   hotkey?: string;
 }) {
@@ -353,7 +332,6 @@ function ProjectRow({
       name={label}
       icon={icon}
       isSelected={isSelected}
-      isCollapsed={isCollapsed}
       execState={execState}
       healthRun={healthRun}
       onClick={onClick}
@@ -371,29 +349,10 @@ function ProjectRow({
   );
 }
 
-function UserFooter({ isCollapsed }: { isCollapsed: boolean }) {
+function UserFooter() {
   const { user, logout } = useAuthStore();
 
   if (!user) return null;
-
-  if (isCollapsed) {
-    return (
-      <button
-        type="button"
-        onClick={() => void logout()}
-        className="flex w-full items-center justify-center rounded-md py-2 transition-colors hover:bg-white/[0.04]"
-        title={`${user.name || user.email || 'User'} — Sign out`}
-      >
-        {user.picture ? (
-          <img src={user.picture} alt="" className="h-6 w-6 rounded-full" />
-        ) : (
-          <div className="flex h-6 w-6 items-center justify-center rounded-full bg-muted text-[10px] font-medium">
-            {(user.name?.[0] || user.email?.[0] || '?').toUpperCase()}
-          </div>
-        )}
-      </button>
-    );
-  }
 
   return (
     <div className="flex items-center gap-2.5 rounded-md px-2 py-2">
@@ -423,7 +382,7 @@ function UserFooter({ isCollapsed }: { isCollapsed: boolean }) {
 }
 
 export function Sidebar() {
-  const { isCollapsed, activeSection, toggleCollapse, setActiveSection } = useSidebarStore();
+  const { activeSection, setActiveSection } = useSidebarStore();
   const [isAddingProject, setIsAddingProject] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
@@ -448,12 +407,6 @@ export function Sidebar() {
   }, [location.pathname, setActiveSection]);
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === '/') {
-      e.preventDefault();
-      toggleCollapse();
-      return;
-    }
-
     const tag = (e.target as HTMLElement).tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target as HTMLElement).isContentEditable) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -492,7 +445,7 @@ export function Sidebar() {
         navigate('/settings');
         break;
     }
-  }, [toggleCollapse, navigate, navigateToView, navigateToProject, projects]);
+  }, [navigate, navigateToView, navigateToProject, projects]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
@@ -517,49 +470,17 @@ export function Sidebar() {
   }, []);
 
   return (
-    <aside
-      className={cn(
-        'flex h-screen shrink-0 flex-col border-r bg-sidebar transition-all duration-200 ease-in-out',
-        isCollapsed ? 'w-14' : 'w-64'
-      )}
-    >
+    <aside className="flex h-screen w-64 shrink-0 flex-col border-r bg-sidebar">
       {/* Header */}
-      <div data-tauri-drag-region className={cn("flex h-12 items-center border-b", isCollapsed ? "justify-center px-2" : "px-5")}>
-        <div className={cn("flex items-center gap-3", !isCollapsed && "flex-1")}>
+      <div data-tauri-drag-region className="flex h-12 items-center border-b px-5">
+        <div className="flex flex-1 items-center gap-3">
           <span className="flex h-4 w-4 items-center justify-center shrink-0 overflow-visible">
             <img src={logoSvg} alt="Djinn" className="h-6 w-6" />
           </span>
-          {!isCollapsed && (
-            <span className="text-sm font-semibold text-sidebar-foreground truncate">
-              Djinn
-            </span>
-          )}
+          <span className="text-sm font-semibold text-sidebar-foreground truncate">
+            Djinn
+          </span>
         </div>
-        {!isCollapsed && (
-          <>
-            <div className="flex items-center gap-1 text-[10px] text-sidebar-foreground/50">
-              <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono">
-                <Command className="h-2.5 w-2.5" />
-              </kbd>
-              <span>/</span>
-              <kbd className="inline-flex h-4 items-center justify-center rounded border border-sidebar-border px-1 font-mono">
-                <span>/</span>
-              </kbd>
-              <span>collapse</span>
-            </div>
-          </>
-        )}
-        <button
-          type="button"
-          onClick={toggleCollapse}
-          className={cn(
-            "flex h-6 w-6 items-center justify-center rounded-md transition-colors",
-            "hover:bg-white/10 text-sidebar-foreground/70 hover:text-sidebar-foreground"
-          )}
-          title={isCollapsed ? "Expand" : "Collapse"}
-        >
-          <PanelLeft className={cn("h-4 w-4 transition-transform", isCollapsed && "rotate-180 scale-90")} />
-        </button>
       </div>
 
       {/* Navigation */}
@@ -569,7 +490,6 @@ export function Sidebar() {
           label="Chat"
           hotkey="C"
           isActive={activeSection === 'chat'}
-          isCollapsed={isCollapsed}
           onClick={() => navigateToView('chat')}
         />
         <NavItem
@@ -577,7 +497,6 @@ export function Sidebar() {
           label="Kanban"
           hotkey="K"
           isActive={activeSection === 'kanban'}
-          isCollapsed={isCollapsed}
           onClick={() => navigateToView('kanban')}
         />
         <NavItem
@@ -585,7 +504,6 @@ export function Sidebar() {
           label="Agents"
           hotkey="A"
           isActive={activeSection === 'agents'}
-          isCollapsed={isCollapsed}
           onClick={() => navigateToView('agents')}
         />
         <NavItem
@@ -593,7 +511,6 @@ export function Sidebar() {
           label="Metrics"
           hotkey="M"
           isActive={activeSection === 'metrics'}
-          isCollapsed={isCollapsed}
           onClick={() => navigateToView('metrics')}
         />
 
@@ -605,7 +522,6 @@ export function Sidebar() {
             label="All Projects"
             icon={<HugeiconsIcon icon={Folder02Icon} className="h-3.5 w-3.5" />}
             isSelected={isAll}
-            isCollapsed={isCollapsed}
             onClick={() => navigateToProject(ALL_PROJECTS)}
             hotkey="0"
           />
@@ -618,7 +534,6 @@ export function Sidebar() {
               label={project.name}
               icon={<HugeiconsIcon icon={Folder02Icon} className="h-3.5 w-3.5" />}
               isSelected={selectedProjectId === project.id}
-              isCollapsed={isCollapsed}
               onClick={() => navigateToProject(project.id)}
               hotkey={idx < 9 ? String(idx + 1) : undefined}
             />
@@ -632,20 +547,16 @@ export function Sidebar() {
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!isAddingProject) void handleAddProject(); } }}
             className={cn(
               'flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors cursor-pointer',
-              isCollapsed ? 'justify-center px-0' : '',
               'text-muted-foreground hover:bg-white/[0.04] hover:text-foreground',
               isAddingProject && 'opacity-50 cursor-not-allowed'
             )}
-            title={isCollapsed ? 'Add Project' : undefined}
           >
             {isAddingProject ? (
-              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+              <HugeiconsIcon icon={Loading02Icon} size={14} className="shrink-0 animate-spin" />
             ) : (
               <HugeiconsIcon icon={PlusSignIcon} className="h-3.5 w-3.5 shrink-0" />
             )}
-            {!isCollapsed && (
-              <span className="truncate flex-1 text-left">Add Project</span>
-            )}
+            <span className="truncate flex-1 text-left">Add Project</span>
           </div>
         </div>
       </nav>
@@ -653,14 +564,13 @@ export function Sidebar() {
       {/* Footer */}
       <div className="border-t p-3 space-y-2">
         <NavItem
-          icon={<Settings className="h-4 w-4" />}
+          icon={<HugeiconsIcon icon={Settings01Icon} size={16} />}
           label="Settings"
           hotkey="S"
           isActive={activeSection === 'settings'}
-          isCollapsed={isCollapsed}
           onClick={() => navigate('/settings')}
         />
-        <UserFooter isCollapsed={isCollapsed} />
+        <UserFooter />
       </div>
     </aside>
   );

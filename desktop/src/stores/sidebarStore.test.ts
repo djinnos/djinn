@@ -2,7 +2,6 @@ import { useSidebarStore } from "./sidebarStore";
 
 function resetStore() {
   useSidebarStore.setState({
-    isCollapsed: false,
     activeSection: "kanban",
     projectsExpanded: true,
   });
@@ -14,10 +13,6 @@ describe("sidebarStore", () => {
   });
 
   describe("initial state", () => {
-    it("starts expanded", () => {
-      expect(useSidebarStore.getState().isCollapsed).toBe(false);
-    });
-
     it("starts on kanban section", () => {
       expect(useSidebarStore.getState().activeSection).toBe("kanban");
     });
@@ -27,41 +22,8 @@ describe("sidebarStore", () => {
     });
   });
 
-  describe("toggleCollapse", () => {
-    it("collapses when expanded", () => {
-      useSidebarStore.getState().toggleCollapse();
-      expect(useSidebarStore.getState().isCollapsed).toBe(true);
-    });
-
-    it("expands when collapsed", () => {
-      useSidebarStore.setState({ isCollapsed: true });
-      useSidebarStore.getState().toggleCollapse();
-      expect(useSidebarStore.getState().isCollapsed).toBe(false);
-    });
-
-    it("toggles back and forth", () => {
-      useSidebarStore.getState().toggleCollapse();
-      expect(useSidebarStore.getState().isCollapsed).toBe(true);
-      useSidebarStore.getState().toggleCollapse();
-      expect(useSidebarStore.getState().isCollapsed).toBe(false);
-    });
-  });
-
-  describe("setCollapsed", () => {
-    it("sets collapsed to true", () => {
-      useSidebarStore.getState().setCollapsed(true);
-      expect(useSidebarStore.getState().isCollapsed).toBe(true);
-    });
-
-    it("sets collapsed to false", () => {
-      useSidebarStore.setState({ isCollapsed: true });
-      useSidebarStore.getState().setCollapsed(false);
-      expect(useSidebarStore.getState().isCollapsed).toBe(false);
-    });
-  });
-
   describe("setActiveSection", () => {
-    it("sets active section to epics", () => {
+    it("sets active section to chat", () => {
       useSidebarStore.getState().setActiveSection("chat");
       expect(useSidebarStore.getState().activeSection).toBe("chat");
     });
@@ -88,30 +50,6 @@ describe("sidebarStore", () => {
       useSidebarStore.setState({ projectsExpanded: false });
       useSidebarStore.getState().setProjectsExpanded(true);
       expect(useSidebarStore.getState().projectsExpanded).toBe(true);
-    });
-  });
-
-  describe("independence", () => {
-    it("changing collapse does not affect activeSection", () => {
-      useSidebarStore.getState().setActiveSection("chat");
-      useSidebarStore.getState().toggleCollapse();
-      expect(useSidebarStore.getState().activeSection).toBe("chat");
-    });
-
-    it("changing activeSection does not affect collapse", () => {
-      useSidebarStore.getState().toggleCollapse();
-      useSidebarStore.getState().setActiveSection("settings");
-      expect(useSidebarStore.getState().isCollapsed).toBe(true);
-    });
-
-    it("changing projects expanded does not affect other state", () => {
-      useSidebarStore.getState().setActiveSection("chat");
-      useSidebarStore.getState().toggleCollapse();
-      useSidebarStore.getState().setProjectsExpanded(false);
-
-      expect(useSidebarStore.getState().activeSection).toBe("chat");
-      expect(useSidebarStore.getState().isCollapsed).toBe(true);
-      expect(useSidebarStore.getState().projectsExpanded).toBe(false);
     });
   });
 });

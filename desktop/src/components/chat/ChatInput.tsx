@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Square, ArrowUp } from 'lucide-react';
+
+import { ArrowUp01Icon, StopIcon } from '@hugeicons/core-free-icons';
+import { HugeiconsIcon } from '@hugeicons/react';
 import { motion } from 'framer-motion';
 
 interface ModelGroup {
@@ -103,7 +105,7 @@ export function ChatInput({
           disabled={!streaming && !canSend}
           className="absolute bottom-2 right-2 h-8 w-8 rounded-full"
         >
-          {streaming ? <Square className="h-3.5 w-3.5" /> : <ArrowUp className="h-3.5 w-3.5" />}
+          {streaming ? <HugeiconsIcon icon={StopIcon} size={14} /> : <HugeiconsIcon icon={ArrowUp01Icon} size={14} />}
         </Button>
       </motion.div>
       <div className="mt-2 flex items-center justify-between gap-2 px-1">

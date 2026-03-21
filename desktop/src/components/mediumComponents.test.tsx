@@ -134,6 +134,81 @@ describe('AgentConfig', () => {
 
     expect(screen.getByRole('button', { name: 'Saving...' })).toBeDisabled();
   });
+
+  const baseProps = {
+    isLoading: false,
+    isSaving: false,
+    error: null,
+    hasUnsavedChanges: false,
+    onAddModel: vi.fn(),
+    onRemoveModel: vi.fn(),
+    onReorderModels: vi.fn(),
+    onUpdateMaxSessions: vi.fn(),
+    onDismissError: vi.fn(),
+    onSave: vi.fn(),
+  };
+
+  const makePricingModel = (overrides: Partial<{ id: string; name: string; provider_id: string }>) => ({
+    id: 'gpt-4o',
+    name: 'GPT-4o',
+    provider_id: 'openai',
+    attachment: false,
+    context_window: 128000,
+    output_limit: 16384,
+    pricing: { input_per_million: 2.5, output_per_million: 10, cache_read_per_million: 1.25, cache_write_per_million: 0 },
+    reasoning: false,
+    tool_call: true,
+    ...overrides,
+  });
+
+  it('shows pretty model name when model id matches without provider prefix', () => {
+    render(
+      <AgentConfig
+        {...baseProps}
+        models={[{ model: 'gpt-4o', provider: 'openai', max_concurrent: 1 }]}
+        availableModels={[makePricingModel({ id: 'gpt-4o', name: 'GPT-4o', provider_id: 'openai' })]}
+      />,
+    );
+    expect(screen.getByText('GPT-4o')).toBeInTheDocument();
+  });
+
+  it('shows pretty model name when availableModels id includes provider prefix', () => {
+    // Backend returns ids like "openai/gpt-5.4" but entry.model is "gpt-5.4" after splitModelId
+    render(
+      <AgentConfig
+        {...baseProps}
+        models={[{ model: 'gpt-5.4', provider: 'openai', max_concurrent: 1 }]}
+        availableModels={[makePricingModel({ id: 'openai/gpt-5.4', name: 'GPT-5.4', provider_id: 'openai' })]}
+      />,
+    );
+    expect(screen.getByText('GPT-5.4')).toBeInTheDocument();
+    expect(screen.queryByText('gpt-5.4')).not.toBeInTheDocument();
+  });
+
+  it('shows pretty name when entry.model itself has provider prefix (in-session before save)', () => {
+    // Before save+reload, entry.model may still be the full "openai/gpt-5.3-codex" id
+    // The display should still resolve to the pretty name
+    render(
+      <AgentConfig
+        {...baseProps}
+        models={[{ model: 'openai/gpt-5.3-codex', provider: 'openai', max_concurrent: 1 }]}
+        availableModels={[makePricingModel({ id: 'openai/gpt-5.3-codex', name: 'GPT-5.3 Codex', provider_id: 'openai' })]}
+      />,
+    );
+    expect(screen.getByText('GPT-5.3 Codex')).toBeInTheDocument();
+    expect(screen.queryByText('openai/gpt-5.3-codex')).not.toBeInTheDocument();
+  });
+
+  it('falls back to raw model id when not found in availableModels', () => {
+    render(
+      <AgentConfig
+        {...baseProps}
+        models={[{ model: 'unknown-model', provider: 'openai', max_concurrent: 1 }]}
+        availableModels={[]}
+      />,
+    );
+    expect(screen.getByText('unknown-model')).toBeInTheDocument();
+  });
 });
 
 describe('ConnectionStatus', () => {

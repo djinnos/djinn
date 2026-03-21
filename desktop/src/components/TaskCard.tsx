@@ -17,9 +17,14 @@ import {
   Progress04Icon,
   Tick01Icon,
   UnavailableIcon,
+  LinkSquare02Icon,
+  GitMergeIcon,
+  PlayIcon,
+  StopIcon,
+  Cancel01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ExternalLink, GitMerge, Play, Square, RotateCcw, X } from "lucide-react";
+import { RotateCcw } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useState } from "react";
@@ -177,13 +182,13 @@ function acProgressIcon(met: number, total: number) {
 
 
 function ActionButton({
-  icon: Icon,
+  icon,
   label,
   disabled,
   className,
   onClick,
 }: {
-  icon: typeof Play;
+  icon: React.ReactNode;
   label: string;
   disabled?: boolean;
   className?: string;
@@ -203,7 +208,7 @@ function ActionButton({
       }}
       aria-label={label}
     >
-      <Icon className="h-3 w-3" />
+      {icon}
       {label}
     </button>
   );
@@ -232,22 +237,22 @@ function TaskCardActions({ task, actionsBg }: { task: Task; actionsBg?: string }
 
   if (isOpen && !isBlocked) {
     actions.push(
-      <ActionButton key="start" icon={Play} label="Start" disabled={busy} className="hover:text-emerald-400" onClick={() => transition(task.id, projectPath, "start")} />
+      <ActionButton key="start" icon={<HugeiconsIcon icon={PlayIcon} size={12} />} label="Start" disabled={busy} className="hover:text-emerald-400" onClick={() => transition(task.id, projectPath, "start")} />
     );
   }
   if (isInProgress) {
     actions.push(
-      <ActionButton key="stop" icon={Square} label="Stop" disabled={busy} className="hover:text-red-400" onClick={() => killTask(task.id)} />
+      <ActionButton key="stop" icon={<HugeiconsIcon icon={StopIcon} size={12} />} label="Stop" disabled={busy} className="hover:text-red-400" onClick={() => killTask(task.id)} />
     );
   }
   if (isClosed) {
     actions.push(
-      <ActionButton key="reopen" icon={RotateCcw} label="Reopen" disabled={busy} onClick={() => transition(task.id, projectPath, "reopen", "Reopened from desktop")} />
+      <ActionButton key="reopen" icon={<RotateCcw className="h-3 w-3" />} label="Reopen" disabled={busy} onClick={() => transition(task.id, projectPath, "reopen", "Reopened from desktop")} />
     );
   }
   if (!isClosed && !isInProgress) {
     actions.push(
-      <ActionButton key="close" icon={X} label="Close" disabled={busy} className="hover:text-red-400" onClick={() => transition(task.id, projectPath, "force_close", "Closed from desktop")} />
+      <ActionButton key="close" icon={<HugeiconsIcon icon={Cancel01Icon} size={12} />} label="Close" disabled={busy} className="hover:text-red-400" onClick={() => transition(task.id, projectPath, "force_close", "Closed from desktop")} />
     );
   }
 
@@ -401,7 +406,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
                   : "merge conflict"
               }
             >
-              <GitMerge className="h-2.5 w-2.5 shrink-0" />
+              <HugeiconsIcon icon={GitMergeIcon} size={10} className="shrink-0" />
               conflict
             </span>
           )}
@@ -420,7 +425,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
               className="inline-flex items-center gap-0.5 text-[10px] font-medium text-violet-400 hover:text-violet-300 hover:underline"
               title={task.pr_url}
             >
-              <ExternalLink className="h-2.5 w-2.5 shrink-0" />
+              <HugeiconsIcon icon={LinkSquare02Icon} size={10} className="shrink-0" />
               {task.pr_url.match(/\/pull\/(\d+)/)?.[0]?.replace("/pull/", "PR #") ?? "PR"}
             </a>
           )}

@@ -10,7 +10,8 @@ import {
   FieldDescription,
 
 } from "@/components/ui/field";
-import { Loader2Icon, FolderIcon, CheckCircle2Icon, AlertCircleIcon } from "lucide-react";
+import { CheckmarkCircle04Icon, AlertCircleIcon, Loading02Icon, Folder02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 export function ProjectSetupStep() {
   const [selectedPath, setSelectedPath] = useState<string>("");
@@ -89,10 +90,10 @@ export function ProjectSetupStep() {
               variant="secondary"
             >
               {isSelecting ? (
-                <Loader2Icon className="h-4 w-4 animate-spin" />
+                <HugeiconsIcon icon={Loading02Icon} size={16} className="animate-spin" />
               ) : (
                 <>
-                  <FolderIcon className="mr-2 h-4 w-4" />
+                  <HugeiconsIcon icon={Folder02Icon} size={16} className="mr-2" />
                   Browse
                 </>
               )}
@@ -121,7 +122,7 @@ export function ProjectSetupStep() {
         {/* Error Display */}
         {error && (
           <div className="flex items-center gap-2 rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-            <AlertCircleIcon className="h-4 w-4 flex-shrink-0" />
+            <HugeiconsIcon icon={AlertCircleIcon} size={16} className="flex-shrink-0" />
             <span>{error}</span>
           </div>
         )}
@@ -129,7 +130,7 @@ export function ProjectSetupStep() {
         {/* Success Display */}
         {isRegistered && (
           <div className="flex items-center gap-2 rounded-md bg-green-500/10 p-3 text-sm text-green-600">
-            <CheckCircle2Icon className="h-4 w-4 flex-shrink-0" />
+            <HugeiconsIcon icon={CheckmarkCircle04Icon} size={16} className="flex-shrink-0" />
             <span>Project registered successfully!</span>
           </div>
         )}
@@ -142,12 +143,12 @@ export function ProjectSetupStep() {
         >
           {isRegistering ? (
             <>
-              <Loader2Icon className="mr-2 h-4 w-4 animate-spin" />
+              <HugeiconsIcon icon={Loading02Icon} size={16} className="mr-2 animate-spin" />
               Registering...
             </>
           ) : isRegistered ? (
             <>
-              <CheckCircle2Icon className="mr-2 h-4 w-4" />
+              <HugeiconsIcon icon={CheckmarkCircle04Icon} size={16} className="mr-2" />
               Registered
             </>
           ) : (

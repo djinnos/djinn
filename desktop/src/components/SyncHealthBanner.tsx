@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { callMcpTool } from "@/api/mcpClient";
-import { AlertCircle } from "lucide-react";
+import { AlertCircleIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { sseStore } from "@/stores/sseStore";
 import type { TaskSyncStatusOutputSchema } from "@/api/generated/mcp-tools.gen";
 
@@ -77,7 +78,7 @@ export function SyncHealthBanner() {
   return (
     <div className="border-l-4 border-red-500 bg-red-50 dark:bg-red-900/20 p-4 mb-4">
       <div className="flex items-start gap-3">
-        <AlertCircle className="text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" size={20} />
+        <HugeiconsIcon icon={AlertCircleIcon} size={20} className="text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" />
         <div className="flex-1">
           <h3 className="font-semibold text-red-900 dark:text-red-100">
             Sync Issues Detected

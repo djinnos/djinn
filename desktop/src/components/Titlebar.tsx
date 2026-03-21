@@ -3,9 +3,11 @@ import {
   Cancel01Icon,
   MinusSignIcon,
   SquareIcon,
+  ArrowRight01Icon,
+  Layers01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ChevronRight, Layers } from "lucide-react";
+
 import { useSelectedProject, useIsAllProjects } from "@/stores/useProjectStore";
 import { useProjectRoute } from "@/hooks/useProjectRoute";
 import { useState, useRef, useEffect } from "react";
@@ -55,11 +57,11 @@ function Breadcrumb() {
 
   return (
     <div className="flex items-center gap-1.5 text-xs font-medium text-foreground/80">
-      {isAll && <Layers className="h-3 w-3 shrink-0 text-muted-foreground" />}
+      {isAll && <HugeiconsIcon icon={Layers01Icon} size={12} className="shrink-0 text-muted-foreground" />}
       <span className="max-w-[160px] truncate">{projectLabel}</span>
       {viewLabel && (
         <>
-          <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/50" />
+          <HugeiconsIcon icon={ArrowRight01Icon} size={12} className="shrink-0 text-muted-foreground/50" />
           <span className="text-muted-foreground">{viewLabel}</span>
         </>
       )}
