@@ -237,10 +237,7 @@ fn parse_jsonrpc_result(body: &str, id: i64) -> Result<serde_json::Value, String
         }
     }
 
-    Err(format!(
-        "No JSON-RPC response with id={} found in body",
-        id
-    ))
+    Err(format!("No JSON-RPC response with id={} found in body", id))
 }
 
 /// Extract the tool result payload from a JSON-RPC result envelope.
@@ -339,7 +336,8 @@ mod tests {
 
     #[test]
     fn test_parse_jsonrpc_result_error() {
-        let body = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"method not found"}}"#;
+        let body =
+            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"method not found"}}"#;
         let err = parse_jsonrpc_result(body, 2).unwrap_err();
         assert!(err.contains("method not found"));
     }

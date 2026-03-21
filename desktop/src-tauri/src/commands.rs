@@ -82,13 +82,14 @@ pub async fn start_github_login(app: AppHandle) -> Result<DeviceCodeInfo, String
                 let expires_at_unix = now_unix + expires_in;
 
                 // Fetch user profile
-                let github_user = match crate::auth::fetch_github_user(&token_response.access_token).await {
-                    Ok(user) => Some(user),
-                    Err(e) => {
-                        log::warn!("Failed to fetch GitHub user profile: {}", e);
-                        None
-                    }
-                };
+                let github_user =
+                    match crate::auth::fetch_github_user(&token_response.access_token).await {
+                        Ok(user) => Some(user),
+                        Err(e) => {
+                            log::warn!("Failed to fetch GitHub user profile: {}", e);
+                            None
+                        }
+                    };
 
                 let user_profile = github_user.as_ref().map(|u| UserProfile {
                     sub: u.id.to_string(),
@@ -169,9 +170,12 @@ pub async fn start_github_login(app: AppHandle) -> Result<DeviceCodeInfo, String
             }
             Err(e) => {
                 log::error!("GitHub device flow polling failed: {}", e);
-                let _ = app.emit("auth:login-failed", serde_json::json!({
-                    "reason": e,
-                }));
+                let _ = app.emit(
+                    "auth:login-failed",
+                    serde_json::json!({
+                        "reason": e,
+                    }),
+                );
             }
         }
     });
@@ -266,7 +270,6 @@ pub async fn clear_auth_token() -> Result<(), String> {
     Ok(())
 }
 
-
 #[tauri::command]
 pub async fn get_refresh_token() -> Result<Option<String>, String> {
     retrieve_token().await
@@ -307,9 +310,7 @@ pub fn auth_get_state() -> Result<AuthStateResponse, String> {
 
 /// Populate AUTH_SESSION after successful silent refresh
 /// Called by lib.rs setup to bridge silent refresh to legacy auth state
-pub async fn populate_session_after_silent_refresh(
-    app: &AppHandle,
-) -> Result<(), String> {
+pub async fn populate_session_after_silent_refresh(app: &AppHandle) -> Result<(), String> {
     // Get current token state from silent refresh
     let token_state = token_refresh::get_token_state()
         .ok_or_else(|| "No token state available from silent refresh".to_string())?;
@@ -323,17 +324,26 @@ pub async fn populate_session_after_silent_refresh(
             picture: Some(github_user.avatar_url),
         }),
         Err(e) => {
-            log::warn!("Failed to fetch GitHub user profile after silent refresh: {}", e);
+            log::warn!(
+                "Failed to fetch GitHub user profile after silent refresh: {}",
+                e
+            );
             // Try to get user info from stored tokens
             match retrieve_token().await {
                 Ok(Some(stored_json)) => {
-                    if let Ok(stored) = serde_json::from_str::<crate::auth::StoredTokens>(&stored_json) {
+                    if let Ok(stored) =
+                        serde_json::from_str::<crate::auth::StoredTokens>(&stored_json)
+                    {
                         if !stored.user_login.is_empty() {
                             Some(UserProfile {
                                 sub: stored.user_login.clone(),
                                 name: Some(stored.user_login),
                                 email: None,
-                                picture: if stored.avatar_url.is_empty() { None } else { Some(stored.avatar_url) },
+                                picture: if stored.avatar_url.is_empty() {
+                                    None
+                                } else {
+                                    Some(stored.avatar_url)
+                                },
                             })
                         } else {
                             None
@@ -462,7 +472,9 @@ pub fn setup_git_remote(project_path: String, remote_url: String) -> Result<Stri
         .map_err(|e| format!("Failed to run git remote add: {}", e))?;
 
     if !add_output.status.success() {
-        let stderr = String::from_utf8_lossy(&add_output.stderr).trim().to_string();
+        let stderr = String::from_utf8_lossy(&add_output.stderr)
+            .trim()
+            .to_string();
         return Err(format!("git remote add failed: {}", stderr));
     }
 
@@ -474,7 +486,9 @@ pub fn setup_git_remote(project_path: String, remote_url: String) -> Result<Stri
         .map_err(|e| format!("Failed to get current branch: {}", e))?;
 
     let branch = if branch_output.status.success() {
-        String::from_utf8_lossy(&branch_output.stdout).trim().to_string()
+        String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .to_string()
     } else {
         "main".to_string()
     };
@@ -487,7 +501,9 @@ pub fn setup_git_remote(project_path: String, remote_url: String) -> Result<Stri
         .map_err(|e| format!("Failed to run git push: {}", e))?;
 
     if !push_output.status.success() {
-        let stderr = String::from_utf8_lossy(&push_output.stderr).trim().to_string();
+        let stderr = String::from_utf8_lossy(&push_output.stderr)
+            .trim()
+            .to_string();
         return Err(format!("git push failed: {}", stderr));
     }
 
@@ -508,5 +524,7 @@ pub async fn select_directory(
         .set_title(title.as_deref().unwrap_or("Select Directory"))
         .blocking_pick_folder();
 
-    folder_path.map(|p| p.into_path().map_err(|e| e.to_string())).transpose()
+    folder_path
+        .map(|p| p.into_path().map_err(|e| e.to_string()))
+        .transpose()
 }
