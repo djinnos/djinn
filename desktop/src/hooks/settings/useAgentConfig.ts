@@ -16,10 +16,7 @@ export function useAgentConfig() {
     addModel,
     removeModel,
     reorderModels,
-    toggleRoleForModel,
     updateMaxSessions,
-    memoryModel,
-    setMemoryModel,
     saveSettings,
     resetError,
   } = useSettingsStore();
@@ -44,10 +41,7 @@ export function useAgentConfig() {
     onAddModel: addModel,
     onRemoveModel: removeModel,
     onReorderModels: reorderModels,
-    onToggleRole: toggleRoleForModel,
     onUpdateMaxSessions: updateMaxSessions,
-    memoryModel,
-    onSetMemoryModel: setMemoryModel,
     onDismissError: resetError,
     onSave: () => void saveSettings(),
   };

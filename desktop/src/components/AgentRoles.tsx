@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useSelectedProject } from "@/stores/useProjectStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -32,11 +33,11 @@ const BASE_ROLES: BaseRole[] = ["worker", "reviewer", "lead", "planner"];
 // ── Role Form ────────────────────────────────────────────────────────────────
 
 interface RoleFormProps {
-  initial?: Partial<CreateRoleRequest>;
+  initial?: Partial<Omit<CreateRoleRequest, "project_id">>;
   fixedBaseRole?: BaseRole;
   submitLabel: string;
   isBusy: boolean;
-  onSubmit: (data: CreateRoleRequest) => void;
+  onSubmit: (data: Omit<CreateRoleRequest, "project_id">) => void;
   onCancel: () => void;
 }
 
@@ -389,6 +390,7 @@ function RoleCard({ role, onEdit, onDelete, onRoleCleared, isDeleting }: RoleCar
 // ── Main Component ───────────────────────────────────────────────────────────
 
 export function AgentRoles() {
+  const project = useSelectedProject();
   const [roles, setRoles] = useState<Role[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -408,23 +410,24 @@ export function AgentRoles() {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchRoles();
+      const data = await fetchRoles(project?.id);
       setRoles(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load roles");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [project?.id]);
 
   useEffect(() => {
     void loadRoles();
   }, [loadRoles]);
 
-  const handleCreate = async (data: CreateRoleRequest) => {
+  const handleCreate = async (data: Omit<CreateRoleRequest, "project_id">) => {
+    if (!project) return;
     setCreateBusy(true);
     try {
-      const role = await createRole(data);
+      const role = await createRole({ ...data, project_id: project.id });
       setRoles((prev) => [...prev, role]);
       setIsCreating(false);
     } catch (err) {
@@ -434,7 +437,7 @@ export function AgentRoles() {
     }
   };
 
-  const handleUpdate = async (id: string, data: CreateRoleRequest) => {
+  const handleUpdate = async (id: string, data: Omit<CreateRoleRequest, "project_id">) => {
     setEditBusy(true);
     try {
       const updated = await updateRole(id, {

@@ -65,7 +65,8 @@ fn provider_connection_status(
 }
 
 fn is_provider_usable(provider: &Provider, builtin_ids: &HashSet<String>) -> bool {
-    provider.is_openai_compatible || builtin_ids.contains(&provider.id)
+    (provider.is_openai_compatible || builtin_ids.contains(&provider.id))
+        && !builtin::is_auth_only_provider(&provider.id)
 }
 
 // ── model_health ──────────────────────────────────────────────────────────────

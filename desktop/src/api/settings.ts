@@ -1,37 +1,22 @@
 import { callMcpTool } from "@/api/mcpClient";
 import type { McpToolOutput, ProviderModelsConnectedOutputSchema } from "@/api/generated/mcp-tools.gen";
 
-export type AgentRole = "worker" | "reviewer" | "lead" | "planner" | "architect";
-
-export interface ModelPriorityItem {
-  model: string;
-  provider: string;
-}
-
-export interface ModelSessionLimit {
+export interface ModelEntry {
   model: string;
   provider: string;
   max_concurrent: number;
-  current_active: number;
-}
-
-export interface AgentSettings {
-  model_priorities: Record<AgentRole, ModelPriorityItem[]>;
-  session_limits: ModelSessionLimit[];
 }
 
 export interface SettingsResponse {
-  agents: AgentSettings;
-  memoryModel: string | null;
+  models: ModelEntry[];
 }
 
 type SettingsGetToolResponse = McpToolOutput<"settings_get">;
 
 interface ParsedSettingsGet {
   settings?: {
-    model_priority?: Record<string, string[]>;
+    models?: string[];
     max_sessions?: Record<string, number>;
-    memory_model?: string | null;
   };
   error?: string;
 }
@@ -41,7 +26,6 @@ function splitModelId(modelId: string): { provider: string; model: string } {
   if (slashIndex < 0) {
     return { provider: "unknown", model: modelId };
   }
-
   return {
     provider: modelId.slice(0, slashIndex),
     model: modelId.slice(slashIndex + 1),
@@ -62,72 +46,31 @@ export async function fetchSettings(): Promise<SettingsResponse> {
     throw new Error(parsed.error);
   }
 
-  const modelPriority = parsed.settings?.model_priority ?? {};
+  const modelsList = parsed.settings?.models ?? [];
   const maxSessions = parsed.settings?.max_sessions ?? {};
 
-  const toPriorityItems = (values: string[] | undefined): ModelPriorityItem[] =>
-    (values ?? []).map((value) => {
-      const split = splitModelId(value);
-      return {
-        provider: split.provider,
-        model: split.model,
-      };
-    });
+  const models: ModelEntry[] = modelsList.map((modelId) => {
+    const { provider, model } = splitModelId(modelId);
+    return {
+      provider,
+      model,
+      max_concurrent: maxSessions[modelId] ?? 1,
+    };
+  });
 
-  const sessionLimits: ModelSessionLimit[] = Object.entries(maxSessions).map(
-    ([modelId, maxConcurrent]) => {
-      const split = splitModelId(modelId);
-      return {
-        provider: split.provider,
-        model: split.model,
-        max_concurrent: maxConcurrent,
-        current_active: 0,
-      };
-    }
-  );
-
-  return {
-    agents: {
-      model_priorities: {
-        worker: toPriorityItems(modelPriority.worker),
-        reviewer: toPriorityItems(modelPriority.reviewer),
-        lead: toPriorityItems(modelPriority.lead),
-        planner: toPriorityItems(modelPriority.planner),
-        architect: toPriorityItems(modelPriority.architect),
-      },
-      session_limits: sessionLimits,
-    },
-    memoryModel: parsed.settings?.memory_model ?? null,
-  };
+  return { models };
 }
 
 export async function saveSettings(settings: SettingsResponse): Promise<void> {
-  const maxSessions = settings.agents.session_limits.reduce<Record<string, number>>(
-    (acc, item) => {
-      acc[combineModelId(item.provider, item.model)] = item.max_concurrent;
-      return acc;
-    },
-    {}
-  );
+  const modelIds = settings.models.map((m) => combineModelId(m.provider, m.model));
+  const maxSessions = settings.models.reduce<Record<string, number>>((acc, m) => {
+    acc[combineModelId(m.provider, m.model)] = m.max_concurrent;
+    return acc;
+  }, {});
 
   const response = await callMcpTool("settings_set", {
-    model_priority_worker: settings.agents.model_priorities.worker.map((item) =>
-      combineModelId(item.provider, item.model)
-    ),
-    model_priority_reviewer: settings.agents.model_priorities.reviewer.map((item) =>
-      combineModelId(item.provider, item.model)
-    ),
-    model_priority_lead: settings.agents.model_priorities.lead.map((item) =>
-      combineModelId(item.provider, item.model)
-    ),
-    model_priority_planner: settings.agents.model_priorities.planner.map((item) =>
-      combineModelId(item.provider, item.model)
-    ),
-    model_priority_architect: settings.agents.model_priorities.architect.map((item) =>
-      combineModelId(item.provider, item.model)
-    ),
+    models: modelIds,
     max_sessions: maxSessions,
-    memory_model: settings.memoryModel ?? "",
   });
 
   if (!response.ok) {

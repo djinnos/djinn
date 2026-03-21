@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { AgentConfig } from "./AgentConfig";
-import type { UnifiedModelEntry } from "@/stores/settingsStore";
+import type { ModelEntry } from "@/stores/settingsStore";
 import type { ProviderModel } from "@/api/settings";
 
 const availableModels: ProviderModel[] = [
@@ -50,35 +50,16 @@ const availableModels: ProviderModel[] = [
   },
 ];
 
-const threeModels: UnifiedModelEntry[] = [
-  {
-    model: "claude-sonnet-4-6",
-    provider: "anthropic",
-    enabledRoles: ["worker", "reviewer", "lead"],
-    max_concurrent: 3,
-    current_active: 0,
-  },
-  {
-    model: "gpt-4o",
-    provider: "openai",
-    enabledRoles: ["worker"],
-    max_concurrent: 2,
-    current_active: 0,
-  },
-  {
-    model: "deepseek-coder",
-    provider: "deepseek",
-    enabledRoles: ["worker", "planner"],
-    max_concurrent: 1,
-    current_active: 0,
-  },
+const threeModels: ModelEntry[] = [
+  { model: "claude-sonnet-4-6", provider: "anthropic", max_concurrent: 3 },
+  { model: "gpt-4o", provider: "openai", max_concurrent: 2 },
+  { model: "deepseek-coder", provider: "deepseek", max_concurrent: 1 },
 ];
 
 const actions = {
   onAddModel: () => {},
   onRemoveModel: () => {},
   onReorderModels: () => {},
-  onToggleRole: () => {},
   onUpdateMaxSessions: () => {},
   onDismissError: () => {},
   onSave: () => {},

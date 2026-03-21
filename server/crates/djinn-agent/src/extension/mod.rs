@@ -1,13 +1,12 @@
 use std::path::{Path, PathBuf};
 
-mod fuzzy;
-
 use std::process::Stdio;
 
 use tokio::time::Duration;
 
-use serde::{Deserialize, Serialize};
-use serde_json::from_value;
+use rmcp::model::Tool as RmcpTool;
+use rmcp::object;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::sandbox;
 use crate::context::AgentContext;
@@ -19,10 +18,8 @@ use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
-use djinn_provider::github_api::GitHubApiClient;
-use djinn_provider::repos::CredentialRepository;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 struct IncomingToolCall {
     name: String,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
@@ -32,20 +29,6 @@ struct IncomingToolCall {
 #[cfg(test)]
 fn floor_char_boundary(s: &str, idx: usize) -> usize {
     crate::truncate::floor_char_boundary(s, idx)
-}
-
-pub(crate) async fn call_tool(
-    state: &AgentContext,
-    name: &str,
-    arguments: Option<serde_json::Map<String, serde_json::Value>>,
-    worktree_path: &Path,
-    session_task_id: Option<&str>,
-) -> Result<serde_json::Value, String> {
-    let tool_call = IncomingToolCall {
-        name: name.to_string(),
-        arguments,
-    };
-    dispatch_tool_call(state, &tool_call, worktree_path, None, session_task_id).await
 }
 
 async fn dispatch_tool_call<T>(
@@ -100,15 +83,10 @@ where
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments, session_task_id).await,
         "memory_list" => call_memory_list(state, &call.arguments).await,
-        "memory_build_context" => {
-            call_memory_build_context(state, &call.arguments, session_task_id).await
-        }
+        "memory_build_context" => call_memory_build_context(state, &call.arguments, session_task_id).await,
         "role_metrics" => call_role_metrics(state, &call.arguments).await,
         "role_amend_prompt" => call_role_amend_prompt(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
-        "github_action_logs" => {
-            call_github_action_logs(state, &call.arguments, worktree_path).await
-        }
         "read" => call_read(state, &call.arguments, worktree_path).await,
         "write" => call_write(state, &call.arguments, worktree_path).await,
         "edit" => call_edit(state, &call.arguments, worktree_path).await,
@@ -118,9 +96,187 @@ where
     }
 }
 
-mod params;
+#[derive(Deserialize)]
+struct TaskListParams {
+    status: Option<String>,
+    issue_type: Option<String>,
+    priority: Option<i64>,
+    #[serde(alias = "q")]
+    text: Option<String>,
+    label: Option<String>,
+    parent: Option<String>,
+    sort: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
 
-use self::params::*;
+#[derive(Deserialize)]
+struct TaskShowParams {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct TaskActivityListParams {
+    id: String,
+    #[serde(default)]
+    event_type: Option<String>,
+    #[serde(default)]
+    actor_role: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct TaskUpdateParams {
+    id: String,
+    title: Option<String>,
+    description: Option<String>,
+    design: Option<String>,
+    priority: Option<i64>,
+    owner: Option<String>,
+    labels_add: Option<Vec<String>>,
+    labels_remove: Option<Vec<String>>,
+    acceptance_criteria: Option<Vec<serde_json::Value>>,
+    memory_refs_add: Option<Vec<String>>,
+    memory_refs_remove: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct TaskUpdateAcParams {
+    id: String,
+    acceptance_criteria: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct TaskCreateParams {
+    epic_id: String,
+    title: String,
+    issue_type: Option<String>,
+    description: Option<String>,
+    design: Option<String>,
+    priority: Option<i64>,
+    owner: Option<String>,
+    status: Option<String>,
+    acceptance_criteria: Option<Vec<String>>,
+    blocked_by: Option<Vec<String>>,
+    memory_refs: Option<Vec<String>>,
+    /// Specialist role name to route this task (e.g. "rust-expert").
+    agent_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct EpicShowParams {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct EpicUpdateParams {
+    id: String,
+    title: Option<String>,
+    description: Option<String>,
+    status: Option<String>,
+    memory_refs_add: Option<Vec<String>>,
+    memory_refs_remove: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct EpicTasksParams {
+    id: String,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct TaskCommentAddParams {
+    id: String,
+    body: String,
+    actor_id: Option<String>,
+    actor_role: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MemoryReadParams {
+    project: Option<String>,
+    identifier: String,
+}
+
+#[derive(Deserialize)]
+struct MemorySearchParams {
+    project: Option<String>,
+    query: String,
+    folder: Option<String>,
+    #[serde(rename = "type")]
+    note_type: Option<String>,
+    limit: Option<i64>,
+    task_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MemoryListParams {
+    project: Option<String>,
+    folder: Option<String>,
+    #[serde(rename = "type")]
+    note_type: Option<String>,
+    depth: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct MemoryBuildContextParams {
+    project: Option<String>,
+    url: String,
+    /// Link traversal depth (default 1). Currently unused at the dispatch layer.
+    _depth: Option<i64>,
+    max_related: Option<i64>,
+    budget: Option<i64>,
+    task_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RoleMetricsParams {
+    project: Option<String>,
+    role_id: Option<String>,
+    window_days: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct RoleAmendPromptParams {
+    project: Option<String>,
+    role_id: String,
+    amendment: String,
+    metrics_snapshot: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ShellParams {
+    command: String,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct WriteParams {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct EditParams {
+    path: String,
+    old_text: String,
+    new_text: String,
+}
+
+#[derive(Deserialize)]
+struct ApplyPatchParams {
+    patch: String,
+}
+
+#[derive(Deserialize)]
+struct ReadParams {
+    #[serde(alias = "path")]
+    file_path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
 
 /// Normalize `Some("")` → `None`. OpenAI models often send empty strings
 /// for optional parameters instead of omitting them, which breaks SQL filters.
@@ -231,37 +387,6 @@ async fn call_task_show(
         Ok(None) => Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) })),
         Err(e) => Err(e.to_string()),
     }
-}
-
-async fn call_task_blocked_list(
-    state: &AgentContext,
-    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
-) -> Result<serde_json::Value, String> {
-    let p: TaskShowParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
-
-    let task_id = match repo.resolve(&p.id).await {
-        Ok(Some(task)) => task.id,
-        Ok(None) => return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) })),
-        Err(e) => return Err(e.to_string()),
-    };
-
-    let tasks = repo
-        .list_blocked_by(&task_id)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(serde_json::json!({
-        "tasks": tasks
-            .iter()
-            .map(|task| serde_json::json!({
-                "id": task.task_id,
-                "short_id": task.short_id,
-                "title": task.title,
-                "status": task.status,
-            }))
-            .collect::<Vec<_>>()
-    }))
 }
 
 async fn call_task_activity_list(
@@ -625,6 +750,13 @@ async fn call_request_lead(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
+    #[derive(Deserialize)]
+    struct RequestPmParams {
+        id: String,
+        reason: String,
+        suggested_breakdown: Option<String>,
+    }
+
     let p: RequestPmParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
 
@@ -652,10 +784,7 @@ async fn call_request_lead(
     // On the 2nd+ escalation for the same task, auto-route to Architect.
     let coordinator = state.coordinator().await;
     let escalation_count = if let Some(ref coord) = coordinator {
-        coord
-            .increment_escalation_count(&task.id)
-            .await
-            .unwrap_or(1)
+        coord.increment_escalation_count(&task.id).await.unwrap_or(1)
     } else {
         1
     };
@@ -708,6 +837,12 @@ async fn call_request_architect(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
+    #[derive(Deserialize)]
+    struct RequestArchitectParams {
+        id: String,
+        reason: String,
+    }
+
     let p: RequestArchitectParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
 
@@ -1060,7 +1195,7 @@ async fn call_shell(
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
     let p: ShellParams = parse_args(arguments)?;
-    let timeout_ms = p.timeout_ms.unwrap_or(120_000).clamp(1000, 600_000);
+    let timeout_ms = p.timeout_ms.unwrap_or(120_000).max(1000);
 
     let mut cmd = if cfg!(windows) {
         let mut c = std::process::Command::new("cmd");
@@ -1095,135 +1230,6 @@ async fn call_shell(
         "stderr": stderr,
         "workdir": worktree_path,
     }))
-}
-
-/// Fetch GitHub Actions CI logs for a workflow run.
-///
-/// Resolves owner/repo from the worktree's git remote so the agent can't
-/// accidentally access logs from other projects.
-async fn call_github_action_logs(
-    state: &AgentContext,
-    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
-    worktree_path: &Path,
-) -> Result<serde_json::Value, String> {
-    use std::sync::Arc;
-
-    let p: GithubActionLogsParams = parse_args(arguments)?;
-
-    // Resolve owner/repo from the worktree's git remote.
-    let (owner, repo) = resolve_github_owner_repo(worktree_path).await?;
-
-    let cred_repo = Arc::new(CredentialRepository::new(
-        state.db.clone(),
-        state.event_bus.clone(),
-    ));
-    let gh = GitHubApiClient::new(cred_repo);
-
-    // Determine which job(s) to fetch logs for.
-    let job_ids: Vec<u64> = if let Some(job_id) = p.job_id {
-        vec![job_id]
-    } else {
-        // List all jobs for the run; fetch logs for failed/cancelled ones.
-        let jobs = gh
-            .list_run_jobs(&owner, &repo, p.run_id)
-            .await
-            .map_err(|e| format!("failed to list jobs for run {}: {e}", p.run_id))?;
-
-        let failed: Vec<u64> = jobs
-            .iter()
-            .filter(|j| {
-                matches!(
-                    j.conclusion.as_deref(),
-                    Some("failure") | Some("cancelled") | Some("timed_out")
-                )
-            })
-            .map(|j| j.id)
-            .collect();
-
-        if failed.is_empty() {
-            // No failed jobs — return job summary instead.
-            let summary: Vec<serde_json::Value> = jobs
-                .iter()
-                .map(|j| {
-                    serde_json::json!({
-                        "id": j.id,
-                        "name": j.name,
-                        "status": j.status,
-                        "conclusion": j.conclusion,
-                    })
-                })
-                .collect();
-            return Ok(serde_json::json!({
-                "run_id": p.run_id,
-                "message": "no failed jobs found",
-                "jobs": summary,
-            }));
-        }
-        failed
-    };
-
-    const MAX_LOG_BYTES: usize = 50_000;
-    let mut sections: Vec<String> = Vec::new();
-
-    for job_id in &job_ids {
-        match gh.get_job_logs(&owner, &repo, *job_id).await {
-            Ok(logs) => {
-                let truncated = crate::truncate::smart_truncate(&logs, MAX_LOG_BYTES);
-                sections.push(format!("=== Job {job_id} ===\n{truncated}"));
-            }
-            Err(e) => {
-                sections.push(format!("=== Job {job_id} === (failed to fetch: {e})"));
-            }
-        }
-    }
-
-    let combined = sections.join("\n\n");
-    let output = crate::truncate::smart_truncate(&combined, MAX_LOG_BYTES);
-
-    Ok(serde_json::json!({
-        "run_id": p.run_id,
-        "logs": output,
-    }))
-}
-
-/// Parse owner and repo from a GitHub remote URL (SSH or HTTPS).
-async fn resolve_github_owner_repo(worktree_path: &Path) -> Result<(String, String), String> {
-    let output = tokio::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(worktree_path)
-        .output()
-        .await
-        .map_err(|e| format!("failed to run git remote get-url: {e}"))?;
-
-    if !output.status.success() {
-        return Err("could not determine git remote — no origin configured".to_string());
-    }
-
-    let remote_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    // SSH: git@github.com:owner/repo.git or HTTPS
-    let path = remote_url
-        .strip_prefix("git@github.com:")
-        .or_else(|| remote_url.strip_prefix("https://github.com/"))
-        .or_else(|| remote_url.strip_prefix("http://github.com/"))
-        .map(|p| p.to_string());
-
-    let path = path.ok_or_else(|| format!("remote URL is not a GitHub URL: {remote_url}"))?;
-
-    let path = path.trim_end_matches(".git");
-    let mut parts = path.splitn(2, '/');
-    let owner = parts
-        .next()
-        .filter(|s| !s.is_empty())
-        .ok_or("could not parse owner from remote URL")?
-        .to_string();
-    let repo = parts
-        .next()
-        .filter(|s| !s.is_empty())
-        .ok_or("could not parse repo from remote URL")?
-        .to_string();
-
-    Ok((owner, repo))
 }
 
 async fn call_read(
@@ -1372,6 +1378,341 @@ async fn call_write(
         .await
 }
 
+/// Multi-layer fuzzy string replacement for the edit tool.
+///
+/// Tries matching strategies in order of strictness:
+/// 1. Exact match
+/// 2. Line-trimmed match (trailing whitespace stripped per line)
+/// 3. Whitespace-normalized match (runs of whitespace collapsed to single space)
+/// 4. Indentation-flexible match (leading whitespace stripped per line)
+///
+/// Returns `(new_content, optional_match_note)`.
+fn fuzzy_replace(
+    content: &str,
+    old_text: &str,
+    new_text: &str,
+    path: &Path,
+) -> Result<(String, Option<String>), String> {
+    // Layer 1: Exact match
+    let count = content.matches(old_text).count();
+    if count == 1 {
+        return Ok((content.replacen(old_text, new_text, 1), None));
+    }
+    if count > 1 {
+        return Err(format!(
+            "old_text appears {count} times in file (must be unique): {}",
+            path.display()
+        ));
+    }
+
+    // Layer 2: Line-trimmed match (trim trailing whitespace per line)
+    if let Some(result) = try_line_trimmed_match(content, old_text, new_text) {
+        return match result {
+            FuzzyResult::Unique(new_content) => Ok((
+                new_content,
+                Some("(matched after trimming trailing whitespace)".to_string()),
+            )),
+            FuzzyResult::Ambiguous(n) => Err(format!(
+                "old_text appears {n} times after trimming trailing whitespace \
+                 (must be unique): {}",
+                path.display()
+            )),
+        };
+    }
+
+    // Layer 3: Whitespace-normalized match
+    if let Some(result) = try_whitespace_normalized_match(content, old_text, new_text) {
+        return match result {
+            FuzzyResult::Unique(new_content) => Ok((
+                new_content,
+                Some("(matched with whitespace normalization)".to_string()),
+            )),
+            FuzzyResult::Ambiguous(n) => Err(format!(
+                "old_text appears {n} times after whitespace normalization \
+                 (must be unique): {}",
+                path.display()
+            )),
+        };
+    }
+
+    // Layer 4: Indentation-flexible match
+    if let Some(result) = try_indentation_flexible_match(content, old_text, new_text) {
+        return match result {
+            FuzzyResult::Unique(new_content) => Ok((
+                new_content,
+                Some("(matched with flexible indentation)".to_string()),
+            )),
+            FuzzyResult::Ambiguous(n) => Err(format!(
+                "old_text appears {n} times after stripping indentation \
+                 (must be unique): {}",
+                path.display()
+            )),
+        };
+    }
+
+    Err(format!("old_text not found in file: {}", path.display()))
+}
+
+enum FuzzyResult {
+    Unique(String),
+    Ambiguous(usize),
+}
+
+/// Trim trailing whitespace from each line, then find the match.
+fn try_line_trimmed_match(content: &str, old_text: &str, new_text: &str) -> Option<FuzzyResult> {
+    let trimmed_content: String = content
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let trimmed_old: String = old_text
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let count = trimmed_content.matches(&trimmed_old as &str).count();
+    if count == 0 {
+        return None;
+    }
+    if count > 1 {
+        return Some(FuzzyResult::Ambiguous(count));
+    }
+
+    let start = trimmed_content.find(&trimmed_old)?;
+    let end = start + trimmed_old.len();
+
+    let (orig_start, orig_end) = map_trimmed_to_original(content, &trimmed_content, start, end);
+    let mut result = String::with_capacity(content.len());
+    result.push_str(&content[..orig_start]);
+    result.push_str(new_text);
+    result.push_str(&content[orig_end..]);
+    Some(FuzzyResult::Unique(result))
+}
+
+fn reindent_replacement(matched_block: &str, replacement: &str) -> String {
+    let matched_lines: Vec<&str> = matched_block.split('\n').collect();
+    let replacement_lines: Vec<&str> = replacement.split('\n').collect();
+
+    if replacement_lines.is_empty() {
+        return String::new();
+    }
+
+    let matched_base_indent = matched_lines
+        .iter()
+        .find(|line| !line.trim().is_empty())
+        .map_or("", |line| leading_whitespace(line));
+
+    let replacement_base_indent = replacement_lines
+        .iter()
+        .find(|line| !line.trim().is_empty())
+        .map_or("", |line| leading_whitespace(line));
+
+    replacement_lines
+        .iter()
+        .map(|line| {
+            if line.is_empty() {
+                return String::new();
+            }
+
+            let replacement_indent = leading_whitespace(line);
+            let relative_indent = replacement_indent
+                .strip_prefix(replacement_base_indent)
+                .unwrap_or(replacement_indent);
+
+            format!(
+                "{matched_base_indent}{relative_indent}{}",
+                &line[replacement_indent.len()..]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn leading_whitespace(line: &str) -> &str {
+    &line[..line.len() - line.trim_start().len()]
+}
+
+/// Map byte positions from a trimmed version back to the original content.
+fn map_trimmed_to_original(
+    original: &str,
+    trimmed: &str,
+    trimmed_start: usize,
+    trimmed_end: usize,
+) -> (usize, usize) {
+    let orig_lines: Vec<&str> = original.split('\n').collect();
+    let trimmed_lines: Vec<&str> = trimmed.split('\n').collect();
+
+    let mut orig_offset = 0usize;
+    let mut trimmed_offset = 0usize;
+    let mut result_start = 0usize;
+    let mut result_end = 0usize;
+    let mut found_start = false;
+    let mut found_end = false;
+
+    for (i, (orig_line, trimmed_line)) in orig_lines.iter().zip(trimmed_lines.iter()).enumerate() {
+        let newline: usize = usize::from(i < orig_lines.len() - 1);
+
+        if !found_start && trimmed_start < trimmed_offset + trimmed_line.len() + newline {
+            let offset_in_line = trimmed_start - trimmed_offset;
+            result_start = orig_offset + offset_in_line;
+            found_start = true;
+        }
+
+        if !found_end && trimmed_end <= trimmed_offset + trimmed_line.len() + newline {
+            let offset_in_line = trimmed_end - trimmed_offset;
+            let clamped = offset_in_line.min(orig_line.len() + newline);
+            result_end = orig_offset + clamped;
+            found_end = true;
+        }
+
+        orig_offset += orig_line.len() + newline;
+        trimmed_offset += trimmed_line.len() + newline;
+
+        if found_start && found_end {
+            break;
+        }
+    }
+
+    (result_start, result_end)
+}
+
+/// Collapse all runs of spaces/tabs to a single space, then find the match.
+fn try_whitespace_normalized_match(
+    content: &str,
+    old_text: &str,
+    new_text: &str,
+) -> Option<FuzzyResult> {
+    let (norm_content, content_map) = normalize_whitespace_with_map(content);
+    let (norm_old, _) = normalize_whitespace_with_map(old_text);
+
+    let count = norm_content.matches(&norm_old as &str).count();
+    if count == 0 {
+        return None;
+    }
+    if count > 1 {
+        return Some(FuzzyResult::Ambiguous(count));
+    }
+
+    let norm_start = norm_content.find(&norm_old)?;
+    let norm_end = norm_start + norm_old.len();
+
+    let orig_start = content_map[norm_start];
+    let orig_end = if norm_end >= content_map.len() {
+        content.len()
+    } else {
+        content_map[norm_end]
+    };
+
+    let mut result = String::with_capacity(content.len());
+    result.push_str(&content[..orig_start]);
+    result.push_str(new_text);
+    result.push_str(&content[orig_end..]);
+    Some(FuzzyResult::Unique(result))
+}
+
+/// Normalize whitespace: collapse runs of spaces/tabs to a single space.
+/// Returns (normalized_string, map from normalized byte index to original byte
+/// index).
+fn normalize_whitespace_with_map(s: &str) -> (String, Vec<usize>) {
+    let mut normalized = String::with_capacity(s.len());
+    let mut map: Vec<usize> = Vec::with_capacity(s.len());
+    let mut in_ws = false;
+    let bytes = s.as_bytes();
+
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' || b == b'\r' {
+            in_ws = false;
+            normalized.push(b as char);
+            map.push(i);
+        } else if b == b' ' || b == b'\t' {
+            if !in_ws {
+                normalized.push(' ');
+                map.push(i);
+                in_ws = true;
+            }
+        } else {
+            in_ws = false;
+            normalized.push(b as char);
+            map.push(i);
+        }
+    }
+
+    (normalized, map)
+}
+
+/// Strip leading whitespace from each line, match, then apply edit preserving
+/// the file's original indentation.
+fn try_indentation_flexible_match(
+    content: &str,
+    old_text: &str,
+    new_text: &str,
+) -> Option<FuzzyResult> {
+    let stripped_content: String = content
+        .lines()
+        .map(|l| l.trim_start())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let stripped_old: String = old_text
+        .lines()
+        .map(|l| l.trim_start())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if stripped_old.is_empty() {
+        return None;
+    }
+
+    let count = stripped_content.matches(&stripped_old as &str).count();
+    if count == 0 {
+        return None;
+    }
+    if count > 1 {
+        return Some(FuzzyResult::Ambiguous(count));
+    }
+
+    let stripped_start = stripped_content.find(&stripped_old)?;
+
+    let match_start_line = stripped_content[..stripped_start]
+        .chars()
+        .filter(|&c| c == '\n')
+        .count();
+    let old_line_count = stripped_old.chars().filter(|&c| c == '\n').count() + 1;
+
+    let content_lines: Vec<&str> = content.lines().collect();
+
+    let mut orig_start = 0usize;
+    for line in &content_lines[..match_start_line] {
+        orig_start += line.len() + 1;
+    }
+    let mut orig_end = orig_start;
+    for (i, line) in content_lines[match_start_line..]
+        .iter()
+        .enumerate()
+        .take(old_line_count)
+    {
+        orig_end += line.len();
+        if match_start_line + i + 1 < content_lines.len() {
+            orig_end += 1;
+        }
+    }
+    orig_end = orig_end.min(content.len());
+
+    let matched_block = &content[orig_start..orig_end];
+    let reindented = reindent_replacement(matched_block, new_text);
+
+    let needs_trailing_newline = content[..orig_end].ends_with('\n') && !reindented.ends_with('\n');
+
+    let mut result = String::with_capacity(content.len());
+    result.push_str(&content[..orig_start]);
+    result.push_str(&reindented);
+    if needs_trailing_newline {
+        result.push('\n');
+    }
+    result.push_str(&content[orig_end..]);
+    Some(FuzzyResult::Unique(result))
+}
+
 async fn call_edit(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -1413,7 +1754,7 @@ async fn call_edit(
                 .map_err(|e| format!("read failed: {e}"))?;
 
             let (new_content, match_note) =
-                fuzzy::fuzzy_replace(&content, &p.old_text, &p.new_text, &path)?;
+                fuzzy_replace(&content, &p.old_text, &p.new_text, &path)?;
             tokio::fs::write(&path, &new_content)
                 .await
                 .map_err(|e| format!("write failed: {e}"))?;
@@ -1514,8 +1855,6 @@ async fn call_apply_patch(
     }))
 }
 
-/// Local parameter shape for the `lsp` tool. Kept next to `call_lsp` because it
-/// is only used by that handler and requires operation-specific validation.
 #[derive(Deserialize)]
 struct LspParams {
     operation: String,
@@ -1744,7 +2083,6 @@ fn task_to_value(t: &Task) -> serde_json::Value {
 
 // ── Lead-only tool params and handlers ────────────────────────────────────────
 
-/// Lead-only transition payload used exclusively by `call_task_transition`.
 #[derive(Deserialize)]
 struct TaskTransitionParams {
     id: String,
@@ -1756,19 +2094,16 @@ struct TaskTransitionParams {
     replacement_task_ids: Option<Vec<String>>,
 }
 
-/// Lead-only payload for deleting a task worktree branch.
 #[derive(Deserialize)]
 struct TaskDeleteBranchParams {
     id: String,
 }
 
-/// Lead-only payload for archiving a task activity log.
 #[derive(Deserialize)]
 struct TaskArchiveActivityParams {
     id: String,
 }
 
-/// Lead-only payload for resetting task reopen/continuation counters.
 #[derive(Deserialize)]
 struct TaskResetCountersParams {
     id: String,
@@ -1995,7 +2330,6 @@ async fn call_task_reset_counters(
     )
 }
 
-/// Lead-only payload for interrupting a paused session.
 #[derive(Deserialize)]
 struct TaskKillSessionParams {
     id: String,
@@ -2039,19 +2373,798 @@ async fn call_task_kill_session(
     }))
 }
 
-mod schemas;
+fn tool_epic_show() -> RmcpTool {
+    RmcpTool::new(
+        "epic_show".to_string(),
+        "Show details for an epic by UUID or short ID.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Epic UUID or short ID"}
+            }
+        }),
+    )
+}
 
-pub(crate) use schemas::{
-    tool_schemas_architect, tool_schemas_lead, tool_schemas_planner, tool_schemas_reviewer,
-    tool_schemas_worker,
-};
+fn tool_epic_update() -> RmcpTool {
+    RmcpTool::new(
+        "epic_update".to_string(),
+        "Update epic fields (title/description) and accept memory ref delta args for planner workflows.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Epic UUID or short ID"},
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "status": {"type": "string"},
+                "memory_refs_add": {"type": "array", "items": {"type": "string"}},
+                "memory_refs_remove": {"type": "array", "items": {"type": "string"}}
+            }
+        }),
+    )
+}
+
+fn tool_epic_tasks() -> RmcpTool {
+    RmcpTool::new(
+        "epic_tasks".to_string(),
+        "List tasks for an epic with pagination.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Epic UUID or short ID"},
+                "limit": {"type": "integer"},
+                "offset": {"type": "integer"}
+            }
+        }),
+    )
+}
+
+fn tool_task_list() -> RmcpTool {
+    RmcpTool::new(
+        "task_list".to_string(),
+        "List tasks with optional filters and pagination.".to_string(),
+        object!({
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "issue_type": {"type": "string"},
+                "priority": {"type": "integer"},
+                "text": {"type": "string", "description": "Free-text search in title/description"},
+                "label": {"type": "string"},
+                "parent": {"type": "string", "description": "Epic ID to filter by"},
+                "sort": {"type": "string"},
+                "limit": {"type": "integer"},
+                "offset": {"type": "integer"}
+            }
+        }),
+    )
+}
+
+async fn call_task_blocked_list(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: TaskShowParams = parse_args(arguments)?;
+    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
+    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
+    };
+    let blocked = repo
+        .list_blocked_by(&task.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let tasks: Vec<serde_json::Value> = blocked
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "task_id": b.task_id,
+                "short_id": b.short_id,
+                "title": b.title,
+                "status": b.status,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "tasks": tasks }))
+}
+
+fn tool_task_blocked_list() -> RmcpTool {
+    RmcpTool::new(
+        "task_blocked_list".to_string(),
+        "List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"}
+            }
+        }),
+    )
+}
+
+fn tool_task_activity_list() -> RmcpTool {
+    RmcpTool::new(
+        "task_activity_list".to_string(),
+        "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"},
+                "event_type": {"type": "string", "description": "Filter by event type: comment, status_changed, commands_run, merge_conflict, task_review_start"},
+                "actor_role": {"type": "string", "description": "Filter by actor: lead, reviewer, worker, verification, system"},
+                "limit": {"type": "integer", "description": "Max entries to return (default 30, max 50)"}
+            }
+        }),
+    )
+}
+
+fn tool_task_show() -> RmcpTool {
+    RmcpTool::new(
+        "task_show".to_string(),
+        "Show details of a work item including recent activity and blockers.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"}
+            }
+        }),
+    )
+}
+
+fn tool_request_lead() -> RmcpTool {
+    RmcpTool::new(
+        "request_lead".to_string(),
+        "Request Lead intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the Lead queue. Your session will effectively end after this call."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["id", "reason"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short_id"},
+                "reason": {"type": "string", "description": "Why Lead intervention is needed (e.g. task too large, design ambiguous, blocked on decision)"},
+                "suggested_breakdown": {"type": "string", "description": "Optional suggested split: list of smaller tasks the Lead should create"}
+            }
+        }),
+    )
+}
+
+fn tool_request_architect() -> RmcpTool {
+    RmcpTool::new(
+        "request_architect".to_string(),
+        "Escalate to the Architect when the task requires strategic technical review that is beyond Lead intervention scope. Use when the problem is architectural, requires codebase-wide analysis, or has failed multiple Lead interventions. Adds a comment and dispatches the Architect. Your session should end after this call."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["id", "reason"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short_id"},
+                "reason": {"type": "string", "description": "Why Architect escalation is needed (e.g. architectural ambiguity, repeated Lead failures, codebase-wide impact)"}
+            }
+        }),
+    )
+}
+
+fn tool_memory_read() -> RmcpTool {
+    RmcpTool::new(
+        "memory_read".to_string(),
+        "Read a note by permalink or title.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["identifier"],
+            "properties": {
+                "project": {"type": "string", "description": "Absolute project path"},
+                "identifier": {"type": "string"}
+            }
+        }),
+    )
+}
+
+fn tool_memory_search() -> RmcpTool {
+    RmcpTool::new(
+        "memory_search".to_string(),
+        "Search notes in project memory.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "project": {"type": "string", "description": "Absolute project path"},
+                "query": {"type": "string"},
+                "folder": {"type": "string"},
+                "type": {"type": "string"},
+                "limit": {"type": "integer"},
+                "task_id": {"type": "string", "description": "Task ID for affinity scoring; defaults to the current session task"}
+            }
+        }),
+    )
+}
+
+fn tool_memory_list() -> RmcpTool {
+    RmcpTool::new(
+        "memory_list".to_string(),
+        "List notes in project memory. Returns compact summaries without full content.".to_string(),
+        object!({
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Absolute project path"},
+                "folder": {"type": "string", "description": "Filter by folder (e.g. \"decisions\")"},
+                "type": {"type": "string", "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\")"},
+                "depth": {"type": "integer", "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels"}
+            }
+        }),
+    )
+}
+
+fn tool_memory_build_context() -> RmcpTool {
+    RmcpTool::new(
+        "memory_build_context".to_string(),
+        "Build context from a memory note with progressive disclosure. Returns full content for primary notes, overview for direct linked notes, abstract for discovered related notes. Use url='folder/*' to return all notes in a folder. Seed notes are never dropped by budget constraints.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["url"],
+            "properties": {
+                "project": {"type": "string", "description": "Absolute project path"},
+                "url": {"type": "string", "description": "Memory URI: 'memory://folder/note', 'folder/note', or 'folder/*' for all notes in a folder"},
+                "depth": {"type": "integer", "description": "Link traversal depth (default 1)"},
+                "max_related": {"type": "integer", "description": "Maximum related notes to return (default 10)"},
+                "budget": {"type": "integer", "description": "Token budget for context (default 4096)"},
+                "task_id": {"type": "string", "description": "Task ID for affinity scoring"}
+            }
+        }),
+    )
+}
+
+fn tool_role_metrics() -> RmcpTool {
+    RmcpTool::new(
+        "role_metrics".to_string(),
+        "Return aggregated effectiveness metrics per agent role: success_rate, avg_tokens, avg_time_seconds, verification_pass_rate, avg_reopens, completed_task_count. Omit role_id to return metrics for all roles in the project.".to_string(),
+        object!({
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Absolute project path"},
+                "role_id": {"type": "string", "description": "Role UUID or name; omit for all roles"},
+                "window_days": {"type": "integer", "description": "Days back for session data (default 30)"}
+            }
+        }),
+    )
+}
+
+fn tool_role_amend_prompt() -> RmcpTool {
+    RmcpTool::new(
+        "role_amend_prompt".to_string(),
+        "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer, resolver base_role). Do NOT use on architect, lead, or planner roles.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["role_id", "amendment"],
+            "properties": {
+                "project": {"type": "string", "description": "Absolute project path"},
+                "role_id": {"type": "string", "description": "Role UUID or name to amend"},
+                "amendment": {"type": "string", "description": "Amendment text to append to learned_prompt"},
+                "metrics_snapshot": {"type": "string", "description": "JSON string of current metrics for the history record"}
+            }
+        }),
+    )
+}
+
+fn tool_shell() -> RmcpTool {
+    RmcpTool::new(
+        "shell".to_string(),
+        "Execute shell commands in the task worktree. Commands always run from the worktree root."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to execute"},
+                "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (default 120000)"}
+            }
+        }),
+    )
+}
+
+fn tool_read() -> RmcpTool {
+    RmcpTool::new(
+        "read".to_string(),
+        "Read a file with line numbers and pagination. Rejects binary files.".to_string(),
+        object!({
+            "type": "object",
+            "properties": {
+                "file_path": { "type": "string" },
+                "offset": { "type": "integer", "minimum": 0 },
+                "limit": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["file_path"]
+        }),
+    )
+}
+
+fn tool_write() -> RmcpTool {
+    RmcpTool::new(
+        "write".to_string(),
+        "Write content to a file, creating it or overwriting if it exists. Path must be within the task worktree.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["path", "content"],
+            "properties": {
+                "path": {"type": "string", "description": "Absolute or worktree-relative file path"},
+                "content": {"type": "string", "description": "File content to write"}
+            }
+        }),
+    )
+}
+
+fn tool_edit() -> RmcpTool {
+    RmcpTool::new(
+        "edit".to_string(),
+        "Edit a file by replacing exact text. Finds old_text and replaces with new_text. Fails if old_text is not found or is ambiguous (appears multiple times).".to_string(),
+        object!({
+            "type": "object",
+            "required": ["path", "old_text", "new_text"],
+            "properties": {
+                "path": {"type": "string", "description": "Absolute or worktree-relative file path"},
+                "old_text": {"type": "string", "description": "Exact text to find and replace"},
+                "new_text": {"type": "string", "description": "Replacement text"}
+            }
+        }),
+    )
+}
+
+fn tool_task_create() -> RmcpTool {
+    RmcpTool::new(
+        "task_create".to_string(),
+        "Create a new task under an epic. Use blocked_by to set dependencies and acceptance_criteria to define success criteria at creation.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["epic_id", "title"],
+            "properties": {
+                "epic_id": {"type": "string"},
+                "title": {"type": "string"},
+                "issue_type": {"type": "string"},
+                "description": {"type": "string"},
+                "design": {"type": "string"},
+                "priority": {"type": "integer"},
+                "owner": {"type": "string"},
+                "status": {"type": "string", "description": "Optional initial status. Allowed: open (default)."},
+                "acceptance_criteria": {"type": "array", "items": {"type": "string"}, "description": "List of acceptance criteria strings."},
+                "blocked_by": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) that block this task."},
+                "memory_refs": {"type": "array", "items": {"type": "string"}, "description": "Memory note permalinks to attach."},
+                "agent_type": {"type": "string", "description": "Specialist role name to route this task (e.g. 'rust-expert'). Must match a configured AgentRole name for this project."}
+            }
+        }),
+    )
+}
+
+fn tool_task_update() -> RmcpTool {
+    RmcpTool::new(
+        "task_update".to_string(),
+        "Update task fields: title, description, design, priority, owner, labels, acceptance_criteria, memory_refs, blocked_by.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string"},
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "design": {"type": "string"},
+                "priority": {"type": "integer"},
+                "owner": {"type": "string"},
+                "labels_add": {"type": "array", "items": {"type": "string"}},
+                "labels_remove": {"type": "array", "items": {"type": "string"}},
+                "acceptance_criteria": {"type": "array", "items": {"type": "object"}},
+                "memory_refs_add": {"type": "array", "items": {"type": "string"}},
+                "memory_refs_remove": {"type": "array", "items": {"type": "string"}},
+                "blocked_by_add": {"type": "array", "items": {"type": "string"}, "description": "Task IDs to add as blockers"},
+                "blocked_by_remove": {"type": "array", "items": {"type": "string"}, "description": "Task IDs to remove as blockers"}
+            }
+        }),
+    )
+}
+
+fn tool_task_transition() -> RmcpTool {
+    RmcpTool::new(
+        "task_transition".to_string(),
+        "Execute a state machine transition on a task. Lead can use: lead_intervention_complete (rescope and reopen for worker), lead_approve (approve implementation and merge), force_close (requires replacement_task_ids for decomposition OR reason for redundant/already-landed tasks), escalate.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id", "action"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"},
+                "action": {"type": "string", "description": "Transition action"},
+                "reason": {"type": "string"},
+                "target_status": {"type": "string"},
+                "replacement_task_ids": {"type": "array", "items": {"type": "string"}, "description": "For force_close with decomposition: IDs of replacement subtasks. Not required if closing a redundant task with a reason."}
+            }
+        }),
+    )
+}
+
+fn tool_task_delete_branch() -> RmcpTool {
+    RmcpTool::new(
+        "task_delete_branch".to_string(),
+        "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"}
+            }
+        }),
+    )
+}
+
+fn tool_task_archive_activity() -> RmcpTool {
+    RmcpTool::new(
+        "task_archive_activity".to_string(),
+        "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"}
+            }
+        }),
+    )
+}
+
+fn tool_task_reset_counters() -> RmcpTool {
+    RmcpTool::new(
+        "task_reset_counters".to_string(),
+        "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"}
+            }
+        }),
+    )
+}
+
+fn tool_task_kill_session() -> RmcpTool {
+    RmcpTool::new(
+        "task_kill_session".to_string(),
+        "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"}
+            }
+        }),
+    )
+}
+
+fn tool_task_comment_add() -> RmcpTool {
+    RmcpTool::new(
+        "task_comment_add".to_string(),
+        "Add a comment or strategic observation to a task's activity log.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id", "body"],
+            "properties": {
+                "id": {"type": "string", "description": "Task UUID or short ID"},
+                "body": {"type": "string", "description": "Comment body to add to the activity log"}
+            }
+        }),
+    )
+}
+
+fn from_value<T>(value: serde_json::Value) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(value)
+}
+
+fn tool_output_view() -> RmcpTool {
+    RmcpTool::new(
+        "output_view".to_string(),
+        "Paginated view of a truncated tool output. When a tool result was truncated, \
+         the full output is stashed and can be browsed here by tool_use_id."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["tool_use_id"],
+            "properties": {
+                "tool_use_id": {"type": "string", "description": "The tool_use_id from the truncated result"},
+                "offset": {"type": "integer", "minimum": 0, "description": "Line offset (0-based, default 0)"},
+                "limit": {"type": "integer", "minimum": 1, "description": "Number of lines to return (default 200)"}
+            }
+        }),
+    )
+}
+
+fn tool_output_grep() -> RmcpTool {
+    RmcpTool::new(
+        "output_grep".to_string(),
+        "Regex search within a truncated tool output. Returns matching lines with \
+         context from the full stashed output."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["tool_use_id", "pattern"],
+            "properties": {
+                "tool_use_id": {"type": "string", "description": "The tool_use_id from the truncated result"},
+                "pattern": {"type": "string", "description": "Regex pattern to search for"},
+                "context_lines": {"type": "integer", "minimum": 0, "description": "Lines of context around each match (default 3)"}
+            }
+        }),
+    )
+}
+
+fn base_tool_schemas() -> Vec<serde_json::Value> {
+    let mut tool_values = vec![
+        serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
+        serde_json::to_value(tool_task_list()).expect("serialize tool_task_list"),
+        serde_json::to_value(tool_task_activity_list()).expect("serialize tool_task_activity_list"),
+        serde_json::to_value(tool_memory_read()).expect("serialize tool_memory_read"),
+        serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
+        serde_json::to_value(tool_memory_list()).expect("serialize tool_memory_list"),
+    ];
+    tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
+    tool_values.push(serde_json::to_value(tool_read()).expect("serialize tool_read"));
+    tool_values.push(serde_json::to_value(tool_lsp()).expect("serialize tool_lsp"));
+    tool_values.push(serde_json::to_value(tool_output_view()).expect("serialize tool_output_view"));
+    tool_values.push(serde_json::to_value(tool_output_grep()).expect("serialize tool_output_grep"));
+    tool_values
+}
+
+/// Tool schemas for Worker and Resolver: base + file-editing tools.
+pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
+    tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
+    tool_values.push(serde_json::to_value(tool_apply_patch()).expect("serialize tool_apply_patch"));
+    tool_values.push(serde_json::to_value(tool_request_lead()).expect("serialize tool_request_lead"));
+    tool_values.push(
+        serde_json::to_value(crate::roles::finalize::tool_submit_work())
+            .expect("serialize tool_submit_work"),
+    );
+    tool_values
+}
+
+/// Tool schemas for Reviewer: base + submit_review finalize tool.
+/// task_update_ac is excluded — submit_review sets AC atomically.
+pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    tool_values.push(
+        serde_json::to_value(crate::roles::finalize::tool_submit_review())
+            .expect("serialize tool_submit_review"),
+    );
+    tool_values
+}
+
+/// Tool schemas for Lead: base + task/epic management tools + submit_decision finalize tool.
+/// task_comment_add and task_transition are excluded — submit_decision drives transitions.
+pub(crate) fn tool_schemas_lead() -> Vec<serde_json::Value> {
+    tool_schemas_pm()
+}
+
+/// Tool schemas for PM (Lead): base + task/epic management tools + submit_decision finalize tool.
+/// task_comment_add and task_transition are excluded — submit_decision drives transitions.
+pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    for value in [
+        serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
+        serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
+        serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
+        serde_json::to_value(tool_task_archive_activity())
+            .expect("serialize tool_task_archive_activity"),
+        serde_json::to_value(tool_task_reset_counters())
+            .expect("serialize tool_task_reset_counters"),
+        serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
+        serde_json::to_value(tool_task_blocked_list()).expect("serialize tool_task_blocked_list"),
+        serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
+        serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
+        serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
+        serde_json::to_value(tool_request_architect())
+            .expect("serialize tool_request_architect"),
+        serde_json::to_value(crate::roles::finalize::tool_submit_decision())
+            .expect("serialize tool_submit_decision"),
+    ] {
+        tool_values.push(value);
+    }
+    tool_values
+}
+
+/// Tool schemas for Planner: base + task/epic management tools + submit_grooming finalize tool.
+/// task_comment_add is excluded — submit_grooming captures session output.
+pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    for value in [
+        serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
+        serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
+        serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
+        serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
+        serde_json::to_value(tool_task_archive_activity())
+            .expect("serialize tool_task_archive_activity"),
+        serde_json::to_value(tool_task_reset_counters())
+            .expect("serialize tool_task_reset_counters"),
+        serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
+        serde_json::to_value(tool_task_blocked_list()).expect("serialize tool_task_blocked_list"),
+        serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
+        serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
+        serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
+        serde_json::to_value(crate::roles::finalize::tool_submit_grooming())
+            .expect("serialize tool_submit_grooming"),
+    ] {
+        tool_values.push(value);
+    }
+    tool_values
+}
+
+/// Tool schemas for Architect: read-only tools, task/epic management, submit_work,
+/// and agent effectiveness tools (role_metrics, memory_build_context, role_amend_prompt).
+/// Does not include write/edit/apply_patch. The Architect diagnoses and directs but does not write code.
+pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    for value in [
+        serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
+        serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
+        serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
+        serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
+        serde_json::to_value(tool_task_blocked_list()).expect("serialize tool_task_blocked_list"),
+        serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
+        serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
+        serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
+        serde_json::to_value(tool_memory_build_context())
+            .expect("serialize tool_memory_build_context"),
+        serde_json::to_value(tool_role_metrics()).expect("serialize tool_role_metrics"),
+        serde_json::to_value(tool_role_amend_prompt()).expect("serialize tool_role_amend_prompt"),
+        serde_json::to_value(crate::roles::finalize::tool_submit_work())
+            .expect("serialize tool_submit_work"),
+    ] {
+        tool_values.push(value);
+    }
+    tool_values
+}
+
+/// Public entry point for the Djinn-native reply loop to call a tool by name.
+///
+/// `arguments` should be the `input` field from a `ContentBlock::ToolUse`
+/// converted to an `Option<Map>`:
+///
+/// ```rust,ignore
+/// let args = match input {
+///     Value::Object(map) => Some(map),
+///     _ => None,
+/// };
+/// ```
+pub(crate) async fn call_tool(
+    state: &AgentContext,
+    name: &str,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    worktree_path: &Path,
+    session_task_id: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
+    dispatch_tool_call(state, &synthetic, worktree_path, None, session_task_id).await
+}
+
+fn tool_apply_patch() -> RmcpTool {
+    RmcpTool::new(
+        "apply_patch".to_string(),
+        concat!(
+            "Apply a patch to one or more files using a custom LLM-friendly format. ",
+            "Uses content-based context matching (not line numbers). Format:\n\n",
+            "*** Begin Patch\n",
+            "*** Update File: path/to/file.rs\n",
+            "@@ context_line_from_file\n",
+            " context line (unchanged)\n",
+            "-old line to remove\n",
+            "+new line to add\n",
+            " context line (unchanged)\n\n",
+            "*** Add File: path/to/new_file.rs\n",
+            "+line 1\n",
+            "+line 2\n\n",
+            "*** Delete File: path/to/old_file.rs\n",
+            "*** End Patch\n\n",
+            "Rules: ' ' prefix = context (must match file), '-' = delete, '+' = add. ",
+            "The @@ line text is searched in the file to locate each chunk. ",
+            "Multiple @@ chunks per file are allowed. ",
+            "Files being updated or deleted must be read first.",
+        )
+        .to_string(),
+        object!({
+            "type": "object",
+            "required": ["patch"],
+            "properties": {
+                "patch": {"type": "string", "description": "Patch content in the custom format (see tool description)"}
+            }
+        }),
+    )
+}
+
+fn tool_lsp() -> RmcpTool {
+    RmcpTool::new(
+        "lsp".to_string(),
+        "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols). Line and character are 1-based.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["operation", "file_path"],
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["hover", "definition", "references", "symbols"],
+                    "description": "LSP operation to perform"
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute or worktree-relative file path"
+                },
+                "line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-based line number (required for hover, definition, references)"
+                },
+                "character": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-based column number (required for hover, definition, references)"
+                }
+            }
+        }),
+    )
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::AgentType;
     use crate::test_helpers::create_test_db;
+    use std::path::Path;
     use tokio_util::sync::CancellationToken;
+
+    pub(crate) mod fuzzy_replace_tests {
+        use super::*;
+
+        #[test]
+        fn rebases_multiline_replacement_using_matched_indentation() {
+            let content = "fn main() {\n    match value {\n        Some(x) => {\n            process(x);\n        }\n    }\n}\n";
+            let old_text = "match value {\n    Some(x) => {\n        process(x);\n    }\n}";
+            let new_text = "match value {\n    Some(x) => {\n        if ready {\n            process(x);\n        }\n    }\n}";
+
+            let (updated, note) = fuzzy_replace(content, old_text, new_text, Path::new("test.rs"))
+                .expect("fuzzy replace should succeed");
+
+            assert_eq!(note.as_deref(), Some("(matched with flexible indentation)"));
+            assert!(updated.contains(
+                "    match value {\n        Some(x) => {\n            if ready {\n                process(x);\n            }\n        }\n    }"
+            ));
+        }
+
+        #[test]
+        fn preserves_later_nested_indent_when_first_replacement_line_is_less_indented() {
+            let content =
+                "impl Example {\n        if condition {\n            run();\n        }\n}\n";
+            let old_text = "if condition {\n    run();\n}";
+            let new_text =
+                "if condition {\n    let nested = || {\n        run();\n    };\n    nested();\n}";
+
+            let (updated, note) = fuzzy_replace(content, old_text, new_text, Path::new("test.rs"))
+                .expect("fuzzy replace should succeed");
+
+            assert_eq!(note.as_deref(), Some("(matched with flexible indentation)"));
+            assert!(updated.contains(
+                "        if condition {\n            let nested = || {\n                run();\n            };\n            nested();\n        }"
+            ));
+        }
+
+        #[test]
+        fn reindent_replacement_preserves_internal_relative_indentation() {
+            let matched_block = "        if ready {\n            execute();\n        }";
+            let replacement =
+                "if ready {\n    let nested = || {\n        execute();\n    };\n    nested();\n}";
+
+            assert_eq!(
+                reindent_replacement(matched_block, replacement),
+                "        if ready {\n            let nested = || {\n                execute();\n            };\n            nested();\n        }"
+            );
+        }
+    }
 
     #[test]
     fn floor_char_boundary_ascii() {
@@ -2124,25 +3237,69 @@ mod tests {
             AgentType::Worker,
             "submit_decision"
         ));
-        assert!(is_tool_allowed_for_agent(
-            AgentType::Lead,
-            "submit_decision"
-        ));
+        assert!(is_tool_allowed_for_agent(AgentType::Lead, "submit_decision"));
         // task_transition is not in the PM tool set (removed by ADR-036).
-        assert!(!is_tool_allowed_for_agent(
-            AgentType::Lead,
-            "task_transition"
-        ));
+        assert!(!is_tool_allowed_for_agent(AgentType::Lead, "task_transition"));
     }
 
     #[test]
     fn shell_timeout_defaults_and_minimum() {
         fn resolve_timeout(t: Option<u64>) -> u64 {
-            t.unwrap_or(120_000).clamp(1000, 600_000)
+            t.unwrap_or(120_000).max(1000)
         }
         assert_eq!(resolve_timeout(None), 120_000);
         assert_eq!(resolve_timeout(Some(0)), 1000);
-        assert_eq!(resolve_timeout(Some(1_200_000)), 600_000);
+    }
+
+    #[test]
+    fn tool_schemas_include_role_specific_tools() {
+        fn schema_names(schemas: Vec<serde_json::Value>) -> Vec<String> {
+            schemas
+                .into_iter()
+                .filter_map(|v| {
+                    v.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(ToString::to_string)
+                })
+                .collect()
+        }
+
+        let worker = schema_names(tool_schemas_worker());
+        assert!(worker.iter().any(|n| n == "shell"));
+        assert!(worker.iter().any(|n| n == "write"));
+        assert!(worker.iter().any(|n| n == "edit"));
+        assert!(worker.iter().any(|n| n == "submit_work"));
+        assert!(!worker.iter().any(|n| n == "task_comment_add"));
+
+        let reviewer = schema_names(tool_schemas_reviewer());
+        assert!(reviewer.iter().any(|n| n == "submit_review"));
+        assert!(!reviewer.iter().any(|n| n == "task_update_ac"));
+        assert!(!reviewer.iter().any(|n| n == "task_comment_add"));
+
+        let lead = schema_names(tool_schemas_lead());
+        assert!(lead.iter().any(|n| n == "task_create"));
+        assert!(lead.iter().any(|n| n == "submit_decision"));
+        assert!(!lead.iter().any(|n| n == "task_transition"));
+        assert!(!lead.iter().any(|n| n == "task_comment_add"));
+
+        let planner = schema_names(tool_schemas_planner());
+        assert!(planner.iter().any(|n| n == "task_create"));
+        assert!(planner.iter().any(|n| n == "task_transition"));
+        assert!(planner.iter().any(|n| n == "submit_grooming"));
+        assert!(!planner.iter().any(|n| n == "task_comment_add"));
+
+        let architect = schema_names(tool_schemas_architect());
+        assert!(architect.iter().any(|n| n == "shell"));
+        assert!(architect.iter().any(|n| n == "read"));
+        assert!(architect.iter().any(|n| n == "task_create"));
+        assert!(architect.iter().any(|n| n == "task_comment_add"));
+        assert!(architect.iter().any(|n| n == "task_transition"));
+        assert!(architect.iter().any(|n| n == "task_kill_session"));
+        assert!(architect.iter().any(|n| n == "submit_work"));
+        // Architect must NOT have code-writing tools.
+        assert!(!architect.iter().any(|n| n == "write"));
+        assert!(!architect.iter().any(|n| n == "edit"));
+        assert!(!architect.iter().any(|n| n == "apply_patch"));
     }
 
     #[test]
@@ -2206,5 +3363,72 @@ mod tests {
 
         let normalized = resolve_path("./src/../Cargo.toml", base);
         assert_eq!(normalized, PathBuf::from("/tmp/worktree/Cargo.toml"));
+    }
+
+    fn tool_names(schemas: &[serde_json::Value]) -> Vec<&str> {
+        schemas
+            .iter()
+            .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn snapshot_worker_tool_names() {
+        let schemas = tool_schemas_worker();
+        let names = tool_names(&schemas);
+        insta::assert_json_snapshot!("worker_tool_names", names);
+    }
+
+    #[test]
+    fn snapshot_worker_tool_schemas() {
+        insta::assert_json_snapshot!("worker_tool_schemas", tool_schemas_worker());
+    }
+
+    #[test]
+    fn snapshot_reviewer_tool_names() {
+        let schemas = tool_schemas_reviewer();
+        let names = tool_names(&schemas);
+        insta::assert_json_snapshot!("reviewer_tool_names", names);
+    }
+
+    #[test]
+    fn snapshot_reviewer_tool_schemas() {
+        insta::assert_json_snapshot!("reviewer_tool_schemas", tool_schemas_reviewer());
+    }
+
+    #[test]
+    fn snapshot_lead_tool_names() {
+        let schemas = tool_schemas_lead();
+        let names = tool_names(&schemas);
+        insta::assert_json_snapshot!("lead_tool_names", names);
+    }
+
+    #[test]
+    fn snapshot_lead_tool_schemas() {
+        insta::assert_json_snapshot!("lead_tool_schemas", tool_schemas_lead());
+    }
+
+    #[test]
+    fn snapshot_planner_tool_names() {
+        let schemas = tool_schemas_planner();
+        let names = tool_names(&schemas);
+        insta::assert_json_snapshot!("planner_tool_names", names);
+    }
+
+    #[test]
+    fn snapshot_planner_tool_schemas() {
+        insta::assert_json_snapshot!("planner_tool_schemas", tool_schemas_planner());
+    }
+
+    #[test]
+    fn snapshot_architect_tool_names() {
+        let schemas = tool_schemas_architect();
+        let names = tool_names(&schemas);
+        insta::assert_json_snapshot!("architect_tool_names", names);
+    }
+
+    #[test]
+    fn snapshot_architect_tool_schemas() {
+        insta::assert_json_snapshot!("architect_tool_schemas", tool_schemas_architect());
     }
 }

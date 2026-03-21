@@ -7,51 +7,54 @@ use djinn_provider::repos::CredentialRepository;
 
 use super::{AppState, SETTINGS_RAW_KEY};
 
+const ALL_ROLES: &[&str] = &["worker", "reviewer", "lead", "planner", "architect", "resolver"];
+
 impl AppState {
     fn slot_pool_config_for_settings(settings: &DjinnSettings) -> SlotPoolConfig {
-        let role_priorities = settings.model_priority_or_default();
+        let models_list = settings.models_or_default();
         let max_sessions = settings.max_sessions_or_default();
 
-        let mut model_ids: HashSet<String> = max_sessions.keys().cloned().collect();
-        for models in role_priorities.values() {
-            for model_id in models {
-                if model_id.contains('/') {
-                    model_ids.insert(model_id.clone());
-                }
-            }
-        }
+        let all_roles: HashSet<String> = ALL_ROLES.iter().map(|r| r.to_string()).collect();
 
-        let mut roles_by_model: HashMap<String, HashSet<String>> = HashMap::new();
-        for (role, model_ids) in &role_priorities {
-            for model_id in model_ids {
-                if model_id.contains('/') {
-                    roles_by_model
-                        .entry(model_id.clone())
-                        .or_default()
-                        .insert(role.clone());
-                }
-            }
-        }
-
-        let mut models = model_ids
-            .into_iter()
+        let models = models_list
+            .iter()
+            .filter(|id| id.contains('/'))
             .map(|model_id| ModelSlotConfig {
-                max_slots: max_sessions.get(&model_id).copied().unwrap_or(1),
-                roles: roles_by_model.remove(&model_id).unwrap_or_default(),
-                model_id,
+                max_slots: max_sessions.get(model_id).copied().unwrap_or(1),
+                roles: all_roles.clone(),
+                model_id: model_id.clone(),
             })
-            .collect::<Vec<_>>();
-        models.sort_by(|a, b| a.model_id.cmp(&b.model_id));
+            .collect();
+
+        // Also include models that only appear in max_sessions but not the list.
+        let listed: HashSet<&str> = models_list.iter().map(String::as_str).collect();
+        let extra: Vec<ModelSlotConfig> = max_sessions
+            .iter()
+            .filter(|(id, _)| id.contains('/') && !listed.contains(id.as_str()))
+            .map(|(model_id, &max_slots)| ModelSlotConfig {
+                max_slots,
+                roles: all_roles.clone(),
+                model_id: model_id.clone(),
+            })
+            .collect();
+
+        let mut all_models: Vec<ModelSlotConfig> = models;
+        all_models.extend(extra);
+        all_models.sort_by(|a, b| a.model_id.cmp(&b.model_id));
+
+        let role_priorities: HashMap<String, Vec<String>> = ALL_ROLES
+            .iter()
+            .map(|r| (r.to_string(), models_list.clone()))
+            .collect();
 
         SlotPoolConfig {
-            models,
+            models: all_models,
             role_priorities,
         }
     }
 
     pub async fn apply_settings(&self, settings: &DjinnSettings) -> Result<(), String> {
-        self.validate_model_priority_providers_connected(settings)
-            .await?;
+        self.validate_models_providers_connected(settings).await?;
         let raw =
             serde_json::to_string(settings).map_err(|e| format!("serialize settings: {e}"))?;
         let repo = SettingsRepository::new(self.db().clone(), self.event_bus());
@@ -62,18 +65,17 @@ impl AppState {
         Ok(())
     }
 
-    async fn validate_model_priority_providers_connected(
+    async fn validate_models_providers_connected(
         &self,
         settings: &DjinnSettings,
     ) -> Result<(), String> {
-        let priorities = settings.model_priority_or_default();
-        if priorities.is_empty() {
+        let models = settings.models_or_default();
+        if models.is_empty() {
             return Ok(());
         }
 
-        let configured_provider_ids: HashSet<String> = priorities
-            .values()
-            .flat_map(|models| models.iter())
+        let configured_provider_ids: HashSet<String> = models
+            .iter()
             .map(|model| {
                 model
                     .split_once('/')
@@ -103,7 +105,7 @@ impl AppState {
             Ok(())
         } else {
             Err(format!(
-                "model_priority references disconnected providers: {}",
+                "models references disconnected providers: {}",
                 missing_provider_ids.join(", ")
             ))
         }
@@ -148,9 +150,12 @@ impl AppState {
             let _ = coordinator
                 .update_dispatch_limit(settings.dispatch_limit_or_default())
                 .await;
-            let _ = coordinator
-                .update_model_priorities(settings.model_priority_or_default())
-                .await;
+            // Build per-role priorities: all roles use the same flat model list.
+            let role_priorities: HashMap<String, Vec<String>> = ALL_ROLES
+                .iter()
+                .map(|r| (r.to_string(), settings.models_or_default()))
+                .collect();
+            let _ = coordinator.update_model_priorities(role_priorities).await;
             coordinator_handle = Some(coordinator);
         }
 

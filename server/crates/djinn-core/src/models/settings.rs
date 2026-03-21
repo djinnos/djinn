@@ -18,15 +18,11 @@ pub struct DjinnSettings {
     /// Maximum number of tasks to dispatch per cycle (default 50).
     #[schemars(with = "Option<i64>")]
     pub dispatch_limit: Option<u32>,
-    /// Per-role ordered model lists, e.g. `{"worker": ["openai/gpt-4o"]}`.
-    pub model_priority: Option<HashMap<String, Vec<String>>>,
+    /// Ordered list of models available to agents, e.g. `["openai/gpt-4o"]`.
+    pub models: Option<Vec<String>>,
     /// Per-model concurrent session caps, e.g. `{"openai/gpt-4o": 4}`.
     #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
-    /// Model used for memory operations (knowledge extraction, summarisation).
-    /// Format: `provider/model`, e.g. `"openai/gpt-4.1-mini"`. Falls back to the
-    /// first model in `model_priority` when unset.
-    pub memory_model: Option<String>,
     /// Langfuse public key for OTLP trace export (e.g. `pk-lf-...`).
     pub langfuse_public_key: Option<String>,
     /// Langfuse secret key for OTLP trace export (e.g. `sk-lf-...`).
@@ -69,21 +65,21 @@ impl DjinnSettings {
             .and_then(serde_json::Value::as_u64)
             .map(|n| n as u32);
 
-        let model_priority = Self::extract_model_priority(v);
+        let models = Self::extract_models_from_legacy(v);
         let max_sessions = Self::extract_max_sessions(v);
 
         Self {
             dispatch_limit,
-            model_priority,
+            models,
             max_sessions,
-            memory_model: None,
             langfuse_public_key: None,
             langfuse_secret_key: None,
             langfuse_endpoint: None,
         }
     }
 
-    fn extract_model_priority(v: &serde_json::Value) -> Option<HashMap<String, Vec<String>>> {
+    /// Extract a flat deduplicated model list from a legacy per-role model_priority map.
+    fn extract_models_from_legacy(v: &serde_json::Value) -> Option<Vec<String>> {
         let root = v
             .get("coordinator")
             .and_then(|c| c.get("model_priority"))
@@ -91,16 +87,14 @@ impl DjinnSettings {
             .or_else(|| v.get("models").and_then(|m| m.get("priority")))?
             .as_object()?;
 
-        let mut out = HashMap::new();
-        for (role, value) in root {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for value in root.values() {
             if let Some(arr) = value.as_array() {
-                let models: Vec<String> = arr
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .collect();
-                if !models.is_empty() {
-                    out.insert(role.clone(), models);
+                for model in arr.iter().filter_map(serde_json::Value::as_str) {
+                    if seen.insert(model.to_owned()) {
+                        out.push(model.to_owned());
+                    }
                 }
             }
         }
@@ -129,8 +123,8 @@ impl DjinnSettings {
         self.dispatch_limit.unwrap_or(50) as usize
     }
 
-    pub fn model_priority_or_default(&self) -> HashMap<String, Vec<String>> {
-        self.model_priority.clone().unwrap_or_default()
+    pub fn models_or_default(&self) -> Vec<String> {
+        self.models.clone().unwrap_or_default()
     }
 
     pub fn max_sessions_or_default(&self) -> HashMap<String, u32> {
@@ -144,13 +138,10 @@ mod tests {
 
     #[test]
     fn from_db_value_parses_typed_format() {
-        let raw = r#"{"dispatch_limit":100,"model_priority":{"worker":["openai/gpt-4o"]}}"#;
+        let raw = r#"{"dispatch_limit":100,"models":["openai/gpt-4o"]}"#;
         let s = DjinnSettings::from_db_value(raw);
         assert_eq!(s.dispatch_limit, Some(100));
-        assert_eq!(
-            s.model_priority.as_ref().unwrap().get("worker").unwrap(),
-            &vec!["openai/gpt-4o"]
-        );
+        assert_eq!(s.models.as_ref().unwrap(), &vec!["openai/gpt-4o"]);
         assert!(s.max_sessions.is_none());
     }
 
@@ -159,10 +150,7 @@ mod tests {
         let raw = r#"{"coordinator":{"dispatch_limit":25,"model_priority":{"worker":["openai/gpt-4o"]}},"supervisor":{"max_sessions":3}}"#;
         let s = DjinnSettings::from_db_value(raw);
         assert_eq!(s.dispatch_limit, Some(25));
-        assert_eq!(
-            s.model_priority.as_ref().unwrap().get("worker").unwrap(),
-            &vec!["openai/gpt-4o"]
-        );
+        assert_eq!(s.models.as_ref().unwrap(), &vec!["openai/gpt-4o"]);
         // Legacy scalar max_sessions is ignored (we only migrate map form)
         assert!(s.max_sessions.is_none());
     }
@@ -184,7 +172,7 @@ mod tests {
     fn defaults_are_correct() {
         let s = DjinnSettings::default();
         assert_eq!(s.dispatch_limit_or_default(), 50);
-        assert!(s.model_priority_or_default().is_empty());
+        assert!(s.models_or_default().is_empty());
         assert!(s.max_sessions_or_default().is_empty());
     }
 

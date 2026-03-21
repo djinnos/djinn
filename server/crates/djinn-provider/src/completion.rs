@@ -202,19 +202,10 @@ pub async fn resolve_memory_provider(db: &Database) -> Result<Box<dyn LlmProvide
         .unwrap_or_default();
     let settings = DjinnSettings::from_db_value(&settings_raw);
 
-    // 1. Explicit memory_model setting.
-    // 2. Fall back to first model from model_priority.
     let model_id = settings
-        .memory_model
-        .clone()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            settings
-                .model_priority_or_default()
-                .into_values()
-                .flat_map(|models| models.into_iter())
-                .next()
-        })
+        .models_or_default()
+        .into_iter()
+        .next()
         .ok_or_else(|| {
             anyhow!("no model configured — add a model in Settings → Model Configuration")
         })?;

@@ -1,28 +1,22 @@
-import { useMemo, useRef, useState } from "react";
-import { AgentRole, ModelPriorityItem, ProviderModel } from "@/api/settings";
-import { UnifiedModelEntry } from "@/stores/settingsStore";
+import { useMemo, useState } from "react";
+import { ProviderModel } from "@/api/settings";
+import { ModelEntry } from "@/stores/settingsStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
-
-const ROLE_LABELS: Record<AgentRole, string> = {
-  worker: "W",
-  reviewer: "R",
-  lead: "L",
-  planner: "P",
-  architect: "A",
-};
-
-const ROLE_FULL_LABELS: Record<AgentRole, string> = {
-  worker: "Worker",
-  reviewer: "Reviewer",
-  lead: "Lead",
-  planner: "Planner",
-  architect: "Architect",
-};
-
-const ALL_ROLES: AgentRole[] = ["worker", "reviewer", "lead", "planner", "architect"];
+import {
+  Combobox,
+  ComboboxCollection,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxGroup,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxLabel,
+  ComboboxList,
+  ComboboxSeparator,
+} from "@/components/ui/combobox";
 
 function ModelPicker({
   availableModels,
@@ -33,86 +27,72 @@ function ModelPicker({
   onSelect: (model: ProviderModel) => void;
   placeholder?: string;
 }) {
-  const [query, setQuery] = useState("");
-  const [open, setOpen] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const [value, setValue] = useState<string | null>(null);
 
-  const filtered = useMemo(() => {
-    if (!query.trim()) return availableModels;
-    const q = query.toLowerCase();
-    return availableModels.filter(
-      (m) =>
-        m.name.toLowerCase().includes(q) ||
-        m.provider_id.toLowerCase().includes(q) ||
-        m.id.toLowerCase().includes(q),
-    );
-  }, [availableModels, query]);
+  const groups = useMemo(() => {
+    const map = new Map<string, ProviderModel[]>();
+    for (const m of availableModels) {
+      if (!map.has(m.provider_id)) map.set(m.provider_id, []);
+      map.get(m.provider_id)!.push(m);
+    }
+    return Array.from(map.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([provider, items]) => ({
+        provider,
+        items: items.slice().sort((a, b) => a.name.localeCompare(b.name)),
+      }));
+  }, [availableModels]);
 
-  const handleSelect = (model: ProviderModel) => {
-    onSelect(model);
-    setQuery("");
-    setOpen(false);
-  };
-
-  const handleBlur = (e: React.FocusEvent) => {
-    // Don't close if focus moves within the container
-    if (containerRef.current?.contains(e.relatedTarget)) return;
-    setOpen(false);
+  const handleValueChange = (val: string | null) => {
+    if (!val) return;
+    const model = availableModels.find((m) => `${m.provider_id}/${m.id}` === val);
+    if (model) {
+      onSelect(model);
+      setTimeout(() => setValue(null), 0);
+    }
   };
 
   return (
-    <div ref={containerRef} className="relative flex gap-2" onBlur={handleBlur}>
-      <Input
-        ref={inputRef}
-        placeholder={placeholder}
-        value={query}
-        onChange={(e) => {
-          setQuery(e.target.value);
-          setOpen(true);
-        }}
-        onFocus={() => setOpen(true)}
-      />
-      {open && (
-        <div className="absolute top-full left-0 right-0 z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border bg-popover shadow-md">
-          {filtered.length === 0 ? (
-            <div className="p-3 text-center text-sm text-muted-foreground">
-              No models found.
-            </div>
-          ) : (
-            filtered.map((m) => (
-              <button
-                key={`${m.provider_id}::${m.id}`}
-                type="button"
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent hover:text-accent-foreground"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => handleSelect(m)}
-              >
-                <span className="font-medium">{m.name}</span>
-                <span className="text-xs text-muted-foreground">{m.provider_id}</span>
-              </button>
-            ))
+    <div className="w-full">
+    <Combobox items={groups} value={value} onValueChange={handleValueChange}>
+      <ComboboxInput placeholder={placeholder} showClear={false} className="w-full" />
+      <ComboboxContent>
+        <ComboboxEmpty>No models found.</ComboboxEmpty>
+        <ComboboxList>
+          {(group, index) => (
+            <ComboboxGroup key={group.provider} items={group.items}>
+              <ComboboxLabel>{group.provider}</ComboboxLabel>
+              <ComboboxCollection>
+                {(item) => (
+                  <ComboboxItem
+                    key={`${item.provider_id}/${item.id}`}
+                    value={`${item.provider_id}/${item.id}`}
+                  >
+                    {item.name}
+                  </ComboboxItem>
+                )}
+              </ComboboxCollection>
+              {index < groups.length - 1 && <ComboboxSeparator />}
+            </ComboboxGroup>
           )}
-        </div>
-      )}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
     </div>
   );
 }
 
 interface AgentConfigProps {
-  models: UnifiedModelEntry[];
+  models: ModelEntry[];
   availableModels: ProviderModel[];
-  memoryModel: string | null;
   isLoading: boolean;
   isSaving: boolean;
   error: string | null;
   hasUnsavedChanges: boolean;
-  onAddModel: (model: ModelPriorityItem) => void;
+  onAddModel: (model: { model: string; provider: string }) => void;
   onRemoveModel: (index: number) => void;
   onReorderModels: (fromIndex: number, toIndex: number) => void;
-  onToggleRole: (index: number, role: AgentRole) => void;
   onUpdateMaxSessions: (index: number, maxConcurrent: number) => void;
-  onSetMemoryModel: (modelId: string | null) => void;
   onDismissError: () => void;
   onSave: () => void;
 }
@@ -120,7 +100,6 @@ interface AgentConfigProps {
 export function AgentConfig({
   models,
   availableModels,
-  memoryModel,
   isLoading,
   isSaving,
   error,
@@ -128,9 +107,7 @@ export function AgentConfig({
   onAddModel,
   onRemoveModel,
   onReorderModels,
-  onToggleRole,
   onUpdateMaxSessions,
-  onSetMemoryModel,
   onDismissError,
   onSave,
 }: AgentConfigProps) {
@@ -183,7 +160,7 @@ export function AgentConfig({
             <div>
               <h3 className="text-lg font-semibold">Model Configuration</h3>
               <p className="text-sm text-muted-foreground">
-                Add models, set session limits, and toggle which agents can use each model. Drag to reorder priority.
+                Add models and set max concurrent sessions. Drag to reorder priority.
               </p>
             </div>
             {hasUnsavedChanges && (
@@ -198,17 +175,6 @@ export function AgentConfig({
             availableModels={availableModels}
             onSelect={(m) => onAddModel({ model: m.id, provider: m.provider_id })}
           />
-
-          {/* Role Legend */}
-          <div className="flex items-center gap-4 text-xs text-muted-foreground">
-            {ALL_ROLES.map((role) => (
-              <span key={role}>
-                <span className="font-semibold text-foreground">{ROLE_LABELS[role]}</span>
-                {" = "}
-                {ROLE_FULL_LABELS[role]}
-              </span>
-            ))}
-          </div>
 
           {/* Model List */}
           {models.length === 0 ? (
@@ -250,29 +216,6 @@ export function AgentConfig({
                       <div className="text-xs text-muted-foreground">{entry.provider}</div>
                     </div>
 
-                    {/* Agent Role Toggles */}
-                    <div className="flex items-center gap-1 shrink-0">
-                      {ALL_ROLES.map((role) => {
-                        const enabled = entry.enabledRoles.includes(role);
-                        return (
-                          <button
-                            key={role}
-                            type="button"
-                            title={`${enabled ? "Disable" : "Enable"} for ${ROLE_FULL_LABELS[role]}`}
-                            onClick={() => onToggleRole(index, role)}
-                            className={cn(
-                              "flex h-7 min-w-[28px] items-center justify-center rounded px-1.5 text-xs font-semibold transition-colors",
-                              enabled
-                                ? "bg-primary text-primary-foreground"
-                                : "bg-muted text-muted-foreground hover:bg-muted/80",
-                            )}
-                          >
-                            {ROLE_LABELS[role]}
-                          </button>
-                        );
-                      })}
-                    </div>
-
                     {/* Max Sessions */}
                     <div className="flex items-center gap-2 shrink-0">
                       <Label className="text-xs text-muted-foreground whitespace-nowrap">Max:</Label>
@@ -308,44 +251,6 @@ export function AgentConfig({
               ))}
             </div>
           )}
-
-          {/* Memory Model */}
-          <div className="border-t pt-6 space-y-3">
-            <div>
-              <h3 className="text-lg font-semibold">Memory Model</h3>
-              <p className="text-sm text-muted-foreground">
-                Model used for knowledge extraction and summarisation after sessions complete.
-                Defaults to the first agent model above if not set.
-              </p>
-            </div>
-
-            {memoryModel ? (
-              <div className="flex items-center gap-3 rounded-md border bg-card p-3">
-                <div className="min-w-0 flex-1">
-                  <div className="font-medium truncate">
-                    {memoryModel.includes("/") ? memoryModel.split("/").slice(1).join("/") : memoryModel}
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    {memoryModel.includes("/") ? memoryModel.split("/")[0] : "unknown"}
-                  </div>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => onSetMemoryModel(null)}
-                  className="h-8 shrink-0 text-xs text-muted-foreground"
-                >
-                  Clear
-                </Button>
-              </div>
-            ) : (
-              <ModelPicker
-                availableModels={availableModels}
-                onSelect={(m) => onSetMemoryModel(m.id)}
-                placeholder="Select memory model..."
-              />
-            )}
-          </div>
         </div>
       )}
     </div>

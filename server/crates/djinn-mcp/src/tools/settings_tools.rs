@@ -31,21 +31,11 @@ pub struct SettingsSetParams {
     /// Maximum number of tasks to dispatch per cycle. Omit to keep current value.
     #[schemars(with = "Option<i64>")]
     pub dispatch_limit: Option<u32>,
-    /// Ordered model list for the 'worker' role (e.g. ["chatgpt_codex/gpt-5.3-codex"]). Omit to keep current value.
-    pub model_priority_worker: Option<Vec<String>>,
-    /// Ordered model list for the 'reviewer' role. Omit to keep current value.
-    pub model_priority_reviewer: Option<Vec<String>>,
-    /// Ordered model list for the 'lead' role. Omit to keep current value.
-    pub model_priority_lead: Option<Vec<String>>,
-    /// Ordered model list for the 'planner' role. Omit to keep current value.
-    pub model_priority_planner: Option<Vec<String>>,
-    /// Ordered model list for the 'architect' role. Omit to keep current value.
-    pub model_priority_architect: Option<Vec<String>>,
-    /// Per-model concurrent session caps (e.g. {"chatgpt_codex/gpt-5.3-codex": 4}). Omit to keep current value.
+    /// Ordered list of models available to all agents (e.g. ["openai/gpt-4o"]). Omit to keep current value.
+    pub models: Option<Vec<String>>,
+    /// Per-model concurrent session caps (e.g. {"openai/gpt-4o": 4}). Omit to keep current value.
     #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
-    /// Model used for memory operations (knowledge extraction, summarisation). Format: "provider/model". Set to "" to clear. Omit to keep current value.
-    pub memory_model: Option<String>,
     /// Langfuse public key for LLM observability (e.g. "pk-lf-..."). Set to "" to disable. Omit to keep current value.
     pub langfuse_public_key: Option<String>,
     /// Langfuse secret key for LLM observability (e.g. "sk-lf-..."). Set to "" to disable. Omit to keep current value.
@@ -121,7 +111,7 @@ impl DjinnMcpServer {
     }
 
     #[tool(
-        description = "Patch runtime server settings. Only provided fields are updated; omitted fields keep their current values. Use individual model_priority_* params to set per-role model lists without overwriting other roles."
+        description = "Patch runtime server settings. Only provided fields are updated; omitted fields keep their current values."
     )]
     pub async fn settings_set(
         &self,
@@ -137,41 +127,11 @@ impl DjinnMcpServer {
         if let Some(v) = p.dispatch_limit {
             settings.dispatch_limit = Some(v);
         }
+        if let Some(v) = p.models {
+            settings.models = Some(v);
+        }
         if let Some(v) = p.max_sessions {
             settings.max_sessions = Some(v);
-        }
-        if let Some(v) = p.model_priority_worker {
-            settings
-                .model_priority
-                .get_or_insert_with(HashMap::new)
-                .insert("worker".to_string(), v);
-        }
-        if let Some(v) = p.model_priority_reviewer {
-            settings
-                .model_priority
-                .get_or_insert_with(HashMap::new)
-                .insert("reviewer".to_string(), v);
-        }
-        if let Some(v) = p.model_priority_lead {
-            settings
-                .model_priority
-                .get_or_insert_with(HashMap::new)
-                .insert("lead".to_string(), v);
-        }
-        if let Some(v) = p.model_priority_planner {
-            settings
-                .model_priority
-                .get_or_insert_with(HashMap::new)
-                .insert("planner".to_string(), v);
-        }
-        if let Some(v) = p.model_priority_architect {
-            settings
-                .model_priority
-                .get_or_insert_with(HashMap::new)
-                .insert("architect".to_string(), v);
-        }
-        if let Some(v) = p.memory_model {
-            settings.memory_model = if v.is_empty() { None } else { Some(v) };
         }
         if let Some(v) = p.langfuse_public_key {
             settings.langfuse_public_key = if v.is_empty() { None } else { Some(v) };

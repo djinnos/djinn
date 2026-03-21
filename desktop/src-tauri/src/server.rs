@@ -83,11 +83,25 @@ pub async fn spawn_server<R: Runtime>(
     // Get the daemon.json path
     let daemon_json_path = get_daemon_json_path(app)?;
 
-    // Remove stale daemon.json from previous runs.
-    // Keep it when it points to a live process so an already-running daemon can be reused.
+    // If daemon.json exists and points to a live, healthy process, reuse it directly.
     if daemon_json_path.exists() {
         if let Some(daemon_info) = read_daemon_info(&daemon_json_path) {
-            if !is_process_running(daemon_info.pid) {
+            if is_process_running(daemon_info.pid) {
+                if health_check(daemon_info.port).await {
+                    log::info!(
+                        "Existing healthy server found on port {} (pid {}); skipping spawn",
+                        daemon_info.port,
+                        daemon_info.pid
+                    );
+                    let state = app.state::<Mutex<ServerState>>();
+                    if let Ok(mut state) = state.lock() {
+                        state.port = Some(daemon_info.port);
+                        state.mark_healthy();
+                    }
+                    return Ok(daemon_info.port);
+                }
+            } else {
+                // Stale daemon.json — remove it
                 let _ = std::fs::remove_file(&daemon_json_path);
             }
         }

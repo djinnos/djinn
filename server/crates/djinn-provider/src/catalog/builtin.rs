@@ -25,6 +25,9 @@ pub struct BuiltinProvider {
     /// given parent in the catalog response and this entry is hidden.
     /// Internally the provider still exists for dispatch/model sourcing.
     pub merge_into: Option<&'static str>,
+    /// If true, this provider is used for authentication only (not model
+    /// dispatch) and should be excluded from the model provider catalog.
+    pub auth_only: bool,
 }
 
 /// All providers Djinn can use out of the box.
@@ -41,6 +44,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         oauth_keys: &[],
         docs_url: "https://docs.anthropic.com",
         merge_into: None,
+        auth_only: false,
     },
     BuiltinProvider {
         id: "openai",
@@ -49,6 +53,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         oauth_keys: &[],
         docs_url: "https://platform.openai.com/docs",
         merge_into: None,
+        auth_only: false,
     },
     BuiltinProvider {
         id: "google",
@@ -57,6 +62,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         oauth_keys: &[],
         docs_url: "https://ai.google.dev/docs",
         merge_into: None,
+        auth_only: false,
     },
     // OAuth-only provider whose capabilities are folded into "openai" in the
     // catalog.  Internally still a distinct provider for dispatch & models.
@@ -67,6 +73,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         oauth_keys: &["CHATGPT_CODEX_TOKEN"],
         docs_url: "https://platform.openai.com/docs",
         merge_into: Some("openai"),
+        auth_only: false,
     },
     BuiltinProvider {
         id: "githubcopilot",
@@ -75,6 +82,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         oauth_keys: &["GITHUB_COPILOT_TOKEN"],
         docs_url: "https://docs.github.com/en/copilot",
         merge_into: None,
+        auth_only: false,
     },
     BuiltinProvider {
         id: "github_app",
@@ -83,6 +91,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         oauth_keys: &["GITHUB_APP_TOKEN"],
         docs_url: "https://docs.github.com/en/apps",
         merge_into: None,
+        auth_only: true,
     },
     BuiltinProvider {
         id: "gcp_vertex_ai",
@@ -91,6 +100,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         oauth_keys: &[],
         docs_url: "https://cloud.google.com/vertex-ai/docs",
         merge_into: None,
+        auth_only: false,
     },
     BuiltinProvider {
         id: "aws_bedrock",
@@ -99,6 +109,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         oauth_keys: &[],
         docs_url: "https://docs.aws.amazon.com/bedrock/",
         merge_into: None,
+        auth_only: false,
     },
     BuiltinProvider {
         id: "azure_openai",
@@ -107,6 +118,7 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         oauth_keys: &[],
         docs_url: "https://learn.microsoft.com/en-us/azure/ai-services/openai/",
         merge_into: None,
+        auth_only: false,
     },
 ];
 
@@ -151,6 +163,12 @@ pub fn all_oauth_keys_for_provider(provider_id: &str) -> Vec<String> {
 /// Check whether a provider is a built-in (not custom/user-added).
 pub fn is_builtin_provider(provider_id: &str) -> bool {
     find_builtin_provider(provider_id).is_some()
+}
+
+/// Check whether a provider is auth-only (used for authentication, not model dispatch).
+/// Auth-only providers should be excluded from model provider catalogs.
+pub fn is_auth_only_provider(provider_id: &str) -> bool {
+    find_builtin_provider(provider_id).map_or(false, |p| p.auth_only)
 }
 
 /// Strip non-alphanumeric chars and lowercase for fuzzy ID matching.

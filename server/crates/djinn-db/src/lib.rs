@@ -9,8 +9,8 @@ pub use error::{DbError as Error, DbResult as Result};
 pub use repositories::{
     agent_role::{
         AgentRoleCreateInput, AgentRoleListQuery, AgentRoleListResult, AgentRoleMetrics,
-        AgentRoleRepository, AgentRoleUpdateInput, PendingAmendmentEvaluation, VALID_BASE_ROLES,
-        WindowedRoleMetrics,
+        AgentRoleRepository, AgentRoleUpdateInput, LearnedPromptHistoryEntry,
+        PendingAmendmentEvaluation, VALID_BASE_ROLES, WindowedRoleMetrics,
     },
     epic::{
         EpicCountQuery, EpicCreateInput, EpicListQuery, EpicListResult, EpicRepository,

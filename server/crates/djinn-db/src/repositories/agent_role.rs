@@ -93,6 +93,16 @@ pub struct WindowedRoleMetrics {
     pub avg_tokens: f64,
 }
 
+/// One row from `learned_prompt_history` for a role.
+pub struct LearnedPromptHistoryEntry {
+    pub id: String,
+    pub proposed_text: String,
+    pub action: String,
+    pub metrics_before: Option<String>,
+    pub metrics_after: Option<String>,
+    pub created_at: String,
+}
+
 pub struct AgentRoleRepository {
     db: Database,
     events: EventBus,
@@ -101,6 +111,73 @@ pub struct AgentRoleRepository {
 impl AgentRoleRepository {
     pub fn new(db: Database, events: EventBus) -> Self {
         Self { db, events }
+    }
+
+    /// Return all roles across all projects, ordered by project_id, base_role, name.
+    pub async fn list_all(&self) -> Result<Vec<AgentRole>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, AgentRole>(
+            "SELECT id, project_id, name, base_role, description,
+                    system_prompt_extensions, model_preference, verification_command,
+                    mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
+             FROM agent_roles
+             ORDER BY project_id ASC, is_default DESC, base_role ASC, name ASC",
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Return the full `learned_prompt_history` for a role, newest first.
+    pub async fn get_history(&self, role_id: &str) -> Result<Vec<LearnedPromptHistoryEntry>> {
+        self.db.ensure_initialized().await?;
+        let rows: Vec<(String, String, String, Option<String>, Option<String>, String)> =
+            sqlx::query_as(
+                "SELECT id, proposed_text, action, metrics_before, metrics_after, created_at
+                 FROM learned_prompt_history
+                 WHERE role_id = ?1
+                 ORDER BY created_at DESC",
+            )
+            .bind(role_id)
+            .fetch_all(self.db.pool())
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, proposed_text, action, metrics_before, metrics_after, created_at)| {
+                    LearnedPromptHistoryEntry {
+                        id,
+                        proposed_text,
+                        action,
+                        metrics_before,
+                        metrics_after,
+                        created_at,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    /// Set a role's `learned_prompt` to NULL and emit an update event.
+    pub async fn clear_learned_prompt(&self, role_id: &str) -> Result<AgentRole> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE agent_roles
+             SET learned_prompt = NULL,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(role_id)
+        .execute(self.db.pool())
+        .await?;
+
+        let role = self
+            .get(role_id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("agent_role not found: {role_id}")))?;
+        self.events
+            .send(DjinnEventEnvelope::agent_role_updated(&role));
+        Ok(role)
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<AgentRole>> {

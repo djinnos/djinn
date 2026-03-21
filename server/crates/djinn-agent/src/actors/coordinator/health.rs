@@ -185,17 +185,15 @@ pub(super) async fn run_project_health_check(
         // For health checks there is no task/role, so no override; fall back to
         // full-project commands (resolve_scoped_commands will use the full
         // verification list when no rules are configured or nothing matches).
-        let scoped_commands =
-            crate::verification::scoped::resolve_scoped_commands(&wt_path, &target_branch, None);
-        let verification = crate::verification::service::verify_commit(
-            &project_id,
-            &commit_sha,
+        let scoped_commands = crate::verification::scoped::resolve_scoped_commands(
             &wt_path,
-            &db,
-            &scoped_commands,
-        )
-        .await
-        .map_err(|e| format!("health-check verification error: {e}"))?;
+            &target_branch,
+            None,
+        );
+        let verification =
+            crate::verification::service::verify_commit(&project_id, &commit_sha, &wt_path, &db, &scoped_commands)
+                .await
+                .map_err(|e| format!("health-check verification error: {e}"))?;
 
         for r in &verification.setup_results {
             let _ = events_tx.send(DjinnEventEnvelope::verification_step(
@@ -449,7 +447,6 @@ mod tests {
                 "task",
                 0,
                 "",
-                None,
                 None,
             )
             .await

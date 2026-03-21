@@ -1576,16 +1576,16 @@ mod settings_tools {
     }
 
     #[tokio::test]
-    async fn settings_set_rejects_unconnected_model_priority_provider() {
+    async fn settings_set_rejects_unconnected_model_provider() {
         let app = create_test_app();
         let session_id = initialize_mcp_session(&app).await;
 
-        // Validation rejects model_priority referencing providers with no credentials.
+        // Validation rejects models referencing providers with no credentials.
         let res = mcp_call_tool(
             &app,
             &session_id,
             "settings_set",
-            json!({"model_priority_worker": ["no-such-provider/some-model"]}),
+            json!({"models": ["no-such-provider/some-model"]}),
         )
         .await;
         assert_eq!(res["ok"], false);

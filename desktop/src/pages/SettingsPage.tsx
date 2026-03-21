@@ -14,9 +14,9 @@ import { AgentConfig } from '@/components/AgentConfig';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
+import { ProviderOnboarding } from '@/components/ProviderOnboarding';
 import { selectDirectory } from '@/tauri/commands';
 import { toast } from 'sonner';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 
 type SettingsCategory = 'providers' | 'projects' | 'models';
 
@@ -99,10 +99,23 @@ function ProvidersSettings() {
     );
   }
 
+  if (configuredProviders.length === 0 && !isAddOpen) {
+    return (
+      <ProviderOnboarding
+        oauthInProgress={oauthInProgress}
+        onConnectChatGPT={() => void connectOAuth('openai')}
+        onOpenCatalog={(filter) => {
+          setIsAddOpen(true);
+          if (filter) setCatalogFilter(filter);
+        }}
+      />
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4 flex-1 min-h-0">
       <div className="flex items-center justify-between shrink-0">
-        <h2 className="text-lg font-semibold">Configured Providers</h2>
+        <h2 className="text-lg font-semibold text-foreground">Configured Providers</h2>
         <Button onClick={() => { setIsAddOpen((v) => !v); if (isAddOpen) resetAddFlow(); }}>{isAddOpen ? 'Close' : 'Add Provider'}</Button>
       </div>
 
@@ -445,7 +458,7 @@ function ProjectsSettings() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold">Projects</h2>
+          <h2 className="text-lg font-semibold text-foreground">Projects</h2>
           <p className="text-sm text-muted-foreground">Registered projects and defaults.</p>
         </div>
         <Button onClick={() => void handleAddProject()} disabled={isAdding}>
@@ -544,19 +557,6 @@ export function SettingsPage() {
 
   return (
     <div className="flex h-full flex-col overflow-hidden p-6">
-      <div
-        className="mb-6 shrink-0 cursor-default select-none"
-        onMouseDown={(e) => { if (e.button === 0 && e.target === e.currentTarget) void getCurrentWindow().startDragging(); }}
-      >
-        <h1
-          className="text-2xl font-bold text-foreground"
-          onMouseDown={(e) => { if (e.button === 0) void getCurrentWindow().startDragging(); }}
-        >Settings</h1>
-        <p
-          className="mt-1 text-muted-foreground"
-          onMouseDown={(e) => { if (e.button === 0) void getCurrentWindow().startDragging(); }}
-        >Configure your workspace preferences</p>
-      </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-6 md:flex-row">
         <aside className="md:w-56 md:shrink-0">
@@ -580,7 +580,7 @@ export function SettingsPage() {
           </nav>
         </aside>
 
-        <section className="min-h-0 min-w-0 flex-1 flex flex-col overflow-y-auto pb-6">
+        <section className="min-h-0 min-w-0 flex-1 flex flex-col overflow-x-hidden overflow-y-auto pb-6">
           {category === 'providers' && <ProvidersSettings />}
           {category === 'projects' && <ProjectsSettings />}
           {category === 'models' && <AgentConfig {...agentConfig} />}
