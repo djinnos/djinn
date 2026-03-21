@@ -574,13 +574,6 @@ async fn call_request_lead(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    #[derive(Deserialize)]
-    struct RequestPmParams {
-        id: String,
-        reason: String,
-        suggested_breakdown: Option<String>,
-    }
-
     let p: RequestPmParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
 
@@ -664,12 +657,6 @@ async fn call_request_architect(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    #[derive(Deserialize)]
-    struct RequestArchitectParams {
-        id: String,
-        reason: String,
-    }
-
     let p: RequestArchitectParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
 

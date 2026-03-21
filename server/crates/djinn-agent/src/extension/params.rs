@@ -1,6 +1,19 @@
 use serde::Deserialize;
 
 #[derive(Deserialize)]
+pub(super) struct RequestPmParams {
+    pub(super) id: String,
+    pub(super) reason: String,
+    pub(super) suggested_breakdown: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct RequestArchitectParams {
+    pub(super) id: String,
+    pub(super) reason: String,
+}
+
+#[derive(Deserialize)]
 pub(super) struct TaskListParams {
     pub(super) status: Option<String>,
     pub(super) issue_type: Option<String>,
