@@ -217,7 +217,9 @@ export function AgentConfig({
                     </div>
                     {/* Model info */}
                     <div className="min-w-0 flex-1">
-                      <div className="font-semibold truncate">{entry.model}</div>
+                      <div className="font-semibold truncate">
+                        {availableModels.find((m) => m.id === entry.model && (m.provider_id ?? m.provider) === entry.provider)?.name ?? entry.model}
+                      </div>
                       <div className="text-xs text-muted-foreground/60">{formatProvider(entry.provider)}</div>
                     </div>
                     {/* Max sessions */}
