@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 /// GitHub OAuth App configuration
-pub const GITHUB_CLIENT_ID: &str = "Iv23livjPjcHXVzAU7sc";
+pub const GITHUB_CLIENT_ID: &str = "Ov23liBIL080Vt6WJs69";
 pub const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 pub const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 pub const GITHUB_API_URL: &str = "https://api.github.com";
@@ -75,18 +75,21 @@ pub async fn start_device_flow() -> Result<DeviceCodeResponse, String> {
     let resp = client
         .post(DEVICE_CODE_URL)
         .header("Accept", "application/json")
-        .form(&[
-            ("client_id", GITHUB_CLIENT_ID),
-            ("scope", GITHUB_SCOPES),
-        ])
+        .form(&[("client_id", GITHUB_CLIENT_ID), ("scope", GITHUB_SCOPES)])
         .send()
         .await
         .map_err(|e| format!("Device code request failed: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_string());
-        return Err(format!("Device code endpoint returned {}: {}", status, body));
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable>".to_string());
+        return Err(format!(
+            "Device code endpoint returned {}: {}",
+            status, body
+        ));
     }
 
     resp.json::<DeviceCodeResponse>()
@@ -95,10 +98,7 @@ pub async fn start_device_flow() -> Result<DeviceCodeResponse, String> {
 }
 
 /// Poll GitHub for device flow authorization
-pub async fn poll_device_flow(
-    device_code: &str,
-    interval: u64,
-) -> Result<TokenResponse, String> {
+pub async fn poll_device_flow(device_code: &str, interval: u64) -> Result<TokenResponse, String> {
     let client = reqwest::Client::new();
     let poll_interval = std::time::Duration::from_secs(interval.max(5));
 
@@ -119,11 +119,17 @@ pub async fn poll_device_flow(
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_string());
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable>".to_string());
             return Err(format!("Token endpoint returned {}: {}", status, body));
         }
 
-        let body = resp.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read response: {}", e))?;
 
         // Try to parse as error first
         if let Ok(err_resp) = serde_json::from_str::<GitHubErrorResponse>(&body) {
@@ -170,7 +176,10 @@ pub async fn refresh_github_token(refresh_token: &str) -> Result<TokenResponse, 
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_string());
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable>".to_string());
         return Err(format!("Token refresh returned {}: {}", status, body));
     }
 
@@ -194,7 +203,10 @@ pub async fn fetch_github_user(access_token: &str) -> Result<GitHubUser, String>
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_string());
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable>".to_string());
         return Err(format!("GitHub /user returned {}: {}", status, body));
     }
 
@@ -242,7 +254,8 @@ fn touch_hint_file() -> Result<(), String> {
 fn delete_hint_file() -> Result<(), String> {
     let hint_path = token_hint_path()?;
     if hint_path.exists() {
-        fs::remove_file(&hint_path).map_err(|e| format!("Failed to remove token metadata file: {e}"))?;
+        fs::remove_file(&hint_path)
+            .map_err(|e| format!("Failed to remove token metadata file: {e}"))?;
     }
     Ok(())
 }
@@ -264,7 +277,9 @@ pub async fn retrieve_token() -> Result<Option<String>, String> {
     match entry.get_password() {
         Ok(token) => Ok(Some(token)),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("Failed to retrieve refresh token from keyring: {e}")),
+        Err(e) => Err(format!(
+            "Failed to retrieve refresh token from keyring: {e}"
+        )),
     }
 }
 
@@ -287,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_github_constants_are_set() {
-        assert_eq!(GITHUB_CLIENT_ID, "Iv23livjPjcHXVzAU7sc");
+        assert_eq!(GITHUB_CLIENT_ID, "Ov23liBIL080Vt6WJs69");
         assert!(DEVICE_CODE_URL.starts_with("https://github.com/"));
         assert!(ACCESS_TOKEN_URL.starts_with("https://github.com/"));
         assert!(GITHUB_API_URL.starts_with("https://api.github.com"));
