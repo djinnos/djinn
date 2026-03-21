@@ -128,10 +128,11 @@ function CommandItem({
   className,
   children,
   onSelect,
+  searchValue,
   ...props
-}: React.ComponentProps<"button"> & { onSelect?: () => void }) {
+}: React.ComponentProps<"button"> & { onSelect?: () => void; searchValue?: string }) {
   const { query } = useCommandContext();
-  const text = typeof children === "string" ? children : "";
+  const text = searchValue ?? (typeof children === "string" ? children : "");
   const visible = !query || text.toLowerCase().includes(query.toLowerCase());
 
   if (!visible) return null;

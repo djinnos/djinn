@@ -48,9 +48,9 @@ function ProvidersSettings() {
 
       <div className="border-t border-border" />
 
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between shrink-0">
-          <h2 className="text-lg font-semibold text-foreground">Providers</h2>
+          <h2 className="text-xl font-bold text-foreground">Providers</h2>
           <Button onClick={() => setIsAddOpen(true)}>Add Provider</Button>
         </div>
 
@@ -61,25 +61,27 @@ function ProvidersSettings() {
           onDone={() => void loadData()}
         />
 
-        <div className="space-y-2 shrink-0">
-          {configuredProviders.map((provider) => (
-            <div key={provider.id} className="flex items-center justify-between rounded-lg border border-border bg-card p-4">
-              <div>
-                <p className="font-medium">{provider.name}</p>
-                <p className="text-xs text-muted-foreground">Configured</p>
-              </div>
-              <ConfirmButton
-                title="Remove provider"
-                description={`Remove "${provider.name}" and its credentials?`}
-                confirmLabel="Remove"
-                onConfirm={() => removeProvider(provider.id)}
-                size="sm"
-              >
-                Remove
-              </ConfirmButton>
-            </div>
-          ))}
-          {configuredProviders.length === 0 && <p className="text-sm text-muted-foreground">No providers configured yet.</p>}
+        <div className="rounded-lg border border-border bg-card px-4 py-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm font-medium text-muted-foreground shrink-0">Connected:</span>
+            {configuredProviders.length === 0 ? (
+              <span className="text-sm text-muted-foreground">None yet.</span>
+            ) : (
+              configuredProviders.map((provider) => (
+                <ConfirmButton
+                  key={provider.id}
+                  title="Remove provider"
+                  description={`Remove "${provider.name}" and its credentials?`}
+                  confirmLabel="Remove"
+                  onConfirm={() => removeProvider(provider.id)}
+                  size="sm"
+                  variant="outline"
+                >
+                  {provider.name}
+                </ConfirmButton>
+              ))
+            )}
+          </div>
         </div>
       </div>
     </div>

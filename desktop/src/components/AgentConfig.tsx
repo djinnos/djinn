@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Sparkles } from "lucide-react";
 import { ProviderModel } from "@/api/settings";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -61,7 +62,7 @@ function ModelPicker({
 
   return (
     <Combobox items={groups} value={value} onValueChange={handleValueChange}>
-      <ComboboxInput placeholder="Search models..." showClear={false} className="w-full" />
+      <ComboboxInput placeholder="Search or add models..." showClear={false} className="w-full" />
       <ComboboxContent>
         <ComboboxEmpty>No models found.</ComboboxEmpty>
         <ComboboxList>
@@ -142,16 +143,18 @@ export function AgentConfig({
         </div>
       )}
 
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="text-lg font-semibold">Models</h3>
-          <p className="text-sm text-muted-foreground">Add models and drag to reorder priority.</p>
+          <h3 className="text-xl font-bold">Models</h3>
+          <p className="text-sm text-muted-foreground">Priority = top → bottom (fallback order)</p>
         </div>
-        {hasUnsavedChanges && (
-          <Button onClick={onSave} disabled={isSaving} size="sm">
-            {isSaving ? "Saving..." : "Save Changes"}
-          </Button>
-        )}
+        <div className="flex items-center gap-2 shrink-0">
+          {hasUnsavedChanges && (
+            <Button variant="outline" onClick={onSave} disabled={isSaving} size="sm">
+              {isSaving ? "Saving..." : "Save"}
+            </Button>
+          )}
+        </div>
       </div>
 
       {isLoading ? (
@@ -164,8 +167,8 @@ export function AgentConfig({
           />
 
           {models.length === 0 ? (
-            <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
-              No models configured. Add models from connected providers above.
+            <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
+              No models configured. Search above to add models.
             </div>
           ) : (
             <div className="space-y-2">
@@ -183,19 +186,24 @@ export function AgentConfig({
                     draggedItem === index && "opacity-50",
                   )}
                 >
-                  <div className="flex items-center gap-3 rounded-md border bg-card p-3">
-                    <div className="cursor-grab text-muted-foreground shrink-0">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <circle cx="9" cy="5" r="1" /><circle cx="9" cy="12" r="1" /><circle cx="9" cy="19" r="1" />
-                        <circle cx="15" cy="5" r="1" /><circle cx="15" cy="12" r="1" /><circle cx="15" cy="19" r="1" />
+                  <div className="flex items-center gap-3 rounded-lg border bg-card px-4 py-3">
+                    {/* Drag handle */}
+                    <div className="cursor-grab text-muted-foreground/40 shrink-0 select-none">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                        <circle cx="9" cy="5" r="1.5" /><circle cx="9" cy="12" r="1.5" /><circle cx="9" cy="19" r="1.5" />
+                        <circle cx="15" cy="5" r="1.5" /><circle cx="15" cy="12" r="1.5" /><circle cx="15" cy="19" r="1.5" />
                       </svg>
                     </div>
+                    {/* Sparkles icon */}
+                    <Sparkles className="h-4 w-4 text-muted-foreground/50 shrink-0" />
+                    {/* Model info */}
                     <div className="min-w-0 flex-1">
-                      <div className="font-medium truncate">{entry.model}</div>
-                      <div className="text-xs text-muted-foreground">{entry.provider}</div>
+                      <div className="font-semibold truncate">{entry.model}</div>
+                      <div className="text-sm text-muted-foreground">{entry.provider}</div>
                     </div>
+                    {/* Max sessions */}
                     <div className="flex items-center gap-2 shrink-0">
-                      <Label className="text-xs text-muted-foreground">Max:</Label>
+                      <Label className="text-sm text-muted-foreground">Max:</Label>
                       <Input
                         type="number"
                         min={1}
@@ -205,18 +213,17 @@ export function AgentConfig({
                           const v = parseInt(e.target.value, 10);
                           if (!isNaN(v) && v >= 1 && v <= 10) onUpdateMaxSessions(index, v);
                         }}
-                        className="w-16 h-8"
+                        className="w-16 h-9 text-center"
                       />
                     </div>
+                    {/* Remove */}
                     <Button
-                      variant="ghost"
+                      variant="outline"
                       size="sm"
                       onClick={() => onRemoveModel(index)}
-                      className="h-8 w-8 p-0 shrink-0"
+                      className="shrink-0"
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M18 6 6 18" /><path d="m6 6 12 12" />
-                      </svg>
+                      Remove
                     </Button>
                   </div>
                 </div>
