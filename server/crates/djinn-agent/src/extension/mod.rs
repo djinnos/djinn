@@ -1208,9 +1208,7 @@ async fn resolve_github_owner_repo(worktree_path: &Path) -> Result<(String, Stri
         .or_else(|| remote_url.strip_prefix("http://github.com/"))
         .map(|p| p.to_string());
 
-    let path = path.ok_or_else(|| {
-        format!("remote URL is not a GitHub URL: {remote_url}")
-    })?;
+    let path = path.ok_or_else(|| format!("remote URL is not a GitHub URL: {remote_url}"))?;
 
     let path = path.trim_end_matches(".git");
     let mut parts = path.splitn(2, '/');
@@ -1516,6 +1514,8 @@ async fn call_apply_patch(
     }))
 }
 
+/// Local parameter shape for the `lsp` tool. Kept next to `call_lsp` because it
+/// is only used by that handler and requires operation-specific validation.
 #[derive(Deserialize)]
 struct LspParams {
     operation: String,
@@ -1744,6 +1744,7 @@ fn task_to_value(t: &Task) -> serde_json::Value {
 
 // ── Lead-only tool params and handlers ────────────────────────────────────────
 
+/// Lead-only transition payload used exclusively by `call_task_transition`.
 #[derive(Deserialize)]
 struct TaskTransitionParams {
     id: String,
@@ -1755,16 +1756,19 @@ struct TaskTransitionParams {
     replacement_task_ids: Option<Vec<String>>,
 }
 
+/// Lead-only payload for deleting a task worktree branch.
 #[derive(Deserialize)]
 struct TaskDeleteBranchParams {
     id: String,
 }
 
+/// Lead-only payload for archiving a task activity log.
 #[derive(Deserialize)]
 struct TaskArchiveActivityParams {
     id: String,
 }
 
+/// Lead-only payload for resetting task reopen/continuation counters.
 #[derive(Deserialize)]
 struct TaskResetCountersParams {
     id: String,
@@ -1991,6 +1995,7 @@ async fn call_task_reset_counters(
     )
 }
 
+/// Lead-only payload for interrupting a paused session.
 #[derive(Deserialize)]
 struct TaskKillSessionParams {
     id: String,
@@ -2202,5 +2207,4 @@ mod tests {
         let normalized = resolve_path("./src/../Cargo.toml", base);
         assert_eq!(normalized, PathBuf::from("/tmp/worktree/Cargo.toml"));
     }
-
 }

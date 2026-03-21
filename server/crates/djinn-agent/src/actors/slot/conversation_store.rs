@@ -45,4 +45,3 @@ pub(crate) async fn load(session_record_id: &str) -> anyhow::Result<Option<Conve
     );
     Ok(Some(conversation))
 }
-

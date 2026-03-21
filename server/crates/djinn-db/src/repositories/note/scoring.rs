@@ -13,8 +13,8 @@ const MIN_ASSOCIATION_WEIGHT: f64 = 0.05;
 pub const CONFIDENCE_FLOOR: f64 = 0.025;
 pub const CONFIDENCE_CEILING: f64 = 0.975;
 
-#[cfg(test)]
-pub const TASK_SUCCESS: f64 = 0.65;
+#[cfg_attr(not(test), expect(dead_code, reason = "Used by intra-crate tests in note::mod and scoring::tests"))]
+pub(crate) const TASK_SUCCESS: f64 = 0.65;
 pub const CO_ACCESS_HIGH: f64 = 0.65;
 pub const STALE_CITATION: f64 = 0.3;
 pub const USER_CONFIRM: f64 = 0.95;

@@ -141,7 +141,8 @@ pub(super) struct MemoryListParams {
 pub(super) struct MemoryBuildContextParams {
     pub(super) project: Option<String>,
     pub(super) url: String,
-    /// Link traversal depth (default 1). Currently unused at the dispatch layer.
+    /// Link traversal depth (default 1). Parsed for forward compatibility even
+    /// though the current dispatch layer does not inspect it yet.
     pub(super) _depth: Option<i64>,
     pub(super) max_related: Option<i64>,
     pub(super) budget: Option<i64>,

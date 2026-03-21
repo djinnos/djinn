@@ -866,12 +866,7 @@ impl GitHubApiClient {
     /// Uses `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs`.
     /// GitHub returns a 302 redirect to a temporary download URL; reqwest
     /// follows the redirect automatically.
-    pub async fn get_job_logs(
-        &self,
-        owner: &str,
-        repo: &str,
-        job_id: u64,
-    ) -> Result<String> {
+    pub async fn get_job_logs(&self, owner: &str, repo: &str, job_id: u64) -> Result<String> {
         let url = format!(
             "{}/repos/{}/{}/actions/jobs/{}/logs",
             self.base_url, owner, repo, job_id
