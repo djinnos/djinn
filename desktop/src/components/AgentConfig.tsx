@@ -11,6 +11,7 @@ const ROLE_LABELS: Record<AgentRole, string> = {
   reviewer: "R",
   lead: "L",
   planner: "P",
+  architect: "A",
 };
 
 const ROLE_FULL_LABELS: Record<AgentRole, string> = {
@@ -18,9 +19,10 @@ const ROLE_FULL_LABELS: Record<AgentRole, string> = {
   reviewer: "Reviewer",
   lead: "Lead",
   planner: "Planner",
+  architect: "Architect",
 };
 
-const ALL_ROLES: AgentRole[] = ["worker", "reviewer", "lead", "planner"];
+const ALL_ROLES: AgentRole[] = ["worker", "reviewer", "lead", "planner", "architect"];
 
 function ModelPicker({
   availableModels,
@@ -339,7 +341,7 @@ export function AgentConfig({
             ) : (
               <ModelPicker
                 availableModels={availableModels}
-                onSelect={(m) => onSetMemoryModel(`${m.provider_id}/${m.id}`)}
+                onSelect={(m) => onSetMemoryModel(m.id)}
                 placeholder="Select memory model..."
               />
             )}

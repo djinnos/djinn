@@ -76,6 +76,41 @@ describe('AgentConfig', () => {
     expect(within(root).getByRole('button', { name: /Claude Sonnet/i })).toBeInTheDocument();
   });
 
+  it('sets memory model with model id directly (no double prefix)', async () => {
+    const onSetMemoryModel = vi.fn();
+    const { container } = render(
+      <AgentConfig
+        models={[]}
+        availableModels={[
+          { provider_id: 'openai', id: 'openai/gpt-5.4', name: 'GPT 5.4', tool_call: true, reasoning: false, attachment: false, context_window: 128000, output_limit: 16384, pricing: { input_per_m: 0, output_per_m: 0 } },
+        ]}
+        isLoading={false}
+        isSaving={false}
+        error={null}
+        hasUnsavedChanges={false}
+        onAddModel={vi.fn()}
+        onRemoveModel={vi.fn()}
+        onReorderModels={vi.fn()}
+        onToggleRole={vi.fn()}
+        onUpdateMaxSessions={vi.fn()}
+        memoryModel={null}
+        onSetMemoryModel={onSetMemoryModel}
+        onDismissError={vi.fn()}
+        onSave={vi.fn()}
+      />,
+    );
+
+    const root = container.firstElementChild as HTMLElement;
+    const memoryInput = within(root).getByPlaceholderText('Select memory model...');
+    fireEvent.focus(memoryInput);
+
+    const modelButton = await screen.findByRole('button', { name: /GPT 5.4/i });
+    fireEvent.click(modelButton);
+
+    // Should pass model id directly, NOT "openai/openai/gpt-5.4"
+    expect(onSetMemoryModel).toHaveBeenCalledWith('openai/gpt-5.4');
+  });
+
   it('disables save while saving', () => {
     render(
       <AgentConfig
