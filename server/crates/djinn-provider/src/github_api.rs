@@ -10,6 +10,7 @@
 //! - [`GitHubApiClient::list_pull_request_reviews`] — list inline review comments
 //! - [`GitHubApiClient::list_pr_review_states`] — list top-level review states (APPROVED, CHANGES_REQUESTED, etc.)
 //! - [`GitHubApiClient::fetch_pr_review_feedback`] — aggregate CHANGES_REQUESTED reviews + inline comments into [`PrReviewFeedback`]
+//! - [`GitHubApiClient::get_check_run_annotations`] — fetch error annotations for a CI check run
 //! - [`GitHubApiClient::re_request_review`] — re-request review from previous reviewers after fixup commits
 //!
 //! # Token lifecycle
@@ -91,6 +92,17 @@ pub struct CheckRun {
     pub status: String,
     pub conclusion: Option<String>,
     pub html_url: String,
+}
+
+/// A single annotation attached to a check run (error/warning/notice).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckAnnotation {
+    pub path: String,
+    pub start_line: u64,
+    pub end_line: u64,
+    pub annotation_level: String,
+    pub message: String,
+    pub title: Option<String>,
 }
 
 /// Summary of check runs for a PR head SHA.
@@ -487,6 +499,51 @@ impl GitHubApiClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!(
                 "list_pull_request_reviews failed ({}): {}",
+                status,
+                body
+            ));
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// Fetch annotations for a check run.
+    ///
+    /// Uses `GET /repos/{owner}/{repo}/check-runs/{check_run_id}/annotations`.
+    /// Returns error-level annotations (failures, warnings, notices) that contain
+    /// the actual CI error messages the worker needs to fix failures.
+    pub async fn get_check_run_annotations(
+        &self,
+        owner: &str,
+        repo: &str,
+        check_run_id: u64,
+    ) -> Result<Vec<CheckAnnotation>> {
+        let url = format!(
+            "{}/repos/{}/{}/check-runs/{}/annotations",
+            self.base_url, owner, repo, check_run_id
+        );
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "get_check_run_annotations failed ({}): {}",
                 status,
                 body
             ));
