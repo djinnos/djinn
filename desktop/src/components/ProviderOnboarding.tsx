@@ -3,12 +3,14 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+  Combobox,
+  ComboboxCollection,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from '@/components/ui/combobox';
 import { ChevronDown, HelpCircle, Loader2, Sparkles, Key, CheckCircle2, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import logoSvg from '@/assets/logo.svg';
@@ -158,16 +160,23 @@ function ApiKeyCard({ onDone }: { onDone: () => void }) {
       </p>
 
       <div className="flex flex-col gap-3 flex-1">
-        <Select value={selectedId} onValueChange={(v) => v && handleProviderChange(v)}>
-          <SelectTrigger className="w-full text-sm">
-            <SelectValue placeholder="Select provider..." />
-          </SelectTrigger>
-          <SelectContent>
-            {providers.map((p) => (
-              <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <Combobox
+          items={providers}
+          value={selectedId}
+          onValueChange={(v) => v && handleProviderChange(v)}
+        >
+          <ComboboxInput placeholder="Search provider..." className="w-full" showClear={false} />
+          <ComboboxContent>
+            <ComboboxEmpty>No providers found.</ComboboxEmpty>
+            <ComboboxList>
+              <ComboboxCollection>
+                {(p: Provider) => (
+                  <ComboboxItem key={p.id} value={p.id}>{p.name}</ComboboxItem>
+                )}
+              </ComboboxCollection>
+            </ComboboxList>
+          </ComboboxContent>
+        </Combobox>
 
         {selectedProvider && (
           <>
