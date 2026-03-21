@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { Delete02Icon } from '@hugeicons/core-free-icons';
+import { HugeiconsIcon } from '@hugeicons/react';
 import { Button } from '@/components/ui/button';
 import { InlineError } from '@/components/InlineError';
 import { EmptyState } from '@/components/EmptyState';
@@ -76,8 +78,10 @@ function ProvidersSettings() {
                   onConfirm={() => removeProvider(provider.id)}
                   size="sm"
                   variant="outline"
+                  className="flex items-center gap-1.5"
                 >
                   {provider.name}
+                  <HugeiconsIcon icon={Delete02Icon} size={13} className="text-muted-foreground/60" />
                 </ConfirmButton>
               ))
             )}
