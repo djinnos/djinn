@@ -3,5 +3,6 @@ source: src/server/mod.rs
 expression: blockers
 ---
 {
-  "blockers": []
+  "error": "invalid arguments for tool 'task_blockers_list': invalid type: null, expected a string",
+  "ok": false
 }

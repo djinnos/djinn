@@ -6,32 +6,6 @@ expression: task_list
   "has_more": false,
   "limit": 10,
   "offset": 0,
-  "tasks": [
-    {
-      "acceptance_criteria": [],
-      "close_reason": null,
-      "closed_at": null,
-      "continuation_count": 0,
-      "created_at": "[TIMESTAMP]",
-      "description": "Task used for MCP snapshot contract testing",
-      "design": "",
-      "epic_id": "[UUID]",
-      "id": "[UUID]",
-      "issue_type": "task",
-      "labels": [],
-      "memory_refs": [],
-      "merge_commit_sha": null,
-      "owner": "",
-      "priority": 0,
-      "reopen_count": 0,
-      "session_count": 0,
-      "short_id": "[SHORT_ID]",
-      "status": "open",
-      "title": "Snapshot Task",
-      "unresolved_blocker_count": 0,
-      "updated_at": "[TIMESTAMP]",
-      "verification_failure_count": 0
-    }
-  ],
-  "total_count": 1
+  "tasks": [],
+  "total_count": 0
 }

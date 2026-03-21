@@ -32,6 +32,7 @@ export interface LearnedPromptHistory {
 }
 
 export interface CreateRoleRequest {
+  project_id: string;
   name: string;
   base_role: BaseRole;
   description: string;
@@ -44,9 +45,12 @@ export interface UpdateRoleRequest {
   system_prompt_extensions?: string[];
 }
 
-export async function fetchRoles(): Promise<Role[]> {
+export async function fetchRoles(projectId?: string): Promise<Role[]> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/roles`);
+  const url = projectId
+    ? `${baseUrl}/roles?project_id=${encodeURIComponent(projectId)}`
+    : `${baseUrl}/roles`;
+  const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch roles: ${response.status}`);
   }
@@ -122,9 +126,9 @@ export interface RoleMetricsResponse {
   generated_at: string;
 }
 
-export async function fetchRoleMetrics(): Promise<RoleMetricsResponse> {
+export async function fetchRoleMetrics(projectId: string): Promise<RoleMetricsResponse> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/roles/metrics`);
+  const response = await fetch(`${baseUrl}/roles/metrics?project_id=${encodeURIComponent(projectId)}`);
   if (!response.ok) {
     throw new Error(`Failed to fetch role metrics: ${response.status}`);
   }

@@ -5345,21 +5345,13 @@ expression: signatures
               "nullable": true,
               "type": "object"
             },
-            "memory_model": {
-              "description": "Model used for memory operations (knowledge extraction, summarisation).\nFormat: `provider/model`, e.g. `\"openai/gpt-4.1-mini\"`. Falls back to the\nfirst model in `model_priority` when unset.",
-              "nullable": true,
-              "type": "string"
-            },
-            "model_priority": {
-              "additionalProperties": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
+            "models": {
+              "description": "Ordered list of models available to agents, e.g. `[\"openai/gpt-4o\"]`.",
+              "items": {
+                "type": "string"
               },
-              "description": "Per-role ordered model lists, e.g. `{\"worker\": [\"openai/gpt-4o\"]}`.",
               "nullable": true,
-              "type": "object"
+              "type": "array"
             }
           },
           "type": "object"
@@ -5453,49 +5445,12 @@ expression: signatures
             "format": "int64",
             "type": "integer"
           },
-          "description": "Per-model concurrent session caps (e.g. {\"chatgpt_codex/gpt-5.3-codex\": 4}). Omit to keep current value.",
+          "description": "Per-model concurrent session caps (e.g. {\"openai/gpt-4o\": 4}). Omit to keep current value.",
           "nullable": true,
           "type": "object"
         },
-        "memory_model": {
-          "description": "Model used for memory operations (knowledge extraction, summarisation). Format: \"provider/model\". Set to \"\" to clear. Omit to keep current value.",
-          "nullable": true,
-          "type": "string"
-        },
-        "model_priority_architect": {
-          "description": "Ordered model list for the 'architect' role. Omit to keep current value.",
-          "items": {
-            "type": "string"
-          },
-          "nullable": true,
-          "type": "array"
-        },
-        "model_priority_lead": {
-          "description": "Ordered model list for the 'lead' role. Omit to keep current value.",
-          "items": {
-            "type": "string"
-          },
-          "nullable": true,
-          "type": "array"
-        },
-        "model_priority_planner": {
-          "description": "Ordered model list for the 'planner' role. Omit to keep current value.",
-          "items": {
-            "type": "string"
-          },
-          "nullable": true,
-          "type": "array"
-        },
-        "model_priority_reviewer": {
-          "description": "Ordered model list for the 'reviewer' role. Omit to keep current value.",
-          "items": {
-            "type": "string"
-          },
-          "nullable": true,
-          "type": "array"
-        },
-        "model_priority_worker": {
-          "description": "Ordered model list for the 'worker' role (e.g. [\"chatgpt_codex/gpt-5.3-codex\"]). Omit to keep current value.",
+        "models": {
+          "description": "Ordered list of models available to all agents (e.g. [\"openai/gpt-4o\"]). Omit to keep current value.",
           "items": {
             "type": "string"
           },

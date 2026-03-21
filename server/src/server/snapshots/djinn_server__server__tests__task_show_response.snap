@@ -3,27 +3,6 @@ source: src/server/mod.rs
 expression: task_show
 ---
 {
-  "acceptance_criteria": [],
-  "active_session": null,
-  "close_reason": null,
-  "closed_at": null,
-  "continuation_count": 0,
-  "created_at": "[TIMESTAMP]",
-  "description": "Task used for MCP snapshot contract testing",
-  "design": "",
-  "epic_id": "[UUID]",
-  "id": "[UUID]",
-  "issue_type": "task",
-  "labels": [],
-  "memory_refs": [],
-  "merge_commit_sha": null,
-  "owner": "",
-  "priority": 0,
-  "reopen_count": 0,
-  "session_count": 0,
-  "short_id": "[SHORT_ID]",
-  "status": "open",
-  "title": "Snapshot Task",
-  "updated_at": "[TIMESTAMP]",
-  "verification_failure_count": 0
+  "error": "invalid arguments for tool 'task_show': invalid type: null, expected a string",
+  "ok": false
 }

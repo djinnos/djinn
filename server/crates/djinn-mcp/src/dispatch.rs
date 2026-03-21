@@ -36,6 +36,9 @@ use crate::tools::sync_tools::{
     TaskSyncStatusParams,
 };
 use crate::tools::system_tools::SystemLogsInput;
+use crate::tools::role_tools::{
+    RoleCreateParams, RoleListParams, RoleMetricsParams, RoleShowParams, RoleUpdateParams,
+};
 use crate::tools::task_tools::{
     BoardHealthParams, BoardReconcileParams, ErrorOr, TaskActivityListParams,
     TaskBlockedListParams, TaskBlockersListParams, TaskClaimParams, TaskCommentAddParams,
@@ -528,6 +531,31 @@ impl DjinnMcpServer {
             "task_memory_refs" => map_error_or(
                 name,
                 self.task_memory_refs(Parameters(decode_args::<TaskMemoryRefsParams>(name, args)?))
+                    .await,
+            ),
+            "role_create" => map_json(
+                name,
+                self.role_create(Parameters(decode_args::<RoleCreateParams>(name, args)?))
+                    .await,
+            ),
+            "role_show" => map_json(
+                name,
+                self.role_show(Parameters(decode_args::<RoleShowParams>(name, args)?))
+                    .await,
+            ),
+            "role_list" => map_json(
+                name,
+                self.role_list(Parameters(decode_args::<RoleListParams>(name, args)?))
+                    .await,
+            ),
+            "role_update" => map_json(
+                name,
+                self.role_update(Parameters(decode_args::<RoleUpdateParams>(name, args)?))
+                    .await,
+            ),
+            "role_metrics" => map_json(
+                name,
+                self.role_metrics(Parameters(decode_args::<RoleMetricsParams>(name, args)?))
                     .await,
             ),
             _ => Err(format!("unknown MCP tool: '{name}'")),

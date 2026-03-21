@@ -3,10 +3,5 @@ source: src/server/mod.rs
 expression: task_count_status
 ---
 {
-  "groups": [
-    {
-      "count": 1,
-      "key": "open"
-    }
-  ]
+  "groups": []
 }

@@ -12,6 +12,7 @@ use tower_http::cors::CorsLayer;
 use crate::sse;
 
 mod chat;
+mod roles;
 mod state;
 pub use state::AppState;
 
@@ -125,6 +126,7 @@ pub fn router(state: AppState) -> Router {
         .route("/db-info", get(sse::db_info_handler))
         .route("/api/chat/completions", post(chat::completions_handler))
         .route("/mcp", post(mcp_handler))
+        .merge(roles::router())
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -1109,14 +1111,7 @@ mod tests {
         let state = AppState::new(db, CancellationToken::new());
 
         let settings = DjinnSettings {
-            model_priority: Some(
-                [(
-                    "worker".into(),
-                    vec!["nvidia/moonshotai/kimi-k2-instruct".into()],
-                )]
-                .into_iter()
-                .collect(),
-            ),
+            models: Some(vec!["nvidia/moonshotai/kimi-k2-instruct".into()]),
             ..Default::default()
         };
 
@@ -1141,14 +1136,7 @@ mod tests {
             .unwrap();
 
         let settings = DjinnSettings {
-            model_priority: Some(
-                [(
-                    "worker".into(),
-                    vec!["synthetic/hf:moonshotai/Kimi-K2.5".into()],
-                )]
-                .into_iter()
-                .collect(),
-            ),
+            models: Some(vec!["synthetic/hf:moonshotai/Kimi-K2.5".into()]),
             ..Default::default()
         };
 

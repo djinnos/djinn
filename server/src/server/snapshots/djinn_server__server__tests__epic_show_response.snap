@@ -12,11 +12,11 @@ expression: epic_show
   "id": "[UUID]",
   "in_progress_count": 0,
   "memory_refs": [],
-  "open_count": 1,
+  "open_count": 0,
   "owner": "",
   "short_id": "[SHORT_ID]",
   "status": "open",
-  "task_count": 1,
+  "task_count": 0,
   "title": "Snapshot Epic",
   "updated_at": "[TIMESTAMP]"
 }

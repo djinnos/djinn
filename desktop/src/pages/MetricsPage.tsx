@@ -1,7 +1,10 @@
 import { AgentMetricsDashboard } from '@/components/AgentMetricsDashboard';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { useSelectedProject } from '@/stores/useProjectStore';
 
 export function MetricsPage() {
+  const project = useSelectedProject();
+
   return (
     <div className="flex h-full flex-col overflow-hidden p-6">
       <div
@@ -18,7 +21,7 @@ export function MetricsPage() {
         >Agent effectiveness by role for this project</p>
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto">
-        <AgentMetricsDashboard />
+        <AgentMetricsDashboard projectId={project?.id ?? null} />
       </div>
     </div>
   );

@@ -136,7 +136,7 @@ function RoleMetricsCard({ metrics }: { metrics: RoleMetrics }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function AgentMetricsDashboard() {
+export function AgentMetricsDashboard({ projectId }: { projectId: string | null }) {
   const [metrics, setMetrics] = useState<RoleMetrics[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -144,10 +144,11 @@ export function AgentMetricsDashboard() {
   const pollRef = useRef<number | null>(null);
 
   const load = useCallback(async (silent = false) => {
+    if (!projectId) return;
     if (!silent) setLoading(true);
     setError(null);
     try {
-      const data = await fetchRoleMetrics();
+      const data = await fetchRoleMetrics(projectId);
       setMetrics(data.metrics);
       setLastRefresh(new Date());
     } catch (err) {
@@ -155,7 +156,7 @@ export function AgentMetricsDashboard() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     void load();
@@ -201,16 +202,20 @@ export function AgentMetricsDashboard() {
         </Button>
       </div>
 
+      {!projectId && (
+        <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
+          Select a project to view metrics.
+        </div>
+      )}
+
       {error && (
         <InlineError
-          message={error.includes("404") || error.includes("Failed to fetch")
-            ? "Metrics endpoint not available yet — requires server task 32m9 (role_metrics)."
-            : error}
+          message={error}
           onRetry={() => void load()}
         />
       )}
 
-      {loading && !metrics && (
+      {loading && !metrics && projectId && (
         <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
           Loading metrics...
         </div>
