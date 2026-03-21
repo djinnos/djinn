@@ -61,6 +61,10 @@ function ProvidersSettings() {
 
   return (
     <div className="flex flex-col gap-6 flex-1 min-h-0">
+      <AgentConfig {...agentConfig} />
+
+      <div className="border-t border-border" />
+
       <div className="flex flex-col gap-4">
         <div className="flex items-center justify-between shrink-0">
           <h2 className="text-lg font-semibold text-foreground">Providers</h2>
@@ -95,10 +99,6 @@ function ProvidersSettings() {
           {configuredProviders.length === 0 && <p className="text-sm text-muted-foreground">No providers configured yet.</p>}
         </div>
       </div>
-
-      <div className="border-t border-border" />
-
-      <AgentConfig {...agentConfig} />
     </div>
   );
 }
