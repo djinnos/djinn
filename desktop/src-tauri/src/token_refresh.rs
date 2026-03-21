@@ -12,8 +12,9 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::auth::{clear_token, retrieve_token, store_token, StoredTokens,
-    GITHUB_CLIENT_ID, ACCESS_TOKEN_URL};
+use crate::auth::{
+    clear_token, retrieve_token, store_token, StoredTokens, ACCESS_TOKEN_URL, GITHUB_CLIENT_ID,
+};
 
 /// Expiry buffer: refresh tokens 30 seconds before actual expiry
 const EXPIRY_BUFFER_SECONDS: u64 = 30;
@@ -138,9 +139,20 @@ pub async fn perform_silent_refresh() -> RefreshResult {
         }
     };
 
+    // GitHub OAuth App tokens don't have refresh tokens — they never expire.
+    // If no refresh token is stored, the access token is still valid.
+    // Restore the session from the stored access token directly.
     if stored_tokens.refresh_token.is_empty() {
-        log::info!("No refresh token in stored data");
-        return RefreshResult::NoToken;
+        log::info!("No refresh token (OAuth App token) — restoring session from stored access token");
+        let state = TokenState {
+            access_token: stored_tokens.access_token.clone(),
+            refresh_token: String::new(),
+            // OAuth App tokens don't expire — use a far-future timestamp (1 year).
+            expires_at_unix: now_unix() + 365 * 24 * 3600,
+            user_id: None,
+        };
+        set_token_state(state.clone());
+        return RefreshResult::Success(state);
     }
 
     // Call GitHub token endpoint
@@ -245,7 +257,10 @@ pub async fn perform_silent_refresh() -> RefreshResult {
     )
     .await;
 
-    log::info!("Silent token refresh successful, token expires in {}s", expires_in);
+    log::info!(
+        "Silent token refresh successful, token expires in {}s",
+        expires_in
+    );
 
     RefreshResult::Success(token_state)
 }
@@ -386,7 +401,10 @@ mod tests {
         clear_token_state();
 
         let retrieved = get_token_state();
-        assert!(retrieved.is_none(), "Should return None when no token state set");
+        assert!(
+            retrieved.is_none(),
+            "Should return None when no token state set"
+        );
     }
 
     #[test]
