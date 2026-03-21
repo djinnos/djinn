@@ -3,6 +3,7 @@ use crate::extension;
 use crate::output_parser::ParsedAgentOutput;
 use crate::prompts::TaskContext;
 use djinn_core::models::{Task, TransitionAction};
+use djinn_db::TaskRepository;
 use futures::future::BoxFuture;
 
 use super::{AgentRole, RoleConfig};
@@ -25,11 +26,20 @@ impl AgentRole for PlannerRole {
 
     fn on_complete<'a>(
         &'a self,
-        _task_id: &'a str,
+        task_id: &'a str,
         _output: &'a ParsedAgentOutput,
-        _app_state: &'a AgentContext,
+        app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
-        Box::pin(async { None })
+        Box::pin(async move {
+            // Decomposition tasks use the simple lifecycle: close on completion.
+            let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            if let Ok(Some(task)) = repo.get(task_id).await
+                && task.issue_type == "decomposition"
+            {
+                return Some((TransitionAction::Close, None));
+            }
+            None
+        })
     }
 }
 
@@ -38,7 +48,10 @@ pub(crate) const PLANNER_CONFIG: RoleConfig = RoleConfig {
     display_name: "Planner",
     dispatch_role: "planner",
     tool_schemas: extension::tool_schemas_planner,
-    start_action: |_status| None,
+    start_action: |status| match status {
+        "open" => Some(TransitionAction::Start),
+        _ => None,
+    },
     release_action: || TransitionAction::Release,
     initial_message: crate::prompts::PLANNER_TEMPLATE,
     preserves_session: false,

@@ -3,7 +3,9 @@ use sqlx::SqlitePool;
 use crate::database::Database;
 use crate::{Error, Result};
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_core::models::{ActivityEntry, Task, TaskStatus, TransitionAction, compute_transition};
+use djinn_core::models::{
+    ActivityEntry, Task, TaskStatus, TransitionAction, compute_transition_for_issue_type,
+};
 
 mod activity;
 mod blockers;

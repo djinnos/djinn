@@ -201,7 +201,7 @@ mod tests {
         );
 
         let cfg = AgentType::Planner.role_config();
-        assert_eq!((cfg.start_action)("open"), None);
+        assert_eq!((cfg.start_action)("open"), Some(TransitionAction::Start));
 
         let cfg = AgentType::Architect.role_config();
         assert_eq!((cfg.start_action)("open"), Some(TransitionAction::Start));

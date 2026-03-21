@@ -68,7 +68,12 @@ impl TaskRepository {
         };
 
         // Validate and compute side effects.
-        let apply = compute_transition(&action, &from, target_override.as_ref())?;
+        let apply = compute_transition_for_issue_type(
+            &action,
+            &from,
+            target_override.as_ref(),
+            &current.issue_type,
+        )?;
 
         // For Start: block if any unresolved blockers exist.
         // A blocker is unresolved if its blocking task has not reached post-merge states.
