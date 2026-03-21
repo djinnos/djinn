@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 mod fuzzy;
+mod schemas;
 
 use std::process::Stdio;
 
@@ -9,6 +10,11 @@ use tokio::time::Duration;
 use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+pub(crate) use self::schemas::{
+    tool_schemas_architect, tool_schemas_lead, tool_schemas_planner, tool_schemas_pm,
+    tool_schemas_reviewer, tool_schemas_worker,
+};
 
 use super::sandbox;
 use crate::context::AgentContext;
