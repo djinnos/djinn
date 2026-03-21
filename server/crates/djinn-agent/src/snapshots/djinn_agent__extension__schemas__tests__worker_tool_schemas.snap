@@ -1,7 +1,7 @@
 ---
-source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 2184
-expression: tool_schemas_lead()
+source: crates/djinn-agent/src/extension/schemas.rs
+assertion_line: 738
+expression: tool_schemas_worker()
 ---
 [
   {
@@ -302,278 +302,82 @@ expression: tool_schemas_lead()
     "name": "output_grep"
   },
   {
-    "description": "Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.",
+    "description": "Write content to a file, creating it or overwriting if it exists. Path must be within the task worktree.",
     "inputSchema": {
       "properties": {
-        "acceptance_criteria": {
-          "items": {
-            "type": "object"
-          },
-          "type": "array"
-        },
-        "description": {
+        "content": {
+          "description": "File content to write",
           "type": "string"
         },
-        "design": {
-          "type": "string"
-        },
-        "epic_id": {
-          "description": "Parent epic UUID or short ID",
-          "type": "string"
-        },
-        "issue_type": {
-          "type": "string"
-        },
-        "labels": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "owner": {
-          "type": "string"
-        },
-        "parent_id": {
-          "type": "string"
-        },
-        "priority": {
-          "type": "integer"
-        },
-        "status": {
-          "type": "string"
-        },
-        "title": {
+        "path": {
+          "description": "Absolute or worktree-relative file path",
           "type": "string"
         }
       },
       "required": [
-        "epic_id",
-        "title"
+        "path",
+        "content"
       ],
       "type": "object"
     },
-    "name": "task_create"
+    "name": "write"
   },
   {
-    "description": "Update task fields and append/remove memory refs when supported by the workflow.",
+    "description": "Edit a file by replacing exact text. Finds old_text and replaces with new_text. Fails if old_text is not found or is ambiguous (appears multiple times).",
     "inputSchema": {
       "properties": {
-        "acceptance_criteria": {
-          "items": {
-            "type": "object"
-          },
-          "type": "array"
-        },
-        "description": {
+        "new_text": {
+          "description": "Replacement text",
           "type": "string"
         },
-        "design": {
+        "old_text": {
+          "description": "Exact text to find and replace",
           "type": "string"
         },
-        "epic_id": {
-          "type": "string"
-        },
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        },
-        "memory_refs_add": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "memory_refs_remove": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "owner": {
-          "type": "string"
-        },
-        "priority": {
-          "type": "integer"
-        },
-        "status": {
-          "type": "string"
-        },
-        "title": {
+        "path": {
+          "description": "Absolute or worktree-relative file path",
           "type": "string"
         }
       },
       "required": [
-        "id"
+        "path",
+        "old_text",
+        "new_text"
       ],
       "type": "object"
     },
-    "name": "task_update"
+    "name": "edit"
   },
   {
-    "description": "Delete the task worktree and branch so a fresh implementation can restart from target branch state.",
+    "description": "Apply a patch to one or more files using a custom LLM-friendly format. Uses content-based context matching (not line numbers). Format:\n\n*** Begin Patch\n*** Update File: path/to/file.rs\n@@ context_line_from_file\n context line (unchanged)\n-old line to remove\n+new line to add\n context line (unchanged)\n\n*** Add File: path/to/new_file.rs\n+line 1\n+line 2\n\n*** Delete File: path/to/old_file.rs\n*** End Patch\n\nRules: ' ' prefix = context (must match file), '-' = delete, '+' = add. The @@ line text is searched in the file to locate each chunk. Multiple @@ chunks per file are allowed. Files being updated or deleted must be read first.",
     "inputSchema": {
       "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
+        "patch": {
+          "description": "Patch content in the custom format (see tool description)",
           "type": "string"
         }
       },
       "required": [
-        "id"
+        "patch"
       ],
       "type": "object"
     },
-    "name": "task_delete_branch"
+    "name": "apply_patch"
   },
   {
-    "description": "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.",
+    "description": "Request Lead intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the Lead queue. Your session will effectively end after this call.",
     "inputSchema": {
       "properties": {
         "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_archive_activity"
-  },
-  {
-    "description": "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_reset_counters"
-  },
-  {
-    "description": "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_kill_session"
-  },
-  {
-    "description": "List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_blocked_list"
-  },
-  {
-    "description": "Show details for an epic by UUID or short ID.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Epic UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "epic_show"
-  },
-  {
-    "description": "Update epic fields (title/description) and accept memory ref delta args for planner workflows.",
-    "inputSchema": {
-      "properties": {
-        "description": {
-          "type": "string"
-        },
-        "id": {
-          "description": "Epic UUID or short ID",
-          "type": "string"
-        },
-        "memory_refs_add": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "memory_refs_remove": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "status": {
-          "type": "string"
-        },
-        "title": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "epic_update"
-  },
-  {
-    "description": "List tasks for an epic with pagination.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Epic UUID or short ID",
-          "type": "string"
-        },
-        "limit": {
-          "type": "integer"
-        },
-        "offset": {
-          "type": "integer"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "epic_tasks"
-  },
-  {
-    "description": "Escalate a task to the Architect role when implementation is blocked on codebase analysis, root-cause investigation, or cross-cutting technical design. This is for strategic technical intervention rather than PM/lead triage.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
+          "description": "Task UUID or short_id",
           "type": "string"
         },
         "reason": {
-          "description": "Why Architect intervention is needed (e.g. root cause unclear, design blocked, need codebase-wide analysis)",
+          "description": "Why Lead intervention is needed (e.g. task too large, design ambiguous, blocked on decision)",
+          "type": "string"
+        },
+        "suggested_breakdown": {
+          "description": "Optional suggested split: list of smaller tasks the Lead should create",
           "type": "string"
         }
       },
@@ -583,31 +387,28 @@ expression: tool_schemas_lead()
       ],
       "type": "object"
     },
-    "name": "request_architect"
+    "name": "request_lead"
   },
   {
-    "description": "Submit the Lead intervention decision and release the task back to the worker queue. Your session ends after this call.",
+    "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",
     "inputSchema": {
       "properties": {
-        "created_tasks": {
-          "description": "IDs of tasks created during this intervention (for decompose decisions)",
+        "files_changed": {
+          "description": "List of files modified during this session",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
-        "decision": {
-          "description": "The decision taken: reopen (send back to worker), decompose (split into subtasks), force_close, or escalate (release back to Lead queue)",
-          "enum": [
-            "reopen",
-            "decompose",
-            "force_close",
-            "escalate"
-          ],
-          "type": "string"
+        "remaining_concerns": {
+          "description": "Any outstanding concerns or caveats for the reviewer",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
-        "rationale": {
-          "description": "Explanation for the decision",
+        "summary": {
+          "description": "Brief summary of the work completed",
           "type": "string"
         },
         "task_id": {
@@ -617,10 +418,10 @@ expression: tool_schemas_lead()
       },
       "required": [
         "task_id",
-        "decision"
+        "summary"
       ],
       "type": "object"
     },
-    "name": "submit_decision"
+    "name": "submit_work"
   }
 ]

@@ -1,5 +1,6 @@
 ---
-source: crates/djinn-agent/src/extension.rs
+source: crates/djinn-agent/src/extension/mod.rs
+assertion_line: 2224
 expression: tool_schemas_architect()
 ---
 [
@@ -90,6 +91,7 @@ expression: tool_schemas_architect()
     "inputSchema": {
       "properties": {
         "identifier": {
+          "description": "Permalink or title",
           "type": "string"
         },
         "project": {
@@ -98,6 +100,7 @@ expression: tool_schemas_architect()
         }
       },
       "required": [
+        "project",
         "identifier"
       ],
       "type": "object"
@@ -130,6 +133,7 @@ expression: tool_schemas_architect()
         }
       },
       "required": [
+        "project",
         "query"
       ],
       "type": "object"
@@ -157,6 +161,9 @@ expression: tool_schemas_architect()
           "type": "string"
         }
       },
+      "required": [
+        "project"
+      ],
       "type": "object"
     },
     "name": "memory_list"
@@ -186,6 +193,7 @@ expression: tool_schemas_architect()
     "inputSchema": {
       "properties": {
         "file_path": {
+          "description": "Absolute or worktree-relative file path",
           "type": "string"
         },
         "limit": {
@@ -294,24 +302,12 @@ expression: tool_schemas_architect()
     "name": "output_grep"
   },
   {
-    "description": "Create a new task under an epic. Use blocked_by to set dependencies and acceptance_criteria to define success criteria at creation.",
+    "description": "Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.",
     "inputSchema": {
       "properties": {
         "acceptance_criteria": {
-          "description": "List of acceptance criteria strings.",
           "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "agent_type": {
-          "description": "Specialist role name to route this task (e.g. 'rust-expert'). Must match a configured AgentRole name for this project.",
-          "type": "string"
-        },
-        "blocked_by": {
-          "description": "Task IDs (UUID or short_id) that block this task.",
-          "items": {
-            "type": "string"
+            "type": "object"
           },
           "type": "array"
         },
@@ -322,13 +318,13 @@ expression: tool_schemas_architect()
           "type": "string"
         },
         "epic_id": {
+          "description": "Parent epic UUID or short ID",
           "type": "string"
         },
         "issue_type": {
           "type": "string"
         },
-        "memory_refs": {
-          "description": "Memory note permalinks to attach.",
+        "labels": {
           "items": {
             "type": "string"
           },
@@ -337,11 +333,13 @@ expression: tool_schemas_architect()
         "owner": {
           "type": "string"
         },
+        "parent_id": {
+          "type": "string"
+        },
         "priority": {
           "type": "integer"
         },
         "status": {
-          "description": "Optional initial status. Allowed: open (default).",
           "type": "string"
         },
         "title": {
@@ -378,28 +376,15 @@ expression: tool_schemas_architect()
     "name": "task_comment_add"
   },
   {
-    "description": "Execute a state machine transition on a task. Lead can use: lead_intervention_complete (rescope and reopen for worker), lead_approve (approve implementation and merge), force_close (requires replacement_task_ids for decomposition OR reason for redundant/already-landed tasks), escalate.",
+    "description": "Transition a task using a named workflow action.",
     "inputSchema": {
       "properties": {
         "action": {
-          "description": "Transition action",
+          "description": "Transition action name",
           "type": "string"
         },
         "id": {
           "description": "Task UUID or short ID",
-          "type": "string"
-        },
-        "reason": {
-          "type": "string"
-        },
-        "replacement_task_ids": {
-          "description": "For force_close with decomposition: IDs of replacement subtasks. Not required if closing a redundant task with a reason.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "target_status": {
           "type": "string"
         }
       },
@@ -519,85 +504,61 @@ expression: tool_schemas_architect()
     "name": "epic_tasks"
   },
   {
-    "description": "Build context from a memory note with progressive disclosure. Returns full content for primary notes, overview for direct linked notes, abstract for discovered related notes. Use url='folder/*' to return all notes in a folder. Seed notes are never dropped by budget constraints.",
+    "description": "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.",
     "inputSchema": {
       "properties": {
-        "budget": {
-          "description": "Token budget for context (default 4096)",
+        "limit": {
+          "description": "Maximum notes to include (default 8)",
           "type": "integer"
         },
-        "depth": {
-          "description": "Link traversal depth (default 1)",
-          "type": "integer"
-        },
-        "max_related": {
-          "description": "Maximum related notes to return (default 10)",
-          "type": "integer"
-        },
-        "project": {
-          "description": "Absolute project path",
+        "query": {
+          "description": "Optional free-text query to bias retrieval",
           "type": "string"
         },
         "task_id": {
-          "description": "Task ID for affinity scoring",
-          "type": "string"
-        },
-        "url": {
-          "description": "Memory URI: 'memory://folder/note', 'folder/note', or 'folder/*' for all notes in a folder",
+          "description": "Task ID to gather related memory for; defaults to current session task when omitted",
           "type": "string"
         }
       },
-      "required": [
-        "url"
-      ],
       "type": "object"
     },
     "name": "memory_build_context"
   },
   {
-    "description": "Return aggregated effectiveness metrics per agent role: success_rate, avg_tokens, avg_time_seconds, verification_pass_rate, avg_reopens, completed_task_count. Omit role_id to return metrics for all roles in the project.",
+    "description": "Show execution quality metrics for a role to support prompt tuning and intervention decisions.",
     "inputSchema": {
       "properties": {
-        "project": {
-          "description": "Absolute project path",
+        "role": {
+          "description": "Role name (worker, reviewer, lead, planner, architect)",
           "type": "string"
-        },
-        "role_id": {
-          "description": "Role UUID or name; omit for all roles",
-          "type": "string"
-        },
-        "window_days": {
-          "description": "Days back for session data (default 30)",
-          "type": "integer"
         }
       },
+      "required": [
+        "role"
+      ],
       "type": "object"
     },
     "name": "role_metrics"
   },
   {
-    "description": "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer, resolver base_role). Do NOT use on architect, lead, or planner roles.",
+    "description": "Append a learned amendment to a role prompt using observed failures or improvements.",
     "inputSchema": {
       "properties": {
         "amendment": {
-          "description": "Amendment text to append to learned_prompt",
+          "description": "Instruction text to append to the role prompt",
           "type": "string"
         },
         "metrics_snapshot": {
           "description": "JSON string of current metrics for the history record",
           "type": "string"
         },
-        "project": {
-          "description": "Absolute project path",
-          "type": "string"
-        },
-        "role_id": {
-          "description": "Role UUID or name to amend",
+        "role": {
+          "description": "Role name to amend",
           "type": "string"
         }
       },
       "required": [
-        "role_id",
+        "role",
         "amendment"
       ],
       "type": "object"

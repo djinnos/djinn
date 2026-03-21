@@ -1,5 +1,6 @@
 ---
-source: crates/djinn-agent/src/extension.rs
+source: crates/djinn-agent/src/extension/mod.rs
+assertion_line: 2204
 expression: tool_schemas_planner()
 ---
 [
@@ -90,6 +91,7 @@ expression: tool_schemas_planner()
     "inputSchema": {
       "properties": {
         "identifier": {
+          "description": "Permalink or title",
           "type": "string"
         },
         "project": {
@@ -98,6 +100,7 @@ expression: tool_schemas_planner()
         }
       },
       "required": [
+        "project",
         "identifier"
       ],
       "type": "object"
@@ -130,6 +133,7 @@ expression: tool_schemas_planner()
         }
       },
       "required": [
+        "project",
         "query"
       ],
       "type": "object"
@@ -157,6 +161,9 @@ expression: tool_schemas_planner()
           "type": "string"
         }
       },
+      "required": [
+        "project"
+      ],
       "type": "object"
     },
     "name": "memory_list"
@@ -186,6 +193,7 @@ expression: tool_schemas_planner()
     "inputSchema": {
       "properties": {
         "file_path": {
+          "description": "Absolute or worktree-relative file path",
           "type": "string"
         },
         "limit": {
@@ -294,24 +302,12 @@ expression: tool_schemas_planner()
     "name": "output_grep"
   },
   {
-    "description": "Create a new task under an epic. Use blocked_by to set dependencies and acceptance_criteria to define success criteria at creation.",
+    "description": "Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.",
     "inputSchema": {
       "properties": {
         "acceptance_criteria": {
-          "description": "List of acceptance criteria strings.",
           "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "agent_type": {
-          "description": "Specialist role name to route this task (e.g. 'rust-expert'). Must match a configured AgentRole name for this project.",
-          "type": "string"
-        },
-        "blocked_by": {
-          "description": "Task IDs (UUID or short_id) that block this task.",
-          "items": {
-            "type": "string"
+            "type": "object"
           },
           "type": "array"
         },
@@ -322,13 +318,13 @@ expression: tool_schemas_planner()
           "type": "string"
         },
         "epic_id": {
+          "description": "Parent epic UUID or short ID",
           "type": "string"
         },
         "issue_type": {
           "type": "string"
         },
-        "memory_refs": {
-          "description": "Memory note permalinks to attach.",
+        "labels": {
           "items": {
             "type": "string"
           },
@@ -337,11 +333,13 @@ expression: tool_schemas_planner()
         "owner": {
           "type": "string"
         },
+        "parent_id": {
+          "type": "string"
+        },
         "priority": {
           "type": "integer"
         },
         "status": {
-          "description": "Optional initial status. Allowed: open (default).",
           "type": "string"
         },
         "title": {
@@ -357,26 +355,12 @@ expression: tool_schemas_planner()
     "name": "task_create"
   },
   {
-    "description": "Update task fields: title, description, design, priority, owner, labels, acceptance_criteria, memory_refs, blocked_by.",
+    "description": "Update task fields and append/remove memory refs when supported by the workflow.",
     "inputSchema": {
       "properties": {
         "acceptance_criteria": {
           "items": {
             "type": "object"
-          },
-          "type": "array"
-        },
-        "blocked_by_add": {
-          "description": "Task IDs to add as blockers",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "blocked_by_remove": {
-          "description": "Task IDs to remove as blockers",
-          "items": {
-            "type": "string"
           },
           "type": "array"
         },
@@ -386,20 +370,12 @@ expression: tool_schemas_planner()
         "design": {
           "type": "string"
         },
-        "id": {
+        "epic_id": {
           "type": "string"
         },
-        "labels_add": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "labels_remove": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
         },
         "memory_refs_add": {
           "items": {
@@ -419,6 +395,9 @@ expression: tool_schemas_planner()
         "priority": {
           "type": "integer"
         },
+        "status": {
+          "type": "string"
+        },
         "title": {
           "type": "string"
         }
@@ -431,28 +410,15 @@ expression: tool_schemas_planner()
     "name": "task_update"
   },
   {
-    "description": "Execute a state machine transition on a task. Lead can use: lead_intervention_complete (rescope and reopen for worker), lead_approve (approve implementation and merge), force_close (requires replacement_task_ids for decomposition OR reason for redundant/already-landed tasks), escalate.",
+    "description": "Transition a task using a named workflow action.",
     "inputSchema": {
       "properties": {
         "action": {
-          "description": "Transition action",
+          "description": "Transition action name",
           "type": "string"
         },
         "id": {
           "description": "Task UUID or short ID",
-          "type": "string"
-        },
-        "reason": {
-          "type": "string"
-        },
-        "replacement_task_ids": {
-          "description": "For force_close with decomposition: IDs of replacement subtasks. Not required if closing a redundant task with a reason.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "target_status": {
           "type": "string"
         }
       },
@@ -465,7 +431,7 @@ expression: tool_schemas_planner()
     "name": "task_transition"
   },
   {
-    "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
+    "description": "Delete the task worktree and branch so a fresh implementation can restart from target branch state.",
     "inputSchema": {
       "properties": {
         "id": {

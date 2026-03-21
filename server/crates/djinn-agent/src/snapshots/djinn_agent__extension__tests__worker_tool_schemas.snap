@@ -1,5 +1,6 @@
 ---
-source: crates/djinn-agent/src/extension.rs
+source: crates/djinn-agent/src/extension/mod.rs
+assertion_line: 2144
 expression: tool_schemas_worker()
 ---
 [
@@ -90,6 +91,7 @@ expression: tool_schemas_worker()
     "inputSchema": {
       "properties": {
         "identifier": {
+          "description": "Permalink or title",
           "type": "string"
         },
         "project": {
@@ -98,6 +100,7 @@ expression: tool_schemas_worker()
         }
       },
       "required": [
+        "project",
         "identifier"
       ],
       "type": "object"
@@ -130,6 +133,7 @@ expression: tool_schemas_worker()
         }
       },
       "required": [
+        "project",
         "query"
       ],
       "type": "object"
@@ -157,6 +161,9 @@ expression: tool_schemas_worker()
           "type": "string"
         }
       },
+      "required": [
+        "project"
+      ],
       "type": "object"
     },
     "name": "memory_list"
@@ -186,6 +193,7 @@ expression: tool_schemas_worker()
     "inputSchema": {
       "properties": {
         "file_path": {
+          "description": "Absolute or worktree-relative file path",
           "type": "string"
         },
         "limit": {
