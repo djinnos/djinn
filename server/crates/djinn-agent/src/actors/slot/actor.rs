@@ -249,8 +249,8 @@ impl SlotHandle {
                         skills,
                         role_verification_command,
                     ) = if let Some(ref t) = task {
-                        use djinn_db::AgentRoleRepository;
-                        let role_repo = AgentRoleRepository::new(
+                        use djinn_db::AgentRepository;
+                        let role_repo = AgentRepository::new(
                             app_state.db.clone(),
                             app_state.event_bus.clone(),
                         );

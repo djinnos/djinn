@@ -10,7 +10,7 @@
 // rate-limited to once per prune tick (~1 hour) to avoid DB churn.
 
 use super::*;
-use djinn_db::{AgentRoleRepository, PendingAmendmentEvaluation, WindowedRoleMetrics};
+use djinn_db::{AgentRepository, PendingAmendmentEvaluation, WindowedRoleMetrics};
 
 /// Number of tasks that must complete after an amendment before evaluation
 /// is triggered.  Configurable; default is 10.
@@ -91,7 +91,7 @@ impl CoordinatorActor {
     ///   4. Apply keep/discard logic.
     ///   5. Update the history record; if discard, revert learned_prompt.
     pub(super) async fn evaluate_prompt_amendments(&self) {
-        let role_repo = AgentRoleRepository::new(
+        let role_repo = AgentRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
@@ -130,23 +130,23 @@ impl CoordinatorActor {
 
     async fn evaluate_one_amendment(
         &self,
-        role_repo: &AgentRoleRepository,
+        role_repo: &AgentRepository,
         project_id: &str,
         amendment: &PendingAmendmentEvaluation,
     ) {
         // Fetch the role to get base_role → agent_type mapping.
-        let role = match role_repo.get(&amendment.role_id).await {
+        let role = match role_repo.get(&amendment.agent_id).await {
             Ok(Some(r)) => r,
             Ok(None) => {
                 tracing::warn!(
-                    role_id = %amendment.role_id,
+                    role_id = %amendment.agent_id,
                     "CoordinatorActor: prompt eval — role not found, skipping"
                 );
                 return;
             }
             Err(e) => {
                 tracing::warn!(
-                    role_id = %amendment.role_id,
+                    role_id = %amendment.agent_id,
                     error = %e,
                     "CoordinatorActor: prompt eval — failed to load role"
                 );
@@ -164,7 +164,7 @@ impl CoordinatorActor {
             Ok(pair) => pair,
             Err(e) => {
                 tracing::warn!(
-                    role_id = %amendment.role_id,
+                    role_id = %amendment.agent_id,
                     error = %e,
                     "CoordinatorActor: prompt eval — failed to count tasks since amendment"
                 );
@@ -175,7 +175,7 @@ impl CoordinatorActor {
         let post_total = completed_since + failed_since;
         if post_total < DEFAULT_EVAL_TASK_COUNT {
             tracing::debug!(
-                role_id = %amendment.role_id,
+                role_id = %amendment.agent_id,
                 post_total,
                 needed = DEFAULT_EVAL_TASK_COUNT,
                 "CoordinatorActor: prompt eval — not enough post-amendment tasks yet"
@@ -191,7 +191,7 @@ impl CoordinatorActor {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(
-                    role_id = %amendment.role_id,
+                    role_id = %amendment.agent_id,
                     error = %e,
                     "CoordinatorActor: prompt eval — failed to get post-window metrics"
                 );
@@ -239,12 +239,12 @@ impl CoordinatorActor {
         // If discarding: revert the learned_prompt.
         if action == "discard" {
             match role_repo
-                .revert_learned_prompt(&amendment.role_id, &amendment.proposed_text)
+                .revert_learned_prompt(&amendment.agent_id, &amendment.proposed_text)
                 .await
             {
                 Ok(_) => {
                     tracing::info!(
-                        role_id = %amendment.role_id,
+                        role_id = %amendment.agent_id,
                         history_id = %amendment.history_id,
                         pre_success_rate = pre_metrics.success_rate,
                         post_success_rate = post_metrics.success_rate,
@@ -255,7 +255,7 @@ impl CoordinatorActor {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        role_id = %amendment.role_id,
+                        role_id = %amendment.agent_id,
                         error = %e,
                         "CoordinatorActor: prompt eval — failed to revert learned_prompt"
                     );
@@ -263,7 +263,7 @@ impl CoordinatorActor {
             }
         } else {
             tracing::info!(
-                role_id = %amendment.role_id,
+                role_id = %amendment.agent_id,
                 history_id = %amendment.history_id,
                 pre_success_rate = pre_metrics.success_rate,
                 post_success_rate = post_metrics.success_rate,

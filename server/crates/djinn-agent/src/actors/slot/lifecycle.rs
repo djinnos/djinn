@@ -142,7 +142,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         && !specialist_name.is_empty()
     {
         let role_repo =
-            djinn_db::AgentRoleRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            djinn_db::AgentRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         let specialist = role_repo
             .get_by_name_for_project(&task.project_id, specialist_name)
             .await
@@ -1729,7 +1729,7 @@ pub async fn run_project_lifecycle(params: ProjectLifecycleParams) -> anyhow::Re
     // ── Build specialist roster for planner prompt ────────────────────────
     let specialist_roster = {
         let role_repo =
-            djinn_db::AgentRoleRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            djinn_db::AgentRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         match role_repo.all_for_project(&project_id).await {
             Ok(roles) if !roles.is_empty() => {
                 let mut lines = Vec::new();

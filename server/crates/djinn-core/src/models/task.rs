@@ -97,7 +97,7 @@ pub struct Task {
     /// JSON array of memory note permalinks associated with this task.
     pub memory_refs: String,
     /// Specialist role name assigned to this task by the Planner (e.g. "rust-expert").
-    /// When set, the slot lifecycle loads this AgentRole instead of the project default.
+    /// When set, the slot lifecycle loads this Agent instead of the project default.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub agent_type: Option<String>,
     /// Number of unresolved blocker tasks (blocking tasks not yet closed).

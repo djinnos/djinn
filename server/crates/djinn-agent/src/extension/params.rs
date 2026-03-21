@@ -150,16 +150,16 @@ pub(super) struct MemoryBuildContextParams {
 }
 
 #[derive(Deserialize)]
-pub(super) struct RoleMetricsParams {
+pub(super) struct AgentMetricsParams {
     pub(super) project: Option<String>,
-    pub(super) role_id: Option<String>,
+    pub(super) agent_id: Option<String>,
     pub(super) window_days: Option<i64>,
 }
 
 #[derive(Deserialize)]
-pub(super) struct RoleAmendPromptParams {
+pub(super) struct AgentAmendPromptParams {
     pub(super) project: Option<String>,
-    pub(super) role_id: String,
+    pub(super) agent_id: String,
     pub(super) amendment: String,
     pub(super) metrics_snapshot: Option<String>,
 }

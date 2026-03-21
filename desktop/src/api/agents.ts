@@ -7,7 +7,7 @@ async function getBaseUrl(): Promise<string> {
 
 export type BaseRole = "worker" | "reviewer" | "lead" | "planner";
 
-export interface Role {
+export interface Agent {
   id: string;
   name: string;
   base_role: BaseRole;
@@ -31,7 +31,7 @@ export interface LearnedPromptHistory {
   amendments: LearnedPromptAmendment[];
 }
 
-export interface CreateRoleRequest {
+export interface CreateAgentRequest {
   project_id: string;
   name: string;
   base_role: BaseRole;
@@ -39,75 +39,75 @@ export interface CreateRoleRequest {
   system_prompt_extensions: string[];
 }
 
-export interface UpdateRoleRequest {
+export interface UpdateAgentRequest {
   name?: string;
   description?: string;
   system_prompt_extensions?: string[];
 }
 
-export async function fetchRoles(projectId?: string): Promise<Role[]> {
+export async function fetchAgents(projectId?: string): Promise<Agent[]> {
   const baseUrl = await getBaseUrl();
   const url = projectId
-    ? `${baseUrl}/roles?project_id=${encodeURIComponent(projectId)}`
-    : `${baseUrl}/roles`;
+    ? `${baseUrl}/agents?project_id=${encodeURIComponent(projectId)}`
+    : `${baseUrl}/agents`;
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`Failed to fetch roles: ${response.status}`);
+    throw new Error(`Failed to fetch agents: ${response.status}`);
   }
-  const data = (await response.json()) as { roles: Role[] };
-  return data.roles;
+  const data = (await response.json()) as { agents: Agent[] };
+  return data.agents;
 }
 
-export async function createRole(request: CreateRoleRequest): Promise<Role> {
+export async function createAgent(request: CreateAgentRequest): Promise<Agent> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/roles`, {
+  const response = await fetch(`${baseUrl}/agents`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Failed to create role: ${text || response.status}`);
+    throw new Error(`Failed to create agent: ${text || response.status}`);
   }
-  return response.json() as Promise<Role>;
+  return response.json() as Promise<Agent>;
 }
 
-export async function updateRole(id: string, request: UpdateRoleRequest): Promise<Role> {
+export async function updateAgent(id: string, request: UpdateAgentRequest): Promise<Agent> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/roles/${id}`, {
+  const response = await fetch(`${baseUrl}/agents/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Failed to update role: ${text || response.status}`);
+    throw new Error(`Failed to update agent: ${text || response.status}`);
   }
-  return response.json() as Promise<Role>;
+  return response.json() as Promise<Agent>;
 }
 
-export async function deleteRole(id: string): Promise<void> {
+export async function deleteAgent(id: string): Promise<void> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/roles/${id}`, {
+  const response = await fetch(`${baseUrl}/agents/${id}`, {
     method: "DELETE",
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Failed to delete role: ${text || response.status}`);
+    throw new Error(`Failed to delete agent: ${text || response.status}`);
   }
 }
 
 // ── Metrics ───────────────────────────────────────────────────────────────────
 
-export interface RoleMetricPoint {
+export interface AgentMetricPoint {
   /** ISO date string, e.g. "2026-03-01" */
   date: string;
   success_rate: number;
 }
 
-export interface RoleMetrics {
-  role_id: string;
-  role_name: string;
+export interface AgentMetrics {
+  agent_id: string;
+  agent_name: string;
   base_role: BaseRole;
   is_default: boolean;
   task_count: number;
@@ -118,26 +118,26 @@ export interface RoleMetrics {
   reopen_rate: number | null;
   /** trend: positive = improving, negative = declining, null = not enough data */
   success_rate_trend: number | null;
-  history: RoleMetricPoint[];
+  history: AgentMetricPoint[];
 }
 
-export interface RoleMetricsResponse {
-  metrics: RoleMetrics[];
+export interface AgentMetricsResponse {
+  metrics: AgentMetrics[];
   generated_at: string;
 }
 
-export async function fetchRoleMetrics(projectId: string): Promise<RoleMetricsResponse> {
+export async function fetchAgentMetrics(projectId: string): Promise<AgentMetricsResponse> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/roles/metrics?project_id=${encodeURIComponent(projectId)}`);
+  const response = await fetch(`${baseUrl}/agents/metrics?project_id=${encodeURIComponent(projectId)}`);
   if (!response.ok) {
-    throw new Error(`Failed to fetch role metrics: ${response.status}`);
+    throw new Error(`Failed to fetch agent metrics: ${response.status}`);
   }
-  return response.json() as Promise<RoleMetricsResponse>;
+  return response.json() as Promise<AgentMetricsResponse>;
 }
 
 export async function fetchLearnedPromptHistory(id: string): Promise<LearnedPromptHistory> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/roles/${id}/learned-prompt/history`);
+  const response = await fetch(`${baseUrl}/agents/${id}/learned-prompt/history`);
   if (!response.ok) {
     throw new Error(`Failed to fetch learned prompt history: ${response.status}`);
   }
@@ -146,7 +146,7 @@ export async function fetchLearnedPromptHistory(id: string): Promise<LearnedProm
 
 export async function clearLearnedPrompt(id: string): Promise<void> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/roles/${id}/learned-prompt`, {
+  const response = await fetch(`${baseUrl}/agents/${id}/learned-prompt`, {
     method: "DELETE",
   });
   if (!response.ok) {

@@ -217,7 +217,7 @@ fn tool_memory_build_context() -> RmcpTool {
 
 fn tool_role_metrics() -> RmcpTool {
     RmcpTool::new(
-        "role_metrics".to_string(),
+        "agent_metrics".to_string(),
         "Show execution quality metrics for a role to support prompt tuning and intervention decisions.".to_string(),
         object!({
             "type": "object",
@@ -231,7 +231,7 @@ fn tool_role_metrics() -> RmcpTool {
 
 fn tool_role_amend_prompt() -> RmcpTool {
     RmcpTool::new(
-        "role_amend_prompt".to_string(),
+        "agent_amend_prompt".to_string(),
         "Append a learned amendment to a role prompt using observed failures or improvements."
             .to_string(),
         object!({

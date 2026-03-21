@@ -1,4 +1,4 @@
-// HTTP handlers for the /roles REST endpoints consumed by the desktop frontend.
+// HTTP handlers for the /agents REST endpoints consumed by the desktop frontend.
 
 use axum::{
     Json, Router,
@@ -9,24 +9,24 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
-use djinn_core::models::AgentRole;
+use djinn_core::models::Agent;
 use djinn_db::{
-    AgentRoleCreateInput, AgentRoleListQuery, AgentRoleMetrics as DbRoleMetrics,
-    AgentRoleRepository, AgentRoleUpdateInput,
+    AgentCreateInput, AgentListQuery, AgentMetrics as DbAgentMetrics,
+    AgentRepository, AgentUpdateInput,
 };
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
-        .route("/roles", get(list_roles).post(create_role))
+        .route("/agents", get(list_agents).post(create_agent))
         // /roles/metrics must be registered before /roles/:id to avoid being
         // captured as a path parameter.
-        .route("/roles/metrics", get(role_metrics))
+        .route("/agents/metrics", get(agent_metrics))
         .route(
             "/roles/{id}/learned-prompt/history",
             get(learned_prompt_history),
         )
-        .route("/roles/{id}/learned-prompt", delete(clear_learned_prompt))
-        .route("/roles/{id}", put(update_role).delete(delete_role))
+        .route("/agents/{id}/learned-prompt", delete(clear_learned_prompt))
+        .route("/agents/{id}", put(update_agent).delete(delete_agent))
 }
 
 // ── Serialisation helpers ─────────────────────────────────────────────────────
@@ -49,7 +49,7 @@ fn now_rfc3339() -> String {
 // ── Role response ─────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
-struct RoleResponse {
+struct AgentResponse {
     id: String,
     project_id: String,
     name: String,
@@ -62,8 +62,8 @@ struct RoleResponse {
     updated_at: String,
 }
 
-impl From<&AgentRole> for RoleResponse {
-    fn from(r: &AgentRole) -> Self {
+impl From<&Agent> for AgentResponse {
+    fn from(r: &Agent) -> Self {
         Self {
             id: r.id.clone(),
             project_id: r.project_id.clone(),
@@ -88,16 +88,16 @@ struct ListQuery {
 
 #[derive(Serialize)]
 struct ListResponse {
-    roles: Vec<RoleResponse>,
+    agents: Vec<AgentResponse>,
 }
 
-async fn list_roles(
+async fn list_agents(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<ListResponse>, (StatusCode, String)> {
-    let repo = AgentRoleRepository::new(state.db().clone(), state.event_bus());
+    let repo = AgentRepository::new(state.db().clone(), state.event_bus());
     let roles = if let Some(project_id) = q.project_id {
-        repo.list_for_project(AgentRoleListQuery {
+        repo.list_for_project(AgentListQuery {
             project_id,
             base_role: None,
             limit: 500,
@@ -105,14 +105,14 @@ async fn list_roles(
         })
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .roles
+        .agents
     } else {
         repo.list_all()
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     };
     Ok(Json(ListResponse {
-        roles: roles.iter().map(RoleResponse::from).collect(),
+        agents: roles.iter().map(AgentResponse::from).collect(),
     }))
 }
 
@@ -127,11 +127,11 @@ struct CreateBody {
     system_prompt_extensions: Option<Vec<String>>,
 }
 
-async fn create_role(
+async fn create_agent(
     State(state): State<AppState>,
     Json(body): Json<CreateBody>,
-) -> Result<Json<RoleResponse>, (StatusCode, String)> {
-    let repo = AgentRoleRepository::new(state.db().clone(), state.event_bus());
+) -> Result<Json<AgentResponse>, (StatusCode, String)> {
+    let repo = AgentRepository::new(state.db().clone(), state.event_bus());
     let extensions = body
         .system_prompt_extensions
         .unwrap_or_default()
@@ -139,7 +139,7 @@ async fn create_role(
     let role = repo
         .create_for_project(
             &body.project_id,
-            AgentRoleCreateInput {
+            AgentCreateInput {
                 name: &body.name,
                 base_role: &body.base_role,
                 description: body.description.as_deref().unwrap_or(""),
@@ -153,7 +153,7 @@ async fn create_role(
         )
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(RoleResponse::from(&role)))
+    Ok(Json(AgentResponse::from(&role)))
 }
 
 // ── PUT /roles/:id ────────────────────────────────────────────────────────────
@@ -165,17 +165,17 @@ struct UpdateBody {
     system_prompt_extensions: Option<Vec<String>>,
 }
 
-async fn update_role(
+async fn update_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateBody>,
-) -> Result<Json<RoleResponse>, (StatusCode, String)> {
-    let repo = AgentRoleRepository::new(state.db().clone(), state.event_bus());
+) -> Result<Json<AgentResponse>, (StatusCode, String)> {
+    let repo = AgentRepository::new(state.db().clone(), state.event_bus());
     let existing = repo
         .get(&id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("role not found: {id}")))?;
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("agent not found: {id}")))?;
 
     let name = body
         .name
@@ -195,7 +195,7 @@ async fn update_role(
     let updated = repo
         .update(
             &id,
-            AgentRoleUpdateInput {
+            AgentUpdateInput {
                 name: &name,
                 description: &description,
                 system_prompt_extensions: &extensions,
@@ -208,21 +208,21 @@ async fn update_role(
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(RoleResponse::from(&updated)))
+    Ok(Json(AgentResponse::from(&updated)))
 }
 
 // ── DELETE /roles/:id ─────────────────────────────────────────────────────────
 
-async fn delete_role(
+async fn delete_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let repo = AgentRoleRepository::new(state.db().clone(), state.event_bus());
+    let repo = AgentRepository::new(state.db().clone(), state.event_bus());
     let role = repo
         .get(&id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("role not found: {id}")))?;
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("agent not found: {id}")))?;
     repo.delete(&id, &role.project_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -237,9 +237,9 @@ struct MetricsQuery {
 }
 
 #[derive(Serialize)]
-struct RoleMetricsItem {
-    role_id: String,
-    role_name: String,
+struct AgentMetricsItem {
+    agent_id: String,
+    agent_name: String,
     base_role: String,
     is_default: bool,
     task_count: i64,
@@ -253,8 +253,8 @@ struct RoleMetricsItem {
 }
 
 #[derive(Serialize)]
-struct RoleMetricsResponse {
-    metrics: Vec<RoleMetricsItem>,
+struct AgentMetricsResponse {
+    metrics: Vec<AgentMetricsItem>,
     generated_at: String,
 }
 
@@ -268,22 +268,22 @@ fn base_role_to_agent_type(base_role: &str) -> &str {
     }
 }
 
-async fn role_metrics(
+async fn agent_metrics(
     State(state): State<AppState>,
     Query(q): Query<MetricsQuery>,
-) -> Result<Json<RoleMetricsResponse>, (StatusCode, String)> {
+) -> Result<Json<AgentMetricsResponse>, (StatusCode, String)> {
     let generated_at = now_rfc3339();
 
     let Some(project_id) = q.project_id else {
-        return Ok(Json(RoleMetricsResponse {
+        return Ok(Json(AgentMetricsResponse {
             metrics: vec![],
             generated_at,
         }));
     };
 
-    let repo = AgentRoleRepository::new(state.db().clone(), state.event_bus());
+    let repo = AgentRepository::new(state.db().clone(), state.event_bus());
     let roles = repo
-        .list_for_project(AgentRoleListQuery {
+        .list_for_project(AgentListQuery {
             project_id: project_id.clone(),
             base_role: None,
             limit: 500,
@@ -291,7 +291,7 @@ async fn role_metrics(
         })
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .roles;
+        .agents;
 
     let mut metrics = Vec::with_capacity(roles.len());
     for role in &roles {
@@ -299,7 +299,7 @@ async fn role_metrics(
         let m = repo
             .get_metrics(&project_id, agent_type, 30)
             .await
-            .unwrap_or(DbRoleMetrics {
+            .unwrap_or(DbAgentMetrics {
                 success_rate: 0.0,
                 avg_reopens: 0.0,
                 verification_pass_rate: 0.0,
@@ -308,9 +308,9 @@ async fn role_metrics(
                 avg_time_seconds: 0.0,
             });
         let has_data = m.completed_task_count > 0;
-        metrics.push(RoleMetricsItem {
-            role_id: role.id.clone(),
-            role_name: role.name.clone(),
+        metrics.push(AgentMetricsItem {
+            agent_id: role.id.clone(),
+            agent_name: role.name.clone(),
             base_role: role.base_role.clone(),
             is_default: role.is_default,
             task_count: m.completed_task_count,
@@ -324,7 +324,7 @@ async fn role_metrics(
         });
     }
 
-    Ok(Json(RoleMetricsResponse {
+    Ok(Json(AgentMetricsResponse {
         metrics,
         generated_at,
     }))
@@ -352,12 +352,12 @@ async fn learned_prompt_history(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<LearnedPromptHistoryResponse>, (StatusCode, String)> {
-    let repo = AgentRoleRepository::new(state.db().clone(), state.event_bus());
+    let repo = AgentRepository::new(state.db().clone(), state.event_bus());
     let role = repo
         .get(&id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("role not found: {id}")))?;
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("agent not found: {id}")))?;
 
     let entries = repo
         .get_history(&id)
@@ -396,7 +396,7 @@ async fn clear_learned_prompt(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let repo = AgentRoleRepository::new(state.db().clone(), state.event_bus());
+    let repo = AgentRepository::new(state.db().clone(), state.event_bus());
     repo.clear_learned_prompt(&id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

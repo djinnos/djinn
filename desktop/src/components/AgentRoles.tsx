@@ -9,17 +9,17 @@ import { InlineError } from "@/components/InlineError";
 import { cn } from "@/lib/utils";
 import {
   type BaseRole,
-  type CreateRoleRequest,
+  type CreateAgentRequest,
   type LearnedPromptAmendment,
   type LearnedPromptHistory,
-  type Role,
+  type Agent,
   clearLearnedPrompt,
-  createRole,
-  deleteRole,
+  createAgent,
+  deleteAgent,
   fetchLearnedPromptHistory,
-  fetchRoles,
-  updateRole,
-} from "@/api/roles";
+  fetchAgents,
+  updateAgent,
+} from "@/api/agents";
 
 const BASE_ROLE_LABELS: Record<BaseRole, string> = {
   worker: "Worker",
@@ -32,16 +32,16 @@ const BASE_ROLES: BaseRole[] = ["worker", "reviewer", "lead", "planner"];
 
 // ── Role Form ────────────────────────────────────────────────────────────────
 
-interface RoleFormProps {
-  initial?: Partial<Omit<CreateRoleRequest, "project_id">>;
+interface AgentFormProps {
+  initial?: Partial<Omit<CreateAgentRequest, "project_id">>;
   fixedBaseRole?: BaseRole;
   submitLabel: string;
   isBusy: boolean;
-  onSubmit: (data: Omit<CreateRoleRequest, "project_id">) => void;
+  onSubmit: (data: Omit<CreateAgentRequest, "project_id">) => void;
   onCancel: () => void;
 }
 
-function RoleForm({ initial, fixedBaseRole, submitLabel, isBusy, onSubmit, onCancel }: RoleFormProps) {
+function AgentForm({ initial, fixedBaseRole, submitLabel, isBusy, onSubmit, onCancel }: AgentFormProps) {
   const [baseRole, setBaseRole] = useState<BaseRole>(fixedBaseRole ?? initial?.base_role ?? "worker");
   const [name, setName] = useState(initial?.name ?? "");
   const [description, setDescription] = useState(initial?.description ?? "");
@@ -204,7 +204,7 @@ function AmendmentEntry({ amendment }: { amendment: LearnedPromptAmendment }) {
 }
 
 interface LearnedPromptSectionProps {
-  role: Role;
+  role: Agent;
   onCleared: () => void;
 }
 
@@ -329,15 +329,15 @@ function LearnedPromptSection({ role, onCleared }: LearnedPromptSectionProps) {
 
 // ── Role Card ────────────────────────────────────────────────────────────────
 
-interface RoleCardProps {
-  role: Role;
+interface AgentCardProps {
+  role: Agent;
   onEdit: () => void;
   onDelete: () => void;
   onRoleCleared: () => void;
   isDeleting: boolean;
 }
 
-function RoleCard({ role, onEdit, onDelete, onRoleCleared, isDeleting }: RoleCardProps) {
+function AgentCard({ role, onEdit, onDelete, onRoleCleared, isDeleting }: AgentCardProps) {
   return (
     <div className="rounded-lg border border-border bg-card p-4 space-y-2">
       <div className="flex items-start justify-between gap-3">
@@ -391,7 +391,7 @@ function RoleCard({ role, onEdit, onDelete, onRoleCleared, isDeleting }: RoleCar
 
 export function AgentRoles() {
   const project = useSelectedProject();
-  const [roles, setRoles] = useState<Role[]>([]);
+  const [roles, setRoles] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -410,10 +410,10 @@ export function AgentRoles() {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchRoles(project?.id);
+      const data = await fetchAgents(project?.id);
       setRoles(data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load roles");
+      setError(err instanceof Error ? err.message : "Failed to load agents");
     } finally {
       setLoading(false);
     }
@@ -423,24 +423,24 @@ export function AgentRoles() {
     void loadRoles();
   }, [loadRoles]);
 
-  const handleCreate = async (data: Omit<CreateRoleRequest, "project_id">) => {
+  const handleCreate = async (data: Omit<CreateAgentRequest, "project_id">) => {
     if (!project) return;
     setCreateBusy(true);
     try {
-      const role = await createRole({ ...data, project_id: project.id });
+      const role = await createAgent({ ...data, project_id: project.id });
       setRoles((prev) => [...prev, role]);
       setIsCreating(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create role");
+      setError(err instanceof Error ? err.message : "Failed to create agent");
     } finally {
       setCreateBusy(false);
     }
   };
 
-  const handleUpdate = async (id: string, data: Omit<CreateRoleRequest, "project_id">) => {
+  const handleUpdate = async (id: string, data: Omit<CreateAgentRequest, "project_id">) => {
     setEditBusy(true);
     try {
-      const updated = await updateRole(id, {
+      const updated = await updateAgent(id, {
         name: data.name,
         description: data.description,
         system_prompt_extensions: data.system_prompt_extensions,
@@ -448,7 +448,7 @@ export function AgentRoles() {
       setRoles((prev) => prev.map((r) => (r.id === id ? updated : r)));
       setEditingId(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to update role");
+      setError(err instanceof Error ? err.message : "Failed to update agent");
     } finally {
       setEditBusy(false);
     }
@@ -457,10 +457,10 @@ export function AgentRoles() {
   const handleDelete = async (id: string) => {
     setDeletingId(id);
     try {
-      await deleteRole(id);
+      await deleteAgent(id);
       setRoles((prev) => prev.filter((r) => r.id !== id));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete role");
+      setError(err instanceof Error ? err.message : "Failed to delete agent");
     } finally {
       setDeletingId(null);
     }
@@ -500,7 +500,7 @@ export function AgentRoles() {
       {isCreating && (
         <div className="rounded-lg border border-border bg-card p-4">
           <h3 className="font-medium mb-4">New specialist</h3>
-          <RoleForm
+          <AgentForm
             submitLabel="Create"
             isBusy={createBusy}
             onSubmit={(data) => void handleCreate(data)}
@@ -525,7 +525,7 @@ export function AgentRoles() {
                   editingId === role.id ? (
                     <div key={role.id} className="rounded-lg border border-border bg-card p-4">
                       <h4 className="font-medium mb-4">Edit "{role.name}"</h4>
-                      <RoleForm
+                      <AgentForm
                         initial={{
                           base_role: role.base_role,
                           name: role.name,
@@ -540,7 +540,7 @@ export function AgentRoles() {
                       />
                     </div>
                   ) : (
-                    <RoleCard
+                    <AgentCard
                       key={role.id}
                       role={role}
                       onEdit={() => setEditingId(role.id)}

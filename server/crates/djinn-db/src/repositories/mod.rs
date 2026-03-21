@@ -1,4 +1,4 @@
-pub mod agent_role;
+pub mod agent;
 pub mod epic;
 pub mod events;
 pub mod git_settings;

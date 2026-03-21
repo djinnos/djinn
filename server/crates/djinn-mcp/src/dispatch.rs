@@ -36,8 +36,8 @@ use crate::tools::sync_tools::{
     TaskSyncStatusParams,
 };
 use crate::tools::system_tools::SystemLogsInput;
-use crate::tools::role_tools::{
-    RoleCreateParams, RoleListParams, RoleMetricsParams, RoleShowParams, RoleUpdateParams,
+use crate::tools::agent_tools::{
+    AgentCreateParams, AgentListParams, AgentMetricsParams, AgentShowParams, AgentUpdateParams,
 };
 use crate::tools::task_tools::{
     BoardHealthParams, BoardReconcileParams, ErrorOr, TaskActivityListParams,
@@ -533,29 +533,29 @@ impl DjinnMcpServer {
                 self.task_memory_refs(Parameters(decode_args::<TaskMemoryRefsParams>(name, args)?))
                     .await,
             ),
-            "role_create" => map_json(
+            "agent_create" => map_json(
                 name,
-                self.role_create(Parameters(decode_args::<RoleCreateParams>(name, args)?))
+                self.agent_create(Parameters(decode_args::<AgentCreateParams>(name, args)?))
                     .await,
             ),
-            "role_show" => map_json(
+            "agent_show" => map_json(
                 name,
-                self.role_show(Parameters(decode_args::<RoleShowParams>(name, args)?))
+                self.agent_show(Parameters(decode_args::<AgentShowParams>(name, args)?))
                     .await,
             ),
-            "role_list" => map_json(
+            "agent_list" => map_json(
                 name,
-                self.role_list(Parameters(decode_args::<RoleListParams>(name, args)?))
+                self.agent_list(Parameters(decode_args::<AgentListParams>(name, args)?))
                     .await,
             ),
-            "role_update" => map_json(
+            "agent_update" => map_json(
                 name,
-                self.role_update(Parameters(decode_args::<RoleUpdateParams>(name, args)?))
+                self.agent_update(Parameters(decode_args::<AgentUpdateParams>(name, args)?))
                     .await,
             ),
-            "role_metrics" => map_json(
+            "agent_metrics" => map_json(
                 name,
-                self.role_metrics(Parameters(decode_args::<RoleMetricsParams>(name, args)?))
+                self.agent_metrics(Parameters(decode_args::<AgentMetricsParams>(name, args)?))
                     .await,
             ),
             _ => Err(format!("unknown MCP tool: '{name}'")),

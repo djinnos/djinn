@@ -2,7 +2,7 @@ use super::*;
 use crate::roles::DispatchContext;
 use djinn_core::models::{TaskStatus, TransitionAction};
 #[cfg(not(test))]
-use djinn_db::AgentRoleRepository;
+use djinn_db::AgentRepository;
 use djinn_provider::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
 
 /// Result of a single `try_dispatch_to_pool` attempt.
@@ -618,7 +618,7 @@ impl CoordinatorActor {
 
         #[cfg(not(test))]
         {
-            let role_repo = AgentRoleRepository::new(
+            let role_repo = AgentRepository::new(
                 self.db.clone(),
                 crate::events::event_bus_for(&self.events_tx),
             );

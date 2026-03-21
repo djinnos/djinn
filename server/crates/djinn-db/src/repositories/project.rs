@@ -223,7 +223,7 @@ impl ProjectRepository {
         for (base_role, description) in DEFAULT_ROLES {
             let role_id = uuid::Uuid::now_v7().to_string();
             sqlx::query(
-                "INSERT OR IGNORE INTO agent_roles
+                "INSERT OR IGNORE INTO agents
                     (id, project_id, name, base_role, description, is_default)
                  VALUES (?1, ?2, ?3, ?4, ?5, 1)",
             )
@@ -523,7 +523,7 @@ mod tests {
         let project = repo.create("seeded", "/seeded").await.unwrap();
 
         let rows: Vec<(String, String, i64)> = sqlx::query_as(
-            "SELECT name, base_role, is_default FROM agent_roles WHERE project_id = ?1 ORDER BY base_role",
+            "SELECT name, base_role, is_default FROM agents WHERE project_id = ?1 ORDER BY base_role",
         )
         .bind(&project.id)
         .fetch_all(db.pool())
@@ -561,7 +561,7 @@ mod tests {
         repo.create("proj-b", "/proj-b").await.unwrap();
 
         let total: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM agent_roles WHERE is_default = 1")
+            sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE is_default = 1")
                 .fetch_one(db.pool())
                 .await
                 .unwrap();

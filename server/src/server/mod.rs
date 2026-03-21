@@ -12,7 +12,7 @@ use tower_http::cors::CorsLayer;
 use crate::sse;
 
 mod chat;
-mod roles;
+mod agents;
 mod state;
 pub use state::AppState;
 
@@ -126,7 +126,7 @@ pub fn router(state: AppState) -> Router {
         .route("/db-info", get(sse::db_info_handler))
         .route("/api/chat/completions", post(chat::completions_handler))
         .route("/mcp", post(mcp_handler))
-        .merge(roles::router())
+        .merge(agents::router())
         .layer(CorsLayer::permissive())
         .with_state(state)
 }

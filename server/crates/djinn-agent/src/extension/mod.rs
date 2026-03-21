@@ -12,7 +12,7 @@ use super::sandbox;
 use crate::context::AgentContext;
 use crate::lsp::format_diagnostics_xml;
 use djinn_core::models::Task;
-use djinn_db::AgentRoleRepository;
+use djinn_db::AgentRepository;
 use djinn_db::EpicRepository;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
@@ -84,8 +84,8 @@ where
         "memory_search" => call_memory_search(state, &call.arguments, session_task_id).await,
         "memory_list" => call_memory_list(state, &call.arguments).await,
         "memory_build_context" => call_memory_build_context(state, &call.arguments, session_task_id).await,
-        "role_metrics" => call_role_metrics(state, &call.arguments).await,
-        "role_amend_prompt" => call_role_amend_prompt(state, &call.arguments).await,
+        "agent_metrics" => call_agent_metrics(state, &call.arguments).await,
+        "agent_amend_prompt" => call_agent_amend_prompt(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
         "read" => call_read(state, &call.arguments, worktree_path).await,
         "write" => call_write(state, &call.arguments, worktree_path).await,
@@ -232,16 +232,16 @@ struct MemoryBuildContextParams {
 }
 
 #[derive(Deserialize)]
-struct RoleMetricsParams {
+struct AgentMetricsParams {
     project: Option<String>,
-    role_id: Option<String>,
+    agent_id: Option<String>,
     window_days: Option<i64>,
 }
 
 #[derive(Deserialize)]
-struct RoleAmendPromptParams {
+struct AgentAmendPromptParams {
     project: Option<String>,
-    role_id: String,
+    agent_id: String,
     amendment: String,
     metrics_snapshot: Option<String>,
 }
@@ -1069,18 +1069,18 @@ async fn call_memory_build_context(
     }
 }
 
-async fn call_role_metrics(
+async fn call_agent_metrics(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let p: RoleMetricsParams = parse_args(arguments)?;
+    let p: AgentMetricsParams = parse_args(arguments)?;
     let project_path = resolve_project_path(p.project);
     let project_id = project_id_for_path(state, &project_path).await?;
     let window_days = p.window_days.unwrap_or(30).max(1);
 
-    let repo = AgentRoleRepository::new(state.db.clone(), state.event_bus.clone());
+    let repo = AgentRepository::new(state.db.clone(), state.event_bus.clone());
 
-    let roles: Vec<djinn_core::models::AgentRole> = if let Some(ref id_or_name) = p.role_id {
+    let roles: Vec<djinn_core::models::Agent> = if let Some(ref id_or_name) = p.agent_id {
         let role = repo.get(id_or_name).await.map_err(|e| e.to_string())?;
         let role = match role {
             Some(r) if r.project_id == project_id => Some(r),
@@ -1091,10 +1091,10 @@ async fn call_role_metrics(
         };
         match role {
             Some(r) => vec![r],
-            None => return Err(format!("agent_role not found: {id_or_name}")),
+            None => return Err(format!("agent not found: {id_or_name}")),
         }
     } else {
-        repo.list_for_project(djinn_db::AgentRoleListQuery {
+        repo.list_for_project(djinn_db::AgentListQuery {
             project_id: project_id.clone(),
             base_role: None,
             limit: 200,
@@ -1102,7 +1102,7 @@ async fn call_role_metrics(
         })
         .await
         .map_err(|e| e.to_string())?
-        .roles
+        .agents
     };
 
     let mut entries = Vec::with_capacity(roles.len());
@@ -1117,7 +1117,7 @@ async fn call_role_metrics(
         let m = repo
             .get_metrics(&project_id, agent_type, window_days)
             .await
-            .unwrap_or(djinn_db::AgentRoleMetrics {
+            .unwrap_or(djinn_db::AgentMetrics {
                 success_rate: 0.0,
                 avg_reopens: 0.0,
                 verification_pass_rate: 0.0,
@@ -1126,8 +1126,8 @@ async fn call_role_metrics(
                 avg_time_seconds: 0.0,
             });
         entries.push(serde_json::json!({
-            "role_id": role.id,
-            "role_name": role.name,
+            "agent_id": role.id,
+            "agent_name": role.name,
             "base_role": role.base_role,
             "success_rate": m.success_rate,
             "avg_reopens": m.avg_reopens,
@@ -1144,29 +1144,29 @@ async fn call_role_metrics(
     }))
 }
 
-async fn call_role_amend_prompt(
+async fn call_agent_amend_prompt(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let p: RoleAmendPromptParams = parse_args(arguments)?;
+    let p: AgentAmendPromptParams = parse_args(arguments)?;
     let project_path = resolve_project_path(p.project);
     let project_id = project_id_for_path(state, &project_path).await?;
 
-    let repo = AgentRoleRepository::new(state.db.clone(), state.event_bus.clone());
+    let repo = AgentRepository::new(state.db.clone(), state.event_bus.clone());
 
     // Resolve role by UUID or name.
     let role = {
-        let by_id = repo.get(&p.role_id).await.map_err(|e| e.to_string())?;
+        let by_id = repo.get(&p.agent_id).await.map_err(|e| e.to_string())?;
         match by_id {
             Some(r) if r.project_id == project_id => Some(r),
             _ => repo
-                .get_by_name_for_project(&project_id, &p.role_id)
+                .get_by_name_for_project(&project_id, &p.agent_id)
                 .await
                 .map_err(|e| e.to_string())?,
         }
     };
 
-    let role = role.ok_or_else(|| format!("agent_role not found: {}", p.role_id))?;
+    let role = role.ok_or_else(|| format!("agent not found: {}", p.agent_id))?;
 
     // Only allow amending specialist roles. Prevents patching high-level orchestration roles.
     if matches!(role.base_role.as_str(), "architect" | "lead" | "planner") {
@@ -1182,8 +1182,8 @@ async fn call_role_amend_prompt(
         .map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
-        "role_id": updated.id,
-        "role_name": updated.name,
+        "agent_id": updated.id,
+        "agent_name": updated.name,
         "learned_prompt": updated.learned_prompt,
         "updated_at": updated.updated_at,
         "amendment_appended": true,
@@ -2619,13 +2619,13 @@ fn tool_memory_build_context() -> RmcpTool {
 
 fn tool_role_metrics() -> RmcpTool {
     RmcpTool::new(
-        "role_metrics".to_string(),
-        "Return aggregated effectiveness metrics per agent role: success_rate, avg_tokens, avg_time_seconds, verification_pass_rate, avg_reopens, completed_task_count. Omit role_id to return metrics for all roles in the project.".to_string(),
+        "agent_metrics".to_string(),
+        "Return aggregated effectiveness metrics per agent: success_rate, avg_tokens, avg_time_seconds, verification_pass_rate, avg_reopens, completed_task_count. Omit agent_id to return metrics for all agents in the project.".to_string(),
         object!({
             "type": "object",
             "properties": {
                 "project": {"type": "string", "description": "Absolute project path"},
-                "role_id": {"type": "string", "description": "Role UUID or name; omit for all roles"},
+                "agent_id": {"type": "string", "description": "Agent UUID or name; omit for all agents"},
                 "window_days": {"type": "integer", "description": "Days back for session data (default 30)"}
             }
         }),
@@ -2634,14 +2634,14 @@ fn tool_role_metrics() -> RmcpTool {
 
 fn tool_role_amend_prompt() -> RmcpTool {
     RmcpTool::new(
-        "role_amend_prompt".to_string(),
+        "agent_amend_prompt".to_string(),
         "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer, resolver base_role). Do NOT use on architect, lead, or planner roles.".to_string(),
         object!({
             "type": "object",
-            "required": ["role_id", "amendment"],
+            "required": ["agent_id", "amendment"],
             "properties": {
                 "project": {"type": "string", "description": "Absolute project path"},
-                "role_id": {"type": "string", "description": "Role UUID or name to amend"},
+                "agent_id": {"type": "string", "description": "Agent UUID or name to amend"},
                 "amendment": {"type": "string", "description": "Amendment text to append to learned_prompt"},
                 "metrics_snapshot": {"type": "string", "description": "JSON string of current metrics for the history record"}
             }

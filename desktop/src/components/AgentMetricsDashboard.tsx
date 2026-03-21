@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { InlineError } from "@/components/InlineError";
 import { cn } from "@/lib/utils";
-import { type BaseRole, type RoleMetrics, fetchRoleMetrics } from "@/api/roles";
+import { type BaseRole, type AgentMetrics, fetchAgentMetrics } from "@/api/agents";
 import { TrendingUp, TrendingDown, Minus, RefreshCw } from "lucide-react";
 
 const BASE_ROLE_LABELS: Record<BaseRole, string> = {
@@ -88,7 +88,7 @@ function MetricCell({ label, value }: { label: string; value: string }) {
 
 // ── Role metrics card ─────────────────────────────────────────────────────────
 
-function RoleMetricsCard({ metrics }: { metrics: RoleMetrics }) {
+function AgentMetricsCard({ metrics }: { metrics: AgentMetrics }) {
   const historyPoints = metrics.history.map((p) => p.success_rate);
   const isEmpty = metrics.task_count === 0;
 
@@ -97,7 +97,7 @@ function RoleMetricsCard({ metrics }: { metrics: RoleMetrics }) {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-medium truncate">{metrics.role_name}</span>
+            <span className="font-medium truncate">{metrics.agent_name}</span>
             {metrics.is_default && (
               <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
                 default
@@ -137,7 +137,7 @@ function RoleMetricsCard({ metrics }: { metrics: RoleMetrics }) {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function AgentMetricsDashboard({ projectId }: { projectId: string | null }) {
-  const [metrics, setMetrics] = useState<RoleMetrics[] | null>(null);
+  const [metrics, setMetrics] = useState<AgentMetrics[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
@@ -148,7 +148,7 @@ export function AgentMetricsDashboard({ projectId }: { projectId: string | null 
     if (!silent) setLoading(true);
     setError(null);
     try {
-      const data = await fetchRoleMetrics(projectId);
+      const data = await fetchAgentMetrics(projectId);
       setMetrics(data.metrics);
       setLastRefresh(new Date());
     } catch (err) {
@@ -237,14 +237,14 @@ export function AgentMetricsDashboard({ projectId }: { projectId: string | null 
           </h3>
 
           {defaults.map((m) => (
-            <RoleMetricsCard key={m.role_id} metrics={m} />
+            <AgentMetricsCard key={m.agent_id} metrics={m} />
           ))}
 
           {specialists.length > 0 && (
             <>
               <p className="text-xs text-muted-foreground pl-0.5 pt-1">Specialists</p>
               {specialists.map((m) => (
-                <RoleMetricsCard key={m.role_id} metrics={m} />
+                <AgentMetricsCard key={m.agent_id} metrics={m} />
               ))}
             </>
           )}

@@ -1847,10 +1847,10 @@ export namespace ProviderValidateOutputSchema {
 
 }
 export type ProviderValidateOutput = ProviderValidateOutputSchema.ProviderValidateOutput;
-export namespace RoleCreateInputSchema {
+export namespace AgentCreateInputSchema {
   export type AnyJson = any
 
-  export interface RoleCreateInput {
+  export interface AgentCreateInput {
   /**
    * Base role to extend. One of: worker, lead, planner, architect, reviewer, resolver.
    */
@@ -1888,11 +1888,11 @@ export namespace RoleCreateInputSchema {
   }
 
 }
-export type RoleCreateInput = RoleCreateInputSchema.RoleCreateInput;
-export namespace RoleCreateOutputSchema {
+export type AgentCreateInput = AgentCreateInputSchema.AgentCreateInput;
+export namespace AgentCreateOutputSchema {
   export type AnyJson = any
 
-  export interface RoleCreateOutput {
+  export interface AgentCreateOutput {
   base_role?: string
   created_at?: string
   description?: string
@@ -1915,9 +1915,9 @@ export namespace RoleCreateOutputSchema {
   }
 
 }
-export type RoleCreateOutput = RoleCreateOutputSchema.RoleCreateOutput;
-export namespace RoleListInputSchema {
-  export interface RoleListInput {
+export type AgentCreateOutput = AgentCreateOutputSchema.AgentCreateOutput;
+export namespace AgentListInputSchema {
+  export interface AgentListInput {
   /**
    * Filter by base role: worker, lead, planner, architect, reviewer, resolver.
    */
@@ -1932,20 +1932,20 @@ export namespace RoleListInputSchema {
   }
 
 }
-export type RoleListInput = RoleListInputSchema.RoleListInput;
-export namespace RoleListOutputSchema {
+export type AgentListInput = AgentListInputSchema.AgentListInput;
+export namespace AgentListOutputSchema {
   export type AnyJson = any
 
-  export interface RoleListOutput {
+  export interface AgentListOutput {
   error?: string
   has_more?: boolean
   limit?: number
   offset?: number
-  roles?: AgentRoleModel[]
+  agents?: AgentModel[]
   total_count?: number
   [k: string]: any
   }
-  export interface AgentRoleModel {
+  export interface AgentModel {
   base_role: string
   created_at: string
   description: string
@@ -1967,17 +1967,17 @@ export namespace RoleListOutputSchema {
   }
 
 }
-export type RoleListOutput = RoleListOutputSchema.RoleListOutput;
-export namespace RoleMetricsInputSchema {
-  export interface RoleMetricsInput {
+export type AgentListOutput = AgentListOutputSchema.AgentListOutput;
+export namespace AgentMetricsInputSchema {
+  export interface AgentMetricsInput {
   /**
    * Absolute project path.
    */
   project: string
   /**
-   * Optional role UUID or name — if omitted returns metrics for all roles.
+   * Optional agent UUID or name — if omitted returns metrics for all agents.
    */
-  role_id?: string
+  agent_id?: string
   /**
    * How many days back to include session data (default 30).
    */
@@ -1986,18 +1986,18 @@ export namespace RoleMetricsInputSchema {
   }
 
 }
-export type RoleMetricsInput = RoleMetricsInputSchema.RoleMetricsInput;
-export namespace RoleMetricsOutputSchema {
-  export interface RoleMetricsOutput {
+export type AgentMetricsInput = AgentMetricsInputSchema.AgentMetricsInput;
+export namespace AgentMetricsOutputSchema {
+  export interface AgentMetricsOutput {
   error?: string
-  roles?: RoleMetricEntry[]
+  agents?: AgentMetricEntry[]
   /**
    * Window used for session queries (days back from now).
    */
   window_days: number
   [k: string]: any
   }
-  export interface RoleMetricEntry {
+  export interface AgentMetricEntry {
   /**
    * Average reopen_count across tasks dispatched to this role.
    */
@@ -2015,8 +2015,8 @@ export namespace RoleMetricsOutputSchema {
    * Number of completed tasks included in the calculation.
    */
   completed_task_count: number
-  role_id: string
-  role_name: string
+  agent_id?: string
+  agent_name: string
   /**
    * Fraction of completed tasks that closed as "completed" (0.0–1.0).
    */
@@ -2029,9 +2029,9 @@ export namespace RoleMetricsOutputSchema {
   }
 
 }
-export type RoleMetricsOutput = RoleMetricsOutputSchema.RoleMetricsOutput;
-export namespace RoleShowInputSchema {
-  export interface RoleShowInput {
+export type AgentMetricsOutput = AgentMetricsOutputSchema.AgentMetricsOutput;
+export namespace AgentShowInputSchema {
+  export interface AgentShowInput {
   /**
    * Role UUID or name.
    */
@@ -2044,11 +2044,11 @@ export namespace RoleShowInputSchema {
   }
 
 }
-export type RoleShowInput = RoleShowInputSchema.RoleShowInput;
-export namespace RoleShowOutputSchema {
+export type AgentShowInput = AgentShowInputSchema.AgentShowInput;
+export namespace AgentShowOutputSchema {
   export type AnyJson = any
 
-  export interface RoleShowOutput {
+  export interface AgentShowOutput {
   base_role?: string
   created_at?: string
   description?: string
@@ -2071,11 +2071,11 @@ export namespace RoleShowOutputSchema {
   }
 
 }
-export type RoleShowOutput = RoleShowOutputSchema.RoleShowOutput;
-export namespace RoleUpdateInputSchema {
+export type AgentShowOutput = AgentShowOutputSchema.AgentShowOutput;
+export namespace AgentUpdateInputSchema {
   export type AnyJson = any
 
-  export interface RoleUpdateInput {
+  export interface AgentUpdateInput {
   /**
    * Set to true to clear learned_prompt back to NULL. Takes precedence over learned_prompt.
    */
@@ -2103,11 +2103,11 @@ export namespace RoleUpdateInputSchema {
   }
 
 }
-export type RoleUpdateInput = RoleUpdateInputSchema.RoleUpdateInput;
-export namespace RoleUpdateOutputSchema {
+export type AgentUpdateInput = AgentUpdateInputSchema.AgentUpdateInput;
+export namespace AgentUpdateOutputSchema {
   export type AnyJson = any
 
-  export interface RoleUpdateOutput {
+  export interface AgentUpdateOutput {
   base_role?: string
   created_at?: string
   description?: string
@@ -2130,7 +2130,7 @@ export namespace RoleUpdateOutputSchema {
   }
 
 }
-export type RoleUpdateOutput = RoleUpdateOutputSchema.RoleUpdateOutput;
+export type AgentUpdateOutput = AgentUpdateOutputSchema.AgentUpdateOutput;
 export namespace SessionActiveInputSchema {
   export interface SessionActiveInput {
   /**
@@ -3191,7 +3191,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "role_create" | "role_list" | "role_metrics" | "role_show" | "role_update" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "board_health" | "board_reconcile" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "board_health": { input: BoardHealthInput; output: BoardHealthOutput };
@@ -3249,11 +3249,11 @@ export interface McpToolMap {
   "provider_oauth_start": { input: ProviderOauthStartInput; output: ProviderOauthStartOutput };
   "provider_remove": { input: ProviderRemoveInput; output: ProviderRemoveOutput };
   "provider_validate": { input: ProviderValidateInput; output: ProviderValidateOutput };
-  "role_create": { input: RoleCreateInput; output: RoleCreateOutput };
-  "role_list": { input: RoleListInput; output: RoleListOutput };
-  "role_metrics": { input: RoleMetricsInput; output: RoleMetricsOutput };
-  "role_show": { input: RoleShowInput; output: RoleShowOutput };
-  "role_update": { input: RoleUpdateInput; output: RoleUpdateOutput };
+  "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
+  "agent_list": { input: AgentListInput; output: AgentListOutput };
+  "agent_metrics": { input: AgentMetricsInput; output: AgentMetricsOutput };
+  "agent_show": { input: AgentShowInput; output: AgentShowOutput };
+  "agent_update": { input: AgentUpdateInput; output: AgentUpdateOutput };
   "session_active": { input: SessionActiveInput; output: SessionActiveOutput };
   "session_for_task": { input: SessionForTaskInput; output: SessionForTaskOutput };
   "session_list": { input: SessionListInput; output: SessionListOutput };

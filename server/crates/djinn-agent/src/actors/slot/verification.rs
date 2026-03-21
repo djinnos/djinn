@@ -159,7 +159,7 @@ async fn role_verification_command_for_task(
 ) -> Option<String> {
     let specialist_name = task.agent_type.as_deref().filter(|s| !s.is_empty())?;
     let role_repo =
-        djinn_db::AgentRoleRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+        djinn_db::AgentRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let role = role_repo
         .get_by_name_for_project(&task.project_id, specialist_name)
         .await

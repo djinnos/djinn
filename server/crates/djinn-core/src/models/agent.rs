@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-/// A configurable agent role, either a default base role or a user-defined specialist.
+/// A configurable agent, either a default base role or a user-defined specialist.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
-pub struct AgentRole {
+pub struct Agent {
     pub id: String,
     pub project_id: String,
     pub name: String,

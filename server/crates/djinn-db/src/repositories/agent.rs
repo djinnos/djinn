@@ -1,5 +1,5 @@
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_core::models::AgentRole;
+use djinn_core::models::Agent;
 
 use crate::database::Database;
 use crate::{Error, Result};
@@ -13,7 +13,7 @@ pub const VALID_BASE_ROLES: &[&str] = &[
     "resolver",
 ];
 
-pub struct AgentRoleCreateInput<'a> {
+pub struct AgentCreateInput<'a> {
     pub name: &'a str,
     pub base_role: &'a str,
     pub description: &'a str,
@@ -25,7 +25,7 @@ pub struct AgentRoleCreateInput<'a> {
     pub is_default: bool,
 }
 
-pub struct AgentRoleUpdateInput<'a> {
+pub struct AgentUpdateInput<'a> {
     pub name: &'a str,
     pub description: &'a str,
     pub system_prompt_extensions: &'a str,
@@ -38,20 +38,20 @@ pub struct AgentRoleUpdateInput<'a> {
     pub learned_prompt: Option<&'a str>,
 }
 
-pub struct AgentRoleListQuery {
+pub struct AgentListQuery {
     pub project_id: String,
     pub base_role: Option<String>,
     pub limit: i64,
     pub offset: i64,
 }
 
-pub struct AgentRoleListResult {
-    pub roles: Vec<AgentRole>,
+pub struct AgentListResult {
+    pub agents: Vec<Agent>,
     pub total_count: i64,
 }
 
 /// Per-role aggregated effectiveness metrics.
-pub struct AgentRoleMetrics {
+pub struct AgentMetrics {
     /// Fraction of closed tasks that completed successfully (0.0–1.0).
     pub success_rate: f64,
     /// Average reopen_count across closed tasks for this role.
@@ -71,8 +71,8 @@ pub struct AgentRoleMetrics {
 pub struct PendingAmendmentEvaluation {
     /// History record ID.
     pub history_id: String,
-    /// Role the amendment applies to.
-    pub role_id: String,
+    /// Agent the amendment applies to.
+    pub agent_id: String,
     /// ISO-8601 timestamp when the amendment was first applied.
     pub created_at: String,
     /// The amendment text (same as `proposed_text`).
@@ -103,24 +103,24 @@ pub struct LearnedPromptHistoryEntry {
     pub created_at: String,
 }
 
-pub struct AgentRoleRepository {
+pub struct AgentRepository {
     db: Database,
     events: EventBus,
 }
 
-impl AgentRoleRepository {
+impl AgentRepository {
     pub fn new(db: Database, events: EventBus) -> Self {
         Self { db, events }
     }
 
     /// Return all roles across all projects, ordered by project_id, base_role, name.
-    pub async fn list_all(&self) -> Result<Vec<AgentRole>> {
+    pub async fn list_all(&self) -> Result<Vec<Agent>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, AgentRole>(
+        Ok(sqlx::query_as::<_, Agent>(
             "SELECT id, project_id, name, base_role, description,
                     system_prompt_extensions, model_preference, verification_command,
                     mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
-             FROM agent_roles
+             FROM agents
              ORDER BY project_id ASC, is_default DESC, base_role ASC, name ASC",
         )
         .fetch_all(self.db.pool())
@@ -134,7 +134,7 @@ impl AgentRoleRepository {
             sqlx::query_as(
                 "SELECT id, proposed_text, action, metrics_before, metrics_after, created_at
                  FROM learned_prompt_history
-                 WHERE role_id = ?1
+                 WHERE agent_id = ?1
                  ORDER BY created_at DESC",
             )
             .bind(role_id)
@@ -159,10 +159,10 @@ impl AgentRoleRepository {
     }
 
     /// Set a role's `learned_prompt` to NULL and emit an update event.
-    pub async fn clear_learned_prompt(&self, role_id: &str) -> Result<AgentRole> {
+    pub async fn clear_learned_prompt(&self, role_id: &str) -> Result<Agent> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "UPDATE agent_roles
+            "UPDATE agents
              SET learned_prompt = NULL,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1",
@@ -174,19 +174,19 @@ impl AgentRoleRepository {
         let role = self
             .get(role_id)
             .await?
-            .ok_or_else(|| Error::InvalidData(format!("agent_role not found: {role_id}")))?;
+            .ok_or_else(|| Error::InvalidData(format!("agent not found: {role_id}")))?;
         self.events
-            .send(DjinnEventEnvelope::agent_role_updated(&role));
+            .send(DjinnEventEnvelope::agent_updated(&role));
         Ok(role)
     }
 
-    pub async fn get(&self, id: &str) -> Result<Option<AgentRole>> {
+    pub async fn get(&self, id: &str) -> Result<Option<Agent>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, AgentRole>(
+        Ok(sqlx::query_as::<_, Agent>(
             "SELECT id, project_id, name, base_role, description,
                     system_prompt_extensions, model_preference, verification_command,
                     mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
-             FROM agent_roles WHERE id = ?1",
+             FROM agents WHERE id = ?1",
         )
         .bind(id)
         .fetch_optional(self.db.pool())
@@ -199,13 +199,13 @@ impl AgentRoleRepository {
         &self,
         project_id: &str,
         base_role: &str,
-    ) -> Result<Option<AgentRole>> {
+    ) -> Result<Option<Agent>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, AgentRole>(
+        Ok(sqlx::query_as::<_, Agent>(
             "SELECT id, project_id, name, base_role, description,
                     system_prompt_extensions, model_preference, verification_command,
                     mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
-             FROM agent_roles
+             FROM agents
              WHERE project_id = ?1 AND base_role = ?2 AND is_default = 1
              LIMIT 1",
         )
@@ -215,7 +215,7 @@ impl AgentRoleRepository {
         .await?)
     }
 
-    /// Return an `AgentRole` by its exact `name` within a project.
+    /// Return an `Agent` by its exact `name` within a project.
     ///
     /// Used by the slot lifecycle when a task has `agent_type` set to a
     /// specialist name (e.g. "rust-expert") to load that role's config.
@@ -223,13 +223,13 @@ impl AgentRoleRepository {
         &self,
         project_id: &str,
         name: &str,
-    ) -> Result<Option<AgentRole>> {
+    ) -> Result<Option<Agent>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, AgentRole>(
+        Ok(sqlx::query_as::<_, Agent>(
             "SELECT id, project_id, name, base_role, description,
                     system_prompt_extensions, model_preference, verification_command,
                     mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
-             FROM agent_roles WHERE project_id = ?1 AND name = ?2",
+             FROM agents WHERE project_id = ?1 AND name = ?2",
         )
         .bind(project_id)
         .bind(name)
@@ -239,13 +239,13 @@ impl AgentRoleRepository {
 
     /// Return all roles for a project without pagination — used for the planner
     /// specialist roster where a complete list is always needed.
-    pub async fn all_for_project(&self, project_id: &str) -> Result<Vec<AgentRole>> {
+    pub async fn all_for_project(&self, project_id: &str) -> Result<Vec<Agent>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, AgentRole>(
+        Ok(sqlx::query_as::<_, Agent>(
             "SELECT id, project_id, name, base_role, description,
                     system_prompt_extensions, model_preference, verification_command,
                     mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
-             FROM agent_roles
+             FROM agents
              WHERE project_id = ?1
              ORDER BY is_default DESC, base_role ASC, name ASC",
         )
@@ -257,12 +257,12 @@ impl AgentRoleRepository {
     pub async fn create_for_project(
         &self,
         project_id: &str,
-        input: AgentRoleCreateInput<'_>,
-    ) -> Result<AgentRole> {
+        input: AgentCreateInput<'_>,
+    ) -> Result<Agent> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
-            "INSERT INTO agent_roles (
+            "INSERT INTO agents (
                 id, project_id, name, base_role, description,
                 system_prompt_extensions, model_preference, verification_command,
                 mcp_servers, skills, is_default
@@ -285,16 +285,16 @@ impl AgentRoleRepository {
         let role = self
             .get(&id)
             .await?
-            .ok_or_else(|| Error::InvalidData("agent_role insert failed".into()))?;
+            .ok_or_else(|| Error::InvalidData("agent insert failed".into()))?;
         self.events
-            .send(DjinnEventEnvelope::agent_role_created(&role));
+            .send(DjinnEventEnvelope::agent_created(&role));
         Ok(role)
     }
 
-    pub async fn update(&self, id: &str, input: AgentRoleUpdateInput<'_>) -> Result<AgentRole> {
+    pub async fn update(&self, id: &str, input: AgentUpdateInput<'_>) -> Result<Agent> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "UPDATE agent_roles
+            "UPDATE agents
              SET name = ?2, description = ?3, system_prompt_extensions = ?4,
                  model_preference = ?5, verification_command = ?6,
                  mcp_servers = ?7, skills = ?8, learned_prompt = ?9,
@@ -316,27 +316,27 @@ impl AgentRoleRepository {
         let role = self
             .get(id)
             .await?
-            .ok_or_else(|| Error::InvalidData(format!("agent_role not found: {id}")))?;
+            .ok_or_else(|| Error::InvalidData(format!("agent not found: {id}")))?;
         self.events
-            .send(DjinnEventEnvelope::agent_role_updated(&role));
+            .send(DjinnEventEnvelope::agent_updated(&role));
         Ok(role)
     }
 
     /// Set a role as the default for its base_role within a project.
     /// Atomically clears any existing default for the same (project_id, base_role) pair
     /// before marking this role as the new default, satisfying the unique partial index.
-    pub async fn set_default(&self, id: &str) -> Result<AgentRole> {
+    pub async fn set_default(&self, id: &str) -> Result<Agent> {
         self.db.ensure_initialized().await?;
 
         // Fetch the role so we know its project_id and base_role.
         let role = self
             .get(id)
             .await?
-            .ok_or_else(|| Error::InvalidData(format!("agent_role not found: {id}")))?;
+            .ok_or_else(|| Error::InvalidData(format!("agent not found: {id}")))?;
 
         // Clear any existing default for this (project_id, base_role).
         sqlx::query(
-            "UPDATE agent_roles SET is_default = 0
+            "UPDATE agents SET is_default = 0
              WHERE project_id = ?1 AND base_role = ?2 AND is_default = 1",
         )
         .bind(&role.project_id)
@@ -346,7 +346,7 @@ impl AgentRoleRepository {
 
         // Set this role as default.
         sqlx::query(
-            "UPDATE agent_roles SET is_default = 1,
+            "UPDATE agents SET is_default = 1,
                      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1",
         )
@@ -355,30 +355,30 @@ impl AgentRoleRepository {
         .await?;
 
         let updated = self.get(id).await?.ok_or_else(|| {
-            Error::InvalidData(format!("agent_role not found after set_default: {id}"))
+            Error::InvalidData(format!("agent not found after set_default: {id}"))
         })?;
         self.events
-            .send(DjinnEventEnvelope::agent_role_updated(&updated));
+            .send(DjinnEventEnvelope::agent_updated(&updated));
         Ok(updated)
     }
 
     pub async fn delete(&self, id: &str, project_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query("DELETE FROM agent_roles WHERE id = ?1")
+        sqlx::query("DELETE FROM agents WHERE id = ?1")
             .bind(id)
             .execute(self.db.pool())
             .await?;
         self.events
-            .send(DjinnEventEnvelope::agent_role_deleted(id, project_id));
+            .send(DjinnEventEnvelope::agent_deleted(id, project_id));
         Ok(())
     }
 
-    pub async fn list_for_project(&self, query: AgentRoleListQuery) -> Result<AgentRoleListResult> {
+    pub async fn list_for_project(&self, query: AgentListQuery) -> Result<AgentListResult> {
         self.db.ensure_initialized().await?;
 
         let (where_sql, params) = build_where(&query.project_id, &query.base_role);
 
-        let total_sql = format!("SELECT COUNT(*) FROM agent_roles WHERE {where_sql}");
+        let total_sql = format!("SELECT COUNT(*) FROM agents WHERE {where_sql}");
         let mut total_q = sqlx::query_scalar::<_, i64>(&total_sql);
         for p in &params {
             total_q = total_q.bind(p.clone());
@@ -389,22 +389,22 @@ impl AgentRoleRepository {
             "SELECT id, project_id, name, base_role, description,
                     system_prompt_extensions, model_preference, verification_command,
                     mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
-             FROM agent_roles WHERE {where_sql}
+             FROM agents WHERE {where_sql}
              ORDER BY is_default DESC, base_role ASC, name ASC
              LIMIT ? OFFSET ?"
         );
-        let mut role_q = sqlx::query_as::<_, AgentRole>(&sql);
+        let mut role_q = sqlx::query_as::<_, Agent>(&sql);
         for p in &params {
             role_q = role_q.bind(p.clone());
         }
-        let roles = role_q
+        let agents = role_q
             .bind(query.limit)
             .bind(query.offset)
             .fetch_all(self.db.pool())
             .await?;
 
-        Ok(AgentRoleListResult {
-            roles,
+        Ok(AgentListResult {
+            agents,
             total_count: total,
         })
     }
@@ -416,7 +416,7 @@ impl AgentRoleRepository {
         project_id: &str,
         agent_type: &str,
         window_days: i64,
-    ) -> Result<AgentRoleMetrics> {
+    ) -> Result<AgentMetrics> {
         self.db.ensure_initialized().await?;
 
         // Task-level metrics: closed tasks that had at least one session of this agent_type.
@@ -465,7 +465,7 @@ impl AgentRoleRepository {
         .await
         .unwrap_or((0.0, 0.0));
 
-        Ok(AgentRoleMetrics {
+        Ok(AgentMetrics {
             success_rate: task_row.0,
             avg_reopens: task_row.1,
             verification_pass_rate: task_row.2,
@@ -484,9 +484,9 @@ impl AgentRoleRepository {
     ) -> Result<Vec<PendingAmendmentEvaluation>> {
         self.db.ensure_initialized().await?;
         let rows: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT h.id, h.role_id, h.created_at, h.proposed_text, h.metrics_before
+            "SELECT h.id, h.agent_id, h.created_at, h.proposed_text, h.metrics_before
              FROM learned_prompt_history h
-             JOIN agent_roles r ON r.id = h.role_id
+             JOIN agents r ON r.id = h.agent_id
              WHERE r.project_id = ?1
                AND h.action = 'keep'
                AND h.metrics_after IS NULL
@@ -499,10 +499,10 @@ impl AgentRoleRepository {
         Ok(rows
             .into_iter()
             .map(
-                |(history_id, role_id, created_at, proposed_text, metrics_before)| {
+                |(history_id, agent_id, created_at, proposed_text, metrics_before)| {
                     PendingAmendmentEvaluation {
                         history_id,
-                        role_id,
+                        agent_id,
                         created_at,
                         proposed_text,
                         metrics_before,
@@ -646,13 +646,13 @@ impl AgentRoleRepository {
         &self,
         role_id: &str,
         amendment_text: &str,
-    ) -> Result<AgentRole> {
+    ) -> Result<Agent> {
         self.db.ensure_initialized().await?;
 
         let role = self
             .get(role_id)
             .await?
-            .ok_or_else(|| Error::InvalidData(format!("agent_role not found: {role_id}")))?;
+            .ok_or_else(|| Error::InvalidData(format!("agent not found: {role_id}")))?;
 
         let current = role.learned_prompt.as_deref().unwrap_or("").trim();
         let amendment = amendment_text.trim();
@@ -675,7 +675,7 @@ impl AgentRoleRepository {
         };
 
         sqlx::query(
-            "UPDATE agent_roles
+            "UPDATE agents
              SET learned_prompt = ?2,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1",
@@ -686,10 +686,10 @@ impl AgentRoleRepository {
         .await?;
 
         let updated = self.get(role_id).await?.ok_or_else(|| {
-            Error::InvalidData(format!("agent_role not found after revert: {role_id}"))
+            Error::InvalidData(format!("agent not found after revert: {role_id}"))
         })?;
         self.events
-            .send(DjinnEventEnvelope::agent_role_updated(&updated));
+            .send(DjinnEventEnvelope::agent_updated(&updated));
         Ok(updated)
     }
 
@@ -703,14 +703,14 @@ impl AgentRoleRepository {
         role_id: &str,
         amendment: &str,
         metrics_snapshot: Option<&str>,
-    ) -> Result<AgentRole> {
+    ) -> Result<Agent> {
         self.db.ensure_initialized().await?;
 
         // Load current role.
         let role = self
             .get(role_id)
             .await?
-            .ok_or_else(|| Error::InvalidData(format!("agent_role not found: {role_id}")))?;
+            .ok_or_else(|| Error::InvalidData(format!("agent not found: {role_id}")))?;
 
         // Build the new learned_prompt by appending the amendment.
         let new_learned_prompt = match role.learned_prompt.as_deref() {
@@ -722,7 +722,7 @@ impl AgentRoleRepository {
 
         // Persist the updated learned_prompt.
         sqlx::query(
-            "UPDATE agent_roles
+            "UPDATE agents
              SET learned_prompt = ?2,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1",
@@ -736,7 +736,7 @@ impl AgentRoleRepository {
         let history_id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
             "INSERT INTO learned_prompt_history
-                (id, role_id, proposed_text, action, metrics_before)
+                (id, agent_id, proposed_text, action, metrics_before)
              VALUES (?1, ?2, ?3, 'keep', ?4)",
         )
         .bind(&history_id)
@@ -747,10 +747,10 @@ impl AgentRoleRepository {
         .await?;
 
         let updated = self.get(role_id).await?.ok_or_else(|| {
-            Error::InvalidData(format!("agent_role not found after update: {role_id}"))
+            Error::InvalidData(format!("agent not found after update: {role_id}"))
         })?;
         self.events
-            .send(DjinnEventEnvelope::agent_role_updated(&updated));
+            .send(DjinnEventEnvelope::agent_updated(&updated));
         Ok(updated)
     }
 }
@@ -795,12 +795,12 @@ mod tests {
     async fn create_and_get_role() {
         let db = test_db();
         let project_id = create_project(&db).await;
-        let repo = AgentRoleRepository::new(db, EventBus::noop());
+        let repo = AgentRepository::new(db, EventBus::noop());
 
         let role = repo
             .create_for_project(
                 &project_id,
-                AgentRoleCreateInput {
+                AgentCreateInput {
                     name: "DB Expert",
                     base_role: "worker",
                     description: "Database migrations specialist",
@@ -827,11 +827,11 @@ mod tests {
     async fn name_uniqueness_within_project() {
         let db = test_db();
         let project_id = create_project(&db).await;
-        let repo = AgentRoleRepository::new(db, EventBus::noop());
+        let repo = AgentRepository::new(db, EventBus::noop());
 
         repo.create_for_project(
             &project_id,
-            AgentRoleCreateInput {
+            AgentCreateInput {
                 name: "My Role",
                 base_role: "worker",
                 description: "",
@@ -849,7 +849,7 @@ mod tests {
         let result = repo
             .create_for_project(
                 &project_id,
-                AgentRoleCreateInput {
+                AgentCreateInput {
                     name: "My Role",
                     base_role: "planner",
                     description: "",
@@ -870,12 +870,12 @@ mod tests {
     async fn update_role() {
         let db = test_db();
         let project_id = create_project(&db).await;
-        let repo = AgentRoleRepository::new(db, EventBus::noop());
+        let repo = AgentRepository::new(db, EventBus::noop());
 
         let role = repo
             .create_for_project(
                 &project_id,
-                AgentRoleCreateInput {
+                AgentCreateInput {
                     name: "Worker",
                     base_role: "worker",
                     description: "original",
@@ -893,7 +893,7 @@ mod tests {
         let updated = repo
             .update(
                 &role.id,
-                AgentRoleUpdateInput {
+                AgentUpdateInput {
                     name: "Worker",
                     description: "updated",
                     system_prompt_extensions: "extra prompt",
@@ -916,12 +916,12 @@ mod tests {
     async fn list_with_base_role_filter() {
         let db = test_db();
         let project_id = create_project(&db).await;
-        let repo = AgentRoleRepository::new(db, EventBus::noop());
+        let repo = AgentRepository::new(db, EventBus::noop());
 
         for (name, base_role) in [("W1", "worker"), ("W2", "worker"), ("P1", "planner")] {
             repo.create_for_project(
                 &project_id,
-                AgentRoleCreateInput {
+                AgentCreateInput {
                     name,
                     base_role,
                     description: "",
@@ -938,7 +938,7 @@ mod tests {
         }
 
         let workers = repo
-            .list_for_project(AgentRoleListQuery {
+            .list_for_project(AgentListQuery {
                 project_id: project_id.clone(),
                 base_role: Some("worker".to_string()),
                 limit: 25,
@@ -947,10 +947,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(workers.total_count, 2);
-        assert_eq!(workers.roles.len(), 2);
+        assert_eq!(workers.agents.len(), 2);
 
         let all = repo
-            .list_for_project(AgentRoleListQuery {
+            .list_for_project(AgentListQuery {
                 project_id,
                 base_role: None,
                 limit: 25,
@@ -965,13 +965,13 @@ mod tests {
     async fn set_default_switches_default() {
         let db = test_db();
         let project_id = create_project(&db).await;
-        let repo = AgentRoleRepository::new(db, EventBus::noop());
+        let repo = AgentRepository::new(db, EventBus::noop());
 
         // Create two worker roles; first one is default.
         let default_role = repo
             .create_for_project(
                 &project_id,
-                AgentRoleCreateInput {
+                AgentCreateInput {
                     name: "Worker A",
                     base_role: "worker",
                     description: "",
@@ -989,7 +989,7 @@ mod tests {
         let specialist = repo
             .create_for_project(
                 &project_id,
-                AgentRoleCreateInput {
+                AgentCreateInput {
                     name: "Worker B",
                     base_role: "worker",
                     description: "",
@@ -1017,12 +1017,12 @@ mod tests {
     async fn duplicate_default_rejected_by_db() {
         let db = test_db();
         let project_id = create_project(&db).await;
-        let repo = AgentRoleRepository::new(db, EventBus::noop());
+        let repo = AgentRepository::new(db, EventBus::noop());
 
         // First default worker — OK.
         repo.create_for_project(
             &project_id,
-            AgentRoleCreateInput {
+            AgentCreateInput {
                 name: "Worker A",
                 base_role: "worker",
                 description: "",
@@ -1041,7 +1041,7 @@ mod tests {
         let result = repo
             .create_for_project(
                 &project_id,
-                AgentRoleCreateInput {
+                AgentCreateInput {
                     name: "Worker B",
                     base_role: "worker",
                     description: "",
@@ -1072,11 +1072,11 @@ mod tests {
         });
         let db = test_db();
         let project_id = create_project(&db).await;
-        let repo = AgentRoleRepository::new(db, bus);
+        let repo = AgentRepository::new(db, bus);
 
         repo.create_for_project(
             &project_id,
-            AgentRoleCreateInput {
+            AgentCreateInput {
                 name: "Event Role",
                 base_role: "worker",
                 description: "",
@@ -1093,7 +1093,7 @@ mod tests {
 
         let events = captured.lock().unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].entity_type, "agent_role");
+        assert_eq!(events[0].entity_type, "agent");
         assert_eq!(events[0].action, "created");
     }
 }

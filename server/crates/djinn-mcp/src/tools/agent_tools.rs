@@ -1,4 +1,4 @@
-// MCP tools for agent role CRUD (role_create, role_update, role_list, role_show, role_metrics).
+// MCP tools for agent CRUD (agent_create, agent_update, agent_list, agent_show, agent_metrics).
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
@@ -6,17 +6,17 @@ use serde::{Deserialize, Serialize};
 use crate::server::DjinnMcpServer;
 use crate::tools::json_object::AnyJson;
 use crate::tools::validation::{validate_limit, validate_offset};
-use djinn_core::models::AgentRole;
-use djinn_db::AgentRoleMetrics as DbRoleMetrics;
+use djinn_core::models::Agent;
+use djinn_db::AgentMetrics as DbAgentMetrics;
 use djinn_db::{
-    AgentRoleCreateInput, AgentRoleListQuery, AgentRoleRepository, AgentRoleUpdateInput,
+    AgentCreateInput, AgentListQuery, AgentRepository, AgentUpdateInput,
     VALID_BASE_ROLES,
 };
 
 // ── View model ───────────────────────────────────────────────────────────────
 
 #[derive(Serialize, schemars::JsonSchema)]
-pub struct AgentRoleModel {
+pub struct AgentModel {
     pub id: String,
     pub project_id: String,
     pub name: String,
@@ -34,8 +34,8 @@ pub struct AgentRoleModel {
     pub updated_at: String,
 }
 
-impl From<&AgentRole> for AgentRoleModel {
-    fn from(r: &AgentRole) -> Self {
+impl From<&Agent> for AgentModel {
+    fn from(r: &Agent) -> Self {
         Self {
             id: r.id.clone(),
             project_id: r.project_id.clone(),
@@ -62,17 +62,17 @@ fn parse_json_array_any(raw: &str) -> Vec<AnyJson> {
 // ── Response types ────────────────────────────────────────────────────────────
 
 #[derive(Serialize, schemars::JsonSchema)]
-pub struct RoleSingleResponse {
+pub struct AgentSingleResponse {
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    pub role: Option<AgentRoleModel>,
+    pub role: Option<AgentModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
-pub struct RoleListResponse {
+pub struct AgentListResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub roles: Option<Vec<AgentRoleModel>>,
+    pub agents: Option<Vec<AgentModel>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,8 +85,8 @@ pub struct RoleListResponse {
     pub error: Option<String>,
 }
 
-fn role_not_found_error(id: &str) -> String {
-    format!("agent_role not found: {id}")
+fn agent_not_found_error(id: &str) -> String {
+    format!("agent not found: {id}")
 }
 
 fn validate_base_role(base_role: &str) -> Result<(), String> {
@@ -101,7 +101,7 @@ fn validate_base_role(base_role: &str) -> Result<(), String> {
     }
 }
 
-fn validate_role_name(name: &str) -> Result<String, String> {
+fn validate_agent_name(name: &str) -> Result<String, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err("name must not be empty".to_string());
@@ -115,7 +115,7 @@ fn validate_role_name(name: &str) -> Result<String, String> {
 // ── Param structs ─────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, schemars::JsonSchema)]
-pub struct RoleCreateParams {
+pub struct AgentCreateParams {
     /// Absolute project path.
     pub project: String,
     /// Unique role name within the project.
@@ -136,7 +136,7 @@ pub struct RoleCreateParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-pub struct RoleShowParams {
+pub struct AgentShowParams {
     /// Absolute project path.
     pub project: String,
     /// Role UUID or name.
@@ -144,7 +144,7 @@ pub struct RoleShowParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-pub struct RoleListParams {
+pub struct AgentListParams {
     /// Absolute project path.
     pub project: String,
     /// Filter by base role: worker, lead, planner, architect, reviewer, resolver.
@@ -154,7 +154,7 @@ pub struct RoleListParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-pub struct RoleUpdateParams {
+pub struct AgentUpdateParams {
     /// Absolute project path.
     pub project: String,
     /// Role UUID or name.
@@ -174,27 +174,27 @@ pub struct RoleUpdateParams {
 
 // ── Tool implementations ──────────────────────────────────────────────────────
 
-#[tool_router(router = role_tool_router, vis = "pub")]
+#[tool_router(router = agent_tool_router, vis = "pub")]
 impl DjinnMcpServer {
     /// Create a specialist agent role that extends a base role with domain-specific config.
     #[tool(
         description = "Create a specialist agent role extending a base role (worker, lead, planner, architect, reviewer, resolver). Returns the created role."
     )]
-    pub async fn role_create(
+    pub async fn agent_create(
         &self,
-        Parameters(p): Parameters<RoleCreateParams>,
-    ) -> Json<RoleSingleResponse> {
-        let name = match validate_role_name(&p.name) {
+        Parameters(p): Parameters<AgentCreateParams>,
+    ) -> Json<AgentSingleResponse> {
+        let name = match validate_agent_name(&p.name) {
             Ok(n) => n,
             Err(e) => {
-                return Json(RoleSingleResponse {
+                return Json(AgentSingleResponse {
                     role: None,
                     error: Some(e),
                 });
             }
         };
         if let Err(e) = validate_base_role(&p.base_role) {
-            return Json(RoleSingleResponse {
+            return Json(AgentSingleResponse {
                 role: None,
                 error: Some(e),
             });
@@ -202,27 +202,27 @@ impl DjinnMcpServer {
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
-                return Json(RoleSingleResponse {
+                return Json(AgentSingleResponse {
                     role: None,
                     error: Some(e),
                 });
             }
         };
 
-        let repo = AgentRoleRepository::new(self.state.db().clone(), self.state.event_bus());
+        let repo = AgentRepository::new(self.state.db().clone(), self.state.event_bus());
 
         // Enforce name uniqueness within project.
         match repo.get_by_name_for_project(&project_id, &name).await {
             Ok(Some(_)) => {
-                return Json(RoleSingleResponse {
+                return Json(AgentSingleResponse {
                     role: None,
                     error: Some(format!(
-                        "a role named '{name}' already exists in this project"
+                        "an agent named '{name}' already exists in this project"
                     )),
                 });
             }
             Err(e) => {
-                return Json(RoleSingleResponse {
+                return Json(AgentSingleResponse {
                     role: None,
                     error: Some(e.to_string()),
                 });
@@ -242,7 +242,7 @@ impl DjinnMcpServer {
         match repo
             .create_for_project(
                 &project_id,
-                AgentRoleCreateInput {
+                AgentCreateInput {
                     name: &name,
                     base_role: &p.base_role,
                     description: p.description.as_deref().unwrap_or(""),
@@ -256,11 +256,11 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(role) => Json(RoleSingleResponse {
-                role: Some(AgentRoleModel::from(&role)),
+            Ok(role) => Json(AgentSingleResponse {
+                role: Some(AgentModel::from(&role)),
                 error: None,
             }),
-            Err(e) => Json(RoleSingleResponse {
+            Err(e) => Json(AgentSingleResponse {
                 role: None,
                 error: Some(e.to_string()),
             }),
@@ -269,56 +269,56 @@ impl DjinnMcpServer {
 
     /// Show full details of an agent role by UUID or name.
     #[tool(description = "Show full details of an agent role. Accepts role UUID or name.")]
-    pub async fn role_show(
+    pub async fn agent_show(
         &self,
-        Parameters(p): Parameters<RoleShowParams>,
-    ) -> Json<RoleSingleResponse> {
+        Parameters(p): Parameters<AgentShowParams>,
+    ) -> Json<AgentSingleResponse> {
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
-                return Json(RoleSingleResponse {
+                return Json(AgentSingleResponse {
                     role: None,
                     error: Some(e),
                 });
             }
         };
-        let repo = AgentRoleRepository::new(self.state.db().clone(), self.state.event_bus());
+        let repo = AgentRepository::new(self.state.db().clone(), self.state.event_bus());
 
-        let role = match resolve_role(&repo, &project_id, &p.id).await {
+        let role = match resolve_agent(&repo, &project_id, &p.id).await {
             Ok(Some(r)) => r,
             Ok(None) => {
-                return Json(RoleSingleResponse {
+                return Json(AgentSingleResponse {
                     role: None,
-                    error: Some(role_not_found_error(&p.id)),
+                    error: Some(agent_not_found_error(&p.id)),
                 });
             }
             Err(e) => {
-                return Json(RoleSingleResponse {
+                return Json(AgentSingleResponse {
                     role: None,
                     error: Some(e),
                 });
             }
         };
 
-        Json(RoleSingleResponse {
-            role: Some(AgentRoleModel::from(&role)),
+        Json(AgentSingleResponse {
+            role: Some(AgentModel::from(&role)),
             error: None,
         })
     }
 
     /// List agent roles for a project with optional base_role filter and pagination.
     #[tool(
-        description = "List agent roles for a project with optional base_role filter. Returns {roles[], total_count, limit, offset, has_more}. Defaults are ordered by base_role then name."
+        description = "List agents for a project with optional base_role filter. Returns {agents[], total_count, limit, offset, has_more}. Defaults are ordered by base_role then name."
     )]
-    pub async fn role_list(
+    pub async fn agent_list(
         &self,
-        Parameters(p): Parameters<RoleListParams>,
-    ) -> Json<RoleListResponse> {
+        Parameters(p): Parameters<AgentListParams>,
+    ) -> Json<AgentListResponse> {
         if let Some(ref br) = p.base_role
             && let Err(e) = validate_base_role(br)
         {
-            return Json(RoleListResponse {
-                roles: None,
+            return Json(AgentListResponse {
+                agents: None,
                 total_count: None,
                 limit: None,
                 offset: None,
@@ -331,8 +331,8 @@ impl DjinnMcpServer {
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
-                return Json(RoleListResponse {
-                    roles: None,
+                return Json(AgentListResponse {
+                    agents: None,
                     total_count: None,
                     limit: None,
                     offset: None,
@@ -341,9 +341,9 @@ impl DjinnMcpServer {
                 });
             }
         };
-        let repo = AgentRoleRepository::new(self.state.db().clone(), self.state.event_bus());
+        let repo = AgentRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo
-            .list_for_project(AgentRoleListQuery {
+            .list_for_project(AgentListQuery {
                 project_id,
                 base_role: p.base_role,
                 limit,
@@ -351,16 +351,16 @@ impl DjinnMcpServer {
             })
             .await
         {
-            Ok(result) => Json(RoleListResponse {
-                roles: Some(result.roles.iter().map(AgentRoleModel::from).collect()),
+            Ok(result) => Json(AgentListResponse {
+                agents: Some(result.agents.iter().map(AgentModel::from).collect()),
                 total_count: Some(result.total_count),
                 limit: Some(limit),
                 offset: Some(offset),
                 has_more: Some(offset + limit < result.total_count),
                 error: None,
             }),
-            Err(e) => Json(RoleListResponse {
-                roles: None,
+            Err(e) => Json(AgentListResponse {
+                agents: None,
                 total_count: None,
                 limit: None,
                 offset: None,
@@ -374,31 +374,31 @@ impl DjinnMcpServer {
     #[tool(
         description = "Update a specialist agent role (name, description, system_prompt_extensions, model_preference, verification_command, mcp_servers, skills). Cannot modify default roles' is_default flag. Accepts role UUID or name."
     )]
-    pub async fn role_update(
+    pub async fn agent_update(
         &self,
-        Parameters(p): Parameters<RoleUpdateParams>,
-    ) -> Json<RoleSingleResponse> {
+        Parameters(p): Parameters<AgentUpdateParams>,
+    ) -> Json<AgentSingleResponse> {
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
-                return Json(RoleSingleResponse {
+                return Json(AgentSingleResponse {
                     role: None,
                     error: Some(e),
                 });
             }
         };
-        let repo = AgentRoleRepository::new(self.state.db().clone(), self.state.event_bus());
+        let repo = AgentRepository::new(self.state.db().clone(), self.state.event_bus());
 
-        let role = match resolve_role(&repo, &project_id, &p.id).await {
+        let role = match resolve_agent(&repo, &project_id, &p.id).await {
             Ok(Some(r)) => r,
             Ok(None) => {
-                return Json(RoleSingleResponse {
+                return Json(AgentSingleResponse {
                     role: None,
-                    error: Some(role_not_found_error(&p.id)),
+                    error: Some(agent_not_found_error(&p.id)),
                 });
             }
             Err(e) => {
-                return Json(RoleSingleResponse {
+                return Json(AgentSingleResponse {
                     role: None,
                     error: Some(e),
                 });
@@ -407,10 +407,10 @@ impl DjinnMcpServer {
 
         // Determine new name; check uniqueness if changed.
         let new_name = if let Some(ref n) = p.name {
-            match validate_role_name(n) {
+            match validate_agent_name(n) {
                 Ok(v) => v,
                 Err(e) => {
-                    return Json(RoleSingleResponse {
+                    return Json(AgentSingleResponse {
                         role: None,
                         error: Some(e),
                     });
@@ -423,15 +423,15 @@ impl DjinnMcpServer {
         if new_name != role.name {
             match repo.get_by_name_for_project(&project_id, &new_name).await {
                 Ok(Some(_)) => {
-                    return Json(RoleSingleResponse {
+                    return Json(AgentSingleResponse {
                         role: None,
                         error: Some(format!(
-                            "a role named '{new_name}' already exists in this project"
+                            "an agent named '{new_name}' already exists in this project"
                         )),
                     });
                 }
                 Err(e) => {
-                    return Json(RoleSingleResponse {
+                    return Json(AgentSingleResponse {
                         role: None,
                         error: Some(e.to_string()),
                     });
@@ -477,7 +477,7 @@ impl DjinnMcpServer {
         match repo
             .update(
                 &role.id,
-                AgentRoleUpdateInput {
+                AgentUpdateInput {
                     name: &new_name,
                     description,
                     system_prompt_extensions,
@@ -490,11 +490,11 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(updated) => Json(RoleSingleResponse {
-                role: Some(AgentRoleModel::from(&updated)),
+            Ok(updated) => Json(AgentSingleResponse {
+                role: Some(AgentModel::from(&updated)),
                 error: None,
             }),
-            Err(e) => Json(RoleSingleResponse {
+            Err(e) => Json(AgentSingleResponse {
                 role: None,
                 error: Some(e.to_string()),
             }),
@@ -505,9 +505,9 @@ impl DjinnMcpServer {
 // ── role_metrics types ────────────────────────────────────────────────────────
 
 #[derive(Serialize, schemars::JsonSchema)]
-pub struct RoleMetricEntry {
-    pub role_id: String,
-    pub role_name: String,
+pub struct AgentMetricEntry {
+    pub agent_id: String,
+    pub agent_name: String,
     pub base_role: String,
     /// Fraction of completed tasks that closed as "completed" (0.0–1.0).
     pub success_rate: f64,
@@ -524,9 +524,9 @@ pub struct RoleMetricEntry {
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
-pub struct RoleMetricsResponse {
+pub struct AgentMetricsResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub roles: Option<Vec<RoleMetricEntry>>,
+    pub agents: Option<Vec<AgentMetricEntry>>,
     /// Window used for session queries (days back from now).
     pub window_days: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -534,11 +534,11 @@ pub struct RoleMetricsResponse {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-pub struct RoleMetricsParams {
+pub struct AgentMetricsParams {
     /// Absolute project path.
     pub project: String,
-    /// Optional role UUID or name — if omitted returns metrics for all roles.
-    pub role_id: Option<String>,
+    /// Optional agent UUID or name — if omitted returns metrics for all agents.
+    pub agent_id: Option<String>,
     /// How many days back to include session data (default 30).
     pub window_days: Option<i64>,
 }
@@ -556,7 +556,7 @@ fn base_role_to_agent_type(base_role: &str) -> &str {
     }
 }
 
-#[tool_router(router = role_metrics_tool_router, vis = "pub")]
+#[tool_router(router = agent_metrics_tool_router, vis = "pub")]
 impl DjinnMcpServer {
     /// Aggregate effectiveness metrics per agent role: success rate, token usage,
     /// session duration, verification pass rate, reopen rate.
@@ -564,39 +564,39 @@ impl DjinnMcpServer {
     #[tool(
         description = "Return aggregated effectiveness metrics per agent role (success_rate, avg_tokens, avg_time_seconds, verification_pass_rate, avg_reopens). Accepts optional role_id filter and window_days (default 30)."
     )]
-    pub async fn role_metrics(
+    pub async fn agent_metrics(
         &self,
-        Parameters(p): Parameters<RoleMetricsParams>,
-    ) -> Json<RoleMetricsResponse> {
+        Parameters(p): Parameters<AgentMetricsParams>,
+    ) -> Json<AgentMetricsResponse> {
         let window_days = p.window_days.unwrap_or(30).max(1);
 
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
-                return Json(RoleMetricsResponse {
-                    roles: None,
+                return Json(AgentMetricsResponse {
+                    agents: None,
                     window_days,
                     error: Some(e),
                 });
             }
         };
 
-        let repo = AgentRoleRepository::new(self.state.db().clone(), self.state.event_bus());
+        let repo = AgentRepository::new(self.state.db().clone(), self.state.event_bus());
 
         // Collect the roles to compute metrics for.
-        let roles: Vec<AgentRole> = if let Some(ref id_or_name) = p.role_id {
-            match resolve_role(&repo, &project_id, id_or_name).await {
+        let agents: Vec<Agent> = if let Some(ref id_or_name) = p.agent_id {
+            match resolve_agent(&repo, &project_id, id_or_name).await {
                 Ok(Some(r)) => vec![r],
                 Ok(None) => {
-                    return Json(RoleMetricsResponse {
-                        roles: None,
+                    return Json(AgentMetricsResponse {
+                        agents: None,
                         window_days,
-                        error: Some(role_not_found_error(id_or_name)),
+                        error: Some(agent_not_found_error(id_or_name)),
                     });
                 }
                 Err(e) => {
-                    return Json(RoleMetricsResponse {
-                        roles: None,
+                    return Json(AgentMetricsResponse {
+                        agents: None,
                         window_days,
                         error: Some(e),
                     });
@@ -604,7 +604,7 @@ impl DjinnMcpServer {
             }
         } else {
             match repo
-                .list_for_project(AgentRoleListQuery {
+                .list_for_project(AgentListQuery {
                     project_id: project_id.clone(),
                     base_role: None,
                     limit: 200,
@@ -612,10 +612,10 @@ impl DjinnMcpServer {
                 })
                 .await
             {
-                Ok(result) => result.roles,
+                Ok(result) => result.agents,
                 Err(e) => {
-                    return Json(RoleMetricsResponse {
-                        roles: None,
+                    return Json(AgentMetricsResponse {
+                        agents: None,
                         window_days,
                         error: Some(e.to_string()),
                     });
@@ -623,14 +623,14 @@ impl DjinnMcpServer {
             }
         };
 
-        let mut entries: Vec<RoleMetricEntry> = Vec::with_capacity(roles.len());
+        let mut entries: Vec<AgentMetricEntry> = Vec::with_capacity(agents.len());
 
-        for role in &roles {
-            let agent_type = base_role_to_agent_type(&role.base_role);
-            let m: DbRoleMetrics = repo
+        for agent in &agents {
+            let agent_type = base_role_to_agent_type(&agent.base_role);
+            let m: DbAgentMetrics = repo
                 .get_metrics(&project_id, agent_type, window_days)
                 .await
-                .unwrap_or(DbRoleMetrics {
+                .unwrap_or(DbAgentMetrics {
                     success_rate: 0.0,
                     avg_reopens: 0.0,
                     verification_pass_rate: 0.0,
@@ -639,10 +639,10 @@ impl DjinnMcpServer {
                     avg_time_seconds: 0.0,
                 });
 
-            entries.push(RoleMetricEntry {
-                role_id: role.id.clone(),
-                role_name: role.name.clone(),
-                base_role: role.base_role.clone(),
+            entries.push(AgentMetricEntry {
+                agent_id: agent.id.clone(),
+                agent_name: agent.name.clone(),
+                base_role: agent.base_role.clone(),
                 success_rate: m.success_rate,
                 avg_reopens: m.avg_reopens,
                 verification_pass_rate: m.verification_pass_rate,
@@ -652,8 +652,8 @@ impl DjinnMcpServer {
             });
         }
 
-        Json(RoleMetricsResponse {
-            roles: Some(entries),
+        Json(AgentMetricsResponse {
+            agents: Some(entries),
             window_days,
             error: None,
         })
@@ -661,11 +661,11 @@ impl DjinnMcpServer {
 }
 
 /// Resolve a role by UUID or name within a project.
-async fn resolve_role(
-    repo: &AgentRoleRepository,
+async fn resolve_agent(
+    repo: &AgentRepository,
     project_id: &str,
     id_or_name: &str,
-) -> Result<Option<AgentRole>, String> {
+) -> Result<Option<Agent>, String> {
     // Try by UUID first.
     if let Ok(Some(role)) = repo.get(id_or_name).await
         && role.project_id == project_id

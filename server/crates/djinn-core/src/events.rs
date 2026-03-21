@@ -1,4 +1,4 @@
-use crate::models::AgentRole;
+use crate::models::Agent;
 use crate::models::ContradictionCandidate;
 use crate::models::Credential;
 use crate::models::CustomProvider;
@@ -237,9 +237,9 @@ impl DjinnEventEnvelope {
             from_sync: false,
         }
     }
-    pub fn agent_role_created(role: &AgentRole) -> Self {
+    pub fn agent_created(role: &Agent) -> Self {
         Self {
-            entity_type: "agent_role",
+            entity_type: "agent",
             action: "created",
             payload: serde_json::to_value(role).unwrap(),
             id: None,
@@ -247,9 +247,9 @@ impl DjinnEventEnvelope {
             from_sync: false,
         }
     }
-    pub fn agent_role_updated(role: &AgentRole) -> Self {
+    pub fn agent_updated(role: &Agent) -> Self {
         Self {
-            entity_type: "agent_role",
+            entity_type: "agent",
             action: "updated",
             payload: serde_json::to_value(role).unwrap(),
             id: None,
@@ -257,9 +257,9 @@ impl DjinnEventEnvelope {
             from_sync: false,
         }
     }
-    pub fn agent_role_deleted(id: &str, project_id: &str) -> Self {
+    pub fn agent_deleted(id: &str, project_id: &str) -> Self {
         Self {
-            entity_type: "agent_role",
+            entity_type: "agent",
             action: "deleted",
             payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(),
             id: Some(id.to_string()),

@@ -7,9 +7,9 @@ pub mod repositories;
 pub use database::{Database, default_db_path};
 pub use error::{DbError as Error, DbResult as Result};
 pub use repositories::{
-    agent_role::{
-        AgentRoleCreateInput, AgentRoleListQuery, AgentRoleListResult, AgentRoleMetrics,
-        AgentRoleRepository, AgentRoleUpdateInput, LearnedPromptHistoryEntry,
+    agent::{
+        AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics,
+        AgentRepository, AgentUpdateInput, LearnedPromptHistoryEntry,
         PendingAmendmentEvaluation, VALID_BASE_ROLES, WindowedRoleMetrics,
     },
     epic::{
