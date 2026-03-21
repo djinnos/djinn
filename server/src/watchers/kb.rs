@@ -232,8 +232,6 @@ fn path_contains_segment(path: &Path, segment: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use tokio::sync::broadcast;
     use tokio::time::{Duration, sleep};
     use tokio_util::sync::CancellationToken;
@@ -342,13 +340,17 @@ mod tests {
         sleep(Duration::from_millis(50)).await;
     }
 
-    async fn project_path_exists(db: &djinn_db::Database, path: &PathBuf) -> bool {
+    async fn project_path_exists(db: &djinn_db::Database, path: &Path) -> bool {
         let project_repo = ProjectRepository::new(db.clone(), crate::events::EventBus::noop());
-        let target = path.as_path();
+        let target = path;
         project_repo
             .list()
             .await
-            .map(|projects| projects.into_iter().any(|p| std::path::Path::new(&p.path) == target))
+            .map(|projects| {
+                projects
+                    .into_iter()
+                    .any(|p| std::path::Path::new(&p.path) == target)
+            })
             .unwrap_or(false)
     }
 }
