@@ -917,7 +917,7 @@ mod memory_tools {
 
         let note = mcp_call_tool(&app, &session_id, "memory_write", json!({"project": project, "title": "Task Ref Note", "content": "task refs seed", "type": "reference"})).await;
 
-        let task = mcp_call_tool(&app, &session_id, "task_create", json!({"project": project, "epic_id": epic.id, "title": "Task referencing memory note", "issue_type": "task", "priority": 2, "status": "open", "memory_refs": [note["permalink"]]})).await;
+        let task = mcp_call_tool(&app, &session_id, "task_create", json!({"project": project, "epic_id": epic.id, "title": "Task referencing memory note", "issue_type": "task", "priority": 2, "status": "open", "memory_refs": [note["permalink"]], "acceptance_criteria": ["note is attached to task"]})).await;
         assert!(task.get("error").is_none() || task["error"].is_null());
 
         let refs = mcp_call_tool(
@@ -1646,7 +1646,7 @@ mod task_tools {
         let app = create_test_app_with_db(db.clone());
         let sid = initialize_mcp_session(&app).await;
 
-        let payload = mcp_call_tool(&app, &sid, "task_create", json!({"project": project.path, "epic_id": epic.id, "title": "Create task contract test"})).await;
+        let payload = mcp_call_tool(&app, &sid, "task_create", json!({"project": project.path, "epic_id": epic.id, "title": "Create task contract test", "acceptance_criteria": ["task is created successfully"]})).await;
         assert!(payload["id"].as_str().is_some());
         assert!(payload["short_id"].as_str().is_some());
         assert_eq!(payload["status"], "open");
@@ -1693,7 +1693,7 @@ mod task_tools {
             &app,
             &sid,
             "task_create",
-            json!({"project": project.path, "epic_id": epic.id, "title": "Blocker task"}),
+            json!({"project": project.path, "epic_id": epic.id, "title": "Blocker task", "acceptance_criteria": ["blocker is resolved"]}),
         )
         .await;
         let blocker_id = blocker["id"].as_str().unwrap();
@@ -1707,6 +1707,7 @@ mod task_tools {
                 "project": project.path,
                 "epic_id": epic.id,
                 "title": "Blocked task",
+                "acceptance_criteria": ["blocked task completes after blocker"],
                 "blocked_by": [blocker_id]
             }),
         )
@@ -1746,6 +1747,7 @@ mod task_tools {
                 "project": project.path,
                 "epic_id": epic.id,
                 "title": "Should not exist",
+                "acceptance_criteria": ["task completes"],
                 "blocked_by": [fake_id]
             }),
         )
@@ -1768,6 +1770,68 @@ mod task_tools {
             0,
             "no task should have been created when blocked_by resolution fails"
         );
+    }
+
+    #[tokio::test]
+    async fn task_create_requires_acceptance_criteria_for_task_type() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db.clone());
+        let sid = initialize_mcp_session(&app).await;
+
+        // task type without AC → error
+        let result = mcp_call_tool(
+            &app,
+            &sid,
+            "task_create",
+            json!({"project": project.path, "epic_id": epic.id, "title": "No AC task", "issue_type": "task"}),
+        )
+        .await;
+        assert!(
+            result["error"].as_str().is_some_and(|e| e.contains("acceptance_criteria")),
+            "should error when acceptance_criteria is missing for task type, got: {result}"
+        );
+
+        // feature and bug types also require AC
+        for issue_type in ["feature", "bug"] {
+            let result = mcp_call_tool(
+                &app,
+                &sid,
+                "task_create",
+                json!({"project": project.path, "epic_id": epic.id, "title": "No AC", "issue_type": issue_type}),
+            )
+            .await;
+            assert!(
+                result["error"].as_str().is_some_and(|e| e.contains("acceptance_criteria")),
+                "{issue_type} should error without acceptance_criteria"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn task_create_simple_lifecycle_types_do_not_require_acceptance_criteria() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let app = create_test_app_with_db(db.clone());
+        let sid = initialize_mcp_session(&app).await;
+
+        // Simple-lifecycle types should succeed without AC
+        for issue_type in ["spike", "research", "decomposition", "review"] {
+            let result = mcp_call_tool(
+                &app,
+                &sid,
+                "task_create",
+                json!({"project": project.path, "epic_id": epic.id, "title": format!("No AC {issue_type}"), "issue_type": issue_type}),
+            )
+            .await;
+            assert!(
+                result.get("error").is_none() || result["error"].is_null(),
+                "{issue_type} should not require acceptance_criteria, got: {result}"
+            );
+            assert!(result["id"].as_str().is_some(), "{issue_type} task should be created");
+        }
     }
 
     #[tokio::test]
