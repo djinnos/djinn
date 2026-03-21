@@ -1,0 +1,29 @@
+---
+source: crates/djinn-agent/src/extension/schemas.rs
+expression: names
+---
+[
+  "task_show",
+  "task_list",
+  "task_activity_list",
+  "memory_read",
+  "memory_search",
+  "memory_list",
+  "shell",
+  "read",
+  "lsp",
+  "output_view",
+  "output_grep",
+  "task_create",
+  "task_update",
+  "task_delete_branch",
+  "task_archive_activity",
+  "task_reset_counters",
+  "task_kill_session",
+  "task_blocked_list",
+  "epic_show",
+  "epic_update",
+  "epic_tasks",
+  "request_architect",
+  "submit_decision"
+]

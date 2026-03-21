@@ -1,0 +1,19 @@
+---
+source: crates/djinn-agent/src/extension/schemas.rs
+assertion_line: 749
+expression: names
+---
+[
+  "task_show",
+  "task_list",
+  "task_activity_list",
+  "memory_read",
+  "memory_search",
+  "memory_list",
+  "shell",
+  "read",
+  "lsp",
+  "output_view",
+  "output_grep",
+  "submit_review"
+]
