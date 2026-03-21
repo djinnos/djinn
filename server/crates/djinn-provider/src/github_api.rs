@@ -289,33 +289,58 @@ impl GitHubApiClient {
 
     /// Enable auto-merge on an existing pull request.
     ///
-    /// Uses the `PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge` endpoint
-    /// with `merge_method`. The PR must be open and the repo must have auto-merge
-    /// enabled in settings.
+    /// Uses the GitHub GraphQL `enablePullRequestAutoMerge` mutation so that the
+    /// PR is only merged once all required status checks pass. The repo must have
+    /// auto-merge enabled in its settings (Settings → General → Allow auto-merge).
     pub async fn enable_auto_merge(
         &self,
-        owner: &str,
-        repo: &str,
-        pull_number: u64,
+        _owner: &str,
+        _repo: &str,
+        _pull_number: u64,
         method: MergeMethod,
+        node_id: &str,
+        commit_headline: &str,
     ) -> Result<serde_json::Value> {
-        let url = format!(
-            "{}/repos/{}/{}/pulls/{}/merge",
-            self.base_url, owner, repo, pull_number
-        );
-        let body = serde_json::json!({ "merge_method": method });
+        let merge_method = match method {
+            MergeMethod::Squash => "SQUASH",
+            MergeMethod::Rebase => "REBASE",
+            MergeMethod::Merge => "MERGE",
+        };
 
+        let query = r#"
+            mutation EnableAutoMerge($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!, $commitHeadline: String!) {
+                enablePullRequestAutoMerge(input: {
+                    pullRequestId: $pullRequestId,
+                    mergeMethod: $mergeMethod,
+                    commitHeadline: $commitHeadline
+                }) {
+                    pullRequest { number title autoMergeRequest { enabledAt mergeMethod } }
+                }
+            }
+        "#;
+
+        let body = serde_json::json!({
+            "query": query,
+            "variables": {
+                "pullRequestId": node_id,
+                "mergeMethod": merge_method,
+                "commitHeadline": commit_headline,
+            }
+        });
+
+        let base_url = self.base_url.clone();
         let resp = self
             .send_with_retry(|token| {
-                let url = url.clone();
                 let body = body.clone();
                 let http = self.http.clone();
+                let base_url = base_url.clone();
                 async move {
+                    // Use base_url for testability; in production base_url is
+                    // https://api.github.com so this resolves to /graphql.
+                    let graphql_url = format!("{}/graphql", base_url);
                     let resp = http
-                        .put(&url)
+                        .post(&graphql_url)
                         .bearer_auth(&token)
-                        .header("Accept", "application/vnd.github+json")
-                        .header("X-GitHub-Api-Version", "2022-11-28")
                         .json(&body)
                         .send()
                         .await?;
@@ -329,7 +354,15 @@ impl GitHubApiClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("enable_auto_merge failed ({}): {}", status, body));
         }
-        Ok(resp.json().await?)
+
+        let json: serde_json::Value = resp.json().await?;
+
+        // GraphQL returns 200 even on errors — check the `errors` field.
+        if let Some(errors) = json.get("errors") {
+            return Err(anyhow!("enable_auto_merge GraphQL error: {}", errors));
+        }
+
+        Ok(json)
     }
 
     /// Get a pull request along with its CI check runs.
@@ -761,6 +794,7 @@ mod tests {
             .unwrap_or(0)
     }
 
+    #[allow(dead_code)]
     fn future_expires_at() -> String {
         // One hour from now, formatted as ISO-8601.
         let secs = now_secs() + 3600;
@@ -878,24 +912,41 @@ mod tests {
         let repo = make_repo();
         seed_tokens(&repo, "ghu_user").await;
 
-        Mock::given(method("PUT"))
-            .and(path("/repos/djinnos/server/pulls/42/merge"))
+        // The GraphQL mutation goes to /graphql, not the REST merge endpoint.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
             .and(header("Authorization", "Bearer ghu_user"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "sha": "abc123",
-                "merged": true,
-                "message": "Pull Request successfully merged"
+                "data": {
+                    "enablePullRequestAutoMerge": {
+                        "pullRequest": {
+                            "number": 42,
+                            "title": "feat: add feature",
+                            "autoMergeRequest": {
+                                "enabledAt": "2026-01-01T00:00:00Z",
+                                "mergeMethod": "SQUASH"
+                            }
+                        }
+                    }
+                }
             })))
             .mount(&server)
             .await;
 
         let client = GitHubApiClient::with_base_url(repo, server.uri());
         let result = client
-            .enable_auto_merge("djinnos", "server", 42, MergeMethod::Squash)
+            .enable_auto_merge(
+                "djinnos",
+                "server",
+                42,
+                MergeMethod::Squash,
+                "PR_node123",
+                "chore(clbs): Phase 1: split extension params",
+            )
             .await
             .unwrap();
 
-        assert_eq!(result["merged"], true);
+        assert!(result["data"]["enablePullRequestAutoMerge"]["pullRequest"]["number"] == 42);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

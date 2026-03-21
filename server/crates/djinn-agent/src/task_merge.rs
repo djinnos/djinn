@@ -183,17 +183,32 @@ async fn try_create_github_pr(
     .map(|o| o.stdout.trim().to_string())
     .unwrap_or_else(|_| String::new());
 
-    // Build acceptance criteria checklist.
-    let criteria_lines: String = if task.acceptance_criteria.trim().is_empty() {
-        String::new()
-    } else {
-        task.acceptance_criteria
-            .lines()
-            .map(|l| {
-                let l = l.trim().trim_start_matches('-').trim();
-                format!("- [ ] {l}\n")
-            })
-            .collect()
+    // Build acceptance criteria checklist from the JSON array.
+    let criteria_lines: String = {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum AcItem {
+            Text(String),
+            Structured {
+                criterion: String,
+                #[serde(default)]
+                met: bool,
+            },
+        }
+
+        match serde_json::from_str::<Vec<AcItem>>(&task.acceptance_criteria) {
+            Ok(items) if !items.is_empty() => items
+                .iter()
+                .map(|item| match item {
+                    AcItem::Text(t) => format!("- [ ] {t}\n"),
+                    AcItem::Structured { criterion, met } => {
+                        let check = if *met { "x" } else { " " };
+                        format!("- [{check}] {criterion}\n")
+                    }
+                })
+                .collect(),
+            _ => String::new(),
+        }
     };
 
     let pr_body = format!(
@@ -229,8 +244,18 @@ async fn try_create_github_pr(
         .map_err(|e| format!("GitHub PR creation failed: {e}"))?;
 
     // Enable auto-merge (best-effort — log failure but don't block).
+    // Uses the GraphQL enablePullRequestAutoMerge mutation so the PR is only
+    // merged after required status checks pass.
+    let commit_headline = format!("{}({}): {}", commit_type, task.short_id, task.title);
     if let Err(e) = github_client
-        .enable_auto_merge(&owner, &repo_name, pr.number, MergeMethod::Squash)
+        .enable_auto_merge(
+            &owner,
+            &repo_name,
+            pr.number,
+            MergeMethod::Squash,
+            &pr.node_id,
+            &commit_headline,
+        )
         .await
     {
         tracing::warn!(
