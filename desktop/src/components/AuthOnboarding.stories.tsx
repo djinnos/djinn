@@ -16,12 +16,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Loader2Icon,
-  CheckCircle2Icon,
-  AlertCircleIcon,
-  FolderIcon,
-} from "lucide-react";
+import { Loading02Icon, CheckmarkCircle04Icon, AlertCircleIcon, Folder02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 export default {
   title: "Onboarding",
@@ -113,7 +109,7 @@ function ServerCheckVisual({
       <div className="flex flex-col items-center gap-4">
         {status === "checking" && (
           <>
-            <Loader2Icon className="h-12 w-12 animate-spin text-primary" />
+            <HugeiconsIcon icon={Loading02Icon} size={48} className="animate-spin text-primary" />
             <div>
               <h2 className="text-xl font-semibold">Connecting to Server</h2>
               <p className="text-sm text-muted-foreground">
@@ -125,7 +121,7 @@ function ServerCheckVisual({
 
         {status === "success" && (
           <>
-            <CheckCircle2Icon className="h-12 w-12 text-green-500" />
+            <HugeiconsIcon icon={CheckmarkCircle04Icon} size={48} className="text-green-500" />
             <div>
               <h2 className="text-xl font-semibold">Server Connected</h2>
               <p className="text-sm text-muted-foreground">
@@ -137,7 +133,7 @@ function ServerCheckVisual({
 
         {status === "error" && (
           <>
-            <AlertCircleIcon className="h-12 w-12 text-destructive" />
+            <HugeiconsIcon icon={AlertCircleIcon} size={48} className="text-destructive" />
             <div>
               <h2 className="text-xl font-semibold">Connection Failed</h2>
               <p className="text-sm text-muted-foreground">
@@ -211,7 +207,7 @@ function ProjectSetupVisual({
               className="flex-1"
             />
             <Button variant="secondary" onClick={() => {}}>
-              <FolderIcon className="mr-2 h-4 w-4" />
+              <HugeiconsIcon icon={Folder02Icon} size={16} className="mr-2" />
               Browse
             </Button>
           </div>
@@ -236,14 +232,14 @@ function ProjectSetupVisual({
 
         {error && (
           <div className="flex items-center gap-2 rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-            <AlertCircleIcon className="h-4 w-4 flex-shrink-0" />
+            <HugeiconsIcon icon={AlertCircleIcon} size={16} className="flex-shrink-0" />
             <span>{error}</span>
           </div>
         )}
 
         {isRegistered && (
           <div className="flex items-center gap-2 rounded-md bg-green-500/10 p-3 text-sm text-green-600">
-            <CheckCircle2Icon className="h-4 w-4 flex-shrink-0" />
+            <HugeiconsIcon icon={CheckmarkCircle04Icon} size={16} className="flex-shrink-0" />
             <span>Project registered successfully!</span>
           </div>
         )}
@@ -255,12 +251,12 @@ function ProjectSetupVisual({
         >
           {isRegistering ? (
             <>
-              <Loader2Icon className="mr-2 h-4 w-4 animate-spin" />
+              <HugeiconsIcon icon={Loading02Icon} size={16} className="mr-2 animate-spin" />
               Registering...
             </>
           ) : isRegistered ? (
             <>
-              <CheckCircle2Icon className="mr-2 h-4 w-4" />
+              <HugeiconsIcon icon={CheckmarkCircle04Icon} size={16} className="mr-2" />
               Registered
             </>
           ) : (
@@ -340,7 +336,7 @@ function ProviderSetupVisual({
   if (variant === "loading") {
     return (
       <div className="flex flex-col items-center gap-4 text-center">
-        <Loader2Icon className="h-8 w-8 animate-spin text-primary" />
+        <HugeiconsIcon icon={Loading02Icon} size={32} className="animate-spin text-primary" />
         <p className="text-sm text-muted-foreground">Loading providers...</p>
       </div>
     );
@@ -349,7 +345,7 @@ function ProviderSetupVisual({
   if (variant === "loadError") {
     return (
       <div className="flex flex-col items-center gap-4 text-center">
-        <AlertCircleIcon className="h-12 w-12 text-destructive" />
+        <HugeiconsIcon icon={AlertCircleIcon} size={48} className="text-destructive" />
         <div>
           <h2 className="text-xl font-semibold">Failed to Load Providers</h2>
           <p className="text-sm text-muted-foreground">
@@ -408,7 +404,7 @@ function ProviderSetupVisual({
           >
             {variant === "oauthInProgress" ? (
               <>
-                <Loader2Icon className="mr-2 h-4 w-4 animate-spin" />
+                <HugeiconsIcon icon={Loading02Icon} size={16} className="mr-2 animate-spin" />
                 Waiting for browser...
               </>
             ) : (
@@ -458,7 +454,7 @@ function ProviderSetupVisual({
             </FieldDescription>
             {variant === "apiKeyValidated" && (
               <div className="flex items-center gap-2 text-sm text-green-500">
-                <CheckCircle2Icon className="h-4 w-4" />
+                <HugeiconsIcon icon={CheckmarkCircle04Icon} size={16} />
                 <span>API key is valid</span>
               </div>
             )}

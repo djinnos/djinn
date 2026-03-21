@@ -3,7 +3,8 @@ import { Button } from "@/components/ui/button";
 import { InlineError } from "@/components/InlineError";
 import { cn } from "@/lib/utils";
 import { type BaseRole, type AgentMetrics, fetchAgentMetrics } from "@/api/agents";
-import { TrendingUp, TrendingDown, Minus, RefreshCw } from "lucide-react";
+import { AnalyticsUpIcon, AnalyticsDownIcon, MinusSignIcon, Refresh01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 const BASE_ROLE_LABELS: Record<BaseRole, string> = {
   worker: "Worker",
@@ -41,10 +42,10 @@ function fmtDuration(seconds: number | null): string {
 // ── Trend indicator ───────────────────────────────────────────────────────────
 
 function TrendIcon({ trend }: { trend: number | null }) {
-  if (trend === null) return <Minus className="h-3.5 w-3.5 text-muted-foreground" />;
-  if (trend > 0.01) return <TrendingUp className="h-3.5 w-3.5 text-green-500" />;
-  if (trend < -0.01) return <TrendingDown className="h-3.5 w-3.5 text-red-500" />;
-  return <Minus className="h-3.5 w-3.5 text-muted-foreground" />;
+  if (trend === null) return <HugeiconsIcon icon={MinusSignIcon} size={14} className="h-3.5 w-3.5 text-muted-foreground" />;
+  if (trend > 0.01) return <HugeiconsIcon icon={AnalyticsUpIcon} size={14} className="text-green-500" />;
+  if (trend < -0.01) return <HugeiconsIcon icon={AnalyticsDownIcon} size={14} className="text-red-500" />;
+  return <HugeiconsIcon icon={MinusSignIcon} size={14} className="h-3.5 w-3.5 text-muted-foreground" />;
 }
 
 // ── Mini sparkline ────────────────────────────────────────────────────────────
@@ -197,7 +198,7 @@ export function AgentMetricsDashboard({ projectId }: { projectId: string | null 
           disabled={loading}
           className="shrink-0"
         >
-          <RefreshCw className={cn("h-3.5 w-3.5 mr-1.5", loading && "animate-spin")} />
+          <HugeiconsIcon icon={Refresh01Icon} size={14} className={cn("mr-1.5", loading && "animate-spin")} />
           Refresh
         </Button>
       </div>

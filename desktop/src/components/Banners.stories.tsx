@@ -7,10 +7,10 @@ import {
   Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { AlertCircle } from "lucide-react";
+import { AlertCircleIcon } from "@hugeicons/core-free-icons";
 import { GitRemoteSetupBanner } from "./GitRemoteSetupBanner";
 import { Button } from "@/components/ui/button";
-import { Loader2Icon } from "lucide-react";
+import { Loading02Icon } from "@hugeicons/core-free-icons";
 
 /* ---------------------------------------------------------------------------
  * BoardHealthBanner — presentational mock
@@ -162,7 +162,7 @@ function SyncHealthBannerMock({ errorDetails = null }: SyncHealthBannerMockProps
   return (
     <div className="border-l-4 border-red-500 bg-red-50 dark:bg-red-900/20 p-4 mb-4">
       <div className="flex items-start gap-3">
-        <AlertCircle className="text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" size={20} />
+        <HugeiconsIcon icon={AlertCircleIcon} size={20} className="text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" />
         <div className="flex-1">
           <h3 className="font-semibold text-red-900 dark:text-red-100">
             Sync Issues Detected
@@ -464,7 +464,7 @@ export const GitHubAppChecking: StoryObj = {
             className="h-7 gap-1.5 px-3 text-xs"
             disabled
           >
-            <Loader2Icon className="h-3.5 w-3.5 animate-spin" />
+            <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
           </Button>
         </div>
       </CardContent>

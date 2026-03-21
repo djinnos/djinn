@@ -1,4 +1,5 @@
-import { CheckCircle2, Circle, XCircle, Zap } from "lucide-react";
+import { CheckmarkCircle04Icon, CancelCircleIcon, CircleIcon, ZapIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
@@ -44,13 +45,13 @@ function StepStatusIcon({ stepStatus }: { stepStatus: StepEntry["status"] }) {
     case "running":
       return <Spinner size="xs" className="text-blue-400" />;
     case "passed":
-      return <CheckCircle2 className="size-4 text-emerald-400" />;
+      return <HugeiconsIcon icon={CheckmarkCircle04Icon} size={16} className="text-emerald-400" />;
     case "failed":
-      return <XCircle className="size-4 text-red-400" />;
+      return <HugeiconsIcon icon={CancelCircleIcon} size={16} className="text-red-400" />;
     case "skipped":
-      return <Circle className="size-4 text-zinc-500 [stroke-dasharray:2_2]" />;
+      return <HugeiconsIcon icon={CircleIcon} size={16} className="text-zinc-500 [stroke-dasharray:2_2]" />;
     default:
-      return <Circle className="size-4 text-zinc-500" />;
+      return <HugeiconsIcon icon={CircleIcon} size={16} className="text-zinc-500" />;
   }
 }
 
@@ -74,7 +75,7 @@ export function StepLog({ steps, status, originalDurationMs, emphasizedStepId, c
       <Accordion defaultValue={failedStepValues} multiple>
         {status === "cache_hit" && (
           <div className="flex items-center gap-2 px-2 py-2 text-sm text-amber-400">
-            <Zap className="size-4" />
+            <HugeiconsIcon icon={ZapIcon} size={16} />
             <span>{cacheLabel}</span>
           </div>
         )}
