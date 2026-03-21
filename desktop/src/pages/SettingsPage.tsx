@@ -70,19 +70,20 @@ function ProvidersSettings() {
               <span className="text-sm text-muted-foreground">None yet.</span>
             ) : (
               configuredProviders.map((provider) => (
-                <ConfirmButton
-                  key={provider.id}
-                  title="Remove provider"
-                  description={`Remove "${provider.name}" and its credentials?`}
-                  confirmLabel="Remove"
-                  onConfirm={() => removeProvider(provider.id)}
-                  size="sm"
-                  variant="outline"
-                  className="flex items-center gap-1.5"
-                >
+                <span key={provider.id} className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-sm">
                   {provider.name}
-                  <HugeiconsIcon icon={Delete02Icon} size={13} className="text-destructive" />
-                </ConfirmButton>
+                  <ConfirmButton
+                    title="Remove provider"
+                    description={`Remove "${provider.name}" and its credentials?`}
+                    confirmLabel="Remove"
+                    onConfirm={() => removeProvider(provider.id)}
+                    size="sm"
+                    variant="ghost"
+                    className="h-auto p-0 text-destructive hover:text-destructive hover:bg-transparent"
+                  >
+                    <HugeiconsIcon icon={Delete02Icon} size={13} />
+                  </ConfirmButton>
+                </span>
               ))
             )}
           </div>
