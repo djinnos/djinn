@@ -56,20 +56,6 @@ fn arb_status() -> impl Strategy<Value = TaskStatus> {
     ]
 }
 
-#[allow(dead_code)]
-fn arb_non_closed_status() -> impl Strategy<Value = TaskStatus> {
-    prop_oneof![
-        Just(TaskStatus::Open),
-        Just(TaskStatus::InProgress),
-        Just(TaskStatus::Verifying),
-        Just(TaskStatus::NeedsTaskReview),
-        Just(TaskStatus::InTaskReview),
-        Just(TaskStatus::PrReady),
-        Just(TaskStatus::NeedsLeadIntervention),
-        Just(TaskStatus::InLeadIntervention),
-    ]
-}
-
 fn arb_action() -> impl Strategy<Value = TransitionAction> {
     prop_oneof![
         Just(TransitionAction::Start),

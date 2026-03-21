@@ -1057,24 +1057,6 @@ mod tests {
             .unwrap_or(0)
     }
 
-    #[allow(dead_code)]
-    fn future_expires_at() -> String {
-        // One hour from now, formatted as ISO-8601.
-        let secs = now_secs() + 3600;
-        let days = secs / 86400;
-        let rem = secs % 86400;
-        let h = rem / 3600;
-        let m = (rem % 3600) / 60;
-        let s = rem % 60;
-        // Simple date reconstruction — good enough for test tokens.
-        // Epoch day → Gregorian: reuse the algorithm in reverse.
-        let (year, month, day) = epoch_days_to_ymd(days);
-        format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-            year, month, day, h, m, s
-        )
-    }
-
     fn epoch_days_to_ymd(z: i64) -> (i64, i64, i64) {
         let z = z + 719468;
         let era = z.div_euclid(146097);
