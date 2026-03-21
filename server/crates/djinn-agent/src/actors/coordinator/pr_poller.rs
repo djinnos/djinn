@@ -170,8 +170,16 @@ impl CoordinatorActor {
                         Some("CI checks failed on PR"),
                     )
                     .await;
-                    self.log_ci_failure_comment(&task.id, &failed_checks, pr_url, &current_sha)
-                        .await;
+                    self.log_ci_failure_comment(
+                        &task.id,
+                        &failed_checks,
+                        pr_url,
+                        &current_sha,
+                        &gh_client,
+                        &owner,
+                        &repo,
+                    )
+                    .await;
                     self.pr_status_cache.remove(&task.id);
                     continue;
                 }
@@ -314,8 +322,16 @@ impl CoordinatorActor {
                             Some("CI checks failed on PR"),
                         )
                         .await;
-                        self.log_ci_failure_comment(&task.id, &failed_checks, pr_url, &current_sha)
-                            .await;
+                        self.log_ci_failure_comment(
+                            &task.id,
+                            &failed_checks,
+                            pr_url,
+                            &current_sha,
+                            &gh_client,
+                            &owner,
+                            &repo,
+                        )
+                        .await;
                         self.pr_status_cache.remove(&task.id);
                         continue;
                     }
@@ -749,28 +765,73 @@ impl CoordinatorActor {
         }
     }
 
-    /// Log a comment on the task with details about which CI checks failed.
+    /// Log a comment on the task with details about which CI checks failed,
+    /// including the actual error annotations from GitHub so the worker can fix them.
     ///
     /// This comment becomes part of the activity log that the re-dispatched worker
     /// reads in its system prompt, giving it context about what needs to be fixed.
+    #[allow(clippy::too_many_arguments)]
     async fn log_ci_failure_comment(
         &self,
         task_id: &str,
         failed_checks: &[&CheckRun],
         pr_url: &str,
         sha: &str,
+        gh_client: &GitHubApiClient,
+        owner: &str,
+        repo: &str,
     ) {
-        let check_lines: Vec<String> = failed_checks
-            .iter()
-            .map(|cr| {
-                let conclusion = cr.conclusion.as_deref().unwrap_or("unknown");
-                format!("- **{}** ({}): {}", cr.name, conclusion, cr.html_url)
-            })
-            .collect();
+        let mut check_lines: Vec<String> = Vec::new();
+
+        for cr in failed_checks {
+            let conclusion = cr.conclusion.as_deref().unwrap_or("unknown");
+            check_lines.push(format!(
+                "- **{}** ({}): {}",
+                cr.name, conclusion, cr.html_url
+            ));
+
+            // Fetch annotations for this check run to surface actual error messages.
+            match gh_client
+                .get_check_run_annotations(owner, repo, cr.id)
+                .await
+            {
+                Ok(annotations) if !annotations.is_empty() => {
+                    for ann in &annotations {
+                        let title_part = ann
+                            .title
+                            .as_deref()
+                            .map(|t| format!(" ({})", t))
+                            .unwrap_or_default();
+                        check_lines.push(format!(
+                            "  - `{}` L{}-L{} [{}]{}: {}",
+                            ann.path,
+                            ann.start_line,
+                            ann.end_line,
+                            ann.annotation_level,
+                            title_part,
+                            ann.message,
+                        ));
+                    }
+                }
+                Ok(_) => {
+                    // No annotations — the check run may use logs instead.
+                    check_lines.push("  - _(no annotations — check the Actions log)_".to_string());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id,
+                        check_run_id = cr.id,
+                        error = %e,
+                        "PR poller: failed to fetch check run annotations"
+                    );
+                    check_lines.push(format!("  - _(failed to fetch annotations: {})_", e));
+                }
+            }
+        }
 
         let body = format!(
             "**CI checks failed on PR** (commit `{sha}`)\n\n\
-             The following CI checks failed. Review the logs and fix the failures before the PR can merge.\n\n\
+             The following CI checks failed. Review the error details below and fix the failures before the PR can merge.\n\n\
              {checks}\n\n\
              PR: {pr_url}",
             sha = &sha[..sha.len().min(12)],
