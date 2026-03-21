@@ -1208,6 +1208,33 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         // LSP clients are demand-spawned; shut them down now to free resources.
         // They'll be re-created when the session resumes and touches files.
         app_state.lsp.shutdown_for_worktree(&worktree_path).await;
+
+        // Spawn extraction for completed worker sessions too — reflection must
+        // happen regardless of whether the session is preserved for resume.
+        if let Some(ref record_id) = current_record_id {
+            let session_id_for_extraction = record_id.clone();
+            let session_id_for_llm = record_id.clone();
+            let messages_snapshot = conversation.messages.clone();
+            let app_state_for_extraction = app_state.clone();
+            let app_state_for_llm = app_state.clone();
+            tokio::spawn(async move {
+                let taxonomy = super::session_extraction::run_structural_extraction(
+                    session_id_for_extraction,
+                    messages_snapshot,
+                    app_state_for_extraction,
+                )
+                .await;
+                // LLM knowledge extraction after structural extraction
+                if let Some(taxonomy) = taxonomy {
+                    super::llm_extraction::run_llm_extraction(
+                        session_id_for_llm,
+                        taxonomy,
+                        app_state_for_llm,
+                    )
+                    .await;
+                }
+            });
+        }
     } else {
         // Non-worker or failed: close session and clean up.
         let session_status = if final_result.is_ok() {
