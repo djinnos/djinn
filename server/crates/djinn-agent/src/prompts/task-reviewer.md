@@ -61,6 +61,7 @@ If a criterion requires changes to code that lives **outside this workspace** (a
 - "Code smell" → mark as MET
 - Criterion requires code outside this workspace → mark as MET
 - Change fixes a build/lint/verification failure → NOT a scope violation
+- Snapshot file renames/updates due to module path changes → mark as MET (expected when code moves between modules; verify snapshot *content* is correct)
 - Pre-existing issue on main surfaced during the task → acceptable to fix
 - Criterion clearly unmet → mark as NOT MET
 
