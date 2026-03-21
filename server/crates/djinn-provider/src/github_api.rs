@@ -94,6 +94,21 @@ pub struct CheckRun {
     pub html_url: String,
 }
 
+/// A GitHub Actions job within a workflow run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionsJob {
+    pub id: u64,
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub html_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ActionsJobsResponse {
+    jobs: Vec<ActionsJob>,
+}
+
 /// A single annotation attached to a check run (error/warning/notice).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckAnnotation {
@@ -803,6 +818,88 @@ impl GitHubApiClient {
             ));
         }
         Ok(resp.json().await?)
+    }
+
+    /// List jobs for a workflow run.
+    ///
+    /// Uses `GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs`.
+    /// Returns up to 100 jobs (GitHub default page size).
+    pub async fn list_run_jobs(
+        &self,
+        owner: &str,
+        repo: &str,
+        run_id: u64,
+    ) -> Result<Vec<ActionsJob>> {
+        let url = format!(
+            "{}/repos/{}/{}/actions/runs/{}/jobs?per_page=100",
+            self.base_url, owner, repo, run_id
+        );
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("list_run_jobs failed ({}): {}", status, body));
+        }
+        let parsed: ActionsJobsResponse = resp.json().await?;
+        Ok(parsed.jobs)
+    }
+
+    /// Download the raw log text for a specific Actions job.
+    ///
+    /// Uses `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs`.
+    /// GitHub returns a 302 redirect to a temporary download URL; reqwest
+    /// follows the redirect automatically.
+    pub async fn get_job_logs(
+        &self,
+        owner: &str,
+        repo: &str,
+        job_id: u64,
+    ) -> Result<String> {
+        let url = format!(
+            "{}/repos/{}/{}/actions/jobs/{}/logs",
+            self.base_url, owner, repo, job_id
+        );
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("get_job_logs failed ({}): {}", status, body));
+        }
+        Ok(resp.text().await?)
     }
 }
 

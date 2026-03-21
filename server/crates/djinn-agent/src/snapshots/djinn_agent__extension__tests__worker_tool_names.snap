@@ -1,6 +1,6 @@
 ---
-source: crates/djinn-agent/src/extension.rs
-assertion_line: 2876
+source: crates/djinn-agent/src/extension/mod.rs
+assertion_line: 2989
 expression: names
 ---
 [
@@ -18,6 +18,7 @@ expression: names
   "write",
   "edit",
   "apply_patch",
+  "github_action_logs",
   "request_lead",
   "submit_work"
 ]
