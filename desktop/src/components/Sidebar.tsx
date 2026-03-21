@@ -15,7 +15,6 @@ import {
   Robot01Icon,
   ChartHistogramIcon,
   ChatIcon,
-  ArrowDown01Icon,
   Folder02Icon,
   PlusSignIcon,
   LogoutSquare01Icon,
@@ -27,10 +26,13 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useExecutionStatus } from '@/hooks/useExecutionStatus';
 import { useExecutionControl } from '@/hooks/useExecutionControl';
 import { useProjects, useSelectedProjectId } from '@/stores/useProjectStore';
-import { ALL_PROJECTS } from '@/stores/projectStore';
+import { ALL_PROJECTS, projectStore } from '@/stores/projectStore';
 import { useProjectRoute } from '@/hooks/useProjectRoute';
 import { useStore } from 'zustand';
 import { verificationStore, type VerificationRun } from '@/stores/verificationStore';
+import { addProject, fetchProjects } from '@/api/server';
+import { selectDirectory } from '@/tauri/commands';
+import { showToast } from '@/lib/toast';
 import { HealthCheckPanel } from '@/components/HealthCheckPanel';
 import {
   AlertDialog,
@@ -421,7 +423,8 @@ function UserFooter({ isCollapsed }: { isCollapsed: boolean }) {
 }
 
 export function Sidebar() {
-  const { isCollapsed, activeSection, projectsExpanded, toggleCollapse, setActiveSection, setProjectsExpanded } = useSidebarStore();
+  const { isCollapsed, activeSection, toggleCollapse, setActiveSection } = useSidebarStore();
+  const [isAddingProject, setIsAddingProject] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const projects = useProjects();
@@ -495,6 +498,23 @@ export function Sidebar() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleKeyDown]);
+
+  const handleAddProject = useCallback(async () => {
+    setIsAddingProject(true);
+    try {
+      const path = await selectDirectory('Select Project Directory');
+      if (!path) return;
+      await addProject(path);
+      const projects = await fetchProjects();
+      projectStore.getState().setProjects(projects);
+      showToast.success('Project added');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to add project';
+      showToast.error('Could not add project', { description: message });
+    } finally {
+      setIsAddingProject(false);
+    }
+  }, []);
 
   return (
     <aside
@@ -578,59 +598,55 @@ export function Sidebar() {
         />
 
         {/* Projects Section */}
-        <div className="pt-2">
-          <div className={cn("flex w-full items-center", isCollapsed ? "justify-center" : "")}>
-            <button
-              type="button"
-              onClick={() => setProjectsExpanded(!projectsExpanded)}
-              className={cn(
-                "flex flex-1 items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors text-muted-foreground hover:bg-white/[0.04]",
-                isCollapsed && "justify-center px-0"
-              )}
-            >
-              <HugeiconsIcon icon={ArrowDown01Icon} className={cn("h-3 w-3 shrink-0 transition-transform", !projectsExpanded && "-rotate-90")} />
-              {!isCollapsed && <span className="font-medium">Projects</span>}
-            </button>
+        <div className="pt-2 space-y-0.5">
+          {/* All Projects row */}
+          <ProjectRow
+            projectPath={null}
+            label="All Projects"
+            icon={<HugeiconsIcon icon={Folder02Icon} className="h-3.5 w-3.5" />}
+            isSelected={isAll}
+            isCollapsed={isCollapsed}
+            onClick={() => navigateToProject(ALL_PROJECTS)}
+            hotkey="0"
+          />
+
+          {/* Individual project rows */}
+          {projects.map((project, idx) => (
+            <ProjectRow
+              key={project.id}
+              projectPath={project.path ?? null}
+              label={project.name}
+              icon={<HugeiconsIcon icon={Folder02Icon} className="h-3.5 w-3.5" />}
+              isSelected={selectedProjectId === project.id}
+              isCollapsed={isCollapsed}
+              onClick={() => navigateToProject(project.id)}
+              hotkey={idx < 9 ? String(idx + 1) : undefined}
+            />
+          ))}
+
+          {/* Add Project */}
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => !isAddingProject && void handleAddProject()}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!isAddingProject) void handleAddProject(); } }}
+            className={cn(
+              'flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors cursor-pointer',
+              isCollapsed ? 'justify-center px-0' : '',
+              'text-muted-foreground hover:bg-white/[0.04] hover:text-foreground',
+              isAddingProject && 'opacity-50 cursor-not-allowed'
+            )}
+            title={isCollapsed ? 'Add Project' : undefined}
+          >
+            {isAddingProject ? (
+              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+            ) : (
+              <HugeiconsIcon icon={PlusSignIcon} className="h-3.5 w-3.5 shrink-0" />
+            )}
             {!isCollapsed && (
-              <button
-                type="button"
-                onClick={() => navigate('/settings/projects')}
-                className="flex h-6 w-6 items-center justify-center rounded-md transition-colors text-muted-foreground hover:bg-white/10 hover:text-foreground shrink-0 mr-1"
-                title="Project settings"
-              >
-                <HugeiconsIcon icon={PlusSignIcon} className="h-3.5 w-3.5" />
-              </button>
+              <span className="truncate flex-1 text-left">Add Project</span>
             )}
           </div>
-
-          {projectsExpanded && (
-            <div className="mt-1 space-y-0.5">
-              {/* All Projects row */}
-              <ProjectRow
-                projectPath={null}
-                label="All Projects"
-                icon={<HugeiconsIcon icon={Folder02Icon} className="h-3.5 w-3.5" />}
-                isSelected={isAll}
-                isCollapsed={isCollapsed}
-                onClick={() => navigateToProject(ALL_PROJECTS)}
-                hotkey="0"
-              />
-
-              {/* Individual project rows */}
-              {projects.map((project, idx) => (
-                <ProjectRow
-                  key={project.id}
-                  projectPath={project.path ?? null}
-                  label={project.name}
-                  icon={<HugeiconsIcon icon={Folder02Icon} className="h-3.5 w-3.5" />}
-                  isSelected={selectedProjectId === project.id}
-                  isCollapsed={isCollapsed}
-                  onClick={() => navigateToProject(project.id)}
-                  hotkey={idx < 9 ? String(idx + 1) : undefined}
-                />
-              ))}
-            </div>
-          )}
         </div>
       </nav>
 

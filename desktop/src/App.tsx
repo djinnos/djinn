@@ -87,8 +87,8 @@ function MainLayout() {
             <Route path="/task/:taskId" element={<TaskSessionPage />} />
 
             {/* Settings */}
-            <Route path="/settings" element={<Navigate to="/settings/providers" replace />} />
-            <Route path="/settings/:category" element={<SettingsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/settings/*" element={<SettingsPage />} />
 
             {/* Default redirect */}
             <Route path="*" element={<Navigate to="/kanban" replace />} />
