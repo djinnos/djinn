@@ -30,7 +30,7 @@ use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::oauth::github_app::{CLIENT_ID, GitHubAppTokens, refresh_cached_token};
+use crate::oauth::github_app::GitHubAppTokens;
 use crate::repos::CredentialRepository;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -249,17 +249,11 @@ impl GitHubApiClient {
 
     // ─── Token management ─────────────────────────────────────────────────────
 
-    /// Load and (if needed) refresh the GitHub App user access token.
+    /// Load the cached GitHub OAuth App user access token.
     async fn load_user_token(&self) -> Result<GitHubAppTokens> {
-        let tokens = GitHubAppTokens::load_from_db(&self.cred_repo)
+        GitHubAppTokens::load_from_db(&self.cred_repo)
             .await
-            .ok_or_else(|| anyhow!("No GitHub App tokens found — please authenticate first"))?;
-
-        if tokens.is_expired() {
-            tracing::debug!("GitHubApiClient: user token expired, refreshing");
-            return refresh_cached_token(&tokens, CLIENT_ID, &self.cred_repo).await;
-        }
-        Ok(tokens)
+            .ok_or_else(|| anyhow!("No GitHub App tokens found — please authenticate first"))
     }
 
     // ─── Core request helper ──────────────────────────────────────────────────
@@ -275,9 +269,9 @@ impl GitHubApiClient {
         let resp = build_request(user_tokens.access_token.clone()).await?;
 
         if resp.status() == StatusCode::UNAUTHORIZED {
-            tracing::warn!("GitHubApiClient: 401 received, refreshing user token and retrying");
-            let refreshed = refresh_cached_token(&user_tokens, CLIENT_ID, &self.cred_repo).await?;
-            return build_request(refreshed.access_token).await;
+            return Err(anyhow!(
+                "GitHub API returned 401 — token may have been revoked, please re-authenticate"
+            ));
         }
 
         Ok(resp)
@@ -1039,7 +1033,7 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_db::Database;
 
-    use crate::oauth::github_app::{GITHUB_APP_OAUTH_DB_KEY, GitHubAppTokens};
+    use crate::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
     use crate::repos::CredentialRepository;
 
     // ─── Test helpers ──────────────────────────────────────────────────────────
@@ -1050,14 +1044,12 @@ mod tests {
     }
 
     async fn seed_tokens(repo: &CredentialRepository, access_token: &str) {
-        let tokens = GitHubAppTokens {
-            access_token: access_token.to_string(),
-            refresh_token: "rt_test".to_string(),
-            expires_at: now_secs() + 3600,
-            refresh_token_expires_at: None,
-            user_login: Some("djinn-test".to_string()),
-        };
-        let json = serde_json::to_string(&tokens).unwrap();
+        // Serialize manually — legacy fields are private on GitHubAppTokens.
+        let json = serde_json::json!({
+            "access_token": access_token,
+            "user_login": "djinn-test",
+        })
+        .to_string();
         repo.set("github_app", GITHUB_APP_OAUTH_DB_KEY, &json)
             .await
             .unwrap();

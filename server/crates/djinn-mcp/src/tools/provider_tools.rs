@@ -707,49 +707,26 @@ impl DjinnMcpServer {
         if matches!(flow_kind, OAuthFlowKind::GitHubApp) {
             use djinn_provider::oauth::github_app;
 
-            // If we already have a valid cached token, return success immediately.
-            if let Some(cached) = github_app::GitHubAppTokens::load_from_db(&credential_repo).await
-            {
-                if !cached.is_expired() {
-                    return Json(ProviderOauthStartResponse {
-                        ok: true,
-                        success: true,
-                        provider_id: input.provider_id,
-                        builtin_id: Some(builtin_id.to_string()),
-                        legacy_builtin_id: Some(builtin_id.to_string()),
-                        oauth_supported: true,
-                        configured_keys: oauth_keys,
-                        error: None,
-                        user_code: None,
-                        verification_uri: None,
-                        pending: false,
-                    });
-                }
-                // Try refresh before falling through to device flow
-                if let Ok(tokens) = github_app::refresh_cached_token(
-                    &cached,
-                    github_app::CLIENT_ID,
-                    &credential_repo,
-                )
+            // If we already have a cached token, return success immediately.
+            // OAuth App tokens are long-lived and don't expire.
+            if github_app::GitHubAppTokens::load_from_db(&credential_repo)
                 .await
-                {
-                    let _ = tokens; // already saved by refresh_cached_token
-                    return Json(ProviderOauthStartResponse {
-                        ok: true,
-                        success: true,
-                        provider_id: input.provider_id,
-                        builtin_id: Some(builtin_id.to_string()),
-                        legacy_builtin_id: Some(builtin_id.to_string()),
-                        oauth_supported: true,
-                        configured_keys: oauth_keys,
-                        error: None,
-                        user_code: None,
-                        verification_uri: None,
-                        pending: false,
-                    });
-                }
+                .is_some()
+            {
+                return Json(ProviderOauthStartResponse {
+                    ok: true,
+                    success: true,
+                    provider_id: input.provider_id,
+                    builtin_id: Some(builtin_id.to_string()),
+                    legacy_builtin_id: Some(builtin_id.to_string()),
+                    oauth_supported: true,
+                    configured_keys: oauth_keys,
+                    error: None,
+                    user_code: None,
+                    verification_uri: None,
+                    pending: false,
+                });
             }
-
             return match github_app::start_device_flow().await {
                 Ok(session) => {
                     let user_code = session.user_code.clone();

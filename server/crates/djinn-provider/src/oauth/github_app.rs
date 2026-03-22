@@ -37,25 +37,33 @@ pub const GITHUB_APP_OAUTH_DB_KEY: &str = "__OAUTH_GITHUB_APP";
 
 // ─── Token types ─────────────────────────────────────────────────────────────
 
-/// Cached GitHub OAuth token bundle.
+/// Cached GitHub OAuth App token bundle.
+///
+/// OAuth App tokens obtained via device code flow are long-lived and do not
+/// expire or require refresh.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubAppTokens {
     /// User access token for authenticating as the user.
     pub access_token: String,
-    /// Refresh token for renewing the access token.
-    pub refresh_token: String,
-    /// UTC timestamp when the access token expires.
-    pub expires_at: i64,
-    /// UTC timestamp when the refresh token expires (optional).
-    pub refresh_token_expires_at: Option<i64>,
     /// GitHub user login extracted after auth (best-effort).
     pub user_login: Option<String>,
+    // Legacy fields kept for backward-compatible deserialization of existing
+    // DB entries. Ignored at runtime.
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
+    refresh_token: Option<String>,
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
+    expires_at: Option<i64>,
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
+    refresh_token_expires_at: Option<i64>,
 }
 
 impl GitHubAppTokens {
-    /// Returns true if the access token has expired (with a 60-second buffer).
+    /// OAuth App tokens never expire.
     pub fn is_expired(&self) -> bool {
-        now_secs() >= self.expires_at - 60
+        false
     }
 
     /// Load tokens from the encrypted credential DB.
@@ -89,74 +97,16 @@ impl GitHubAppTokens {
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
-    refresh_token: String,
-    expires_in: Option<i64>,
-    refresh_token_expires_in: Option<i64>,
 }
 
 fn token_response_to_tokens(tr: TokenResponse, user_login: Option<String>) -> GitHubAppTokens {
-    let now = now_secs();
-    let expires_at = now + tr.expires_in.unwrap_or(28_800); // default 8 hours
-    let refresh_token_expires_at = tr.refresh_token_expires_in.map(|secs| now + secs);
     GitHubAppTokens {
         access_token: tr.access_token,
-        refresh_token: tr.refresh_token,
-        expires_at,
-        refresh_token_expires_at,
         user_login,
+        refresh_token: None,
+        expires_at: None,
+        refresh_token_expires_at: None,
     }
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-// ─── Token refresh ───────────────────────────────────────────────────────────
-
-/// Attempt a silent token refresh using the stored refresh_token.
-/// Returns refreshed `GitHubAppTokens` on success, saving them to the DB.
-pub async fn refresh_cached_token(
-    cached: &GitHubAppTokens,
-    client_id: &str,
-    repo: &CredentialRepository,
-) -> Result<GitHubAppTokens> {
-    let client = Client::new();
-    let params = [
-        ("grant_type", "refresh_token"),
-        ("refresh_token", cached.refresh_token.as_str()),
-        ("client_id", client_id),
-    ];
-    let resp = client
-        .post(ACCESS_TOKEN_URL)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .form(&params)
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!(
-            "GitHub App token refresh failed ({}): {}",
-            status,
-            text
-        ));
-    }
-    let body = resp.text().await?;
-    let tr: TokenResponse = serde_json::from_str(&body).map_err(|e| {
-        anyhow!(
-            "GitHub App token refresh: failed to decode response ({}): {}",
-            e,
-            body
-        )
-    })?;
-    let tokens = token_response_to_tokens(tr, cached.user_login.clone());
-    tokens.save_to_db(repo).await?;
-    tracing::info!("GitHubApp: token refreshed successfully");
-    Ok(tokens)
 }
 
 // ─── Device code flow ────────────────────────────────────────────────────────
@@ -351,28 +301,15 @@ async fn fetch_user_login(access_token: &str) -> Option<String> {
 
 /// Perform the full GitHub OAuth device code flow.
 ///
-/// 1. Checks DB cache; returns immediately if unexpired.
-/// 2. Attempts a silent token refresh if the cached token is expired.
-/// 3. Falls back to a full device code flow if refresh fails or no cache exists.
+/// 1. Returns cached token if available (OAuth App tokens don't expire).
+/// 2. Otherwise runs the device code flow.
 ///
 /// Tokens are persisted to the encrypted credential DB on success.
 pub async fn run_github_app_flow(repo: &CredentialRepository) -> Result<GitHubAppTokens> {
-    // 1. Check cache
+    // Return cached token — OAuth App tokens are long-lived.
     if let Some(cached) = GitHubAppTokens::load_from_db(repo).await {
-        if !cached.is_expired() {
-            tracing::debug!("GitHubApp: using cached access token");
-            return Ok(cached);
-        }
-        tracing::debug!("GitHubApp: cached token expired, attempting refresh");
-        match refresh_cached_token(&cached, CLIENT_ID, repo).await {
-            Ok(tokens) => return Ok(tokens),
-            Err(e) => {
-                tracing::warn!(
-                    "GitHubApp: token refresh failed, starting device flow: {}",
-                    e
-                );
-            }
-        }
+        tracing::debug!("GitHubApp: using cached access token");
+        return Ok(cached);
     }
 
     // 2. Device code flow
@@ -406,40 +343,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn expired_token_detection() {
+    fn oauth_app_tokens_never_expire() {
         let tokens = GitHubAppTokens {
             access_token: "tok".into(),
-            refresh_token: "ref".into(),
-            expires_at: now_secs() - 100,
-            refresh_token_expires_at: None,
             user_login: None,
-        };
-        assert!(tokens.is_expired());
-
-        let tokens_valid = GitHubAppTokens {
-            access_token: "tok".into(),
-            refresh_token: "ref".into(),
-            expires_at: now_secs() + 3600,
+            refresh_token: None,
+            expires_at: None,
             refresh_token_expires_at: None,
-            user_login: None,
         };
-        assert!(!tokens_valid.is_expired());
+        assert!(!tokens.is_expired());
     }
 
     #[test]
-    fn token_response_sets_expires_at_from_expires_in() {
-        let before = now_secs();
+    fn token_response_to_tokens_sets_user_login() {
         let tr = TokenResponse {
             access_token: "at".into(),
-            refresh_token: "rt".into(),
-            expires_in: Some(3600),
-            refresh_token_expires_in: Some(86400),
         };
         let tokens = token_response_to_tokens(tr, Some("djinn-user".into()));
-        let after = now_secs();
-        assert!(tokens.expires_at >= before + 3600);
-        assert!(tokens.expires_at <= after + 3600);
-        assert!(tokens.refresh_token_expires_at.is_some());
+        assert_eq!(tokens.access_token, "at");
         assert_eq!(tokens.user_login.as_deref(), Some("djinn-user"));
+    }
+
+    #[test]
+    fn legacy_db_format_deserializes() {
+        // Old tokens stored with refresh_token and expires_at should still load.
+        let json = r#"{"access_token":"tok","refresh_token":"rt","expires_at":1000,"user_login":"u"}"#;
+        let tokens: GitHubAppTokens = serde_json::from_str(json).unwrap();
+        assert_eq!(tokens.access_token, "tok");
+        assert!(!tokens.is_expired());
     }
 }
