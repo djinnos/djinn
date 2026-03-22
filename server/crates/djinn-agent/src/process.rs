@@ -48,6 +48,26 @@ pub async fn output(mut cmd: Command) -> io::Result<Output> {
         .map_err(io::Error::other)?
 }
 
+/// Join a drain thread with a wall-clock deadline.
+///
+/// If the thread doesn't finish in time (e.g. a surviving subprocess still
+/// holds the pipe open), we abandon it and return whatever bytes it collected
+/// up to that point — or an empty vec if it never finished.
+#[cfg(unix)]
+fn join_with_timeout(
+    handle: std::thread::JoinHandle<Vec<u8>>,
+    deadline: std::time::Duration,
+) -> Vec<u8> {
+    // The thread sends its buffer over a channel when done so we can race it
+    // against a sleep on the calling thread without unsafe shenanigans.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let buf = handle.join().unwrap_or_default();
+        let _ = tx.send(buf);
+    });
+    rx.recv_timeout(deadline).unwrap_or_default()
+}
+
 #[cfg(unix)]
 fn signal_process_group(pgid: i32, signal: libc::c_int) -> io::Result<()> {
     // Negative pid targets the whole process group.
@@ -92,8 +112,8 @@ pub async fn output_with_kill(mut cmd: Command, timeout: Duration) -> io::Result
             buf
         });
 
-        let status = match child.wait_timeout(timeout)? {
-            Some(status) => status,
+        let timed_out = match child.wait_timeout(timeout)? {
+            Some(_status) => false,
             None => {
                 let _ = signal_process_group(pgid, libc::SIGTERM);
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -102,12 +122,17 @@ pub async fn output_with_kill(mut cmd: Command, timeout: Duration) -> io::Result
                     let _ = signal_process_group(pgid, libc::SIGKILL);
                 }
 
-                child.wait()?
+                true
             }
         };
+        let status = child.wait()?;
 
-        let stdout_bytes = stdout_handle.join().unwrap_or_default();
-        let stderr_bytes = stderr_handle.join().unwrap_or_default();
+        // After a kill the drain threads may block forever if any subprocess
+        // survived in a different process group and still holds the pipe open.
+        // Give them a short deadline; take whatever bytes arrived before it.
+        let drain_deadline = std::time::Duration::from_secs(if timed_out { 2 } else { 60 });
+        let stdout_bytes = join_with_timeout(stdout_handle, drain_deadline);
+        let stderr_bytes = join_with_timeout(stderr_handle, drain_deadline);
 
         Ok(Output {
             status,
