@@ -116,6 +116,9 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
     let events_tx = crate::events::event_bus_for(&state.events_tx);
     let project_id = project_id.to_string();
     let project_path_owned = project_path.to_path_buf();
+    // Capture the runtime handle here (we're in async context); the debouncer
+    // callback runs on notify's own thread which has no Tokio reactor.
+    let rt_handle = tokio::runtime::Handle::current();
 
     let debouncer = new_debouncer(
         DEBOUNCE,
@@ -138,8 +141,9 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
                     let project_id = project_id.clone();
                     let project_path = project_path_owned.clone();
 
-                    // Spawn reindex on the tokio runtime.
-                    tokio::spawn(async move {
+                    // Spawn reindex on the captured runtime handle — safe to call
+                    // from non-Tokio threads (notify's debouncer thread).
+                    rt_handle.spawn(async move {
                         let note_repo = NoteRepository::new(db, events_tx);
                         match note_repo
                             .reindex_from_disk(&project_id, &project_path)
