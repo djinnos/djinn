@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 3261
 expression: names
 ---
 [
@@ -25,6 +24,6 @@ expression: names
   "epic_tasks",
   "memory_build_context",
   "agent_metrics",
-  "role_amend_prompt",
+  "agent_amend_prompt",
   "submit_work"
 ]

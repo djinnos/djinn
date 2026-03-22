@@ -901,17 +901,17 @@ impl CoordinatorActor {
                 offset: 0,
             })
             .await;
-        if let Ok(result) = &existing_patrol {
-            if !result.tasks.is_empty() {
-                tracing::debug!(
-                    project_id = %project_id,
-                    existing_task = %result.tasks[0].short_id,
-                    "CoordinatorActor: patrol — open review task already exists, skipping creation"
-                );
-                #[cfg(test)]
-                eprintln!("[patrol] step 3: open review task already exists, skipping");
-                return;
-            }
+        if let Ok(result) = &existing_patrol
+            && !result.tasks.is_empty()
+        {
+            tracing::debug!(
+                project_id = %project_id,
+                existing_task = %result.tasks[0].short_id,
+                "CoordinatorActor: patrol — open review task already exists, skipping creation"
+            );
+            #[cfg(test)]
+            eprintln!("[patrol] step 3: open review task already exists, skipping");
+            return;
         }
         #[cfg(test)]
         eprintln!("[patrol] step 3: no existing open patrol task");

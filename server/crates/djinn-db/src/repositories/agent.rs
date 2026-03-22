@@ -130,6 +130,7 @@ impl AgentRepository {
     /// Return the full `learned_prompt_history` for a role, newest first.
     pub async fn get_history(&self, role_id: &str) -> Result<Vec<LearnedPromptHistoryEntry>> {
         self.db.ensure_initialized().await?;
+        #[allow(clippy::type_complexity)]
         let rows: Vec<(String, String, String, Option<String>, Option<String>, String)> =
             sqlx::query_as(
                 "SELECT id, proposed_text, action, metrics_before, metrics_after, created_at

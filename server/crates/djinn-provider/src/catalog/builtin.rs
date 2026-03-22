@@ -168,7 +168,7 @@ pub fn is_builtin_provider(provider_id: &str) -> bool {
 /// Check whether a provider is auth-only (used for authentication, not model dispatch).
 /// Auth-only providers should be excluded from model provider catalogs.
 pub fn is_auth_only_provider(provider_id: &str) -> bool {
-    find_builtin_provider(provider_id).map_or(false, |p| p.auth_only)
+    find_builtin_provider(provider_id).is_some_and(|p| p.auth_only)
 }
 
 /// Strip non-alphanumeric chars and lowercase for fuzzy ID matching.

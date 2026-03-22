@@ -514,6 +514,7 @@ mod tests {
             oauth_keys: &[],
             docs_url: "https://example.com/docs",
             merge_into: None,
+            auth_only: false,
         }];
         catalog.inject_builtin_providers(entries);
 
@@ -543,6 +544,7 @@ mod tests {
             oauth_keys: &[],
             docs_url: "",
             merge_into: None,
+            auth_only: false,
         }];
         catalog.inject_builtin_providers(entries);
 

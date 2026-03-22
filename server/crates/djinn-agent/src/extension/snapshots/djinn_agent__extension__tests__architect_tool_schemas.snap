@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 3266
 expression: tool_schemas_architect()
 ---
 [
@@ -171,7 +170,7 @@ expression: tool_schemas_architect()
           "type": "string"
         },
         "timeout_ms": {
-          "description": "Timeout in milliseconds (default 120000, max 600000)",
+          "description": "Timeout in milliseconds (default 120000)",
           "type": "integer"
         }
       },
@@ -556,15 +555,15 @@ expression: tool_schemas_architect()
     "name": "memory_build_context"
   },
   {
-    "description": "Return aggregated effectiveness metrics per agent role: success_rate, avg_tokens, avg_time_seconds, verification_pass_rate, avg_reopens, completed_task_count. Omit role_id to return metrics for all roles in the project.",
+    "description": "Return aggregated effectiveness metrics per agent: success_rate, avg_tokens, avg_time_seconds, verification_pass_rate, avg_reopens, completed_task_count. Omit agent_id to return metrics for all agents in the project.",
     "inputSchema": {
       "properties": {
-        "project": {
-          "description": "Absolute project path",
+        "agent_id": {
+          "description": "Agent UUID or name; omit for all agents",
           "type": "string"
         },
-        "role_id": {
-          "description": "Role UUID or name; omit for all roles",
+        "project": {
+          "description": "Absolute project path",
           "type": "string"
         },
         "window_days": {
@@ -580,6 +579,10 @@ expression: tool_schemas_architect()
     "description": "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer, resolver base_role). Do NOT use on architect, lead, or planner roles.",
     "inputSchema": {
       "properties": {
+        "agent_id": {
+          "description": "Agent UUID or name to amend",
+          "type": "string"
+        },
         "amendment": {
           "description": "Amendment text to append to learned_prompt",
           "type": "string"
@@ -591,19 +594,15 @@ expression: tool_schemas_architect()
         "project": {
           "description": "Absolute project path",
           "type": "string"
-        },
-        "role_id": {
-          "description": "Role UUID or name to amend",
-          "type": "string"
         }
       },
       "required": [
-        "role_id",
+        "agent_id",
         "amendment"
       ],
       "type": "object"
     },
-    "name": "role_amend_prompt"
+    "name": "agent_amend_prompt"
   },
   {
     "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",

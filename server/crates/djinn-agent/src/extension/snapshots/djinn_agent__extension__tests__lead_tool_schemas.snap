@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 3242
 expression: tool_schemas_lead()
 ---
 [
@@ -171,7 +170,7 @@ expression: tool_schemas_lead()
           "type": "string"
         },
         "timeout_ms": {
-          "description": "Timeout in milliseconds (default 120000, max 600000)",
+          "description": "Timeout in milliseconds (default 120000)",
           "type": "integer"
         }
       },
