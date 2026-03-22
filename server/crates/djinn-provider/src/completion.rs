@@ -727,7 +727,7 @@ mod tests {
         settings
             .set(
                 "settings.raw",
-                r#"{"memory_model":"anthropic/claude-3-5-haiku-latest"}"#,
+                r#"{"models":["anthropic/claude-3-5-haiku-latest"]}"#,
             )
             .await
             .unwrap();
@@ -745,11 +745,11 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let settings = SettingsRepository::new(db.clone(), EventBus::noop());
         let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
-        // Configure a model in settings model_priority (what the UI does).
+        // Configure a model in settings models list (what the UI does).
         settings
             .set(
                 "settings.raw",
-                r#"{"model_priority":{"worker":["openai/gpt-4.1-mini"]}}"#,
+                r#"{"models":["openai/gpt-4.1-mini"]}"#,
             )
             .await
             .unwrap();
@@ -769,7 +769,7 @@ mod tests {
         settings
             .set(
                 "settings.raw",
-                r#"{"memory_model":"openai/nonexistent-model"}"#,
+                r#"{"models":["openai/nonexistent-model"]}"#,
             )
             .await
             .unwrap();
