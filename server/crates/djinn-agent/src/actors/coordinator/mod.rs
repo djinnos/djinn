@@ -23,7 +23,6 @@ use crate::roles::RoleRegistry;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::parse_json_array;
 use djinn_db::Database;
-use djinn_db::EpicRepository;
 use djinn_db::GitSettingsRepository;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;

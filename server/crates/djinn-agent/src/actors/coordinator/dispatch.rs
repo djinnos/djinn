@@ -819,11 +819,13 @@ impl CoordinatorActor {
     }
 
     /// Dispatch an Architect patrol session every 5 minutes when:
-    ///   - At least one open epic exists (there is active work to review).
     ///   - No Architect session is currently running.
-    ///   - At least one project is not paused/unhealthy (dispatch is enabled).
+    ///   - At least one project has dispatch enabled (not paused/unhealthy).
+    ///   - No open patrol review task already exists for that project.
     ///
-    /// Creates a "review" task for visibility, then dispatches the Architect to it.
+    /// The Architect reviews the whole board (tasks, epics, health) — it is not
+    /// gated on open epics existing.  Creates a "review" task for visibility,
+    /// then dispatches the Architect to it.
     pub(super) async fn maybe_dispatch_architect_patrol(&mut self) {
         // Check if any Architect session is already running.
         let session_repo = SessionRepository::new(
@@ -852,76 +854,82 @@ impl CoordinatorActor {
             active_sessions.len()
         );
 
-        // Check if there are any open epics.
-        let epic_repo = EpicRepository::new(
+        // Find a dispatch-enabled project.  The patrol reviews the whole board,
+        // so we only need at least one project that is actively running.
+        let project_repo = ProjectRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
-        let all_epics = match epic_repo.list().await {
-            Ok(e) => e,
+        let projects = match project_repo.list().await {
+            Ok(p) => p,
             Err(e) => {
-                tracing::warn!(error = %e, "CoordinatorActor: patrol — failed to list epics");
+                tracing::warn!(error = %e, "CoordinatorActor: patrol — failed to list projects");
                 return;
             }
         };
-        #[cfg(test)]
-        eprintln!("[patrol] step 2: total epics: {}", all_epics.len());
-        tracing::debug!(
-            total_epics = all_epics.len(),
-            "CoordinatorActor: patrol — epic list"
-        );
-        let open_epics: Vec<_> = all_epics
-            .into_iter()
-            .filter(|e| e.status == "open")
-            .collect();
-        if open_epics.is_empty() {
-            tracing::debug!("CoordinatorActor: patrol — no open epics, skipping Architect patrol");
-            return;
-        }
-        tracing::debug!(
-            open_epics = open_epics.len(),
-            "CoordinatorActor: patrol — found open epics"
-        );
-        #[cfg(test)]
-        eprintln!("[patrol] step 3: open epics: {}", open_epics.len());
-
-        // Find a project with dispatch enabled to attach the patrol task to.
-        // Use the first open epic's project_id.
-        let Some(project_epic) = open_epics.first() else {
-            return;
-        };
-        let project_id = &project_epic.project_id;
-        tracing::debug!(project_id = %project_id, "CoordinatorActor: patrol — using project");
-
-        if !self.is_project_dispatch_enabled(project_id) {
+        let Some(active_project) = projects
+            .iter()
+            .find(|p| self.is_project_dispatch_enabled(&p.id))
+        else {
             tracing::debug!(
-                project_id = %project_id,
-                "CoordinatorActor: patrol — project paused or unhealthy, skipping"
+                "CoordinatorActor: patrol — no dispatch-enabled projects, skipping"
             );
             return;
-        }
-        tracing::debug!(project_id = %project_id, "CoordinatorActor: patrol — project dispatch enabled");
+        };
+        let project_id = active_project.id.clone();
+        tracing::debug!(project_id = %project_id, "CoordinatorActor: patrol — using project");
         #[cfg(test)]
-        eprintln!("[patrol] step 5: project dispatch enabled, project_id={project_id}");
+        eprintln!("[patrol] step 2: project dispatch enabled, project_id={project_id}");
+
+        // Check for an existing open patrol review task for this project.
+        // Avoid creating duplicates if the previous patrol task was never dispatched.
+        let task_repo = TaskRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let existing_patrol = task_repo
+            .list_filtered(djinn_db::ListQuery {
+                project_id: Some(project_id.clone()),
+                status: Some("open".to_string()),
+                issue_type: Some("review".to_string()),
+                priority: None,
+                label: None,
+                text: None,
+                parent: None,
+                sort: "created_desc".to_string(),
+                limit: 1,
+                offset: 0,
+            })
+            .await;
+        if let Ok(result) = &existing_patrol {
+            if !result.tasks.is_empty() {
+                tracing::debug!(
+                    project_id = %project_id,
+                    existing_task = %result.tasks[0].short_id,
+                    "CoordinatorActor: patrol — open review task already exists, skipping creation"
+                );
+                #[cfg(test)]
+                eprintln!("[patrol] step 3: open review task already exists, skipping");
+                return;
+            }
+        }
+        #[cfg(test)]
+        eprintln!("[patrol] step 3: no existing open patrol task");
 
         // Resolve models for the "architect" role.
         let model_ids = self.resolve_dispatch_models_for_role("architect").await;
         tracing::debug!(model_ids = ?model_ids, "CoordinatorActor: patrol — resolved models");
         #[cfg(test)]
-        eprintln!("[patrol] step 6: resolved models: {:?}", model_ids);
+        eprintln!("[patrol] step 4: resolved models: {:?}", model_ids);
         if model_ids.is_empty() {
             tracing::debug!("CoordinatorActor: patrol — no model configured for architect role");
             return;
         }
 
         // Create a review task for the patrol session.
-        let task_repo = TaskRepository::new(
-            self.db.clone(),
-            crate::events::event_bus_for(&self.events_tx),
-        );
         let review_task = match task_repo
             .create_in_project(
-                project_id,
+                &project_id,
                 None,
                 "Architect patrol: board health review",
                 "Automated patrol session to review board health, epic progress, and approach viability.",
@@ -936,12 +944,12 @@ impl CoordinatorActor {
         {
             Ok(t) => {
                 #[cfg(test)]
-                eprintln!("[patrol] step 7: review task created: {}", t.id);
+                eprintln!("[patrol] step 5: review task created: {}", t.id);
                 t
             }
             Err(e) => {
                 #[cfg(test)]
-                eprintln!("[patrol] step 7: FAILED to create review task: {e}");
+                eprintln!("[patrol] step 5: FAILED to create review task: {e}");
                 tracing::warn!(
                     error = %e,
                     project_id = %project_id,
@@ -951,7 +959,7 @@ impl CoordinatorActor {
             }
         };
 
-        let Some(project_path) = self.project_path_for_id(project_id).await else {
+        let Some(project_path) = self.project_path_for_id(&project_id).await else {
             #[cfg(test)]
             eprintln!("[patrol] step 8: FAILED to get project path");
             tracing::warn!(
@@ -981,7 +989,6 @@ impl CoordinatorActor {
                     task_id = %review_task.short_id,
                     task_uuid = %review_task.id,
                     project_id = %project_id,
-                    open_epics = open_epics.len(),
                     "CoordinatorActor: Architect patrol dispatched"
                 );
                 self.last_dispatched
