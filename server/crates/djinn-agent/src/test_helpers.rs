@@ -1,6 +1,7 @@
 //! Test utilities for djinn-agent tests.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -23,15 +24,28 @@ use crate::lsp::LspManager;
 use crate::roles::RoleRegistry;
 
 pub fn test_tempdir(prefix: &str) -> tempfile::TempDir {
-    let base = std::env::current_dir()
-        .expect("current dir")
-        .join("target")
-        .join("test-tmp");
+    let base = test_tmp_base();
     std::fs::create_dir_all(&base).expect("create test tempdir base");
     tempfile::Builder::new()
         .prefix(prefix)
         .tempdir_in(base)
         .expect("create test tempdir")
+}
+
+fn test_tmp_base() -> PathBuf {
+    if let Ok(base) = std::env::var("CARGO_TARGET_TMPDIR") {
+        let base = PathBuf::from(base).join("djinn-agent");
+        if base.is_relative() {
+            std::env::current_dir().expect("current dir").join(base)
+        } else {
+            base
+        }
+    } else {
+        std::env::current_dir()
+            .expect("current dir")
+            .join("target")
+            .join("test-tmp")
+    }
 }
 
 pub fn test_persistent_dir(prefix: &str) -> std::path::PathBuf {
