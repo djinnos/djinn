@@ -1789,7 +1789,9 @@ mod task_tools {
         )
         .await;
         assert!(
-            result["error"].as_str().is_some_and(|e| e.contains("acceptance_criteria")),
+            result["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("acceptance_criteria")),
             "should error when acceptance_criteria is missing for task type, got: {result}"
         );
 
@@ -1803,7 +1805,9 @@ mod task_tools {
             )
             .await;
             assert!(
-                result["error"].as_str().is_some_and(|e| e.contains("acceptance_criteria")),
+                result["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("acceptance_criteria")),
                 "{issue_type} should error without acceptance_criteria"
             );
         }
@@ -1830,7 +1834,10 @@ mod task_tools {
                 result.get("error").is_none() || result["error"].is_null(),
                 "{issue_type} should not require acceptance_criteria, got: {result}"
             );
-            assert!(result["id"].as_str().is_some(), "{issue_type} task should be created");
+            assert!(
+                result["id"].as_str().is_some(),
+                "{issue_type} task should be created"
+            );
         }
     }
 

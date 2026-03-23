@@ -22,6 +22,18 @@ use crate::file_time::FileTime;
 use crate::lsp::LspManager;
 use crate::roles::RoleRegistry;
 
+pub fn test_tempdir(prefix: &str) -> tempfile::TempDir {
+    let base = std::env::current_dir()
+        .expect("current dir")
+        .join("target")
+        .join("test-tmp");
+    std::fs::create_dir_all(&base).expect("create test tempdir base");
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(base)
+        .expect("create test tempdir")
+}
+
 pub fn create_test_db() -> Database {
     Database::open_in_memory().expect("failed to create test database")
 }
@@ -49,8 +61,10 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
 pub async fn create_test_project(db: &Database) -> Project {
     let repo = ProjectRepository::new(db.clone(), test_events());
     let id = uuid::Uuid::now_v7();
-    let path = format!("/tmp/djinn-test-project-{id}");
+    let tempdir = test_tempdir("djinn-test-project-");
+    let path = tempdir.path().to_string_lossy().to_string();
     let name = format!("test-project-{id}");
+    std::mem::forget(tempdir);
     repo.create(&name, &path)
         .await
         .expect("failed to create test project")

@@ -1259,7 +1259,6 @@ pub fn format_diagnostics_xml(diags: Vec<Diagnostic>) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use tempfile::Builder;
 
     fn make_diag(file: &str, line: u32, character: u32, severity: u32, msg: &str) -> Diagnostic {
         Diagnostic {
@@ -1578,7 +1577,7 @@ mod tests {
     #[tokio::test]
     async fn lsp_manager_touch_file_no_server_for_txt() {
         let mgr = LspManager::new();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = crate::test_helpers::test_tempdir("djinn-lsp-manager-");
         let file = tmp.path().join("test.txt");
         std::fs::write(&file, "hello").unwrap();
         // Should return without error even though no server matches
@@ -1634,9 +1633,10 @@ mod tests {
 
     #[test]
     fn which_in_path_finds_existing_binary() {
-        // /usr/bin/ls should exist on any Linux
-        let result = which_in_path("ls", "/usr/bin");
-        assert_eq!(result, Some(PathBuf::from("/usr/bin/ls")));
+        let tmp = crate::test_helpers::test_tempdir("djinn-lsp-which-");
+        make_fake_binary(tmp.path(), "ls", "#!/bin/sh\n");
+        let result = which_in_path("ls", &tmp.path().to_string_lossy());
+        assert_eq!(result, Some(tmp.path().join("ls")));
     }
 
     #[test]
@@ -1647,8 +1647,15 @@ mod tests {
 
     #[test]
     fn which_in_path_scans_multiple_dirs() {
-        let result = which_in_path("ls", "/nonexistent:/usr/bin:/also_fake");
-        assert_eq!(result, Some(PathBuf::from("/usr/bin/ls")));
+        let tmp = crate::test_helpers::test_tempdir("djinn-lsp-which-");
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        make_fake_binary(&second, "ls", "#!/bin/sh\n");
+        let path = format!("{}:{}", first.display(), second.display());
+        let result = which_in_path("ls", &path);
+        assert_eq!(result, Some(second.join("ls")));
     }
 
     // --- resolve_binary_inner ---
@@ -1666,10 +1673,7 @@ mod tests {
     }
 
     fn tempdir_in_tmp() -> tempfile::TempDir {
-        Builder::new()
-            .prefix("djinn-lsp-")
-            .tempdir_in("/tmp")
-            .unwrap()
+        crate::test_helpers::test_tempdir("djinn-lsp-")
     }
 
     #[test]

@@ -367,7 +367,8 @@ mod tests {
     #[test]
     fn legacy_db_format_deserializes() {
         // Old tokens stored with refresh_token and expires_at should still load.
-        let json = r#"{"access_token":"tok","refresh_token":"rt","expires_at":1000,"user_login":"u"}"#;
+        let json =
+            r#"{"access_token":"tok","refresh_token":"rt","expires_at":1000,"user_login":"u"}"#;
         let tokens: GitHubAppTokens = serde_json::from_str(json).unwrap();
         assert_eq!(tokens.access_token, "tok");
         assert!(!tokens.is_expired());

@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tempfile::{Builder, TempDir};
+use tempfile::TempDir;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -28,10 +28,7 @@ use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
 
 /// Creates a temporary git repository with a single commit on `main`.
 async fn create_git_repo() -> TempDir {
-    let tmp = Builder::new()
-        .prefix("djinn-lifecycle-")
-        .tempdir_in("/tmp")
-        .expect("tempdir");
+    let tmp = crate::test_helpers::test_tempdir("djinn-lifecycle-");
     let p = tmp.path();
 
     let run = |args: &[&str]| {

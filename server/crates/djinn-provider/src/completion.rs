@@ -747,10 +747,7 @@ mod tests {
         let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
         // Configure a model in settings models list (what the UI does).
         settings
-            .set(
-                "settings.raw",
-                r#"{"models":["openai/gpt-4.1-mini"]}"#,
-            )
+            .set("settings.raw", r#"{"models":["openai/gpt-4.1-mini"]}"#)
             .await
             .unwrap();
         credentials
@@ -767,10 +764,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let settings = SettingsRepository::new(db.clone(), EventBus::noop());
         settings
-            .set(
-                "settings.raw",
-                r#"{"models":["openai/nonexistent-model"]}"#,
-            )
+            .set("settings.raw", r#"{"models":["openai/nonexistent-model"]}"#)
             .await
             .unwrap();
 

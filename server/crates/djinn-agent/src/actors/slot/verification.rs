@@ -486,10 +486,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn tempdir_in_tmp() -> tempfile::TempDir {
-        tempfile::Builder::new()
-            .prefix("djinn-verification-")
-            .tempdir_in("/tmp")
-            .expect("tempdir")
+        crate::test_helpers::test_tempdir("djinn-verification-")
     }
 
     fn write_settings(dir: &std::path::Path, body: &str) {

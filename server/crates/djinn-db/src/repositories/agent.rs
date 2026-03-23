@@ -131,16 +131,22 @@ impl AgentRepository {
     pub async fn get_history(&self, role_id: &str) -> Result<Vec<LearnedPromptHistoryEntry>> {
         self.db.ensure_initialized().await?;
         #[allow(clippy::type_complexity)]
-        let rows: Vec<(String, String, String, Option<String>, Option<String>, String)> =
-            sqlx::query_as(
-                "SELECT id, proposed_text, action, metrics_before, metrics_after, created_at
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        )> = sqlx::query_as(
+            "SELECT id, proposed_text, action, metrics_before, metrics_after, created_at
                  FROM learned_prompt_history
                  WHERE agent_id = ?1
                  ORDER BY created_at DESC",
-            )
-            .bind(role_id)
-            .fetch_all(self.db.pool())
-            .await?;
+        )
+        .bind(role_id)
+        .fetch_all(self.db.pool())
+        .await?;
 
         Ok(rows
             .into_iter()
@@ -176,8 +182,7 @@ impl AgentRepository {
             .get(role_id)
             .await?
             .ok_or_else(|| Error::InvalidData(format!("agent not found: {role_id}")))?;
-        self.events
-            .send(DjinnEventEnvelope::agent_updated(&role));
+        self.events.send(DjinnEventEnvelope::agent_updated(&role));
         Ok(role)
     }
 
@@ -287,8 +292,7 @@ impl AgentRepository {
             .get(&id)
             .await?
             .ok_or_else(|| Error::InvalidData("agent insert failed".into()))?;
-        self.events
-            .send(DjinnEventEnvelope::agent_created(&role));
+        self.events.send(DjinnEventEnvelope::agent_created(&role));
         Ok(role)
     }
 
@@ -318,8 +322,7 @@ impl AgentRepository {
             .get(id)
             .await?
             .ok_or_else(|| Error::InvalidData(format!("agent not found: {id}")))?;
-        self.events
-            .send(DjinnEventEnvelope::agent_updated(&role));
+        self.events.send(DjinnEventEnvelope::agent_updated(&role));
         Ok(role)
     }
 

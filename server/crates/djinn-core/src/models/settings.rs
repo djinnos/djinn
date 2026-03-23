@@ -215,7 +215,9 @@ mod tests {
         let raw = r#"{"model_priority":{"worker":["openai/gpt-4o","anthropic/claude-opus-4-6"],"reviewer":["openai/gpt-4o"]},"max_sessions":{"openai/gpt-4o":2}}"#;
         let s = DjinnSettings::from_db_value(raw);
         // Should have extracted a deduplicated flat model list.
-        let models = s.models.expect("models should be extracted from model_priority map");
+        let models = s
+            .models
+            .expect("models should be extracted from model_priority map");
         assert!(
             models.contains(&"openai/gpt-4o".to_string()),
             "gpt-4o should be in models"
@@ -225,7 +227,13 @@ mod tests {
             "claude should be in models"
         );
         // Deduplication: gpt-4o appears in both worker and reviewer roles — only once in output.
-        assert_eq!(models.iter().filter(|m| m.as_str() == "openai/gpt-4o").count(), 1);
+        assert_eq!(
+            models
+                .iter()
+                .filter(|m| m.as_str() == "openai/gpt-4o")
+                .count(),
+            1
+        );
         // max_sessions should be migrated too.
         let ms = s.max_sessions.expect("max_sessions should be migrated");
         assert_eq!(ms.get("openai/gpt-4o"), Some(&2));

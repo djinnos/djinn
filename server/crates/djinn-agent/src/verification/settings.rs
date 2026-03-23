@@ -191,10 +191,7 @@ mod tests {
     use super::*;
 
     fn tempdir_in_tmp() -> tempfile::TempDir {
-        tempfile::Builder::new()
-            .prefix("djinn-settings-")
-            .tempdir_in("/tmp")
-            .unwrap()
+        crate::test_helpers::test_tempdir("djinn-settings-")
     }
 
     fn write_settings(dir: &tempfile::TempDir, content: &str) {

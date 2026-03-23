@@ -8,9 +8,9 @@ pub use database::{Database, default_db_path};
 pub use error::{DbError as Error, DbResult as Result};
 pub use repositories::{
     agent::{
-        AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics,
-        AgentRepository, AgentUpdateInput, LearnedPromptHistoryEntry,
-        PendingAmendmentEvaluation, VALID_BASE_ROLES, WindowedRoleMetrics,
+        AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics, AgentRepository,
+        AgentUpdateInput, LearnedPromptHistoryEntry, PendingAmendmentEvaluation, VALID_BASE_ROLES,
+        WindowedRoleMetrics,
     },
     epic::{
         EpicCountQuery, EpicCreateInput, EpicListQuery, EpicListResult, EpicRepository,

@@ -7,7 +7,14 @@ use djinn_provider::repos::CredentialRepository;
 
 use super::{AppState, SETTINGS_RAW_KEY};
 
-const ALL_ROLES: &[&str] = &["worker", "reviewer", "lead", "planner", "architect", "resolver"];
+const ALL_ROLES: &[&str] = &[
+    "worker",
+    "reviewer",
+    "lead",
+    "planner",
+    "architect",
+    "resolver",
+];
 
 impl AppState {
     fn slot_pool_config_for_settings(settings: &DjinnSettings) -> SlotPoolConfig {

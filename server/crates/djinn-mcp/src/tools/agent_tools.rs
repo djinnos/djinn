@@ -9,8 +9,7 @@ use crate::tools::validation::{validate_limit, validate_offset};
 use djinn_core::models::Agent;
 use djinn_db::AgentMetrics as DbAgentMetrics;
 use djinn_db::{
-    AgentCreateInput, AgentListQuery, AgentRepository, AgentUpdateInput,
-    VALID_BASE_ROLES,
+    AgentCreateInput, AgentListQuery, AgentRepository, AgentUpdateInput, VALID_BASE_ROLES,
 };
 
 // ── View model ───────────────────────────────────────────────────────────────
