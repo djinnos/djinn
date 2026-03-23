@@ -15,7 +15,6 @@ import {
   PlayIcon,
   PauseIcon,
   Loading02Icon,
-  CommandIcon,
   Settings01Icon,
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';

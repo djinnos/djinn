@@ -14,7 +14,6 @@ const settingsStore = {
   addModel: vi.fn(),
   removeModel: vi.fn(),
   reorderModels: vi.fn(),
-  toggleRoleForModel: vi.fn(),
   updateMaxSessions: vi.fn(),
   saveSettings: vi.fn(),
   resetError: vi.fn(),
@@ -33,11 +32,8 @@ describe('useAgentConfig', () => {
     expect(settingsStore.loadSettings).toHaveBeenCalled();
     expect(settingsStore.loadProviderModels).toHaveBeenCalled();
 
-    result.current.onToggleRole('model-a', 'reviewer');
-    expect(settingsStore.toggleRoleForModel).toHaveBeenCalledWith('model-a', 'reviewer');
-
-    result.current.onUpdateMaxSessions('model-a', 3);
-    expect(settingsStore.updateMaxSessions).toHaveBeenCalledWith('model-a', 3);
+    result.current.onUpdateMaxSessions(0, 3);
+    expect(settingsStore.updateMaxSessions).toHaveBeenCalledWith(0, 3);
   });
 
   it('saves settings', () => {

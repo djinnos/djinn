@@ -18,7 +18,6 @@ describe('Sidebar component', () => {
     localStorage.clear();
 
     useSidebarStore.setState({
-      isCollapsed: false,
       activeSection: 'kanban',
       projectsExpanded: true,
     });
@@ -52,19 +51,17 @@ describe('Sidebar component', () => {
     expect(screen.getByText('Project Beta')).toBeInTheDocument();
   });
 
-  it('expands and collapses projects section on click', async () => {
+  it('navigates between nav sections on click', async () => {
     const user = userEvent.setup();
     render(<Sidebar />);
 
-    const projectsToggle = screen.getByRole('button', { name: 'Projects' });
+    const chatButton = screen.getByRole('button', { name: /Chat/ });
+    await user.click(chatButton);
+    expect(useSidebarStore.getState().activeSection).toBe('chat');
 
-    await user.click(projectsToggle);
-    expect(screen.queryByText('Project Alpha')).not.toBeInTheDocument();
-    expect(screen.queryByText('Project Beta')).not.toBeInTheDocument();
-
-    await user.click(projectsToggle);
-    expect(screen.getByText('Project Alpha')).toBeInTheDocument();
-    expect(screen.getByText('Project Beta')).toBeInTheDocument();
+    const kanbanButton = screen.getByRole('button', { name: /Kanban/ });
+    await user.click(kanbanButton);
+    expect(useSidebarStore.getState().activeSection).toBe('kanban');
   });
 
   it('highlights active project based on route', () => {
@@ -88,17 +85,17 @@ describe('Sidebar component', () => {
     expect(inactiveProjectButton?.className).toContain('text-muted-foreground');
   });
 
-  it('sidebar collapse toggle changes layout', async () => {
-    const user = userEvent.setup();
+  it('renders sidebar with fixed width and all nav items', () => {
     const { container } = render(<Sidebar />);
 
     const sidebar = container.querySelector('aside');
     expect(sidebar?.className).toContain('w-64');
 
-    await user.click(screen.getByRole('button', { name: 'Collapse' }));
-
-    expect(sidebar?.className).toContain('w-14');
-    expect(screen.getByRole('button', { name: 'Expand' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Chat/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Kanban/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Agents/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Metrics/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Settings/ })).toBeInTheDocument();
   });
 
   it('shows empty state for projects when projectStore is empty', async () => {

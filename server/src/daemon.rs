@@ -185,11 +185,11 @@ pub async fn ensure_running(
     db_path: Option<&Path>,
     server_bin: &Path,
 ) -> Result<DaemonInfo, String> {
-    if let Some(info) = read_info_default() {
-        if pid_is_alive(info.pid) {
-            tracing::info!(pid = info.pid, port = info.port, "daemon already running");
-            return Ok(info);
-        }
+    if let Some(info) = read_info_default()
+        && pid_is_alive(info.pid)
+    {
+        tracing::info!(pid = info.pid, port = info.port, "daemon already running");
+        return Ok(info);
     }
 
     let child = spawn_daemon(server_bin, port, db_path)?;
@@ -233,11 +233,11 @@ fn spawn_daemon(
 
 async fn wait_for_daemon(mut child: std::process::Child) -> Result<DaemonInfo, String> {
     for _ in 0..40 {
-        if let Some(info) = read_info_default() {
-            if pid_is_alive(info.pid) {
-                tracing::info!(pid = info.pid, port = info.port, "daemon started");
-                return Ok(info);
-            }
+        if let Some(info) = read_info_default()
+            && pid_is_alive(info.pid)
+        {
+            tracing::info!(pid = info.pid, port = info.port, "daemon started");
+            return Ok(info);
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }

@@ -8,7 +8,6 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import { useAuthStore } from "@/stores/authStore";
-import { useSidebarStore } from "@/stores/sidebarStore";
 import { renderWithProviders } from "@/test/helpers";
 import { Sidebar } from "./Sidebar";
 
@@ -37,6 +36,31 @@ vi.mock("@/stores/useProjectStore", () => ({
 }));
 vi.mock("@/stores/projectStore", () => ({
   ALL_PROJECTS: "__all__",
+  projectStore: { getState: () => ({}), setState: vi.fn(), subscribe: vi.fn() },
+}));
+vi.mock("@/stores/verificationStore", () => ({
+  verificationStore: {
+    getState: () => ({ runs: [] }),
+    setState: vi.fn(),
+    subscribe: vi.fn(() => vi.fn()),
+  },
+}));
+vi.mock("@/api/server", () => ({
+  addProject: vi.fn(),
+  fetchProjects: vi.fn().mockResolvedValue([]),
+}));
+vi.mock("@/tauri/commands", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/tauri/commands")>();
+  return {
+    ...actual,
+    selectDirectory: vi.fn(),
+  };
+});
+vi.mock("@/lib/toast", () => ({
+  showToast: { success: vi.fn(), error: vi.fn() },
+}));
+vi.mock("@/components/HealthCheckPanel", () => ({
+  HealthCheckPanel: () => null,
 }));
 // Mock hugeicons to avoid import issues
 vi.mock("@hugeicons/core-free-icons", () => ({
@@ -48,6 +72,10 @@ vi.mock("@hugeicons/core-free-icons", () => ({
   Folder02Icon: "Folder02Icon",
   PlusSignIcon: "PlusSignIcon",
   LogoutSquare01Icon: "LogoutSquare01Icon",
+  PlayIcon: "PlayIcon",
+  PauseIcon: "PauseIcon",
+  Loading02Icon: "Loading02Icon",
+  Settings01Icon: "Settings01Icon",
 }));
 vi.mock("@hugeicons/react", () => ({
   HugeiconsIcon: ({ children }: { children?: React.ReactNode }) => <span>{children}</span>,
@@ -129,7 +157,9 @@ describe("UserFooter (via Sidebar)", () => {
 
       await user.click(screen.getByTitle("Sign out"));
 
-      expect(mockInvoke).toHaveBeenCalledWith("auth_logout");
+      await waitFor(() => {
+        expect(mockInvoke).toHaveBeenCalledWith("auth_logout");
+      });
     });
 
     it("renders fallback initial when no picture", () => {
@@ -174,66 +204,6 @@ describe("UserFooter (via Sidebar)", () => {
       const footer = screen.getByText("No Email").closest("div");
       const paragraphs = footer?.querySelectorAll("p");
       expect(paragraphs?.length).toBe(1);
-    });
-  });
-
-  describe("collapsed sidebar with user", () => {
-    beforeEach(() => {
-      setAuthState({});
-      useSidebarStore.setState({ isCollapsed: true });
-    });
-
-    afterEach(() => {
-      useSidebarStore.setState({ isCollapsed: false });
-    });
-
-    it("renders avatar button with sign-out title", () => {
-      renderWithProviders(<Sidebar />);
-
-      const btn = screen.getByTitle("Alice Smith — Sign out");
-      expect(btn).toBeInTheDocument();
-    });
-
-    it("renders avatar image in collapsed mode", () => {
-      renderWithProviders(<Sidebar />);
-
-      const avatar = screen.getByAltText("");
-      expect(avatar).toHaveAttribute("src", "https://example.com/alice.png");
-    });
-
-    it("renders initial in collapsed mode when no picture", () => {
-      setAuthState({ user: { sub: "u1", name: "Charlie" } });
-
-      renderWithProviders(<Sidebar />);
-
-      expect(screen.getByText("C")).toBeInTheDocument();
-    });
-
-    it("uses email for collapsed title when no name", () => {
-      setAuthState({ user: { sub: "u1", email: "anon@test.com" } });
-
-      renderWithProviders(<Sidebar />);
-
-      expect(screen.getByTitle("anon@test.com — Sign out")).toBeInTheDocument();
-    });
-
-    it("falls back to 'User' in collapsed title", () => {
-      setAuthState({ user: { sub: "u1" } });
-
-      renderWithProviders(<Sidebar />);
-
-      expect(screen.getByTitle("User — Sign out")).toBeInTheDocument();
-    });
-
-    it("calls logout when collapsed avatar is clicked", async () => {
-      mockInvoke.mockResolvedValueOnce(undefined);
-      const user = userEvent.setup();
-
-      renderWithProviders(<Sidebar />);
-
-      await user.click(screen.getByTitle("Alice Smith — Sign out"));
-
-      expect(mockInvoke).toHaveBeenCalledWith("auth_logout");
     });
   });
 

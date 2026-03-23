@@ -10,7 +10,7 @@ import { useSelectedProject } from "@/stores/useProjectStore";
 import { verificationStore } from "@/stores/verificationStore";
 import { Button } from "@/components/ui/button";
 import { RotateCcw } from "lucide-react";
-import { ArrowDown01Icon, ArrowRight01Icon, PlayIcon } from "@hugeicons/core-free-icons";
+import { ArrowDown01Icon, ArrowRight01Icon, Cancel01Icon, PlayIcon, StopIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   areSetupVerificationViewsEqual,

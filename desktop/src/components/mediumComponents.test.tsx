@@ -24,20 +24,19 @@ import { callMcpTool } from '@/api/mcpClient';
 describe('AgentConfig', () => {
   afterEach(() => cleanup());
 
-  it('renders role sections, model dropdown, and current selection', () => {
+  it('renders header, model picker, and current model entry', () => {
     const { container } = render(
       <AgentConfig
         models={[
           {
             provider: 'openai',
             model: 'gpt-4o',
-            enabledRoles: ['worker', 'lead'],
-            maxConcurrent: 2,
+            max_concurrent: 2,
           },
         ]}
         availableModels={[
-          { provider: 'openai', id: 'gpt-4o-mini', name: 'GPT 4o Mini' },
-          { provider: 'anthropic', id: 'claude-3-5-sonnet', name: 'Claude Sonnet' },
+          { provider_id: 'openai', id: 'gpt-4o-mini', name: 'GPT 4o Mini', tool_call: true, reasoning: false, attachment: false, context_window: 128000, output_limit: 16384, pricing: { input_per_m: 0, output_per_m: 0 } },
+          { provider_id: 'anthropic', id: 'claude-3-5-sonnet', name: 'Claude Sonnet', tool_call: true, reasoning: false, attachment: false, context_window: 128000, output_limit: 16384, pricing: { input_per_m: 0, output_per_m: 0 } },
         ]}
         isLoading={false}
         isSaving={false}
@@ -46,37 +45,23 @@ describe('AgentConfig', () => {
         onAddModel={vi.fn()}
         onRemoveModel={vi.fn()}
         onReorderModels={vi.fn()}
-        onToggleRole={vi.fn()}
         onUpdateMaxSessions={vi.fn()}
-        memoryModel={null}
-        onSetMemoryModel={vi.fn()}
         onDismissError={vi.fn()}
         onSave={vi.fn()}
       />,
     );
 
     const root = container.firstElementChild as HTMLElement;
-    expect(within(root).getByRole('heading', { name: 'Model Configuration' })).toBeInTheDocument();
+    expect(within(root).getByRole('heading', { name: 'Models' })).toBeInTheDocument();
 
-    const searchInput = within(root).getByPlaceholderText('Search models...');
+    const searchInput = within(root).getByPlaceholderText('Search or add models...');
     expect(searchInput).toBeInTheDocument();
 
-    const legend = root.querySelector('.flex.items-center.gap-4.text-xs.text-muted-foreground') as HTMLElement;
-    expect(within(legend).getByText((_, el) => el?.textContent === 'W = Worker')).toBeInTheDocument();
-    expect(within(legend).getByText((_, el) => el?.textContent === 'R = Reviewer')).toBeInTheDocument();
-    expect(within(legend).getByText((_, el) => el?.textContent === 'L = Lead')).toBeInTheDocument();
-
     expect(within(root).getByText('gpt-4o')).toBeInTheDocument();
-    expect(within(root).getByText('openai')).toBeInTheDocument();
-    expect(within(root).getByTitle('Disable for Worker')).toBeInTheDocument();
-    expect(within(root).getByTitle('Disable for Lead')).toBeInTheDocument();
-
-    // The search input is present and functional (combobox dropdown uses portal, not in root)
-    expect(searchInput).toHaveAttribute('placeholder', 'Search models...');
+    expect(within(root).getByText('OpenAI')).toBeInTheDocument();
   });
 
-  it('sets memory model with model id directly (no double prefix)', () => {
-    const onSetMemoryModel = vi.fn();
+  it('shows empty state when no models are configured', () => {
     const { container } = render(
       <AgentConfig
         models={[]}
@@ -90,25 +75,14 @@ describe('AgentConfig', () => {
         onAddModel={vi.fn()}
         onRemoveModel={vi.fn()}
         onReorderModels={vi.fn()}
-        onToggleRole={vi.fn()}
         onUpdateMaxSessions={vi.fn()}
-        memoryModel={null}
-        onSetMemoryModel={onSetMemoryModel}
         onDismissError={vi.fn()}
         onSave={vi.fn()}
       />,
     );
 
     const root = container.firstElementChild as HTMLElement;
-    // Memory model combobox input is present
-    const memoryInput = within(root).getByPlaceholderText('Select memory model...');
-    expect(memoryInput).toBeInTheDocument();
-
-    // The combobox dropdown uses a portal so items aren't findable in root.
-    // Verify the component would pass id directly (not double-prefix) by checking
-    // that the available model id is 'openai/gpt-5.4' (already has prefix, no duplication).
-    // This is a contract test: onSetMemoryModel receives m.id, not provider_id/m.id.
-    expect(onSetMemoryModel).not.toHaveBeenCalled();
+    expect(within(root).getByText('No models configured. Search above to add models.')).toBeInTheDocument();
   });
 
   it('disables save while saving', () => {
@@ -123,10 +97,7 @@ describe('AgentConfig', () => {
         onAddModel={vi.fn()}
         onRemoveModel={vi.fn()}
         onReorderModels={vi.fn()}
-        onToggleRole={vi.fn()}
         onUpdateMaxSessions={vi.fn()}
-        memoryModel={null}
-        onSetMemoryModel={vi.fn()}
         onDismissError={vi.fn()}
         onSave={vi.fn()}
       />,
