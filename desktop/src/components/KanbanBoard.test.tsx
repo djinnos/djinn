@@ -110,6 +110,28 @@ describe("KanbanBoard", () => {
     });
   });
 
+  it("hides review and breakdown tasks from done/merged column", () => {
+    const tasks: Task[] = [
+      makeTask({ id: "t-done-task", title: "Regular done", status: "closed", issue_type: "task", epic_id: epicA.id }),
+      makeTask({ id: "t-done-review", title: "Done review", status: "closed", issue_type: "review", epic_id: epicA.id }),
+      makeTask({ id: "t-done-breakdown", title: "Done breakdown", status: "closed", issue_type: "decomposition", epic_id: epicA.id }),
+    ];
+
+    render(
+      <KanbanBoard
+        tasks={tasks}
+        epics={new Map([[epicA.id, epicA]])}
+        disableSearchParamSync
+      />
+    );
+
+    const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
+    expect(doneCol).toHaveTextContent("1");
+    expect(screen.getByText("Regular done")).toBeInTheDocument();
+    expect(screen.queryByText("Done review")).not.toBeInTheDocument();
+    expect(screen.queryByText("Done breakdown")).not.toBeInTheDocument();
+  });
+
   it("shows empty board state when no tasks", () => {
     render(<KanbanBoard tasks={[]} epics={new Map()} disableSearchParamSync />);
 

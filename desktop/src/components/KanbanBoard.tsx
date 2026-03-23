@@ -279,6 +279,8 @@ export function KanbanBoard({
     for (const task of filteredTasks) {
       const epicKey = task.epic_id ?? "no-epic";
       const columnKey = taskToColumnKey(task);
+      // Hide review and breakdown tasks from the done/merged column
+      if (columnKey === "done" && (task.issue_type === "review" || task.issue_type === "decomposition")) continue;
       const columnMap = byColumn.get(columnKey);
       if (!columnMap) continue;
 
