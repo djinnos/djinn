@@ -203,6 +203,10 @@ export async function addProject(path: string): Promise<Project> {
     path,
   });
 
+  if (response.status.startsWith("error")) {
+    throw new Error(response.status.replace(/^error:\s*/, ""));
+  }
+
   return response.project;
 }
 
