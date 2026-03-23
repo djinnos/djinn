@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::PathBuf;
 
 /// GitHub OAuth App configuration
@@ -10,8 +9,16 @@ pub const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token"
 pub const GITHUB_API_URL: &str = "https://api.github.com";
 pub const GITHUB_SCOPES: &str = "repo read:org user:email";
 
-const KEYRING_SERVICE: &str = "djinnos-desktop";
-const KEYRING_USERNAME: &str = "refresh_token";
+/// File-based token storage path (~/.djinn/auth_token.json).
+/// Avoids macOS Keychain permission prompts while keeping tokens local and
+/// owner-readable only (0o600).
+fn token_file_path() -> Result<PathBuf, String> {
+    let mut dir = dirs::home_dir().ok_or_else(|| "Unable to resolve home dir".to_string())?;
+    dir.push(".djinn");
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create ~/.djinn: {e}"))?;
+    dir.push("auth_token.json");
+    Ok(dir)
+}
 
 /// Response from GitHub device code endpoint
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +57,7 @@ pub struct GitHubUser {
     pub email: Option<String>,
 }
 
-/// Stored token blob in keyring
+/// Stored token blob persisted to ~/.djinn/auth_token.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredTokens {
     pub access_token: String,
@@ -215,84 +222,37 @@ pub async fn fetch_github_user(access_token: &str) -> Result<GitHubUser, String>
         .map_err(|e| format!("Failed to parse GitHub user: {}", e))
 }
 
-// --- Keyring storage ---
+// --- File-based token storage ---
 
-fn token_hint_path() -> Result<PathBuf, String> {
-    let mut dir = dirs::config_dir().ok_or_else(|| "Unable to resolve config dir".to_string())?;
-    dir.push("djinnos");
-    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
-    dir.push("refresh_token.meta");
-    Ok(dir)
-}
-
-fn set_owner_only_permissions(path: &PathBuf) -> Result<(), String> {
+pub async fn store_token(token: &str) -> Result<(), String> {
+    let path = token_file_path()?;
+    fs::write(&path, token.as_bytes())
+        .map_err(|e| format!("Failed to write token file: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("Failed setting 0o600 permissions: {e}"))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed setting token file permissions: {e}"))?;
     }
-    Ok(())
-}
-
-fn touch_hint_file() -> Result<(), String> {
-    let hint_path = token_hint_path()?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&hint_path)
-        .map_err(|e| format!("Failed to create token metadata file: {e}"))?;
-    file.write_all(b"stored_in_keyring=true\n")
-        .map_err(|e| format!("Failed to write token metadata file: {e}"))?;
-    file.flush()
-        .map_err(|e| format!("Failed to flush token metadata file: {e}"))?;
-    set_owner_only_permissions(&hint_path)?;
-    Ok(())
-}
-
-fn delete_hint_file() -> Result<(), String> {
-    let hint_path = token_hint_path()?;
-    if hint_path.exists() {
-        fs::remove_file(&hint_path)
-            .map_err(|e| format!("Failed to remove token metadata file: {e}"))?;
-    }
-    Ok(())
-}
-
-pub async fn store_token(token: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
-        .map_err(|e| format!("Failed to initialize keyring entry: {e}"))?;
-    entry
-        .set_password(token)
-        .map_err(|e| format!("Failed to store refresh token in keyring: {e}"))?;
-    touch_hint_file()?;
     Ok(())
 }
 
 pub async fn retrieve_token() -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
-        .map_err(|e| format!("Failed to initialize keyring entry: {e}"))?;
-
-    match entry.get_password() {
-        Ok(token) => Ok(Some(token)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!(
-            "Failed to retrieve refresh token from keyring: {e}"
-        )),
+    let path = token_file_path()?;
+    match fs::read_to_string(&path) {
+        Ok(contents) if !contents.is_empty() => Ok(Some(contents)),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Failed to read token file: {e}")),
     }
 }
 
 pub async fn clear_token() -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
-        .map_err(|e| format!("Failed to initialize keyring entry: {e}"))?;
-
-    match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => {
-            delete_hint_file()?;
-            Ok(())
-        }
-        Err(e) => Err(format!("Failed to clear refresh token from keyring: {e}")),
+    let path = token_file_path()?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Failed to remove token file: {e}")),
     }
 }
 

@@ -98,7 +98,7 @@ pub async fn start_github_login(app: AppHandle) -> Result<DeviceCodeInfo, String
                     picture: Some(u.avatar_url.clone()),
                 });
 
-                // Store tokens as JSON blob in keyring
+                // Store tokens as JSON blob
                 let refresh_token = token_response.refresh_token.clone().unwrap_or_default();
                 if let Some(ref gh_user) = github_user {
                     let stored = crate::auth::StoredTokens {
@@ -110,7 +110,7 @@ pub async fn start_github_login(app: AppHandle) -> Result<DeviceCodeInfo, String
                     };
                     if let Ok(json) = serde_json::to_string(&stored) {
                         if let Err(e) = store_token(&json).await {
-                            log::error!("Failed to store tokens in keyring: {}", e);
+                            log::error!("Failed to store tokens: {}", e);
                         }
                     }
                 } else if !refresh_token.is_empty() {
@@ -124,7 +124,7 @@ pub async fn start_github_login(app: AppHandle) -> Result<DeviceCodeInfo, String
                     };
                     if let Ok(json) = serde_json::to_string(&stored) {
                         if let Err(e) = store_token(&json).await {
-                            log::error!("Failed to store tokens in keyring: {}", e);
+                            log::error!("Failed to store tokens: {}", e);
                         }
                     }
                 }

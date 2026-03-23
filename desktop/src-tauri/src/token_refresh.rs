@@ -115,7 +115,7 @@ pub async fn perform_silent_refresh() -> RefreshResult {
         }
     }
 
-    // Retrieve stored token blob from keyring
+    // Retrieve stored token blob
     let stored_json = match retrieve_token().await {
         Ok(Some(token)) => token,
         Ok(None) => {
@@ -215,7 +215,7 @@ pub async fn perform_silent_refresh() -> RefreshResult {
         stored_tokens.refresh_token.clone()
     });
 
-    // Update stored tokens in keyring
+    // Update stored tokens
     let updated_stored = StoredTokens {
         access_token: token_response.access_token.clone(),
         refresh_token: new_refresh_token.clone(),

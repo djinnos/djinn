@@ -1,4 +1,4 @@
-//! Sync GitHub OAuth tokens from the desktop keyring to the server's credential vault.
+//! Sync GitHub OAuth tokens from the desktop token file to the server's credential vault.
 //!
 //! After login or token refresh, the desktop pushes the tokens to the server
 //! so it can make GitHub API calls (PR creation, etc.) on behalf of the user.
@@ -43,7 +43,7 @@ fn resolve_server_port() -> Option<u16> {
 /// Push tokens to the server's credential vault via the MCP `credential_set` tool.
 ///
 /// This is best-effort: failures are logged but never propagated to the caller
-/// because the primary token storage (OS keyring) has already succeeded.
+/// because the primary token storage (local file) has already succeeded.
 pub async fn sync_tokens_to_server(
     access_token: &str,
     refresh_token: &str,
