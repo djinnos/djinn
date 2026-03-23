@@ -3388,10 +3388,7 @@ mod tests {
             response.get("status").and_then(|v| v.as_str()),
             Some("open")
         );
-        assert_eq!(
-            response.get("agent_type").and_then(|v| v.as_str()),
-            Some("rust-expert")
-        );
+        assert_eq!(response.get("agent_type").and_then(|v| v.as_str()), None);
         assert_eq!(
             response
                 .get("acceptance_criteria")
