@@ -1,13 +1,13 @@
-use std::collections::HashSet;
-
 use rmcp::Json;
+
+use std::collections::HashSet;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::task_tools::types::{
-    ActivityEntryResponse, ErrorOr, ErrorResponse, TaskResponse, TaskShowResponse,
+    ActivityEntryResponse, ErrorOr, ErrorResponse, TaskResponse,
 };
-use djinn_core::models::{Task, TaskStatus, TransitionAction};
-use djinn_db::{ActivityEntry, TaskRepository};
+use djinn_core::models::{ActivityEntry, Task, TaskStatus, TransitionAction};
+use djinn_db::TaskRepository;
 
 pub(super) fn task_to_response(task: &Task) -> TaskResponse {
     TaskResponse {
@@ -21,14 +21,30 @@ pub(super) fn task_to_response(task: &Task) -> TaskResponse {
         issue_type: task.issue_type.clone(),
         priority: task.priority,
         owner: task.owner.clone(),
-        acceptance_criteria: parse_string_array(&task.acceptance_criteria),
+        acceptance_criteria: task
+            .acceptance_criteria
+            .trim()
+            .is_empty()
+            .then(Vec::new)
+            .unwrap_or_else(|| {
+                serde_json::from_str(&task.acceptance_criteria).unwrap_or_else(|_| Vec::new())
+            }),
         labels: parse_string_array(&task.labels),
-        blocked_by: task.blocked_by.clone(),
         memory_refs: parse_string_array(&task.memory_refs),
+        reopen_count: task.reopen_count,
+        continuation_count: task.continuation_count,
+        verification_failure_count: task.verification_failure_count,
         agent_type: task.agent_type.clone(),
         created_at: task.created_at.clone(),
         updated_at: task.updated_at.clone(),
         closed_at: task.closed_at.clone(),
+        close_reason: task.close_reason.clone(),
+        merge_commit_sha: task.merge_commit_sha.clone(),
+        merge_conflict_metadata: task
+            .merge_conflict_metadata
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok())
+            .map(crate::tools::AnyJson),
         warning: None,
     }
 }
@@ -107,7 +123,7 @@ pub(super) async fn create_task(
             &request.issue_type,
             request.priority,
             &request.owner,
-            request.status,
+            request.status.as_deref(),
             ac_json.as_deref(),
         )
         .await
@@ -391,7 +407,7 @@ pub(super) struct CreateTaskRequest {
     pub issue_type: String,
     pub priority: i64,
     pub owner: String,
-    pub status: TaskStatus,
+    pub status: Option<String>,
     pub acceptance_criteria: Option<Vec<String>>,
     pub labels: Vec<String>,
     pub memory_refs: Vec<String>,

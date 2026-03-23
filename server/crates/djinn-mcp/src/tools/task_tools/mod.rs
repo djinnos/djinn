@@ -23,7 +23,10 @@ mod board;
 mod ops;
 mod types;
 
-pub use ops::*;
+use self::ops::{
+    CommentTaskRequest, CreateTaskRequest, TransitionTaskRequest, UpdateTaskRequest,
+    add_task_comment, create_task, transition_task, update_task,
+};
 pub use types::*;
 
 // ── Tool implementations ─────────────────────────────────────────────────────
@@ -64,7 +67,7 @@ impl DjinnMcpServer {
             Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e))),
         };
         let status = match validate_task_create_status(p.status.as_deref()) {
-            Ok(s) => s,
+            Ok(s) => s.map(str::to_owned),
             Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e))),
         };
         if let Some(ref labels) = p.labels
@@ -112,7 +115,14 @@ impl DjinnMcpServer {
                 priority,
                 owner,
                 status,
-                acceptance_criteria: p.acceptance_criteria,
+                acceptance_criteria: p.acceptance_criteria.map(|ac| {
+                    ac.into_iter()
+                        .map(|item| match item {
+                            AcceptanceCriterionItem::Text(text) => text,
+                            AcceptanceCriterionItem::Structured(status) => status.criterion,
+                        })
+                        .collect()
+                }),
                 labels: p.labels.unwrap_or_default(),
                 memory_refs: p.memory_refs.unwrap_or_default(),
                 blocked_by_refs: p.blocked_by.unwrap_or_default(),
@@ -183,7 +193,14 @@ impl DjinnMcpServer {
                 design: p.design,
                 priority: p.priority,
                 owner: p.owner,
-                acceptance_criteria: p.acceptance_criteria,
+                acceptance_criteria: p.acceptance_criteria.map(|ac| {
+                    ac.into_iter()
+                        .map(|item| match item {
+                            AcceptanceCriterionItem::Text(text) => text,
+                            AcceptanceCriterionItem::Structured(status) => status.criterion,
+                        })
+                        .collect()
+                }),
                 labels_add: p.labels_add.unwrap_or_default(),
                 labels_remove: p.labels_remove.unwrap_or_default().into_iter().collect(),
                 memory_refs_add: p.memory_refs_add.unwrap_or_default(),
