@@ -48,6 +48,20 @@
         "cd server && cargo test -p djinn-server",
         "cd server && cargo clippy -p djinn-server --all-targets -- -D warnings"
       ]
+    },
+    {
+      "match": "desktop/src/**",
+      "commands": [
+        "cd desktop && pnpm tsc --noEmit",
+        "cd desktop && pnpm test"
+      ]
+    },
+    {
+      "match": "desktop/src-tauri/**",
+      "commands": [
+        "cd desktop/src-tauri && cargo clippy --all-targets -- -D warnings",
+        "cd desktop/src-tauri && cargo test"
+      ]
     }
   ]
 }
