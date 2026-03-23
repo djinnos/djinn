@@ -661,8 +661,14 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     for value in [
         serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
+        serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
         serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
         serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
+        serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
+        serde_json::to_value(tool_task_archive_activity())
+            .expect("serialize tool_task_archive_activity"),
+        serde_json::to_value(tool_task_reset_counters())
+            .expect("serialize tool_task_reset_counters"),
         serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
         serde_json::to_value(tool_task_blocked_list()).expect("serialize tool_task_blocked_list"),
         serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
@@ -733,8 +739,12 @@ mod tests {
         assert!(architect.iter().any(|n| n == "shell"));
         assert!(architect.iter().any(|n| n == "read"));
         assert!(architect.iter().any(|n| n == "task_create"));
+        assert!(architect.iter().any(|n| n == "task_update"));
         assert!(architect.iter().any(|n| n == "task_comment_add"));
         assert!(architect.iter().any(|n| n == "task_transition"));
+        assert!(architect.iter().any(|n| n == "task_delete_branch"));
+        assert!(architect.iter().any(|n| n == "task_archive_activity"));
+        assert!(architect.iter().any(|n| n == "task_reset_counters"));
         assert!(architect.iter().any(|n| n == "task_kill_session"));
         assert!(architect.iter().any(|n| n == "submit_work"));
         assert!(!architect.iter().any(|n| n == "write"));

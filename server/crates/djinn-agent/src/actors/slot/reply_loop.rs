@@ -835,7 +835,7 @@ pub(super) async fn run_reply_loop(
                         // calls from the same generation can contend on the
                         // write lock).
                         let mut result =
-                            extension::call_tool(app_state, &name, args.clone(), worktree_path, Some(task_id))
+                            extension::call_tool(app_state, &name, args.clone(), worktree_path, Some(task_id), Some(role_name))
                                 .await;
                         {
                             let mut retries = 0u32;
@@ -860,6 +860,7 @@ pub(super) async fn run_reply_loop(
                                             args.clone(),
                                             worktree_path,
                                             Some(task_id),
+                                            Some(role_name),
                                         )
                                         .await;
                                     }

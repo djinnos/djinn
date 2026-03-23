@@ -13,7 +13,19 @@ use djinn_db::EpicRepository;
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Ticks at STUCK_INTERVAL (30 s) before Architect patrol fires (5 min = 10 ticks).
+/// Used as the fallback when no dynamic interval has been set by the architect.
 pub(super) const ARCHITECT_PATROL_TICKS: u32 = 10;
+
+/// Default patrol interval in minutes (used when the architect has not self-scheduled).
+/// Corresponds to ARCHITECT_PATROL_TICKS (10 ticks * 30s = 5 min).
+#[allow(dead_code)]
+pub(crate) const DEFAULT_ARCHITECT_PATROL_MINUTES: u32 = 5;
+
+/// Minimum patrol interval the architect may request.
+pub(crate) const MIN_ARCHITECT_PATROL_MINUTES: u32 = 5;
+
+/// Maximum patrol interval the architect may request.
+pub(crate) const MAX_ARCHITECT_PATROL_MINUTES: u32 = 60;
 
 /// Rolling window for throughput tracking.
 pub(super) const THROUGHPUT_WINDOW: Duration = Duration::from_secs(60 * 60);

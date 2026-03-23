@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
+assertion_line: 3509
 expression: tool_schemas_architect()
 ---
 [
@@ -357,6 +358,80 @@ expression: tool_schemas_architect()
     "name": "task_create"
   },
   {
+    "description": "Update task fields: title, description, design, priority, owner, labels, acceptance_criteria, memory_refs, blocked_by.",
+    "inputSchema": {
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "blocked_by_add": {
+          "description": "Task IDs to add as blockers",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "blocked_by_remove": {
+          "description": "Task IDs to remove as blockers",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "design": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "labels_add": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "labels_remove": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "memory_refs_add": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "memory_refs_remove": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_update"
+  },
+  {
     "description": "Add a comment or strategic observation to a task's activity log.",
     "inputSchema": {
       "properties": {
@@ -410,6 +485,54 @@ expression: tool_schemas_architect()
       "type": "object"
     },
     "name": "task_transition"
+  },
+  {
+    "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_delete_branch"
+  },
+  {
+    "description": "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_archive_activity"
+  },
+  {
+    "description": "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_reset_counters"
   },
   {
     "description": "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.",
@@ -651,6 +774,10 @@ expression: tool_schemas_architect()
             "type": "string"
           },
           "type": "array"
+        },
+        "next_patrol_minutes": {
+          "description": "Architect only: minutes until the next patrol should run (5-60). Omit for non-architect roles.",
+          "type": "integer"
         },
         "remaining_concerns": {
           "description": "Any outstanding concerns or caveats for the reviewer",

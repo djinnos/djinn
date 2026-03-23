@@ -819,15 +819,51 @@ impl CoordinatorActor {
         }
     }
 
-    /// Dispatch an Architect patrol session every 5 minutes when:
+    /// Dispatch an Architect patrol session at a dynamic interval when:
     ///   - No Architect session is currently running.
     ///   - At least one project has dispatch enabled (not paused/unhealthy).
+    ///   - The board has at least one open or in_progress task (skip empty boards).
     ///   - No open patrol review task already exists for that project.
     ///
-    /// The Architect reviews the whole board (tasks, epics, health) — it is not
-    /// gated on open epics existing.  Creates a "review" task for visibility,
-    /// then dispatches the Architect to it.
+    /// The patrol interval is self-scheduled by the architect via the
+    /// `next_patrol_minutes` field in `submit_work`.  When no schedule exists,
+    /// the default interval (ARCHITECT_PATROL_TICKS) is used.
+    ///
+    /// Creates a "review" task for visibility, then dispatches the Architect.
     pub(super) async fn maybe_dispatch_architect_patrol(&mut self) {
+        // Step 0: Check for the most recent patrol_schedule activity to update
+        // the dynamic patrol interval.
+        {
+            let task_repo = self.task_repo();
+            if let Some(minutes) = task_repo
+                .query_activity(ActivityQuery {
+                    event_type: Some("patrol_schedule".to_string()),
+                    limit: 1,
+                    ..Default::default()
+                })
+                .await
+                .ok()
+                .and_then(|a| a.into_iter().next())
+                .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.payload).ok())
+                .and_then(|p| p.get("next_patrol_minutes").and_then(|v| v.as_u64()))
+            {
+                let minutes = (minutes as u32).clamp(
+                    rules::MIN_ARCHITECT_PATROL_MINUTES,
+                    rules::MAX_ARCHITECT_PATROL_MINUTES,
+                );
+                let ticks = minutes * 2;
+                if ticks != self.next_patrol_ticks {
+                    tracing::info!(
+                        old_ticks = self.next_patrol_ticks,
+                        new_ticks = ticks,
+                        minutes,
+                        "CoordinatorActor: patrol interval updated by architect"
+                    );
+                    self.next_patrol_ticks = ticks;
+                }
+            }
+        }
+
         // Check if any Architect session is already running.
         let session_repo = SessionRepository::new(
             self.db.clone(),
@@ -882,12 +918,37 @@ impl CoordinatorActor {
         #[cfg(test)]
         eprintln!("[patrol] step 2: project dispatch enabled, project_id={project_id}");
 
-        // Check for an existing open patrol review task for this project.
-        // Avoid creating duplicates if the previous patrol task was never dispatched.
+        // Precondition: skip patrol if there are no open or in_progress tasks on the
+        // board.  No point patrolling an empty board.
         let task_repo = TaskRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
+        {
+            let has_active_work = {
+                let open = task_repo.list_by_status("open").await.unwrap_or_default();
+                let in_progress = task_repo
+                    .list_by_status("in_progress")
+                    .await
+                    .unwrap_or_default();
+                // Exclude review-type tasks (patrol tasks themselves) from the count
+                // to avoid the patrol perpetually triggering because its own task exists.
+                open.iter()
+                    .chain(in_progress.iter())
+                    .any(|t| t.issue_type != "review")
+            };
+            if !has_active_work {
+                tracing::debug!(
+                    "CoordinatorActor: patrol — no open/in_progress tasks on board, skipping"
+                );
+                #[cfg(test)]
+                eprintln!("[patrol] skipping: empty board");
+                return;
+            }
+        }
+
+        // Check for an existing open patrol review task for this project.
+        // Avoid creating duplicates if the previous patrol task was never dispatched.
         let existing_patrol = task_repo
             .list_filtered(djinn_db::ListQuery {
                 project_id: Some(project_id.clone()),

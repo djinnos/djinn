@@ -52,7 +52,7 @@ mod dispatch;
 mod health;
 pub(crate) mod pr_poller;
 mod prompt_eval;
-mod rules;
+pub(crate) mod rules;
 mod wave;
 
 /// Interval between stuck-detection passes (AGENT-08).
@@ -235,8 +235,12 @@ struct CoordinatorActor {
     last_stale_sweep: StdInstant,
     /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
     prune_tick_counter: u32,
-    /// Tick counter for Architect patrol (fires every ARCHITECT_PATROL_TICKS ticks ≈ 5 min)
+    /// Tick counter for Architect patrol (fires every `next_patrol_ticks` ticks)
     architect_tick_counter: u32,
+    /// Dynamic patrol interval in ticks, set by the architect's self-scheduling.
+    /// Defaults to `rules::ARCHITECT_PATROL_TICKS` (10 ticks = 5 min).
+    /// Updated when the coordinator reads a `patrol_schedule` activity entry.
+    next_patrol_ticks: u32,
     /// Rolling-window throughput tracking: epic_id → Vec of merge event instants.
     throughput_events: HashMap<String, Vec<StdInstant>>,
     /// Per-task Lead escalation count (request_lead call count per task UUID).
@@ -304,6 +308,7 @@ impl CoordinatorActor {
             last_stale_sweep: StdInstant::now(),
             prune_tick_counter: 0,
             architect_tick_counter: 0,
+            next_patrol_ticks: rules::ARCHITECT_PATROL_TICKS,
             throughput_events: HashMap::new(),
             escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),
@@ -393,9 +398,10 @@ impl CoordinatorActor {
                         self.evict_throughput_events();
                         self.evaluate_prompt_amendments().await;
                     }
-                    // Architect patrol every ~5 min (rules::ARCHITECT_PATROL_TICKS ticks at 30s)
+                    // Architect patrol: dynamic interval set by self-scheduling,
+                    // falling back to ARCHITECT_PATROL_TICKS (5 min) by default.
                     self.architect_tick_counter += 1;
-                    if self.architect_tick_counter >= rules::ARCHITECT_PATROL_TICKS {
+                    if self.architect_tick_counter >= self.next_patrol_ticks {
                         self.architect_tick_counter = 0;
                         self.maybe_dispatch_architect_patrol().await;
                     }
@@ -1905,9 +1911,9 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
 
-        // Create project with an open epic.
+        // Create project with an open epic and an open task.
         let project = test_helpers::create_test_project(&db).await;
-        EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        let epic = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
             .create_for_project(
                 &project.id,
                 djinn_db::EpicCreateInput {
@@ -1918,6 +1924,23 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                 },
+            )
+            .await
+            .unwrap();
+
+        // Add an open task so the empty-board precondition passes.
+        TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .create_in_project(
+                &project.id,
+                Some(&epic.id),
+                "Test task",
+                "",
+                "",
+                "task",
+                1,
+                "",
+                None,
+                None,
             )
             .await
             .unwrap();

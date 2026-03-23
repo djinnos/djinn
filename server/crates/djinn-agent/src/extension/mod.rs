@@ -37,6 +37,7 @@ async fn dispatch_tool_call<T>(
     worktree_path: &Path,
     allowed_schemas: Option<&[serde_json::Value]>,
     session_task_id: Option<&str>,
+    session_role: Option<&str>,
 ) -> Result<serde_json::Value, String>
 where
     T: Serialize,
@@ -67,7 +68,7 @@ where
         "task_create" => call_task_create(state, &call.arguments).await,
         "task_update" => call_task_update(state, &call.arguments).await,
         "task_update_ac" => call_task_update_ac(state, &call.arguments).await,
-        "task_comment_add" => call_task_comment_add(state, &call.arguments).await,
+        "task_comment_add" => call_task_comment_add(state, &call.arguments, session_role).await,
         "request_lead" => call_request_lead(state, &call.arguments).await,
         "request_architect" => call_request_architect(state, &call.arguments).await,
         "task_transition" => call_task_transition(state, &call.arguments).await,
@@ -890,6 +891,7 @@ async fn call_request_architect(
 async fn call_task_comment_add(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: TaskCommentAddParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
@@ -899,8 +901,9 @@ async fn call_task_comment_add(
     };
 
     let payload = serde_json::json!({ "body": p.body }).to_string();
-    let actor_id = p.actor_id.as_deref().unwrap_or("agent");
-    let actor_role = p.actor_role.as_deref().unwrap_or("system");
+    let default_role = session_role.unwrap_or("system");
+    let actor_id = p.actor_id.as_deref().unwrap_or(default_role);
+    let actor_role = p.actor_role.as_deref().unwrap_or(default_role);
 
     let entry = repo
         .log_activity(Some(&task.id), actor_id, actor_role, "comment", &payload)
@@ -3069,8 +3072,14 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     for value in [
         serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
+        serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
         serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
         serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
+        serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
+        serde_json::to_value(tool_task_archive_activity())
+            .expect("serialize tool_task_archive_activity"),
+        serde_json::to_value(tool_task_reset_counters())
+            .expect("serialize tool_task_reset_counters"),
         serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
         serde_json::to_value(tool_task_blocked_list()).expect("serialize tool_task_blocked_list"),
         serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
@@ -3106,9 +3115,10 @@ pub(crate) async fn call_tool(
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
     session_task_id: Option<&str>,
+    session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
-    dispatch_tool_call(state, &synthetic, worktree_path, None, session_task_id).await
+    dispatch_tool_call(state, &synthetic, worktree_path, None, session_task_id, session_role).await
 }
 
 fn tool_apply_patch() -> RmcpTool {

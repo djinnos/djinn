@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
+assertion_line: 3461
 expression: tool_schemas_worker()
 ---
 [
@@ -391,6 +392,10 @@ expression: tool_schemas_worker()
             "type": "string"
           },
           "type": "array"
+        },
+        "next_patrol_minutes": {
+          "description": "Architect only: minutes until the next patrol should run (5-60). Omit for non-architect roles.",
+          "type": "integer"
         },
         "remaining_concerns": {
           "description": "Any outstanding concerns or caveats for the reviewer",

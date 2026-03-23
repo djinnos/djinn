@@ -31,6 +31,8 @@ pub struct SubmitWork {
     pub files_changed: Vec<String>,
     #[serde(default)]
     pub remaining_concerns: Vec<String>,
+    /// Optional: minutes until the next patrol should run (architect self-scheduling).
+    pub next_patrol_minutes: Option<u32>,
 }
 
 /// Payload for a reviewer submitting their review outcome.
@@ -88,6 +90,10 @@ pub fn tool_submit_work() -> RmcpTool {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Any outstanding concerns or caveats for the reviewer"
+                },
+                "next_patrol_minutes": {
+                    "type": "integer",
+                    "description": "Architect only: minutes until the next patrol should run (5-60). Omit for non-architect roles."
                 }
             }
         }),
