@@ -38,6 +38,10 @@ pub fn test_persistent_dir(prefix: &str) -> std::path::PathBuf {
     test_tempdir(prefix).keep()
 }
 
+pub fn test_path(prefix: &str) -> std::path::PathBuf {
+    test_persistent_dir(prefix)
+}
+
 pub fn create_test_db() -> Database {
     Database::open_in_memory().expect("failed to create test database")
 }

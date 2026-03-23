@@ -3445,16 +3445,17 @@ mod tests {
 
     #[test]
     fn resolve_path_handles_relative_absolute_and_normalization() {
-        let base = Path::new("/tmp/worktree");
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-resolve-");
+        let base = worktree.path();
 
         let relative = resolve_path("src/main.rs", base);
-        assert_eq!(relative, PathBuf::from("/tmp/worktree/src/main.rs"));
+        assert_eq!(relative, base.join("src/main.rs"));
 
         let absolute = resolve_path("/etc/hosts", base);
         assert_eq!(absolute, PathBuf::from("/etc/hosts"));
 
         let normalized = resolve_path("./src/../Cargo.toml", base);
-        assert_eq!(normalized, PathBuf::from("/tmp/worktree/Cargo.toml"));
+        assert_eq!(normalized, base.join("Cargo.toml"));
     }
 
     fn tool_names(schemas: &[serde_json::Value]) -> Vec<&str> {

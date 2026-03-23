@@ -3,7 +3,7 @@ use crate::message::{ContentBlock, Conversation, Message, Role};
 use crate::provider::StreamEvent;
 use crate::test_helpers::{
     FailingProvider, FakeProvider, agent_context_from_db, create_test_db, create_test_epic,
-    create_test_project, create_test_task,
+    create_test_project, create_test_task, test_path,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -50,7 +50,8 @@ async fn run_with_provider(
     i64,
     i64,
 ) {
-    let worktree_path = std::path::Path::new("/tmp");
+    let worktree = test_path("djinn-reply-loop-");
+    let worktree_path = worktree.as_path();
     run_reply_loop(
         ReplyLoopContext {
             provider,
