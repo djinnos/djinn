@@ -3409,6 +3409,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn call_tool_dispatches_task_update_with_public_response_shape() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let task = create_test_task(&db, &project.id, &epic.id).await;
+        let state = agent_context_from_db(db.clone(), CancellationToken::new());
+
+        let response = call_tool(
+            &state,
+            "task_update",
+            Some(
+                serde_json::json!({
+                    "id": task.short_id,
+                    "title": "Dispatch-updated task",
+                    "description": "Updated through extension dispatch",
+                    "design": "Keep the update response shape stable",
+                    "priority": 2,
+                    "owner": "planner",
+                    "labels_add": ["migration-test"],
+                    "acceptance_criteria": [{"criterion": "updated criterion", "met": false}],
+                    "memory_refs_add": ["decisions/adr-041-unified-tool-service-layer-in-djinn-mcp"]
+                })
+                .as_object()
+                .expect("task_update args object")
+                .clone(),
+            ),
+            Path::new(&project.path),
+            Some(&task.id),
+            Some("planner"),
+        )
+        .await
+        .expect("task_update dispatch should succeed");
+
+        assert_eq!(
+            response.get("id").and_then(|v| v.as_str()),
+            Some(task.id.as_str())
+        );
+        assert_eq!(
+            response.get("short_id").and_then(|v| v.as_str()),
+            Some(task.short_id.as_str())
+        );
+        assert_eq!(
+            response.get("title").and_then(|v| v.as_str()),
+            Some("Dispatch-updated task")
+        );
+        assert_eq!(
+            response.get("description").and_then(|v| v.as_str()),
+            Some("Updated through extension dispatch")
+        );
+        assert_eq!(
+            response.get("design").and_then(|v| v.as_str()),
+            Some("Keep the update response shape stable")
+        );
+        assert_eq!(response.get("priority").and_then(|v| v.as_i64()), Some(2));
+        assert_eq!(
+            response.get("owner").and_then(|v| v.as_str()),
+            Some("planner")
+        );
+        assert_eq!(
+            response
+                .get("labels")
+                .and_then(|v| v.as_array())
+                .map(|labels| labels
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()),
+            Some(vec!["migration-test"])
+        );
+        assert_eq!(
+            response
+                .get("acceptance_criteria")
+                .and_then(|v| v.as_array())
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("criterion"))
+                .and_then(|v| v.as_str()),
+            Some("updated criterion")
+        );
+        assert_eq!(
+            response
+                .get("memory_refs")
+                .and_then(|v| v.as_array())
+                .and_then(|items| items.first())
+                .and_then(|v| v.as_str()),
+            Some("decisions/adr-041-unified-tool-service-layer-in-djinn-mcp")
+        );
+    }
+
+    #[tokio::test]
     async fn call_tool_dispatches_comment_and_transition_flows() {
         let db = create_test_db();
         let project = create_test_project(&db).await;

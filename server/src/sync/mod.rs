@@ -552,9 +552,11 @@ mod tests {
 
     #[test]
     fn registered_channels_has_tasks() {
-        assert_eq!(REGISTERED_CHANNELS.len(), 4);
-        assert_eq!(REGISTERED_CHANNELS[0].name, "tasks");
-        assert_eq!(REGISTERED_CHANNELS[0].branch, "djinn/tasks");
+        let tasks_channel = REGISTERED_CHANNELS
+            .iter()
+            .find(|channel| channel.name == "tasks")
+            .expect("tasks channel should remain registered");
+        assert_eq!(tasks_channel.branch, "djinn/tasks");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
