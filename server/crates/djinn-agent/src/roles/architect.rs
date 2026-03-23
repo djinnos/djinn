@@ -38,10 +38,8 @@ impl AgentRole for ArchitectRole {
                     rules::MIN_ARCHITECT_PATROL_MINUTES,
                     rules::MAX_ARCHITECT_PATROL_MINUTES,
                 );
-                let task_repo = TaskRepository::new(
-                    app_state.db.clone(),
-                    app_state.event_bus.clone(),
-                );
+                let task_repo =
+                    TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
                 let payload_json =
                     serde_json::json!({ "next_patrol_minutes": minutes }).to_string();
                 if let Err(e) = task_repo
