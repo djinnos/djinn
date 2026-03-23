@@ -3223,6 +3223,7 @@ mod tests {
     use crate::test_helpers::{
         agent_context_from_db, create_test_epic, create_test_project, create_test_task,
     };
+    use djinn_core::events::EventBus;
     use std::path::Path;
     use tokio_util::sync::CancellationToken;
 
@@ -3545,7 +3546,21 @@ mod tests {
     async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
         let db = create_test_db();
         let project = create_test_project(&db).await;
-        let epic = create_test_epic(&db, &project.id).await;
+        let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
+        let epic = epic_repo
+            .update(
+                &create_test_epic(&db, &project.id).await.id,
+                djinn_db::EpicUpdateInput {
+                    title: "test-epic",
+                    description: "test epic description",
+                    emoji: "🧪",
+                    color: "#0000ff",
+                    owner: "test-owner",
+                    memory_refs: Some("[]"),
+                },
+            )
+            .await
+            .expect("normalize test epic color");
         let task = create_test_task(&db, &project.id, &epic.id).await;
         let state = agent_context_from_db(db, CancellationToken::new());
 
@@ -3581,15 +3596,12 @@ mod tests {
         let update_value = call_epic_update(&state, &update_args)
             .await
             .expect("epic_update succeeds");
-        assert_eq!(update_value["title"], "updated epic title");
-        assert_eq!(
-            update_value["description"],
-            "updated epic description"
-        );
-        assert_eq!(
-            update_value["memory_refs"],
-            serde_json::json!(["notes/adr-041"])
-        );
+        let epic_model: djinn_mcp::tools::epic_ops::EpicSingleResponse =
+            serde_json::from_value(update_value.clone()).expect("parse epic update response");
+        let epic_model = epic_model.epic.expect("updated epic payload");
+        assert_eq!(epic_model.title, "updated epic title");
+        assert_eq!(epic_model.description, "updated epic description");
+        assert_eq!(epic_model.memory_refs, vec!["notes/adr-041".to_string()]);
         assert!(update_value.get("error").is_none());
 
         let tasks_args = Some(
