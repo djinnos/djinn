@@ -399,6 +399,30 @@ pub async fn populate_session_after_silent_refresh(app: &AppHandle) -> Result<()
     let state = build_auth_state_response(Some(&session));
     emit_auth_state_changed(app, &state);
 
+    // Re-sync tokens to the server credential vault so the server has them
+    // even if it was restarted since the last login/refresh.
+    {
+        let user_login = match retrieve_token().await {
+            Ok(Some(json)) => serde_json::from_str::<crate::auth::StoredTokens>(&json)
+                .ok()
+                .and_then(|s| {
+                    if s.user_login.is_empty() {
+                        None
+                    } else {
+                        Some(s.user_login)
+                    }
+                }),
+            _ => None,
+        };
+        crate::token_sync::sync_tokens_to_server(
+            &token_state.access_token,
+            &token_state.refresh_token,
+            token_state.expires_at_unix,
+            user_login.as_deref(),
+        )
+        .await;
+    }
+
     log::info!("Populated AUTH_SESSION after silent refresh");
     Ok(())
 }
