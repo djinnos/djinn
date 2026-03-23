@@ -11,6 +11,7 @@ djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
 djinn-git = { path = "../djinn-git" }
 djinn-provider = { path = "../djinn-provider" }
+djinn-mcp = { path = "../djinn-mcp" }
 anyhow = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }

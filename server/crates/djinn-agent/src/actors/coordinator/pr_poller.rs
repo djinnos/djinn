@@ -96,10 +96,7 @@ impl CoordinatorActor {
             };
 
             // Fetch current PR state + CI check runs.
-            let (pr, checks) = match gh_client
-                .get_pull_request(&owner, &repo, pull_number)
-                .await
-            {
+            let (pr, checks) = match gh_client.get_pull_request(&owner, &repo, pull_number).await {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::warn!(
@@ -149,10 +146,7 @@ impl CoordinatorActor {
                 continue;
             }
 
-            let all_completed = checks
-                .check_runs
-                .iter()
-                .all(|cr| cr.status == "completed");
+            let all_completed = checks.check_runs.iter().all(|cr| cr.status == "completed");
 
             if !all_completed {
                 // CI checks still running — skip, check next tick.
@@ -224,12 +218,8 @@ impl CoordinatorActor {
             );
             match gh_client.mark_pr_ready_for_review(&pr.node_id).await {
                 Ok(_) => {
-                    self.apply_pr_transition(
-                        &task.id,
-                        TransitionAction::PrUndraft,
-                        None,
-                    )
-                    .await;
+                    self.apply_pr_transition(&task.id, TransitionAction::PrUndraft, None)
+                        .await;
                     self.pr_status_cache.remove(&task.id);
                 }
                 Err(e) => {
@@ -285,10 +275,7 @@ impl CoordinatorActor {
             };
 
             // Fetch current PR state + CI check runs.
-            let (pr, checks) = match gh_client
-                .get_pull_request(&owner, &repo, pull_number)
-                .await
-            {
+            let (pr, checks) = match gh_client.get_pull_request(&owner, &repo, pull_number).await {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::warn!(

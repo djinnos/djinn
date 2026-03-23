@@ -16,7 +16,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use djinn_db::{NoteRepository, ProjectRepository, SessionRepository, TaskRepository, folder_for_type};
+use djinn_db::{
+    NoteRepository, ProjectRepository, SessionRepository, TaskRepository, folder_for_type,
+};
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
 use serde::Deserialize;
@@ -314,7 +316,13 @@ async fn run_llm_extraction_inner(
             // ── Dedup check: skip if a near-duplicate already exists ─────
             let folder = folder_for_type(note_type);
             let skip = match note_repo
-                .dedup_candidates(&project.id, folder, note_type, &note.content, DEDUP_CANDIDATE_LIMIT)
+                .dedup_candidates(
+                    &project.id,
+                    folder,
+                    note_type,
+                    &note.content,
+                    DEDUP_CANDIDATE_LIMIT,
+                )
                 .await
             {
                 Ok(candidates) => candidates

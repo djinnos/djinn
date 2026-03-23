@@ -870,7 +870,16 @@ async fn start_allows_decomposition_without_acceptance_criteria() {
 
     // Decomposition tasks have no AC by design — the planner produces the breakdown.
     let task = repo
-        .create(&epic.id, "Plan next wave", "", "", "decomposition", 0, "", Some("open"))
+        .create(
+            &epic.id,
+            "Plan next wave",
+            "",
+            "",
+            "decomposition",
+            0,
+            "",
+            Some("open"),
+        )
         .await
         .unwrap();
     assert_eq!(task.acceptance_criteria, "[]");
@@ -1573,7 +1582,12 @@ async fn blocker_swap_atomic_no_race_concurrent() {
     None
 )]
 // task_review_approve moves to approved
-#[case("in_task_review", TransitionAction::TaskReviewApprove, "approved", None)]
+#[case(
+    "in_task_review",
+    TransitionAction::TaskReviewApprove,
+    "approved",
+    None
+)]
 // task_review_reject returns to open (requires reason)
 #[case(
     "in_task_review",

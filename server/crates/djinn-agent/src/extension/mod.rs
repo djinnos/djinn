@@ -12,12 +12,13 @@ use super::sandbox;
 use crate::context::AgentContext;
 use crate::lsp::format_diagnostics_xml;
 use djinn_core::models::Task;
-use djinn_db::{AgentCreateInput, AgentRepository, VALID_BASE_ROLES};
 use djinn_db::EpicRepository;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
+use djinn_db::{AgentCreateInput, AgentRepository, VALID_BASE_ROLES};
+use djinn_mcp::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
 
 #[derive(Deserialize)]
 struct IncomingToolCall {
@@ -84,7 +85,9 @@ where
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments, session_task_id).await,
         "memory_list" => call_memory_list(state, &call.arguments).await,
-        "memory_build_context" => call_memory_build_context(state, &call.arguments, session_task_id).await,
+        "memory_build_context" => {
+            call_memory_build_context(state, &call.arguments, session_task_id).await
+        }
         "agent_metrics" => call_agent_metrics(state, &call.arguments).await,
         "agent_amend_prompt" => call_agent_amend_prompt(state, &call.arguments).await,
         "agent_create" => call_agent_create(state, &call.arguments).await,
@@ -296,6 +299,36 @@ fn non_empty(opt: Option<String>) -> Option<String> {
     opt.filter(|s| !s.is_empty())
 }
 
+async fn resolve_project_id_for_agent_tools(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<String, String> {
+    let project_id = arguments
+        .as_ref()
+        .and_then(|map| map.get("project"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(|project| async move {
+            let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+            repo.resolve(project)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("project not found: {project}"))
+        });
+
+    if let Some(project_id) = project_id {
+        return project_id.await;
+    }
+
+    let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+    let projects = repo.list().await.map_err(|e| e.to_string())?;
+    match projects.as_slice() {
+        [project] => Ok(project.id.clone()),
+        [] => Err("no project configured for agent tool call".to_string()),
+        _ => Err("project is required when multiple projects are configured".to_string()),
+    }
+}
+
 async fn call_task_list(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -464,13 +497,18 @@ async fn call_epic_show(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: EpicShowParams = parse_args(arguments)?;
+    let project_id = resolve_project_id_for_agent_tools(state, arguments).await?;
     let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
-
-    match repo.resolve(&p.id).await {
-        Ok(Some(epic)) => Ok(serde_json::to_value(epic).map_err(|e| e.to_string())?),
-        Ok(None) => Ok(serde_json::json!({ "error": format!("epic not found: {}", p.id) })),
-        Err(e) => Err(e.to_string()),
-    }
+    let response = djinn_mcp::tools::epic_ops::epic_show(
+        &repo,
+        &project_id,
+        EpicShowRequest {
+            project: String::new(),
+            id: p.id,
+        },
+    )
+    .await;
+    serde_json::to_value(response).map_err(|e| e.to_string())
 }
 
 async fn call_epic_update(
@@ -478,42 +516,25 @@ async fn call_epic_update(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: EpicUpdateParams = parse_args(arguments)?;
+    let project_id = resolve_project_id_for_agent_tools(state, arguments).await?;
     let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
-
-    let Some(epic) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
-        return Ok(serde_json::json!({ "error": format!("epic not found: {}", p.id) }));
-    };
-
-    let title = p.title.as_deref().unwrap_or(&epic.title);
-    let description = p.description.as_deref().unwrap_or(&epic.description);
-    let emoji = epic.emoji.as_str();
-    let color = epic.color.as_str();
-    let owner = epic.owner.as_str();
-
-    let updated = repo
-        .update(
-            &epic.id,
-            djinn_db::EpicUpdateInput {
-                title,
-                description,
-                emoji,
-                color,
-                owner,
-                memory_refs: None,
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if let Some(_status) = p.status.as_deref() {
-        // EpicRepository::update does not currently support status transitions.
-    }
-
-    if p.memory_refs_add.is_some() || p.memory_refs_remove.is_some() {
-        // Epics do not currently persist memory_refs in storage; accepted for forward compatibility.
-    }
-
-    serde_json::to_value(updated).map_err(|e| e.to_string())
+    let response = djinn_mcp::tools::epic_ops::epic_update_with_delta(
+        &repo,
+        &project_id,
+        EpicUpdateDeltaRequest {
+            project: String::new(),
+            id: p.id,
+            title: p.title,
+            description: p.description,
+            emoji: None,
+            color: None,
+            owner: None,
+            memory_refs_add: p.memory_refs_add,
+            memory_refs_remove: p.memory_refs_remove,
+        },
+    )
+    .await;
+    serde_json::to_value(response).map_err(|e| e.to_string())
 }
 
 async fn call_epic_tasks(
@@ -521,37 +542,31 @@ async fn call_epic_tasks(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: EpicTasksParams = parse_args(arguments)?;
+    let project_id = resolve_project_id_for_agent_tools(state, arguments).await?;
     let epic_repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
-
-    let Some(epic) = epic_repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
-        return Ok(serde_json::json!({ "error": format!("epic not found: {}", p.id) }));
-    };
-
     let task_repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
-    let limit = p.limit.unwrap_or(50).clamp(1, 200);
-    let offset = p.offset.unwrap_or(0).max(0);
-    let mut all = task_repo
-        .list_by_epic(&epic.id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let total = i64::try_from(all.len()).unwrap_or(0);
-    let start = usize::try_from(offset).unwrap_or(0).min(all.len());
-    let end = start
-        .saturating_add(usize::try_from(limit).unwrap_or(0))
-        .min(all.len());
-    let tasks = all
-        .drain(start..end)
-        .map(|t| task_to_value(&t))
-        .collect::<Vec<_>>();
-    let has_more = i64::try_from(end).unwrap_or(0) < total;
-
-    Ok(serde_json::json!({
-        "tasks": tasks,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "has_more": has_more,
-    }))
+    let response = djinn_mcp::tools::epic_ops::epic_tasks(
+        &epic_repo,
+        &task_repo,
+        &project_id,
+        EpicTasksRequest {
+            project: String::new(),
+            epic_id: p.id,
+            status: None,
+            issue_type: None,
+            sort: None,
+            limit: p.limit,
+            offset: p.offset,
+        },
+    )
+    .await;
+    let mut value = serde_json::to_value(response).map_err(|e| e.to_string())?;
+    if let Some(map) = value.as_object_mut()
+        && let Some(total_count) = map.remove("total_count")
+    {
+        map.insert("total".to_string(), total_count);
+    }
+    Ok(value)
 }
 
 async fn call_task_create(
@@ -796,7 +811,10 @@ async fn call_request_lead(
     // On the 2nd+ escalation for the same task, auto-route to Architect.
     let coordinator = state.coordinator().await;
     let escalation_count = if let Some(ref coord) = coordinator {
-        coord.increment_escalation_count(&task.id).await.unwrap_or(1)
+        coord
+            .increment_escalation_count(&task.id)
+            .await
+            .unwrap_or(1)
     } else {
         1
     };
@@ -1231,7 +1249,9 @@ async fn call_agent_create(
 
     // Enforce name uniqueness within project.
     if let Ok(Some(_)) = repo.get_by_name_for_project(&project_id, &name).await {
-        return Err(format!("an agent named '{name}' already exists in this project"));
+        return Err(format!(
+            "an agent named '{name}' already exists in this project"
+        ));
     }
 
     let created = repo
@@ -2987,7 +3007,8 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
     tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
     tool_values.push(serde_json::to_value(tool_apply_patch()).expect("serialize tool_apply_patch"));
-    tool_values.push(serde_json::to_value(tool_request_lead()).expect("serialize tool_request_lead"));
+    tool_values
+        .push(serde_json::to_value(tool_request_lead()).expect("serialize tool_request_lead"));
     tool_values.push(
         serde_json::to_value(crate::roles::finalize::tool_submit_work())
             .expect("serialize tool_submit_work"),
@@ -3029,8 +3050,7 @@ pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
         serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
         serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
-        serde_json::to_value(tool_request_architect())
-            .expect("serialize tool_request_architect"),
+        serde_json::to_value(tool_request_architect()).expect("serialize tool_request_architect"),
         serde_json::to_value(crate::roles::finalize::tool_submit_decision())
             .expect("serialize tool_submit_decision"),
     ] {
@@ -3314,9 +3334,15 @@ mod tests {
             AgentType::Worker,
             "submit_decision"
         ));
-        assert!(is_tool_allowed_for_agent(AgentType::Lead, "submit_decision"));
+        assert!(is_tool_allowed_for_agent(
+            AgentType::Lead,
+            "submit_decision"
+        ));
         // task_transition is not in the PM tool set (removed by ADR-036).
-        assert!(!is_tool_allowed_for_agent(AgentType::Lead, "task_transition"));
+        assert!(!is_tool_allowed_for_agent(
+            AgentType::Lead,
+            "task_transition"
+        ));
     }
 
     #[test]

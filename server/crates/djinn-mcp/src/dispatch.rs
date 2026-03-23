@@ -3,6 +3,9 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::server::DjinnMcpServer;
+use crate::tools::agent_tools::{
+    AgentCreateParams, AgentListParams, AgentMetricsParams, AgentShowParams, AgentUpdateParams,
+};
 use crate::tools::credential_tools::{CredentialDeleteInput, CredentialSetInput};
 use crate::tools::epic_tools::{
     EpicCloseParams, EpicCountParams, EpicCreateParams, EpicDeleteParams, EpicListParams,
@@ -36,9 +39,6 @@ use crate::tools::sync_tools::{
     TaskSyncStatusParams,
 };
 use crate::tools::system_tools::SystemLogsInput;
-use crate::tools::agent_tools::{
-    AgentCreateParams, AgentListParams, AgentMetricsParams, AgentShowParams, AgentUpdateParams,
-};
 use crate::tools::task_tools::{
     BoardHealthParams, BoardReconcileParams, ErrorOr, TaskActivityListParams,
     TaskBlockedListParams, TaskBlockersListParams, TaskClaimParams, TaskCommentAddParams,

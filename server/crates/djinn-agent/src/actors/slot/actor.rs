@@ -250,10 +250,8 @@ impl SlotHandle {
                         role_verification_command,
                     ) = if let Some(ref t) = task {
                         use djinn_db::AgentRepository;
-                        let role_repo = AgentRepository::new(
-                            app_state.db.clone(),
-                            app_state.event_bus.clone(),
-                        );
+                        let role_repo =
+                            AgentRepository::new(app_state.db.clone(), app_state.event_bus.clone());
                         let base_role_name = role.config().name;
                         match role_repo
                             .get_default_for_base_role(&t.project_id, base_role_name)

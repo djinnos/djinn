@@ -11,8 +11,8 @@ use tower_http::cors::CorsLayer;
 
 use crate::sse;
 
-mod chat;
 mod agents;
+mod chat;
 mod state;
 pub use state::AppState;
 

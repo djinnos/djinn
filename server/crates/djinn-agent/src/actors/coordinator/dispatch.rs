@@ -908,9 +908,7 @@ impl CoordinatorActor {
             .iter()
             .find(|p| self.is_project_dispatch_enabled(&p.id))
         else {
-            tracing::debug!(
-                "CoordinatorActor: patrol — no dispatch-enabled projects, skipping"
-            );
+            tracing::debug!("CoordinatorActor: patrol — no dispatch-enabled projects, skipping");
             return;
         };
         let project_id = active_project.id.clone();
