@@ -1,12 +1,6 @@
 import { useServerHealth } from "@/hooks/useServerHealth";
 import { useEventSource } from "@/hooks/useEventSource";
-import { useFirstRun } from "@/hooks/useFirstRun";
 import { LoadingScreen } from "@/components/LoadingScreen";
-import { Wizard } from "@/components/Wizard";
-import { WizardStep } from "@/components/WizardStep";
-import { ServerCheckStep } from "@/components/ServerCheckStep";
-import { ProviderSetupStep } from "@/components/ProviderSetupStep";
-import { ProjectSetupStep } from "@/components/ProjectSetupStep";
 import { Sidebar } from "@/components/Sidebar";
 import { Titlebar } from "@/components/Titlebar";
 import { KanbanPage } from "@/pages/KanbanPage";
@@ -16,51 +10,11 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { TaskSessionPage } from "@/pages/TaskSessionPage";
 import { ChatPage } from "@/pages/ChatPage";
 import { SyncHealthBanner } from "@/components/SyncHealthBanner";
-import { useWizardStore } from "@/stores/wizardStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
 import { useSelectedProjectId } from "@/stores/useProjectStore";
-import { Button } from "@/components/ui/button";
-import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
-import { useProviderGateStore } from "@/stores/providerGateStore";
-import { ProviderOnboarding } from "@/components/ProviderOnboarding";
-import { useModelGateStore } from "@/stores/modelGateStore";
-import { ModelOnboarding } from "@/components/ModelOnboarding";
-
-
-function WelcomeStep() {
-  return (
-    <div className="flex flex-col gap-4 text-center">
-      <h2 className="text-2xl font-semibold">Welcome to Djinn</h2>
-      <p className="text-muted-foreground">
-        Let's set up your workspace in a few simple steps.
-      </p>
-    </div>
-  );
-}
-
-function DoneState({ onDismiss }: { onDismiss: (path: "/" | "/settings") => void }) {
-
-  return (
-    <div className="flex min-h-screen flex-col bg-background">
-      <main className="flex flex-1 flex-col items-center justify-center p-6">
-        <div className="w-full max-w-md rounded-lg border border-border bg-card p-8 text-center">
-          <h2 className="text-2xl font-semibold">You're All Set!</h2>
-          <p className="mt-2 text-muted-foreground">
-            Setup is complete. What's next?
-          </p>
-          <div className="mt-6 flex flex-col gap-3">
-            <Button onClick={() => onDismiss("/")}>View Kanban Board</Button>
-            <Button variant="outline" onClick={() => onDismiss("/settings")}>
-              Explore Settings
-            </Button>
-          </div>
-        </div>
-      </main>
-    </div>
-  );
-}
+import { Navigate, Route, Routes } from "react-router-dom";
 
 function MainLayout() {
   return (
@@ -103,35 +57,10 @@ function MainLayout() {
 
 export default function App() {
   const { status, error, retry, isRetrying } = useServerHealth();
-  const { isFirstRun, isLoading: isFirstRunLoading } = useFirstRun();
-  const { isCompleted, resetWizard } = useWizardStore();
   const selectedProjectId = useSelectedProjectId();
-  const navigate = useNavigate();
-  const { hasProvider, refresh: refreshGate } = useProviderGateStore();
-  const { hasModels, refresh: refreshModelGate } = useModelGateStore();
 
   useProjectsBootstrap(status);
-  const [showWizard, setShowWizard] = useState(false);
-  const [showDoneState, setShowDoneState] = useState(false);
-
   useEventSource(selectedProjectId);
-
-  useEffect(() => {
-    if (status === 'connected') {
-      void refreshGate();
-      void refreshModelGate();
-    }
-  }, [status, refreshGate, refreshModelGate]);
-
-  useEffect(() => {
-    if (isFirstRunLoading) return;
-
-    if (isFirstRun === true && !isCompleted) {
-      setShowWizard(true);
-    } else {
-      setShowWizard(false);
-    }
-  }, [isFirstRun, isFirstRunLoading, isCompleted]);
 
   useEffect(() => {
     if (status === "connected") {
@@ -139,11 +68,11 @@ export default function App() {
     }
   }, [status]);
 
-  if (status === "loading" || isFirstRunLoading) {
+  if (status === "loading") {
     return (
       <LoadingScreen
         status="loading"
-        message={status === "loading" ? "Connecting to server..." : "Checking first-run status..."}
+        message="Connecting to server..."
       />
     );
   }
@@ -157,51 +86,6 @@ export default function App() {
         isRetrying={isRetrying}
       />
     );
-  }
-
-  if (showWizard) {
-    return (
-      <Wizard
-        onComplete={() => {
-          setShowWizard(false);
-          setShowDoneState(true);
-        }}
-        onSkip={() => {
-          localStorage.removeItem("djinnos-wizard-storage");
-          resetWizard();
-          setShowWizard(false);
-          setShowDoneState(false);
-        }}
-      >
-        <WizardStep stepNumber={1}>
-          <WelcomeStep />
-        </WizardStep>
-        <WizardStep stepNumber={2}>
-          <ServerCheckStep />
-        </WizardStep>
-        <WizardStep stepNumber={3}>
-          <ProviderSetupStep />
-        </WizardStep>
-        <WizardStep stepNumber={4}>
-          <ProjectSetupStep />
-        </WizardStep>
-      </Wizard>
-    );
-  }
-
-  if (showDoneState) {
-    return <DoneState onDismiss={(path) => {
-      setShowDoneState(false);
-      navigate(path === "/" ? "/kanban" : path);
-    }} />;
-  }
-
-  if (hasProvider === false) {
-    return <ProviderOnboarding />;
-  }
-
-  if (hasModels === false) {
-    return <ModelOnboarding />;
   }
 
   return <MainLayout />;

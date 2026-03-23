@@ -2,7 +2,6 @@ import { renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAgentConfig } from './useAgentConfig';
 
-const resetWizard = vi.fn();
 const settingsStore = {
   models: [{ id: 'm1' }],
   availableModels: [{ id: 'm2' }],
@@ -21,7 +20,6 @@ const settingsStore = {
   resetError: vi.fn(),
 };
 
-vi.mock('@/stores/wizardStore', () => ({ useWizardStore: () => ({ resetWizard }) }));
 vi.mock('@/stores/settingsStore', () => ({ useSettingsStore: () => settingsStore }));
 
 describe('useAgentConfig', () => {
@@ -42,11 +40,8 @@ describe('useAgentConfig', () => {
     expect(settingsStore.updateMaxSessions).toHaveBeenCalledWith('model-a', 3);
   });
 
-  it('resets wizard and saves', () => {
+  it('saves settings', () => {
     const { result } = renderHook(() => useAgentConfig());
-
-    result.current.handleResetWizard();
-    expect(resetWizard).toHaveBeenCalled();
 
     result.current.onSave();
     expect(settingsStore.saveSettings).toHaveBeenCalled();

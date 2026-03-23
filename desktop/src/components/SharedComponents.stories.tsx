@@ -4,18 +4,14 @@ import { MemoryRouter } from 'react-router-dom';
 import { EmptyState } from './EmptyState';
 import { LoadingScreen } from './LoadingScreen';
 import { InlineError } from './InlineError';
-import { WizardStepIndicator } from './WizardStepIndicator';
-import { WizardStep } from './WizardStep';
 import { Sidebar } from './Sidebar';
 import { ProjectSelector } from './ProjectSelector';
 import { ConnectionStatus } from './ConnectionStatus';
-import { Wizard } from './Wizard';
 
 import type { Project } from '@/api/types';
 import { useSidebarStore } from '@/stores/sidebarStore';
 import { useProjectStore } from '@/stores/useProjectStore';
 import { sseStore } from '@/stores/sseStore';
-import { useWizardStore } from '@/stores/wizardStore';
 
 const withRouter = (Story: any) => (
   <MemoryRouter>
@@ -68,41 +64,6 @@ const ConnectionStatusState = ({
   }, [status, reconnectAttempt]);
 
   return <ConnectionStatus />;
-};
-
-const WizardState = ({ currentStep = 1, totalSteps = 4, completedSteps = [], skippedSteps = [] }: { currentStep?: number; totalSteps?: number; completedSteps?: number[]; skippedSteps?: number[] }) => {
-  const resetWizard = useWizardStore((s) => s.resetWizard);
-  const goToStep = useWizardStore((s) => s.goToStep);
-  const markStepComplete = useWizardStore((s) => s.markStepComplete);
-
-  useEffect(() => {
-    resetWizard();
-    goToStep(currentStep);
-    completedSteps.forEach((step) => markStepComplete(step));
-    if (skippedSteps.length > 0) {
-      useWizardStore.setState({ skippedSteps });
-    }
-    if (totalSteps !== useWizardStore.getState().totalSteps) {
-      useWizardStore.setState({ totalSteps });
-    }
-  }, [
-    completedSteps,
-    currentStep,
-    goToStep,
-    markStepComplete,
-    resetWizard,
-    skippedSteps,
-    totalSteps,
-  ]);
-
-  return (
-    <Wizard>
-      <div className="space-y-3 rounded-md border p-4">
-        <h3 className="font-semibold">Welcome to DjinnOS</h3>
-        <p className="text-sm text-muted-foreground">Configure your workspace and preferences to get started.</p>
-      </div>
-    </Wizard>
-  );
 };
 
 export default {
@@ -168,21 +129,6 @@ export const InlineErrorRetrying = {
   render: () => <InlineError message="Temporary network issue." onRetry={() => {}} retrying />,
 };
 
-export const WizardStepIndicatorInitial = {
-  name: 'WizardStepIndicator / Initial',
-  render: () => <WizardStepIndicator currentStep={1} totalSteps={4} completedSteps={[]} skippedSteps={[]} />,
-};
-
-export const WizardStepIndicatorProgress = {
-  name: 'WizardStepIndicator / Progress',
-  render: () => <WizardStepIndicator currentStep={3} totalSteps={5} completedSteps={[1, 2]} skippedSteps={[]} />,
-};
-
-export const WizardStepIndicatorWithSkipped = {
-  name: 'WizardStepIndicator / With Skipped Step',
-  render: () => <WizardStepIndicator currentStep={4} totalSteps={5} completedSteps={[1, 2, 3]} skippedSteps={[2]} />,
-};
-
 export const SidebarKanban = {
   name: 'Sidebar / Kanban',
   decorators: [withRouter],
@@ -218,46 +164,4 @@ export const ConnectionStatusReconnecting = {
 export const ConnectionStatusError = {
   name: 'ConnectionStatus / Error',
   render: () => <ConnectionStatusState status="error" />,
-};
-
-export const WizardFlowInitial = {
-  name: 'Wizard / Initial Step',
-  render: () => <WizardState currentStep={1} totalSteps={4} completedSteps={[]} skippedSteps={[]} />,
-};
-
-export const WizardFlowInProgress = {
-  name: 'Wizard / In Progress',
-  render: () => <WizardState currentStep={3} totalSteps={4} completedSteps={[1, 2]} skippedSteps={[2]} />,
-};
-
-const WizardStepState = ({ activeStep, displayStep }: { activeStep: number; displayStep: number }) => {
-  const goToStep = useWizardStore((s) => s.goToStep);
-
-  useEffect(() => {
-    goToStep(activeStep);
-  }, [activeStep, goToStep]);
-
-  return (
-    <WizardStep stepNumber={displayStep}>
-      <div className="rounded-md border p-4">
-        <h3 className="font-semibold">Step {displayStep} Content</h3>
-        <p className="text-sm text-muted-foreground">This content is visible because the current step matches.</p>
-      </div>
-    </WizardStep>
-  );
-};
-
-export const WizardStepVisible = {
-  name: 'WizardStep / Visible (step matches)',
-  render: () => <WizardStepState activeStep={2} displayStep={2} />,
-};
-
-export const WizardStepHidden = {
-  name: 'WizardStep / Hidden (step mismatch)',
-  render: () => (
-    <div>
-      <WizardStepState activeStep={1} displayStep={3} />
-      <p className="text-sm text-muted-foreground">Step 3 content is hidden because current step is 1.</p>
-    </div>
-  ),
 };

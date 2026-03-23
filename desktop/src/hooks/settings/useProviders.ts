@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSettingsStore } from '@/stores/settingsStore';
-import { useProviderGateStore } from '@/stores/providerGateStore';
 import {
   addCustomProvider,
   removeProviderFull,
@@ -60,8 +59,6 @@ export function useProviders() {
   const unconfiguredProviders = useMemo(() => providers.filter((p) => !credentialByProvider.get(p.id)?.configured), [providers, credentialByProvider]);
 
   const { removeModelsByProvider, saveSettings: saveAgentSettings, loadProviderModels } = useSettingsStore();
-  const refreshGate = useProviderGateStore((s) => s.refresh);
-
   const validateInline = useCallback(async (providerId: string, apiKey: string) => {
     if (!providerId || !apiKey.trim()) return;
     setValidating(true);
@@ -89,7 +86,7 @@ export function useProviders() {
       await saveProviderCredentials(providerId, apiKey.trim());
       await loadData();
       await loadProviderModels();
-      void refreshGate();
+
       showToast.success('Provider added', { description: 'Credentials saved successfully.' });
       return true;
     } catch (error) {
@@ -124,7 +121,7 @@ export function useProviders() {
       }
       await loadData();
       await loadProviderModels();
-      void refreshGate();
+
       showToast.success('Connected via OAuth');
       return true;
     } catch (error) {
@@ -142,7 +139,7 @@ export function useProviders() {
       await saveAgentSettings();
       await loadData();
       await loadProviderModels();
-      void refreshGate();
+
       showToast.success('Provider removed');
     } catch (error) {
       showToast.error('Could not remove provider', { description: error instanceof Error ? error.message : 'Unknown error' });
