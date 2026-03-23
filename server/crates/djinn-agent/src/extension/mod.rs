@@ -179,7 +179,7 @@ struct EpicUpdateParams {
     id: String,
     title: Option<String>,
     description: Option<String>,
-    status: Option<String>,
+    _status: Option<String>,
     memory_refs_add: Option<Vec<String>>,
     memory_refs_remove: Option<Vec<String>>,
 }

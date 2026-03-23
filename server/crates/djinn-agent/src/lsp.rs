@@ -1634,9 +1634,14 @@ mod tests {
 
     #[test]
     fn which_in_path_finds_existing_binary() {
-        // /usr/bin/ls should exist on any Linux
-        let result = which_in_path("ls", "/usr/bin");
-        assert_eq!(result, Some(PathBuf::from("/usr/bin/ls")));
+        let ls_path = std::env::var_os("PATH")
+            .and_then(|path| which_in_path("ls", &path.to_string_lossy()))
+            .expect("ls should exist somewhere on PATH for test environment");
+        assert!(
+            ls_path.ends_with("ls"),
+            "unexpected ls path: {}",
+            ls_path.display()
+        );
     }
 
     #[test]
@@ -1647,8 +1652,9 @@ mod tests {
 
     #[test]
     fn which_in_path_scans_multiple_dirs() {
-        let result = which_in_path("ls", "/nonexistent:/usr/bin:/also_fake");
-        assert_eq!(result, Some(PathBuf::from("/usr/bin/ls")));
+        let path = "/nonexistent:/also_fake:/bin";
+        let result = which_in_path("ls", path);
+        assert_eq!(result, Some(PathBuf::from("/bin/ls")));
     }
 
     // --- resolve_binary_inner ---
