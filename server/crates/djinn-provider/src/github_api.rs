@@ -318,6 +318,46 @@ impl GitHubApiClient {
         Ok(resp.json().await?)
     }
 
+    /// List open pull requests whose head branch matches `head`.
+    ///
+    /// `head` should be in `owner:branch` format (e.g. `"djinnos:task/453b"`).
+    /// Returns an empty vec when no matching PRs exist.
+    pub async fn list_pulls_by_head(
+        &self,
+        owner: &str,
+        repo: &str,
+        head: &str,
+    ) -> Result<Vec<PullRequest>> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls?state=open&head={}",
+            self.base_url, owner, repo, head
+        );
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("list_pulls_by_head failed ({}): {}", status, body));
+        }
+        Ok(resp.json().await?)
+    }
+
     /// Enable auto-merge on an existing pull request.
     ///
     /// Uses the GitHub GraphQL `enablePullRequestAutoMerge` mutation so that the

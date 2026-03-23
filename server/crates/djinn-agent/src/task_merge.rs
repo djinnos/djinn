@@ -213,7 +213,7 @@ async fn try_create_github_pr(
     let pr_title = format!("{}({}): {}", commit_type, task.short_id, task.title);
 
     let github_client = GitHubApiClient::new(cred_repo);
-    let pr = github_client
+    let pr = match github_client
         .create_pull_request(
             &owner,
             &repo_name,
@@ -227,7 +227,42 @@ async fn try_create_github_pr(
             },
         )
         .await
-        .map_err(|e| format!("GitHub PR creation failed: {e}"))?;
+    {
+        Ok(pr) => pr,
+        Err(e) => {
+            let err_msg = e.to_string();
+            // If a PR already exists for this head branch, adopt it instead of failing.
+            if err_msg.contains("A pull request already exists") {
+                let head_ref = format!("{owner}:{base_branch}");
+                match github_client
+                    .list_pulls_by_head(&owner, &repo_name, &head_ref)
+                    .await
+                {
+                    Ok(prs) if !prs.is_empty() => {
+                        tracing::info!(
+                            task_id = %task_id,
+                            pr_url = %prs[0].html_url,
+                            pr_number = prs[0].number,
+                            "Lifecycle: adopting existing GitHub PR"
+                        );
+                        prs.into_iter().next().unwrap()
+                    }
+                    Ok(_) => {
+                        return Err(format!(
+                            "GitHub PR creation failed (already exists) but could not find existing PR for {head_ref}"
+                        ));
+                    }
+                    Err(list_err) => {
+                        return Err(format!(
+                            "GitHub PR creation failed: {err_msg}; failed to look up existing PR: {list_err}"
+                        ));
+                    }
+                }
+            } else {
+                return Err(format!("GitHub PR creation failed: {err_msg}"));
+            }
+        }
+    };
 
     // Store the PR URL on the task record.
     if let Err(e) = task_repo.set_pr_url(task_id, &pr.html_url).await {
