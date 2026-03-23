@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn registered_channels_has_tasks() {
-        assert!(!REGISTERED_CHANNELS.is_empty());
+        assert_eq!(REGISTERED_CHANNELS.len(), 4);
         assert_eq!(REGISTERED_CHANNELS[0].name, "tasks");
         assert_eq!(REGISTERED_CHANNELS[0].branch, "djinn/tasks");
     }
