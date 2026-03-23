@@ -207,7 +207,14 @@ fn resolve_server_binary() -> Result<PathBuf, String> {
         return Ok(path);
     }
 
-    // 3. Search PATH.
+    // 3. Co-located binary in the same Cargo target directory (dev builds).
+    //    During `tauri dev`, the desktop exe and djinn-server are both built
+    //    into the same target/debug (or target/release) directory.
+    if let Some(path) = resolve_colocated_binary() {
+        return Ok(path);
+    }
+
+    // 4. Search PATH.
     if let Some(path) = find_in_path("djinn-server") {
         return Ok(path);
     }
@@ -252,6 +259,19 @@ fn resolve_sidecar_path() -> Option<PathBuf> {
 
 fn target_triple() -> &'static str {
     env!("DJINN_TARGET_TRIPLE")
+}
+
+/// During `tauri dev`, both the desktop app and `djinn-server` are compiled
+/// into the same Cargo target directory (e.g. `target/debug/`).  Look for the
+/// server binary next to the running executable.
+fn resolve_colocated_binary() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    let candidate = exe_dir.join("djinn-server");
+    if candidate.is_file() {
+        return Some(candidate);
+    }
+    None
 }
 
 /// Search `PATH` for a binary by name.
