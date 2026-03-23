@@ -1420,10 +1420,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/repos/djinnos/server/pulls"))
             .and(wiremock::matchers::query_param("state", "open"))
-            .and(wiremock::matchers::query_param(
-                "head",
-                "djinnos:task/453b",
-            ))
+            .and(wiremock::matchers::query_param("head", "djinnos:task/453b"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {
                     "number": 99,

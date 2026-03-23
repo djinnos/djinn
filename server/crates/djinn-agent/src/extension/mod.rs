@@ -3338,6 +3338,167 @@ mod tests {
         assert!(!outside.path().join("pwned.txt").exists());
     }
 
+    #[tokio::test]
+    async fn call_tool_dispatches_task_create_with_public_response_shape() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let state = agent_context_from_db(db.clone(), CancellationToken::new());
+
+        let response = call_tool(
+            &state,
+            "task_create",
+            Some(
+                serde_json::json!({
+                    "epic_id": epic.short_id,
+                    "title": "Dispatch-created task",
+                    "description": "Created through extension dispatch",
+                    "design": "Keep the response shape stable",
+                    "priority": 3,
+                    "owner": "planner",
+                    "acceptance_criteria": ["first criterion"],
+                    "memory_refs": ["decisions/adr-041-unified-tool-service-layer-in-djinn-mcp"],
+                    "agent_type": "rust-expert"
+                })
+                .as_object()
+                .expect("task_create args object")
+                .clone(),
+            ),
+            Path::new(&project.path),
+            None,
+            Some("planner"),
+        )
+        .await
+        .expect("task_create dispatch should succeed");
+
+        assert_eq!(
+            response.get("title").and_then(|v| v.as_str()),
+            Some("Dispatch-created task")
+        );
+        assert_eq!(
+            response.get("description").and_then(|v| v.as_str()),
+            Some("Created through extension dispatch")
+        );
+        assert_eq!(response.get("priority").and_then(|v| v.as_i64()), Some(3));
+        assert_eq!(
+            response.get("owner").and_then(|v| v.as_str()),
+            Some("planner")
+        );
+        assert_eq!(
+            response.get("status").and_then(|v| v.as_str()),
+            Some("open")
+        );
+        assert_eq!(
+            response.get("agent_type").and_then(|v| v.as_str()),
+            Some("rust-expert")
+        );
+        assert_eq!(
+            response
+                .get("acceptance_criteria")
+                .and_then(|v| v.as_array())
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("criterion"))
+                .and_then(|v| v.as_str()),
+            Some("first criterion")
+        );
+        assert_eq!(
+            response
+                .get("memory_refs")
+                .and_then(|v| v.as_array())
+                .and_then(|items| items.first())
+                .and_then(|v| v.as_str()),
+            Some("decisions/adr-041-unified-tool-service-layer-in-djinn-mcp")
+        );
+    }
+
+    #[tokio::test]
+    async fn call_tool_dispatches_comment_and_transition_flows() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let task = create_test_task(&db, &project.id, &epic.id).await;
+        let state = agent_context_from_db(db.clone(), CancellationToken::new());
+
+        let comment = call_tool(
+            &state,
+            "task_comment_add",
+            Some(
+                serde_json::json!({
+                    "id": task.short_id,
+                    "body": "Dispatch-level architect note"
+                })
+                .as_object()
+                .expect("task_comment_add args object")
+                .clone(),
+            ),
+            Path::new(&project.path),
+            Some(&task.id),
+            Some("architect"),
+        )
+        .await
+        .expect("task_comment_add dispatch should succeed");
+
+        assert_eq!(
+            comment.get("task_id").and_then(|v| v.as_str()),
+            Some(task.id.as_str())
+        );
+        assert_eq!(
+            comment.get("actor_id").and_then(|v| v.as_str()),
+            Some("architect")
+        );
+        assert_eq!(
+            comment.get("actor_role").and_then(|v| v.as_str()),
+            Some("architect")
+        );
+        assert_eq!(
+            comment.get("event_type").and_then(|v| v.as_str()),
+            Some("comment")
+        );
+        assert_eq!(
+            comment
+                .get("payload")
+                .and_then(|v| v.get("body"))
+                .and_then(|v| v.as_str()),
+            Some("Dispatch-level architect note")
+        );
+
+        let transitioned = call_tool(
+            &state,
+            "task_transition",
+            Some(
+                serde_json::json!({
+                    "id": task.short_id,
+                    "action": "start"
+                })
+                .as_object()
+                .expect("task_transition args object")
+                .clone(),
+            ),
+            Path::new(&project.path),
+            Some(&task.id),
+            Some("lead"),
+        )
+        .await
+        .expect("task_transition dispatch should succeed");
+
+        assert_eq!(
+            transitioned.get("id").and_then(|v| v.as_str()),
+            Some(task.id.as_str())
+        );
+        assert_eq!(
+            transitioned.get("short_id").and_then(|v| v.as_str()),
+            Some(task.short_id.as_str())
+        );
+        assert_eq!(
+            transitioned.get("status").and_then(|v| v.as_str()),
+            Some("in_progress")
+        );
+        assert_eq!(
+            transitioned.get("title").and_then(|v| v.as_str()),
+            Some(task.title.as_str())
+        );
+    }
+
     #[test]
     fn worker_cannot_use_pm_only_tool() {
         // submit_decision is PM-only (ADR-036: finalize tools are role-specific).
