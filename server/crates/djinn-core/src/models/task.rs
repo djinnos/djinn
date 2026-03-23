@@ -131,8 +131,12 @@ pub enum TaskStatus {
     Verifying,
     NeedsTaskReview,
     InTaskReview,
-    /// PR has been opened and is awaiting CI/review/merge. Distinct from closed.
-    PrReady,
+    /// Reviewer approved; waiting for PR to be created (or GitHub App to create it).
+    Approved,
+    /// PR created as draft — CI running, not yet ready for human review.
+    PrDraft,
+    /// PR out of draft — awaiting human code review / merge.
+    PrReview,
     NeedsLeadIntervention,
     InLeadIntervention,
     Closed,
@@ -147,7 +151,9 @@ impl TaskStatus {
             Self::Verifying => "verifying",
             Self::NeedsTaskReview => "needs_task_review",
             Self::InTaskReview => "in_task_review",
-            Self::PrReady => "pr_ready",
+            Self::Approved => "approved",
+            Self::PrDraft => "pr_draft",
+            Self::PrReview => "pr_review",
             Self::NeedsLeadIntervention => "needs_lead_intervention",
             Self::InLeadIntervention => "in_lead_intervention",
             Self::Closed => "closed",
@@ -162,7 +168,11 @@ impl TaskStatus {
             "verifying" => Ok(Self::Verifying),
             "needs_task_review" => Ok(Self::NeedsTaskReview),
             "in_task_review" => Ok(Self::InTaskReview),
-            "pr_ready" => Ok(Self::PrReady),
+            "approved" => Ok(Self::Approved),
+            "pr_draft" => Ok(Self::PrDraft),
+            // backward compat: old pr_ready maps to pr_draft
+            "pr_ready" => Ok(Self::PrDraft),
+            "pr_review" => Ok(Self::PrReview),
             "needs_lead_intervention" => Ok(Self::NeedsLeadIntervention),
             "in_lead_intervention" => Ok(Self::InLeadIntervention),
             "closed" => Ok(Self::Closed),
@@ -211,11 +221,17 @@ pub enum TransitionAction {
     LeadApprove,
     /// Merge conflict discovered during Lead approval — reopen for conflict resolver.
     LeadApproveConflict,
-    /// Reviewer approves and opens a GitHub PR — transitions in_task_review → pr_ready.
-    MarkPrReady,
-    /// GitHub App signals PR merged — transitions pr_ready → closed.
+    /// Reviewer/Lead approves, moving task to approved (waiting for PR creation).
+    PrCreated,
+    /// GitHub App signals PR has been taken out of draft — transitions pr_draft → pr_review.
+    PrUndraft,
+    /// GitHub App signals CI failure on draft PR — transitions pr_draft → open.
+    PrCiFailed,
+    /// Merge conflict detected on approved or draft PR — transitions approved/pr_draft → open.
+    PrConflict,
+    /// GitHub App signals PR merged — transitions pr_review → closed.
     PrMerge,
-    /// GitHub App signals changes requested on PR — transitions pr_ready → open.
+    /// GitHub App signals changes requested on PR — transitions pr_review → open.
     PrChangesRequested,
 }
 
@@ -265,7 +281,10 @@ impl TransitionAction {
             "lead_intervention_complete" => Ok(Self::LeadInterventionComplete),
             "lead_approve" => Ok(Self::LeadApprove),
             "lead_approve_conflict" => Ok(Self::LeadApproveConflict),
-            "mark_pr_ready" => Ok(Self::MarkPrReady),
+            "pr_created" => Ok(Self::PrCreated),
+            "pr_undraft" => Ok(Self::PrUndraft),
+            "pr_ci_failed" => Ok(Self::PrCiFailed),
+            "pr_conflict" => Ok(Self::PrConflict),
             "pr_merge" => Ok(Self::PrMerge),
             "pr_changes_requested" => Ok(Self::PrChangesRequested),
             other => Err(Error::Internal(format!(
@@ -453,12 +472,7 @@ pub fn compute_transition(
             if *from != TaskStatus::InTaskReview {
                 return bad("task_review_approve is only valid from in_task_review");
             }
-            TransitionApply {
-                to_status: Some(TaskStatus::Closed),
-                set_closed_at: true,
-                close_reason: Some("completed"),
-                ..Default::default()
-            }
+            TransitionApply::simple(TaskStatus::Approved)
         }
 
         TransitionAction::Close => {
@@ -581,12 +595,7 @@ pub fn compute_transition(
             if *from != TaskStatus::InLeadIntervention {
                 return bad("lead_approve is only valid from in_lead_intervention");
             }
-            TransitionApply {
-                to_status: Some(TaskStatus::Closed),
-                set_closed_at: true,
-                close_reason: Some("completed"),
-                ..Default::default()
-            }
+            TransitionApply::simple(TaskStatus::Approved)
         }
 
         TransitionAction::LeadApproveConflict => {
@@ -601,21 +610,46 @@ pub fn compute_transition(
             }
         }
 
-        TransitionAction::MarkPrReady => {
-            if !matches!(
-                from,
-                TaskStatus::InTaskReview | TaskStatus::InLeadIntervention
-            ) {
-                return bad(
-                    "mark_pr_ready is only valid from in_task_review or in_lead_intervention",
-                );
+        TransitionAction::PrCreated => {
+            if *from != TaskStatus::Approved {
+                return bad("pr_created is only valid from approved");
             }
-            TransitionApply::simple(TaskStatus::PrReady)
+            TransitionApply::simple(TaskStatus::PrDraft)
+        }
+
+        TransitionAction::PrUndraft => {
+            if *from != TaskStatus::PrDraft {
+                return bad("pr_undraft is only valid from pr_draft");
+            }
+            TransitionApply::simple(TaskStatus::PrReview)
+        }
+
+        TransitionAction::PrCiFailed => {
+            if *from != TaskStatus::PrDraft {
+                return bad("pr_ci_failed is only valid from pr_draft");
+            }
+            TransitionApply {
+                to_status: Some(TaskStatus::Open),
+                increment_reopen: true,
+                ..Default::default()
+            }
+        }
+
+        TransitionAction::PrConflict => {
+            if !matches!(from, TaskStatus::Approved | TaskStatus::PrDraft) {
+                return bad("pr_conflict is only valid from approved or pr_draft");
+            }
+            TransitionApply {
+                to_status: Some(TaskStatus::Open),
+                reset_continuation: true,
+                set_merge_conflict_metadata: true,
+                ..Default::default()
+            }
         }
 
         TransitionAction::PrMerge => {
-            if *from != TaskStatus::PrReady {
-                return bad("pr_merge is only valid from pr_ready");
+            if *from != TaskStatus::PrReview {
+                return bad("pr_merge is only valid from pr_review");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::Closed),
@@ -626,8 +660,8 @@ pub fn compute_transition(
         }
 
         TransitionAction::PrChangesRequested => {
-            if *from != TaskStatus::PrReady {
-                return bad("pr_changes_requested is only valid from pr_ready");
+            if *from != TaskStatus::PrReview {
+                return bad("pr_changes_requested is only valid from pr_review");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
@@ -688,19 +722,21 @@ pub fn compute_transition_for_issue_type(
 mod tests {
     use super::*;
 
-    const STATUSES: [TaskStatus; 9] = [
+    const STATUSES: [TaskStatus; 11] = [
         TaskStatus::Open,
         TaskStatus::InProgress,
         TaskStatus::Verifying,
         TaskStatus::NeedsTaskReview,
         TaskStatus::InTaskReview,
-        TaskStatus::PrReady,
+        TaskStatus::Approved,
+        TaskStatus::PrDraft,
+        TaskStatus::PrReview,
         TaskStatus::NeedsLeadIntervention,
         TaskStatus::InLeadIntervention,
         TaskStatus::Closed,
     ];
 
-    const ACTIONS: [TransitionAction; 26] = [
+    const ACTIONS: [TransitionAction; 29] = [
         TransitionAction::Start,
         TransitionAction::SubmitVerification,
         TransitionAction::VerificationPass,
@@ -724,7 +760,10 @@ mod tests {
         TransitionAction::LeadInterventionComplete,
         TransitionAction::LeadApprove,
         TransitionAction::LeadApproveConflict,
-        TransitionAction::MarkPrReady,
+        TransitionAction::PrCreated,
+        TransitionAction::PrUndraft,
+        TransitionAction::PrCiFailed,
+        TransitionAction::PrConflict,
         TransitionAction::PrMerge,
         TransitionAction::PrChangesRequested,
     ];
@@ -759,7 +798,7 @@ mod tests {
                 Some(TaskStatus::Open)
             }
             (TransitionAction::TaskReviewApprove, TaskStatus::InTaskReview) => {
-                Some(TaskStatus::Closed)
+                Some(TaskStatus::Approved)
             }
             (TransitionAction::Close, s) if *s != TaskStatus::Closed => Some(TaskStatus::Closed),
             (TransitionAction::Reopen, TaskStatus::Closed) => Some(TaskStatus::Open),
@@ -787,17 +826,20 @@ mod tests {
                 Some(TaskStatus::Open)
             }
             (TransitionAction::LeadApprove, TaskStatus::InLeadIntervention) => {
-                Some(TaskStatus::Closed)
+                Some(TaskStatus::Approved)
             }
             (TransitionAction::LeadApproveConflict, TaskStatus::InLeadIntervention) => {
                 Some(TaskStatus::Open)
             }
+            (TransitionAction::PrCreated, TaskStatus::Approved) => Some(TaskStatus::PrDraft),
+            (TransitionAction::PrUndraft, TaskStatus::PrDraft) => Some(TaskStatus::PrReview),
+            (TransitionAction::PrCiFailed, TaskStatus::PrDraft) => Some(TaskStatus::Open),
             (
-                TransitionAction::MarkPrReady,
-                TaskStatus::InTaskReview | TaskStatus::InLeadIntervention,
-            ) => Some(TaskStatus::PrReady),
-            (TransitionAction::PrMerge, TaskStatus::PrReady) => Some(TaskStatus::Closed),
-            (TransitionAction::PrChangesRequested, TaskStatus::PrReady) => Some(TaskStatus::Open),
+                TransitionAction::PrConflict,
+                TaskStatus::Approved | TaskStatus::PrDraft,
+            ) => Some(TaskStatus::Open),
+            (TransitionAction::PrMerge, TaskStatus::PrReview) => Some(TaskStatus::Closed),
+            (TransitionAction::PrChangesRequested, TaskStatus::PrReview) => Some(TaskStatus::Open),
             _ => None,
         }
     }

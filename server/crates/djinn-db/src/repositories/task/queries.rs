@@ -322,7 +322,7 @@ impl TaskRepository {
                     MIN(CASE WHEN t.status IN (
                         'needs_task_review','in_task_review','closed'
                     ) THEN t.updated_at ELSE NULL END) AS oldest_review_at,
-                    SUM(CASE WHEN t.status = 'pr_ready' THEN 1 ELSE 0 END) AS pr_ready
+                    SUM(CASE WHEN t.status IN ('approved','pr_draft','pr_review') THEN 1 ELSE 0 END) AS pr_ready
              FROM epics e
              LEFT JOIN tasks t ON t.epic_id = e.id
              GROUP BY e.id
@@ -391,7 +391,7 @@ impl TaskRepository {
                     e.short_id AS epic_short_id
              FROM tasks t
              JOIN epics e ON t.epic_id = e.id
-             WHERE t.status IN ('needs_task_review','in_task_review','pr_ready','closed')
+             WHERE t.status IN ('needs_task_review','in_task_review','approved','pr_draft','pr_review','closed')
              ORDER BY t.updated_at ASC",
         )
         .fetch_all(self.db.pool())

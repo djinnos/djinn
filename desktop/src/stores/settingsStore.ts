@@ -27,7 +27,7 @@ export interface SettingsActions {
   updateMaxSessions: (indexOrModelId: number | string, maxConcurrent: number) => void;
   toggleRoleForModel: (indexOrModelId: number | string, role: string) => void;
   removeModelsByProvider: (provider: string) => void;
-  saveSettings: () => Promise<void>;
+  saveSettings: () => Promise<boolean>;
   resetError: () => void;
 }
 
@@ -134,11 +134,15 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
     try {
       await saveSettings({ models });
       set({ isSaving: false, hasUnsavedChanges: false });
+      return true;
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save settings';
+      console.error('[settings] save failed:', message);
       set({
-        error: error instanceof Error ? error.message : 'Failed to save settings',
+        error: message,
         isSaving: false
       });
+      return false;
     }
   },
 

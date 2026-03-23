@@ -1,3 +1,7 @@
+// TODO: These functions will be called by the coordinator PR dispatch path (ADR-040).
+// Suppress dead_code until that path is wired up.
+#![allow(dead_code)]
+
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -75,24 +79,9 @@ pub(crate) const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
     pr_creation_fail: Some(TransitionAction::Escalate),
     // When a GitHub PR is created, transition to pr_ready instead of closed.
     // The PR poller will close the task via PrMerge once the PR is merged.
-    pr_created: Some(TransitionAction::MarkPrReady),
+    pr_created: Some(TransitionAction::PrCreated),
 };
 
-/// Actions used when Lead approves directly from intervention.
-///
-/// `release` uses `LeadInterventionComplete` (→ Open) instead of
-/// `LeadInterventionRelease` (→ NeedsLeadIntervention) so that verification
-/// or git failures route the task back to a worker who can fix the code,
-/// rather than looping the Lead in a re-dispatch cycle it cannot resolve.
-pub(crate) const PM_MERGE_ACTIONS: MergeActions = MergeActions {
-    approve: TransitionAction::LeadApprove,
-    conflict: TransitionAction::LeadApproveConflict,
-    release: TransitionAction::LeadInterventionComplete,
-    verification_fail: None, // falls back to release (→ Open), which is correct for Lead
-    pr_creation_fail: None,  // falls back to release (→ Open), which is correct for Lead
-    // When a GitHub PR is created from Lead approval, also go to pr_ready.
-    pr_created: Some(TransitionAction::MarkPrReady),
-};
 
 pub(crate) async fn merge_after_task_review(
     task_id: &str,

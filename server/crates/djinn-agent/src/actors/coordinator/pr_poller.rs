@@ -25,32 +25,51 @@ pub const PR_REVIEW_FEEDBACK_EVENT: &str = "pr_review_feedback";
 const PR_REVIEW_CYCLE_EVENT: &str = "pr_review_cycle";
 
 impl CoordinatorActor {
-    /// Poll GitHub for PR status on all tasks in the `pr_ready` state.
+    /// Poll GitHub for PR status on all tasks in `pr_draft` and `pr_review` states.
     ///
-    /// Runs on every 30-second tick.  Returns immediately when no `pr_ready`
-    /// tasks exist so no GitHub API calls are made during idle periods.
+    /// Runs on every 30-second tick. Returns immediately when no tasks in either
+    /// status exist so no GitHub API calls are made during idle periods.
     ///
-    /// Full lifecycle:
-    /// - **PR is merged** → `PrMerge` transition (pr_ready → closed).
-    /// - **PR is closed without merge** → `ForceClose`.
-    /// - **PR has changes-requested review** → `PrChangesRequested` to send back to worker.
-    /// - **PR is draft, CI checks still running** → skip, check next tick.
-    /// - **PR is draft, CI checks ALL passed, no merge conflicts** → undraft (mark ready for review).
-    /// - **PR is draft, CI checks failed** → `PrChangesRequested` with CI failure details.
-    /// - **PR is not draft, mergeable, approved (or no approval required)** → squash merge.
-    /// - **PR is not draft, requires approval but not yet approved** → skip, wait for approval.
+    /// **`pr_draft` lifecycle** (CI monitoring):
+    /// - PR merged → `PrMerge` → closed.
+    /// - PR closed without merge → `ForceClose`.
+    /// - CI checks still running → skip, check next tick.
+    /// - CI checks failed → `PrCiFailed` → open (with CI details logged to activity).
+    /// - CI checks passed + merge conflicts → `PrConflict` → open.
+    /// - CI checks passed + no conflicts → undraft PR via GitHub API, then `PrUndraft` → pr_review.
+    ///
+    /// **`pr_review` lifecycle** (review monitoring):
+    /// - PR merged → `PrMerge` → closed.
+    /// - PR closed without merge → `ForceClose`.
+    /// - Changes requested → `PrChangesRequested` → open (review feedback logged to activity).
+    /// - Review round >= threshold → escalate to Architect.
+    /// - Approved + mergeable → squash merge, `PrMerge` → closed.
+    /// - Pending reviews → wait.
     pub(super) async fn poll_pr_statuses(&mut self) {
+        let cred_repo = Arc::new(CredentialRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        ));
+        let gh_client = GitHubApiClient::new(cred_repo);
+
+        self.poll_pr_draft_tasks(&gh_client).await;
+        self.poll_pr_review_tasks(&gh_client).await;
+    }
+
+    // ── pr_draft polling (CI monitoring) ─────────────────────────────────────
+
+    /// Poll tasks in `pr_draft` status: wait for CI to pass, then undraft the PR.
+    async fn poll_pr_draft_tasks(&mut self, gh_client: &GitHubApiClient) {
         let task_repo = self.task_repo();
-        let pr_ready_tasks = match task_repo.list_by_status("pr_ready").await {
+        let pr_draft_tasks = match task_repo.list_by_status("pr_draft").await {
             Ok(tasks) => tasks,
             Err(e) => {
-                tracing::warn!(error = %e, "PR poller: failed to query pr_ready tasks");
+                tracing::warn!(error = %e, "PR poller: failed to query pr_draft tasks");
                 return;
             }
         };
 
-        // Only poll when there are open PRs to check — no idle API calls.
-        let tasks_with_pr: Vec<_> = pr_ready_tasks
+        let tasks_with_pr: Vec<_> = pr_draft_tasks
             .into_iter()
             .filter(|t| t.pr_url.is_some())
             .collect();
@@ -61,15 +80,9 @@ impl CoordinatorActor {
 
         tracing::debug!(
             count = tasks_with_pr.len(),
-            "PR poller: checking {} pr_ready task(s)",
+            "PR poller: checking {} pr_draft task(s)",
             tasks_with_pr.len()
         );
-
-        let cred_repo = Arc::new(CredentialRepository::new(
-            self.db.clone(),
-            crate::events::event_bus_for(&self.events_tx),
-        ));
-        let gh_client = GitHubApiClient::new(cred_repo);
 
         for task in tasks_with_pr {
             let pr_url = task.pr_url.as_deref().unwrap();
@@ -83,7 +96,10 @@ impl CoordinatorActor {
             };
 
             // Fetch current PR state + CI check runs.
-            let (pr, checks) = match gh_client.get_pull_request(&owner, &repo, pull_number).await {
+            let (pr, checks) = match gh_client
+                .get_pull_request(&owner, &repo, pull_number)
+                .await
+            {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::warn!(
@@ -94,6 +110,8 @@ impl CoordinatorActor {
                     continue;
                 }
             };
+
+            let current_sha = pr.head.sha.clone();
 
             // ── Merged? ───────────────────────────────────────────────────────
             if pr.merged == Some(true) {
@@ -108,8 +126,7 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // PR is closed but not merged (e.g. manually closed without merge).
-            // Force-close the task — it cannot be merged via this PR anymore.
+            // ── PR closed without merge ───────────────────────────────────────
             if pr.state == PrState::Closed {
                 tracing::info!(
                     task_id = %task.short_id,
@@ -126,104 +143,196 @@ impl CoordinatorActor {
                 continue;
             }
 
-            let current_sha = pr.head.sha.clone();
-            let is_draft = pr.draft == Some(true);
+            // ── CI checks ─────────────────────────────────────────────────────
+            if checks.check_runs.is_empty() {
+                // No checks registered yet — skip, wait for next tick.
+                continue;
+            }
 
-            // ── Draft PR handling ─────────────────────────────────────────────
-            if is_draft {
-                // Check CI status for draft PRs.
-                if checks.check_runs.is_empty() {
-                    // No checks registered yet — skip, wait for next tick.
-                    continue;
-                }
+            let all_completed = checks
+                .check_runs
+                .iter()
+                .all(|cr| cr.status == "completed");
 
-                let all_completed = checks.check_runs.iter().all(|cr| cr.status == "completed");
+            if !all_completed {
+                // CI checks still running — skip, check next tick.
+                continue;
+            }
 
-                if !all_completed {
-                    // CI checks still running — skip, check next tick.
-                    continue;
-                }
-
-                // All checks completed — check for failures.
-                let failed_checks: Vec<&CheckRun> = checks
-                    .check_runs
-                    .iter()
-                    .filter(|cr| {
-                        matches!(
-                            cr.conclusion.as_deref(),
-                            Some("failure") | Some("timed_out") | Some("cancelled")
-                        )
-                    })
-                    .collect();
-
-                if !failed_checks.is_empty() {
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        pr = pull_number,
-                        sha = %current_sha,
-                        failed_count = failed_checks.len(),
-                        "PR poller: CI check failed on draft PR → reopening task for rework"
-                    );
-                    self.apply_pr_transition(
-                        &task.id,
-                        TransitionAction::PrChangesRequested,
-                        Some("CI checks failed on PR"),
+            // All checks completed — check for failures.
+            let failed_checks: Vec<&CheckRun> = checks
+                .check_runs
+                .iter()
+                .filter(|cr| {
+                    matches!(
+                        cr.conclusion.as_deref(),
+                        Some("failure") | Some("timed_out") | Some("cancelled")
                     )
-                    .await;
-                    self.log_ci_failure_comment(
-                        &task.id,
-                        &failed_checks,
-                        pr_url,
-                        &current_sha,
-                        &gh_client,
-                        &owner,
-                        &repo,
-                    )
-                    .await;
-                    self.pr_status_cache.remove(&task.id);
-                    continue;
-                }
+                })
+                .collect();
 
-                // All CI checks passed. Check for merge conflicts before undrafting.
-                if pr.mergeable == Some(false) {
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        pr = pull_number,
-                        "PR poller: draft PR has merge conflicts → reopening task for rework"
-                    );
-                    self.apply_pr_transition(
-                        &task.id,
-                        TransitionAction::PrChangesRequested,
-                        Some("PR has merge conflicts"),
-                    )
-                    .await;
-                    self.pr_status_cache.remove(&task.id);
-                    continue;
-                }
-
-                // All CI passed and no merge conflicts — undraft the PR.
+            if !failed_checks.is_empty() {
                 tracing::info!(
                     task_id = %task.short_id,
                     pr = pull_number,
-                    "PR poller: CI passed on draft PR → marking ready for review"
+                    sha = %current_sha,
+                    failed_count = failed_checks.len(),
+                    "PR poller: CI check failed on draft PR → reopening task for rework"
                 );
-                if let Err(e) = gh_client
-                    .mark_pr_ready_for_review(&pr.node_id)
-                    .await
-                {
+                self.apply_pr_transition(
+                    &task.id,
+                    TransitionAction::PrCiFailed,
+                    Some("CI checks failed on PR"),
+                )
+                .await;
+                self.log_ci_failure_comment(
+                    &task.id,
+                    &failed_checks,
+                    pr_url,
+                    &current_sha,
+                    gh_client,
+                    &owner,
+                    &repo,
+                )
+                .await;
+                self.pr_status_cache.remove(&task.id);
+                continue;
+            }
+
+            // All CI checks passed. Check for merge conflicts before undrafting.
+            if pr.mergeable == Some(false) {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    "PR poller: draft PR has merge conflicts → reopening task for rework"
+                );
+                self.apply_pr_transition(
+                    &task.id,
+                    TransitionAction::PrConflict,
+                    Some("PR has merge conflicts"),
+                )
+                .await;
+                self.pr_status_cache.remove(&task.id);
+                continue;
+            }
+
+            // All CI passed and no merge conflicts — undraft the PR, then transition.
+            tracing::info!(
+                task_id = %task.short_id,
+                pr = pull_number,
+                "PR poller: CI passed on draft PR → undrafting and marking ready for review"
+            );
+            match gh_client.mark_pr_ready_for_review(&pr.node_id).await {
+                Ok(_) => {
+                    self.apply_pr_transition(
+                        &task.id,
+                        TransitionAction::PrUndraft,
+                        None,
+                    )
+                    .await;
+                    self.pr_status_cache.remove(&task.id);
+                }
+                Err(e) => {
                     tracing::warn!(
                         task_id = %task.short_id,
                         pr = pull_number,
                         error = %e,
                         "PR poller: failed to undraft PR (will retry next tick)"
                     );
+                    // Don't transition — will retry next tick.
                 }
+            }
+        }
+    }
+
+    // ── pr_review polling (review monitoring) ────────────────────────────────
+
+    /// Poll tasks in `pr_review` status: wait for reviewer approval or changes, then merge.
+    async fn poll_pr_review_tasks(&mut self, gh_client: &GitHubApiClient) {
+        let task_repo = self.task_repo();
+        let pr_review_tasks = match task_repo.list_by_status("pr_review").await {
+            Ok(tasks) => tasks,
+            Err(e) => {
+                tracing::warn!(error = %e, "PR poller: failed to query pr_review tasks");
+                return;
+            }
+        };
+
+        let tasks_with_pr: Vec<_> = pr_review_tasks
+            .into_iter()
+            .filter(|t| t.pr_url.is_some())
+            .collect();
+
+        if tasks_with_pr.is_empty() {
+            return;
+        }
+
+        tracing::debug!(
+            count = tasks_with_pr.len(),
+            "PR poller: checking {} pr_review task(s)",
+            tasks_with_pr.len()
+        );
+
+        for task in tasks_with_pr {
+            let pr_url = task.pr_url.as_deref().unwrap();
+            let Some((owner, repo, pull_number)) = parse_pr_url(pr_url) else {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    pr_url,
+                    "PR poller: unrecognised PR URL format, skipping"
+                );
+                continue;
+            };
+
+            // Fetch current PR state + CI check runs.
+            let (pr, checks) = match gh_client
+                .get_pull_request(&owner, &repo, pull_number)
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "PR poller: failed to fetch PR status"
+                    );
+                    continue;
+                }
+            };
+
+            let current_sha = pr.head.sha.clone();
+
+            // ── Merged? ───────────────────────────────────────────────────────
+            if pr.merged == Some(true) {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    "PR poller: PR merged → closing task"
+                );
+                self.apply_pr_transition(&task.id, TransitionAction::PrMerge, None)
+                    .await;
+                self.pr_status_cache.remove(&task.id);
                 continue;
             }
 
-            // ── Non-draft PR handling ─────────────────────────────────────────
+            // ── PR closed without merge ───────────────────────────────────────
+            if pr.state == PrState::Closed {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    "PR poller: PR closed without merge → force-closing task"
+                );
+                self.apply_pr_transition(
+                    &task.id,
+                    TransitionAction::ForceClose,
+                    Some("PR was closed without merging"),
+                )
+                .await;
+                self.pr_status_cache.remove(&task.id);
+                continue;
+            }
 
-            // Check for changes-requested reviews first.
+            // ── Review state ──────────────────────────────────────────────────
             let reviews = match gh_client
                 .list_pr_review_states(&owner, &repo, pull_number)
                 .await
@@ -285,7 +394,7 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // ── CI checks on non-draft (cached per head SHA) ─────────────────
+            // ── CI checks on review PR (cached per head SHA) ──────────────────
             let sha_changed = self
                 .pr_status_cache
                 .get(&task.id)
@@ -314,11 +423,11 @@ impl CoordinatorActor {
                             pr = pull_number,
                             sha = %current_sha,
                             failed_count = failed_checks.len(),
-                            "PR poller: CI check failed → reopening task for rework"
+                            "PR poller: CI check failed on review PR → reopening task for rework"
                         );
                         self.apply_pr_transition(
                             &task.id,
-                            TransitionAction::PrChangesRequested,
+                            TransitionAction::PrCiFailed,
                             Some("CI checks failed on PR"),
                         )
                         .await;
@@ -327,7 +436,7 @@ impl CoordinatorActor {
                             &failed_checks,
                             pr_url,
                             &current_sha,
-                            &gh_client,
+                            gh_client,
                             &owner,
                             &repo,
                         )
@@ -338,12 +447,10 @@ impl CoordinatorActor {
                 }
             }
 
-            // ── Merge eligibility check ──────────────────────────────────────
-            // PR is not draft, no changes requested, CI is green.
-            // Check if it's mergeable and whether approval is sufficient.
+            // ── Merge eligibility check ───────────────────────────────────────
+            // No changes requested, CI is green. Check if mergeable and approved.
 
             if pr.mergeable == Some(false) {
-                // PR has merge conflicts — send back for rework.
                 tracing::info!(
                     task_id = %task.short_id,
                     pr = pull_number,
@@ -351,7 +458,7 @@ impl CoordinatorActor {
                 );
                 self.apply_pr_transition(
                     &task.id,
-                    TransitionAction::PrChangesRequested,
+                    TransitionAction::PrConflict,
                     Some("PR has merge conflicts"),
                 )
                 .await;
@@ -359,21 +466,16 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // Check approval status. If any review is APPROVED and none are
-            // CHANGES_REQUESTED, we consider the PR approved. If there are no
-            // reviews at all and the PR is mergeable, try to merge — GitHub will
-            // reject if branch protection requires reviews.
             let has_approved = reviews.iter().any(|r| r.state.as_str() == "APPROVED");
             let has_reviews = !reviews.is_empty();
 
             if has_reviews && !has_approved {
-                // There are reviews but none are APPROVED (and no CHANGES_REQUESTED
-                // since we handled that above). This means reviews are pending or
-                // only COMMENTED. Wait for approval or re-request review.
+                // Reviews exist but none APPROVED (and no CHANGES_REQUESTED handled above).
+                // This means reviews are pending or only COMMENTED. Wait for approval.
                 self.maybe_re_request_review(
                     &task.id,
                     &task.short_id,
-                    &gh_client,
+                    gh_client,
                     &owner,
                     &repo,
                     pull_number,

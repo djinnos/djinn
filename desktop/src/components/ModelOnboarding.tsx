@@ -11,8 +11,10 @@ export function ModelOnboarding() {
   const saveSettings = useSettingsStore((s) => s.saveSettings);
 
   const handleContinue = async () => {
-    await saveSettings();
-    await refresh();
+    const ok = await saveSettings();
+    if (ok) {
+      await refresh();
+    }
   };
 
   return (

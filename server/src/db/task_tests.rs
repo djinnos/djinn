@@ -506,7 +506,9 @@ async fn status_enum_roundtrips() {
         "in_progress",
         "needs_task_review",
         "in_task_review",
-        "pr_ready",
+        "approved",
+        "pr_draft",
+        "pr_review",
         "closed",
     ];
     for s in statuses {
@@ -574,9 +576,8 @@ async fn full_happy_path() {
         )
         .await
         .unwrap();
-    assert_eq!(t.status, "closed");
-    assert!(t.closed_at.is_some());
-    assert_eq!(t.close_reason.as_deref(), Some("completed"));
+    assert_eq!(t.status, "approved");
+    assert!(t.closed_at.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1549,7 +1550,9 @@ async fn blocker_swap_atomic_no_race_concurrent() {
 #[case("verifying", TransitionAction::Close, "closed", None)]
 #[case("needs_task_review", TransitionAction::Close, "closed", None)]
 #[case("in_task_review", TransitionAction::Close, "closed", None)]
-#[case("pr_ready", TransitionAction::Close, "closed", None)]
+#[case("approved", TransitionAction::Close, "closed", None)]
+#[case("pr_draft", TransitionAction::Close, "closed", None)]
+#[case("pr_review", TransitionAction::Close, "closed", None)]
 // force_close is valid from every non-closed state (requires a reason)
 #[case("open", TransitionAction::ForceClose, "closed", Some("testing"))]
 #[case("in_progress", TransitionAction::ForceClose, "closed", Some("testing"))]
@@ -1569,8 +1572,8 @@ async fn blocker_swap_atomic_no_race_concurrent() {
     "in_task_review",
     None
 )]
-// task_review_approve closes the task
-#[case("in_task_review", TransitionAction::TaskReviewApprove, "closed", None)]
+// task_review_approve moves to approved
+#[case("in_task_review", TransitionAction::TaskReviewApprove, "approved", None)]
 // task_review_reject returns to open (requires reason)
 #[case(
     "in_task_review",
@@ -1592,13 +1595,21 @@ async fn blocker_swap_atomic_no_race_concurrent() {
     "needs_task_review",
     Some("releasing review")
 )]
-// mark_pr_ready transitions in_task_review → pr_ready
-#[case("in_task_review", TransitionAction::MarkPrReady, "pr_ready", None)]
-// pr_merge transitions pr_ready → closed
-#[case("pr_ready", TransitionAction::PrMerge, "closed", None)]
-// pr_changes_requested transitions pr_ready → open (requires reason)
+// pr_created transitions approved → pr_draft
+#[case("approved", TransitionAction::PrCreated, "pr_draft", None)]
+// pr_undraft transitions pr_draft → pr_review
+#[case("pr_draft", TransitionAction::PrUndraft, "pr_review", None)]
+// pr_ci_failed transitions pr_draft → open
+#[case("pr_draft", TransitionAction::PrCiFailed, "open", None)]
+// pr_conflict transitions approved → open
+#[case("approved", TransitionAction::PrConflict, "open", None)]
+// pr_conflict transitions pr_draft → open
+#[case("pr_draft", TransitionAction::PrConflict, "open", None)]
+// pr_merge transitions pr_review → closed
+#[case("pr_review", TransitionAction::PrMerge, "closed", None)]
+// pr_changes_requested transitions pr_review → open (requires reason)
 #[case(
-    "pr_ready",
+    "pr_review",
     TransitionAction::PrChangesRequested,
     "open",
     Some("changes requested by reviewer")
@@ -1671,19 +1682,33 @@ async fn valid_transition(
 #[case("closed", TransitionAction::Close)]
 #[case("closed", TransitionAction::ForceClose)]
 #[case("closed", TransitionAction::TaskReviewApprove)]
-// pr_ready invalid transitions
-#[case("pr_ready", TransitionAction::Start)]
-#[case("pr_ready", TransitionAction::TaskReviewApprove)]
-#[case("pr_ready", TransitionAction::MarkPrReady)]
-// mark_pr_ready only from in_task_review
-#[case("open", TransitionAction::MarkPrReady)]
-#[case("in_progress", TransitionAction::MarkPrReady)]
-// pr_merge only from pr_ready
+// approved invalid transitions
+#[case("approved", TransitionAction::Start)]
+#[case("approved", TransitionAction::TaskReviewApprove)]
+#[case("approved", TransitionAction::PrUndraft)]
+// pr_created only from approved
+#[case("open", TransitionAction::PrCreated)]
+#[case("in_progress", TransitionAction::PrCreated)]
+#[case("pr_draft", TransitionAction::PrCreated)]
+// pr_undraft only from pr_draft
+#[case("open", TransitionAction::PrUndraft)]
+#[case("approved", TransitionAction::PrUndraft)]
+// pr_ci_failed only from pr_draft
+#[case("open", TransitionAction::PrCiFailed)]
+#[case("approved", TransitionAction::PrCiFailed)]
+#[case("pr_review", TransitionAction::PrCiFailed)]
+// pr_conflict only from approved or pr_draft
+#[case("open", TransitionAction::PrConflict)]
+#[case("in_progress", TransitionAction::PrConflict)]
+#[case("pr_review", TransitionAction::PrConflict)]
+// pr_merge only from pr_review
 #[case("open", TransitionAction::PrMerge)]
 #[case("in_task_review", TransitionAction::PrMerge)]
-// pr_changes_requested only from pr_ready
+#[case("pr_draft", TransitionAction::PrMerge)]
+// pr_changes_requested only from pr_review
 #[case("open", TransitionAction::PrChangesRequested)]
 #[case("in_task_review", TransitionAction::PrChangesRequested)]
+#[case("pr_draft", TransitionAction::PrChangesRequested)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_transition(#[case] from_status: &str, #[case] action: TransitionAction) {
     let db = test_helpers::create_test_db();

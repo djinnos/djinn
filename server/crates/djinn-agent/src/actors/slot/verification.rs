@@ -228,6 +228,8 @@ async fn run_verification_pipeline(
 ///
 /// Returns `Ok(())` when all commands pass (or none are configured), and
 /// `Err(feedback)` with a human-readable failure description otherwise.
+// TODO: Will be called by coordinator PR dispatch path (ADR-040).
+#[allow(dead_code)]
 pub(crate) async fn run_verification_gate(
     task_id: &str,
     project_path: &str,
@@ -382,6 +384,7 @@ fn resolve_head_commit(worktree_path: &std::path::Path) -> anyhow::Result<String
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[allow(dead_code)]
 fn resolve_head_commit_for_branch(
     project_dir: &std::path::Path,
     branch_name: &str,

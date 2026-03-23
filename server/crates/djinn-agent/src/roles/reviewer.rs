@@ -6,7 +6,6 @@ use crate::extension;
 use crate::output_parser::ParsedAgentOutput;
 use crate::prompts::TaskContext;
 use crate::roles::finalize::SubmitReview;
-use crate::task_merge::{VerificationGateFn, merge_after_task_review};
 use djinn_core::models::{Task, TransitionAction};
 use djinn_db::TaskRepository;
 use futures::future::BoxFuture;
@@ -48,20 +47,7 @@ impl AgentRole for ReviewerRole {
                         task_id = %task_id,
                         "task reviewer: submit_review verdict=approved → approve"
                     );
-                    let gate_state = app_state.clone();
-                    let gate: VerificationGateFn =
-                        Box::new(move |task_id: String, project_path: String| {
-                            let s = gate_state.clone();
-                            Box::pin(async move {
-                                crate::actors::slot::verification::run_verification_gate(
-                                    &task_id,
-                                    &project_path,
-                                    &s,
-                                )
-                                .await
-                            })
-                        });
-                    return merge_after_task_review(task_id, app_state, Some(gate)).await;
+                    return Some((TransitionAction::TaskReviewApprove, None));
                 } else {
                     // Rejected — check staleness to pick the right reject action.
                     tracing::info!(
@@ -123,20 +109,7 @@ impl AgentRole for ReviewerRole {
                 Ok(Some(task)) => {
                     if all_acceptance_criteria_met(&task.acceptance_criteria) {
                         tracing::info!(task_id = %task_id, "task reviewer: all AC met → approve");
-                        let gate_state = app_state.clone();
-                        let gate: VerificationGateFn =
-                            Box::new(move |task_id: String, project_path: String| {
-                                let s = gate_state.clone();
-                                Box::pin(async move {
-                                    crate::actors::slot::verification::run_verification_gate(
-                                        &task_id,
-                                        &project_path,
-                                        &s,
-                                    )
-                                    .await
-                                })
-                            });
-                        merge_after_task_review(task_id, app_state, Some(gate)).await
+                        Some((TransitionAction::TaskReviewApprove, None))
                     } else {
                         let feedback = output.reviewer_feedback.clone().unwrap_or_else(|| {
                             "reviewer found unmet acceptance criteria".to_string()
