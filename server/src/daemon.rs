@@ -208,7 +208,7 @@ fn spawn_daemon(
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
 
     // Place the daemon in its own session so it is immune to SIGHUP/SIGINT
     // from the parent's terminal or process group.
@@ -242,10 +242,27 @@ async fn wait_for_daemon(mut child: std::process::Child) -> Result<DaemonInfo, S
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
+    // Capture stderr for diagnostics when the daemon fails to start.
+    let stderr_output = child
+        .stderr
+        .take()
+        .and_then(|mut stderr| {
+            use std::io::Read;
+            let mut buf = String::new();
+            stderr.read_to_string(&mut buf).ok().map(|_| buf)
+        })
+        .unwrap_or_default();
+
+    let stderr_hint = if stderr_output.is_empty() {
+        String::new()
+    } else {
+        format!("\nstderr: {}", stderr_output.trim())
+    };
+
     match child.try_wait() {
-        Ok(Some(status)) => Err(format!("daemon process exited early: {status}")),
-        Ok(None) => Err("daemon did not become healthy in time".to_string()),
-        Err(e) => Err(format!("check daemon process status: {e}")),
+        Ok(Some(status)) => Err(format!("daemon process exited early: {status}{stderr_hint}")),
+        Ok(None) => Err(format!("daemon did not become healthy in time{stderr_hint}")),
+        Err(e) => Err(format!("check daemon process status: {e}{stderr_hint}")),
     }
 }
 

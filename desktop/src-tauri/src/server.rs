@@ -77,7 +77,10 @@ pub async fn ensure_daemon() -> Result<String, String> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    Ok(base_url)
+    Err(format!(
+        "daemon process started (pid={}) but health endpoint at {base_url}/health did not become ready",
+        info.pid
+    ))
 }
 
 /// Verify a remote server URL is reachable.
@@ -268,11 +271,33 @@ fn resolve_colocated_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
     let candidate = exe_dir.join("djinn-server");
-    if candidate.is_file() {
-        return Some(candidate);
+    if !candidate.is_file() {
+        return None;
     }
-    None
+    // Skip tiny placeholder files created by build.rs for cargo check/clippy.
+    let meta = std::fs::metadata(&candidate).ok()?;
+    if meta.len() < 1024 {
+        return None;
+    }
+    // Tauri dev may copy the sidecar without execute permission — fix it.
+    ensure_executable(&candidate);
+    Some(candidate)
 }
+
+/// Ensure a file has executable permission (u+x).
+#[cfg(unix)]
+fn ensure_executable(path: &PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mode = meta.permissions().mode();
+        if mode & 0o111 == 0 {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o755));
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn ensure_executable(_path: &PathBuf) {}
 
 /// Search `PATH` for a binary by name.
 fn find_in_path(name: &str) -> Option<PathBuf> {
