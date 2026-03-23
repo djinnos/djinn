@@ -916,7 +916,7 @@ impl CoordinatorActor {
         #[cfg(test)]
         eprintln!("[patrol] step 2: project dispatch enabled, project_id={project_id}");
 
-        // Precondition: skip patrol if there are no open or in_progress tasks on the
+        // Precondition: skip patrol if there are no non-closed tasks on the
         // board.  No point patrolling an empty board.
         let task_repo = TaskRepository::new(
             self.db.clone(),
@@ -924,20 +924,34 @@ impl CoordinatorActor {
         );
         {
             let has_active_work = {
-                let open = task_repo.list_by_status("open").await.unwrap_or_default();
-                let in_progress = task_repo
-                    .list_by_status("in_progress")
-                    .await
-                    .unwrap_or_default();
-                // Exclude review-type tasks (patrol tasks themselves) from the count
-                // to avoid the patrol perpetually triggering because its own task exists.
-                open.iter()
-                    .chain(in_progress.iter())
-                    .any(|t| t.issue_type != "review")
+                let mut found = false;
+                // Check every non-closed status so the patrol fires whenever
+                // there is any active work — not just open/in_progress.
+                for status in [
+                    "open",
+                    "in_progress",
+                    "verifying",
+                    "needs_task_review",
+                    "in_task_review",
+                    "approved",
+                    "pr_draft",
+                    "pr_review",
+                    "needs_lead_intervention",
+                    "in_lead_intervention",
+                ] {
+                    let tasks = task_repo.list_by_status(status).await.unwrap_or_default();
+                    // Exclude review-type tasks (patrol tasks themselves) from the count
+                    // to avoid the patrol perpetually triggering because its own task exists.
+                    if tasks.iter().any(|t| t.issue_type != "review") {
+                        found = true;
+                        break;
+                    }
+                }
+                found
             };
             if !has_active_work {
                 tracing::debug!(
-                    "CoordinatorActor: patrol — no open/in_progress tasks on board, skipping"
+                    "CoordinatorActor: patrol — no active tasks on board, skipping"
                 );
                 #[cfg(test)]
                 eprintln!("[patrol] skipping: empty board");
