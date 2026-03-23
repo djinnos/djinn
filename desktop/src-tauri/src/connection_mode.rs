@@ -1,23 +1,18 @@
 use serde::{Deserialize, Serialize};
 
 /// How the desktop app connects to the djinn server.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConnectionMode {
     /// Spawn and manage a local djinn-server daemon (default).
     ///
     /// The daemon is a separate process that survives desktop restarts and can
     /// be shared with Claude Code and other MCP clients.
+    #[default]
     #[serde(alias = "embedded")]
     Daemon,
     /// Connect to an externally-managed server (VPS, WSL, etc.).
     Remote { url: String },
-}
-
-impl Default for ConnectionMode {
-    fn default() -> Self {
-        ConnectionMode::Daemon
-    }
 }
 
 /// Load the persisted connection mode, falling back to `Daemon` on any error.

@@ -288,7 +288,7 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
 
 /// Best-effort port extraction from a URL string.
 fn parse_port(url: &str) -> Option<u16> {
-    let after_scheme = url.splitn(3, "//").nth(1).unwrap_or(url);
-    let host_port = after_scheme.splitn(2, '/').next().unwrap_or(after_scheme);
+    let after_scheme = url.split("//").nth(1).unwrap_or(url);
+    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
     host_port.rsplit(':').next().and_then(|s| s.parse().ok())
 }
