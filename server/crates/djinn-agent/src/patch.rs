@@ -503,10 +503,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn tempdir_in_tmp() -> TempDir {
-        tempfile::Builder::new()
-            .prefix("djinn-patch-")
-            .tempdir_in("/tmp")
-            .unwrap()
+        crate::test_helpers::test_tempdir("djinn-patch-")
     }
 
     #[test]

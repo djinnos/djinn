@@ -431,7 +431,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::test_helpers::{agent_context_from_db, create_test_db};
+    use crate::test_helpers::{agent_context_from_db, create_test_db, test_path};
 
     #[test]
     fn parse_extraction_response_valid_json() {
@@ -486,8 +486,12 @@ mod tests {
 
         // Need a project first
         let id = uuid::Uuid::now_v7().to_string();
+        let project_path = test_path(&format!("djinn-llm-extraction-no-task-{id}-"));
         let project = project_repo
-            .create(&format!("proj-{id}"), &format!("/tmp/test-{id}"))
+            .create(
+                &format!("proj-{id}"),
+                project_path.to_string_lossy().as_ref(),
+            )
             .await
             .expect("create project");
 
@@ -522,8 +526,12 @@ mod tests {
         let epic_repo = djinn_db::EpicRepository::new(db.clone(), events.clone());
 
         let id = uuid::Uuid::now_v7().to_string();
+        let project_path = test_path(&format!("djinn-llm-extraction-provider-{id}-"));
         let project = project_repo
-            .create(&format!("proj-{id}"), &format!("/tmp/test-{id}"))
+            .create(
+                &format!("proj-{id}"),
+                project_path.to_string_lossy().as_ref(),
+            )
             .await
             .expect("create project");
 

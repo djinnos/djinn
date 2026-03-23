@@ -26,7 +26,7 @@ fn test_app_state() -> (
     let db = test_helpers::create_test_db();
     let cancel = tokio_util::sync::CancellationToken::new();
     let app_state = test_helpers::agent_context_from_db(db, cancel.clone());
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = test_helpers::test_tempdir("djinn-slot-pool-");
     (app_state, cancel, temp)
 }
 

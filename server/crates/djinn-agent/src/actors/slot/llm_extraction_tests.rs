@@ -27,7 +27,7 @@ use crate::test_helpers::{FailingProvider, FakeProvider, agent_context_from_db, 
 
 /// Creates a temp directory (notes will be written there).
 fn make_tmpdir() -> TempDir {
-    tempfile::tempdir().expect("tempdir")
+    crate::test_helpers::test_tempdir("djinn-llm-extraction-")
 }
 
 struct TestFixture {

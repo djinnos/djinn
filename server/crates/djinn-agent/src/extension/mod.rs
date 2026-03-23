@@ -18,7 +18,10 @@ use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
 use djinn_db::{AgentCreateInput, AgentRepository, VALID_BASE_ROLES};
+<<<<<<< HEAD
 use djinn_mcp::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
+=======
+>>>>>>> origin/main
 
 #[derive(Deserialize)]
 struct IncomingToolCall {
@@ -3308,10 +3311,8 @@ mod tests {
 
     #[tokio::test]
     async fn write_rejects_symlink_escape_outside_worktree() {
-        use tempfile::tempdir;
-
-        let worktree = tempdir().expect("temp worktree");
-        let outside = tempdir().expect("outside dir");
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-worktree-");
+        let outside = crate::test_helpers::test_tempdir("djinn-ext-outside-");
         let link = worktree.path().join("escape-link");
 
         #[cfg(unix)]
@@ -3415,9 +3416,7 @@ mod tests {
 
     #[test]
     fn ensure_path_within_worktree_accepts_in_tree_and_rejects_traversal() {
-        use tempfile::tempdir;
-
-        let worktree = tempdir().expect("temp worktree");
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-worktree-");
         let nested = worktree.path().join("nested");
         std::fs::create_dir_all(&nested).expect("create nested");
         let in_tree = nested.join("file.txt");
@@ -3431,10 +3430,8 @@ mod tests {
 
     #[test]
     fn ensure_path_within_worktree_rejects_symlink_escape() {
-        use tempfile::tempdir;
-
-        let worktree = tempdir().expect("temp worktree");
-        let outside = tempdir().expect("outside");
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-worktree-");
+        let outside = crate::test_helpers::test_tempdir("djinn-ext-outside-");
         let link = worktree.path().join("escape-link");
 
         #[cfg(unix)]
@@ -3464,16 +3461,17 @@ mod tests {
 
     #[test]
     fn resolve_path_handles_relative_absolute_and_normalization() {
-        let base = Path::new("/tmp/worktree");
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-resolve-");
+        let base = worktree.path();
 
         let relative = resolve_path("src/main.rs", base);
-        assert_eq!(relative, PathBuf::from("/tmp/worktree/src/main.rs"));
+        assert_eq!(relative, base.join("src/main.rs"));
 
         let absolute = resolve_path("/etc/hosts", base);
         assert_eq!(absolute, PathBuf::from("/etc/hosts"));
 
         let normalized = resolve_path("./src/../Cargo.toml", base);
-        assert_eq!(normalized, PathBuf::from("/tmp/worktree/Cargo.toml"));
+        assert_eq!(normalized, base.join("Cargo.toml"));
     }
 
     fn tool_names(schemas: &[serde_json::Value]) -> Vec<&str> {
