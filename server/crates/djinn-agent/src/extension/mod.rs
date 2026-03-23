@@ -18,10 +18,7 @@ use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
 use djinn_db::{AgentCreateInput, AgentRepository, VALID_BASE_ROLES};
-<<<<<<< HEAD
 use djinn_mcp::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
-=======
->>>>>>> origin/main
 
 #[derive(Deserialize)]
 struct IncomingToolCall {

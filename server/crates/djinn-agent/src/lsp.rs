@@ -1644,21 +1644,10 @@ mod tests {
 
     #[test]
     fn which_in_path_finds_existing_binary() {
-<<<<<<< HEAD
-        let ls_path = std::env::var_os("PATH")
-            .and_then(|path| which_in_path("ls", &path.to_string_lossy()))
-            .expect("ls should exist somewhere on PATH for test environment");
-        assert!(
-            ls_path.ends_with("ls"),
-            "unexpected ls path: {}",
-            ls_path.display()
-        );
-=======
         let tmp = crate::test_helpers::test_tempdir("djinn-lsp-which-");
         make_fake_binary(tmp.path(), "ls", "#!/bin/sh\n");
         let result = which_in_path("ls", &tmp.path().to_string_lossy());
         assert_eq!(result, Some(tmp.path().join("ls")));
->>>>>>> origin/main
     }
 
     #[test]
@@ -1669,11 +1658,6 @@ mod tests {
 
     #[test]
     fn which_in_path_scans_multiple_dirs() {
-<<<<<<< HEAD
-        let path = "/nonexistent:/also_fake:/bin";
-        let result = which_in_path("ls", path);
-        assert_eq!(result, Some(PathBuf::from("/bin/ls")));
-=======
         let tmp = crate::test_helpers::test_tempdir("djinn-lsp-which-");
         let first = tmp.path().join("first");
         let second = tmp.path().join("second");
@@ -1683,7 +1667,6 @@ mod tests {
         let path = format!("{}:{}", first.display(), second.display());
         let result = which_in_path("ls", &path);
         assert_eq!(result, Some(second.join("ls")));
->>>>>>> origin/main
     }
 
     // --- resolve_binary_inner ---
