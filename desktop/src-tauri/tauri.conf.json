@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DjinnOS Desktop",
+  "productName": "Djinn",
   "version": "0.1.0",
   "identifier": "com.djinnos.desktop",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "DjinnOS Desktop",
+        "title": "Djinn",
         "decorations": false,
         "width": 1200,
         "height": 800,
