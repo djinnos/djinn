@@ -12,12 +12,12 @@ use super::sandbox;
 use crate::context::AgentContext;
 use crate::lsp::format_diagnostics_xml;
 use djinn_core::models::Task;
-use djinn_db::{AgentCreateInput, AgentRepository, VALID_BASE_ROLES};
 use djinn_db::EpicRepository;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
+use djinn_db::{AgentCreateInput, AgentRepository, VALID_BASE_ROLES};
 
 #[derive(Deserialize)]
 struct IncomingToolCall {
@@ -84,7 +84,9 @@ where
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments, session_task_id).await,
         "memory_list" => call_memory_list(state, &call.arguments).await,
-        "memory_build_context" => call_memory_build_context(state, &call.arguments, session_task_id).await,
+        "memory_build_context" => {
+            call_memory_build_context(state, &call.arguments, session_task_id).await
+        }
         "agent_metrics" => call_agent_metrics(state, &call.arguments).await,
         "agent_amend_prompt" => call_agent_amend_prompt(state, &call.arguments).await,
         "agent_create" => call_agent_create(state, &call.arguments).await,
@@ -796,7 +798,10 @@ async fn call_request_lead(
     // On the 2nd+ escalation for the same task, auto-route to Architect.
     let coordinator = state.coordinator().await;
     let escalation_count = if let Some(ref coord) = coordinator {
-        coord.increment_escalation_count(&task.id).await.unwrap_or(1)
+        coord
+            .increment_escalation_count(&task.id)
+            .await
+            .unwrap_or(1)
     } else {
         1
     };
@@ -1231,7 +1236,9 @@ async fn call_agent_create(
 
     // Enforce name uniqueness within project.
     if let Ok(Some(_)) = repo.get_by_name_for_project(&project_id, &name).await {
-        return Err(format!("an agent named '{name}' already exists in this project"));
+        return Err(format!(
+            "an agent named '{name}' already exists in this project"
+        ));
     }
 
     let created = repo
@@ -2987,7 +2994,8 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
     tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
     tool_values.push(serde_json::to_value(tool_apply_patch()).expect("serialize tool_apply_patch"));
-    tool_values.push(serde_json::to_value(tool_request_lead()).expect("serialize tool_request_lead"));
+    tool_values
+        .push(serde_json::to_value(tool_request_lead()).expect("serialize tool_request_lead"));
     tool_values.push(
         serde_json::to_value(crate::roles::finalize::tool_submit_work())
             .expect("serialize tool_submit_work"),
@@ -3029,8 +3037,7 @@ pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
         serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
         serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
-        serde_json::to_value(tool_request_architect())
-            .expect("serialize tool_request_architect"),
+        serde_json::to_value(tool_request_architect()).expect("serialize tool_request_architect"),
         serde_json::to_value(crate::roles::finalize::tool_submit_decision())
             .expect("serialize tool_submit_decision"),
     ] {
@@ -3118,7 +3125,15 @@ pub(crate) async fn call_tool(
     session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
-    dispatch_tool_call(state, &synthetic, worktree_path, None, session_task_id, session_role).await
+    dispatch_tool_call(
+        state,
+        &synthetic,
+        worktree_path,
+        None,
+        session_task_id,
+        session_role,
+    )
+    .await
 }
 
 fn tool_apply_patch() -> RmcpTool {
@@ -3280,10 +3295,8 @@ mod tests {
 
     #[tokio::test]
     async fn write_rejects_symlink_escape_outside_worktree() {
-        use tempfile::tempdir;
-
-        let worktree = tempdir().expect("temp worktree");
-        let outside = tempdir().expect("outside dir");
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-worktree-");
+        let outside = crate::test_helpers::test_tempdir("djinn-ext-outside-");
         let link = worktree.path().join("escape-link");
 
         #[cfg(unix)]
@@ -3314,9 +3327,15 @@ mod tests {
             AgentType::Worker,
             "submit_decision"
         ));
-        assert!(is_tool_allowed_for_agent(AgentType::Lead, "submit_decision"));
+        assert!(is_tool_allowed_for_agent(
+            AgentType::Lead,
+            "submit_decision"
+        ));
         // task_transition is not in the PM tool set (removed by ADR-036).
-        assert!(!is_tool_allowed_for_agent(AgentType::Lead, "task_transition"));
+        assert!(!is_tool_allowed_for_agent(
+            AgentType::Lead,
+            "task_transition"
+        ));
     }
 
     #[test]
@@ -3381,9 +3400,7 @@ mod tests {
 
     #[test]
     fn ensure_path_within_worktree_accepts_in_tree_and_rejects_traversal() {
-        use tempfile::tempdir;
-
-        let worktree = tempdir().expect("temp worktree");
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-worktree-");
         let nested = worktree.path().join("nested");
         std::fs::create_dir_all(&nested).expect("create nested");
         let in_tree = nested.join("file.txt");
@@ -3397,10 +3414,8 @@ mod tests {
 
     #[test]
     fn ensure_path_within_worktree_rejects_symlink_escape() {
-        use tempfile::tempdir;
-
-        let worktree = tempdir().expect("temp worktree");
-        let outside = tempdir().expect("outside");
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-worktree-");
+        let outside = crate::test_helpers::test_tempdir("djinn-ext-outside-");
         let link = worktree.path().join("escape-link");
 
         #[cfg(unix)]
@@ -3430,16 +3445,17 @@ mod tests {
 
     #[test]
     fn resolve_path_handles_relative_absolute_and_normalization() {
-        let base = Path::new("/tmp/worktree");
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-resolve-");
+        let base = worktree.path();
 
         let relative = resolve_path("src/main.rs", base);
-        assert_eq!(relative, PathBuf::from("/tmp/worktree/src/main.rs"));
+        assert_eq!(relative, base.join("src/main.rs"));
 
         let absolute = resolve_path("/etc/hosts", base);
         assert_eq!(absolute, PathBuf::from("/etc/hosts"));
 
         let normalized = resolve_path("./src/../Cargo.toml", base);
-        assert_eq!(normalized, PathBuf::from("/tmp/worktree/Cargo.toml"));
+        assert_eq!(normalized, base.join("Cargo.toml"));
     }
 
     fn tool_names(schemas: &[serde_json::Value]) -> Vec<&str> {

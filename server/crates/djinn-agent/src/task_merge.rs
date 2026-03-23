@@ -79,7 +79,6 @@ pub(crate) const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
     pr_created: Some(TransitionAction::PrCreated),
 };
 
-
 #[allow(dead_code)]
 pub(crate) async fn merge_after_task_review(
     task_id: &str,

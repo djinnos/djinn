@@ -560,11 +560,10 @@ mod tests {
         repo.create("proj-a", "/proj-a").await.unwrap();
         repo.create("proj-b", "/proj-b").await.unwrap();
 
-        let total: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE is_default = 1")
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE is_default = 1")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
         assert_eq!(total, 12, "2 projects × 6 roles = 12 default rows");
     }
 

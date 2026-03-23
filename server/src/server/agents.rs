@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::server::AppState;
 use djinn_core::models::Agent;
 use djinn_db::{
-    AgentCreateInput, AgentListQuery, AgentMetrics as DbAgentMetrics,
-    AgentRepository, AgentUpdateInput,
+    AgentCreateInput, AgentListQuery, AgentMetrics as DbAgentMetrics, AgentRepository,
+    AgentUpdateInput,
 };
 
 pub(super) fn router() -> Router<AppState> {
@@ -132,10 +132,7 @@ async fn create_agent(
     Json(body): Json<CreateBody>,
 ) -> Result<Json<AgentResponse>, (StatusCode, String)> {
     let repo = AgentRepository::new(state.db().clone(), state.event_bus());
-    let extensions = body
-        .system_prompt_extensions
-        .unwrap_or_default()
-        .join("\n");
+    let extensions = body.system_prompt_extensions.unwrap_or_default().join("\n");
     let role = repo
         .create_for_project(
             &body.project_id,
@@ -177,11 +174,7 @@ async fn update_agent(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("agent not found: {id}")))?;
 
-    let name = body
-        .name
-        .as_deref()
-        .unwrap_or(&existing.name)
-        .to_string();
+    let name = body.name.as_deref().unwrap_or(&existing.name).to_string();
     let description = body
         .description
         .as_deref()

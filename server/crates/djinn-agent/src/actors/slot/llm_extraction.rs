@@ -16,7 +16,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use djinn_db::{NoteRepository, ProjectRepository, SessionRepository, TaskRepository, folder_for_type};
+use djinn_db::{
+    NoteRepository, ProjectRepository, SessionRepository, TaskRepository, folder_for_type,
+};
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
 use serde::Deserialize;
@@ -314,7 +316,13 @@ async fn run_llm_extraction_inner(
             // ── Dedup check: skip if a near-duplicate already exists ─────
             let folder = folder_for_type(note_type);
             let skip = match note_repo
-                .dedup_candidates(&project.id, folder, note_type, &note.content, DEDUP_CANDIDATE_LIMIT)
+                .dedup_candidates(
+                    &project.id,
+                    folder,
+                    note_type,
+                    &note.content,
+                    DEDUP_CANDIDATE_LIMIT,
+                )
                 .await
             {
                 Ok(candidates) => candidates
@@ -423,7 +431,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::test_helpers::{agent_context_from_db, create_test_db};
+    use crate::test_helpers::{agent_context_from_db, create_test_db, test_path};
 
     #[test]
     fn parse_extraction_response_valid_json() {
@@ -478,8 +486,12 @@ mod tests {
 
         // Need a project first
         let id = uuid::Uuid::now_v7().to_string();
+        let project_path = test_path(&format!("djinn-llm-extraction-no-task-{id}-"));
         let project = project_repo
-            .create(&format!("proj-{id}"), &format!("/tmp/test-{id}"))
+            .create(
+                &format!("proj-{id}"),
+                project_path.to_string_lossy().as_ref(),
+            )
             .await
             .expect("create project");
 
@@ -514,8 +526,12 @@ mod tests {
         let epic_repo = djinn_db::EpicRepository::new(db.clone(), events.clone());
 
         let id = uuid::Uuid::now_v7().to_string();
+        let project_path = test_path(&format!("djinn-llm-extraction-provider-{id}-"));
         let project = project_repo
-            .create(&format!("proj-{id}"), &format!("/tmp/test-{id}"))
+            .create(
+                &format!("proj-{id}"),
+                project_path.to_string_lossy().as_ref(),
+            )
             .await
             .expect("create project");
 

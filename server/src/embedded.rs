@@ -48,8 +48,7 @@ pub async fn start(config: Config, cancel: CancellationToken) -> Result<u16, Str
     tracing::info!(port, "embedded: server listening on 127.0.0.1:{port}");
 
     tokio::spawn(async move {
-        let srv = axum::serve(listener, app)
-            .with_graceful_shutdown(cancel.cancelled_owned());
+        let srv = axum::serve(listener, app).with_graceful_shutdown(cancel.cancelled_owned());
         if let Err(e) = srv.await {
             tracing::error!(error = %e, "embedded server error");
         }

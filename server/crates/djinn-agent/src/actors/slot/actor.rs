@@ -250,10 +250,8 @@ impl SlotHandle {
                         role_verification_command,
                     ) = if let Some(ref t) = task {
                         use djinn_db::AgentRepository;
-                        let role_repo = AgentRepository::new(
-                            app_state.db.clone(),
-                            app_state.event_bus.clone(),
-                        );
+                        let role_repo =
+                            AgentRepository::new(app_state.db.clone(), app_state.event_bus.clone());
                         let base_role_name = role.config().name;
                         match role_repo
                             .get_default_for_base_role(&t.project_id, base_role_name)
@@ -452,7 +450,7 @@ mod tests {
     fn test_app_state() -> (AgentContext, CancellationToken, TempDir) {
         let db = test_helpers::create_test_db();
         let cancel = CancellationToken::new();
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = test_helpers::test_tempdir("djinn-slot-actor-");
         (
             test_helpers::agent_context_from_db(db, cancel.clone()),
             cancel,
@@ -461,10 +459,7 @@ mod tests {
     }
 
     async fn create_git_repo() -> TempDir {
-        let tmp = tempfile::Builder::new()
-            .prefix("djinn-slot-actor-project-")
-            .tempdir_in("/tmp")
-            .expect("tempdir");
+        let tmp = test_helpers::test_tempdir("djinn-slot-actor-project-");
         let p = tmp.path();
 
         let run = |args: &[&str]| {

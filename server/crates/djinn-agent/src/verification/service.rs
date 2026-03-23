@@ -106,7 +106,6 @@ mod tests {
     use djinn_core::commands::CommandResult;
     use djinn_db::Database;
     use djinn_db::VerificationCacheRepository;
-    use tempfile::Builder;
 
     fn test_db() -> Database {
         Database::open_in_memory().expect("in-memory db")
@@ -123,10 +122,7 @@ mod tests {
     }
 
     fn tempdir_in_tmp() -> tempfile::TempDir {
-        Builder::new()
-            .prefix("djinn-verification-")
-            .tempdir_in("/tmp")
-            .expect("tempdir")
+        crate::test_helpers::test_tempdir("djinn-verification-")
     }
 
     #[tokio::test]

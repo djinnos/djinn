@@ -776,10 +776,7 @@ impl GitHubApiClient {
     ///
     /// `node_id` is the GraphQL node ID of the pull request (available as
     /// `PullRequest::node_id` from `get_pull_request`).
-    pub async fn mark_pr_ready_for_review(
-        &self,
-        node_id: &str,
-    ) -> Result<serde_json::Value> {
+    pub async fn mark_pr_ready_for_review(&self, node_id: &str) -> Result<serde_json::Value> {
         let query = r#"
             mutation MarkPullRequestReadyForReview($pullRequestId: ID!) {
                 markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) {
@@ -826,7 +823,10 @@ impl GitHubApiClient {
 
         // GraphQL returns 200 even on errors — check the `errors` field.
         if let Some(errors) = json.get("errors") {
-            return Err(anyhow!("mark_pr_ready_for_review GraphQL error: {}", errors));
+            return Err(anyhow!(
+                "mark_pr_ready_for_review GraphQL error: {}",
+                errors
+            ));
         }
 
         Ok(json)
@@ -1219,10 +1219,7 @@ mod tests {
             .await;
 
         let client = GitHubApiClient::with_base_url(repo, server.uri());
-        let result = client
-            .mark_pr_ready_for_review("PR_node456")
-            .await
-            .unwrap();
+        let result = client.mark_pr_ready_for_review("PR_node456").await.unwrap();
 
         assert_eq!(
             result["data"]["markPullRequestReadyForReview"]["pullRequest"]["isDraft"],

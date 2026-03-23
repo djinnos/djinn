@@ -169,10 +169,7 @@ mod tests {
     use std::fs;
 
     fn tempdir_in_tmp() -> tempfile::TempDir {
-        tempfile::Builder::new()
-            .prefix("djinn-scoped-")
-            .tempdir_in("/tmp")
-            .expect("tempdir")
+        crate::test_helpers::test_tempdir("djinn-scoped-")
     }
 
     fn write_settings(dir: &tempfile::TempDir, content: &str) {
