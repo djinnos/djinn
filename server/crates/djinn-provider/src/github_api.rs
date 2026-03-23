@@ -1412,6 +1412,67 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_pulls_by_head_returns_matching_prs() {
+        let server = MockServer::start().await;
+        let repo = make_repo();
+        seed_tokens(&repo, "ghu_user").await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/djinnos/server/pulls"))
+            .and(wiremock::matchers::query_param("state", "open"))
+            .and(wiremock::matchers::query_param(
+                "head",
+                "djinnos:task/453b",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "number": 99,
+                    "title": "chore(453b): Move epic tools",
+                    "state": "open",
+                    "merged": false,
+                    "html_url": "https://github.com/djinnos/server/pull/99",
+                    "head": { "ref": "task/453b", "sha": "aaa111" },
+                    "base": { "ref": "main", "sha": "bbb222" },
+                    "auto_merge": null,
+                    "node_id": "PR_existing"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = GitHubApiClient::with_base_url(repo, server.uri());
+        let prs = client
+            .list_pulls_by_head("djinnos", "server", "djinnos:task/453b")
+            .await
+            .unwrap();
+
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].number, 99);
+        assert_eq!(prs[0].html_url, "https://github.com/djinnos/server/pull/99");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_pulls_by_head_returns_empty_when_no_match() {
+        let server = MockServer::start().await;
+        let repo = make_repo();
+        seed_tokens(&repo, "ghu_user").await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/djinnos/server/pulls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let client = GitHubApiClient::with_base_url(repo, server.uri());
+        let prs = client
+            .list_pulls_by_head("djinnos", "server", "djinnos:no-such-branch")
+            .await
+            .unwrap();
+
+        assert!(prs.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn missing_creds_returns_error() {
         let server = MockServer::start().await;
         let repo = make_repo();
