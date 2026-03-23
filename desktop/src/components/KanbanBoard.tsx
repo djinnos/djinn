@@ -78,7 +78,7 @@ const PRIORITY_ICONS: Record<number, { icon: typeof FullSignalIcon; color: strin
 
 function taskToColumnKey(task: Task): ColumnKey {
   if (task.status === "closed") return "done";
-  if (task.status === "pr_ready") return "pr_ready";
+  if (task.status === "approved" || task.status === "pr_draft" || task.status === "pr_review") return "pr_ready";
   if (
     task.status === "in_progress" ||
     task.status === "verifying" ||
