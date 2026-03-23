@@ -141,6 +141,16 @@ impl AppState {
             return;
         };
         let settings = DjinnSettings::from_db_value(&raw);
+
+        // If the settings were migrated from a legacy format, re-save them in the current typed
+        // schema so subsequent startups parse cleanly without triggering the migration warning.
+        if let Ok(canonical) = serde_json::to_string(&settings)
+            && canonical != raw
+            && let Err(e) = repo.set(SETTINGS_RAW_KEY, &canonical).await
+        {
+            tracing::warn!(error = %e, "failed to persist migrated settings");
+        }
+
         self.apply_runtime_settings(&settings).await;
     }
 

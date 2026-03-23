@@ -1,7 +1,3 @@
-// TODO: These functions will be called by the coordinator PR dispatch path (ADR-040).
-// Suppress dead_code until that path is wired up.
-#![allow(dead_code)]
-
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -66,6 +62,7 @@ pub(crate) struct MergeActions {
 }
 
 /// Standard actions used by the task reviewer path.
+#[allow(dead_code)]
 pub(crate) const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
     approve: TransitionAction::TaskReviewApprove,
     conflict: TransitionAction::TaskReviewRejectConflict,
@@ -83,6 +80,7 @@ pub(crate) const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
 };
 
 
+#[allow(dead_code)]
 pub(crate) async fn merge_after_task_review(
     task_id: &str,
     app_state: &AgentContext,

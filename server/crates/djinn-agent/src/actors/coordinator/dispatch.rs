@@ -1,5 +1,6 @@
 use super::*;
 use crate::roles::DispatchContext;
+use crate::task_merge::{self, MergeActions};
 use djinn_core::models::{TaskStatus, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
@@ -1008,6 +1009,128 @@ impl CoordinatorActor {
                 tracing::debug!(
                     "CoordinatorActor: patrol — no model could accept Architect dispatch"
                 );
+            }
+        }
+    }
+
+    /// Process tasks in `approved` status: create a GitHub PR (or fall back to
+    /// direct squash-merge when no GitHub App credential is configured).
+    ///
+    /// Runs on each coordinator tick. This is a lightweight API-call path — no
+    /// agent session is created.
+    pub(super) async fn process_approved_tasks(&mut self) {
+        let repo = self.task_repo();
+        let tasks = match repo.list_by_status("approved").await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: list_by_status(approved) failed");
+                return;
+            }
+        };
+
+        if tasks.is_empty() {
+            return;
+        }
+
+        // Build an AgentContext for the merge helpers (they need DB + event bus +
+        // git actors).  This is the same construction used by the stale-sweep path
+        // in the tick loop.
+        let app_state = crate::context::AgentContext {
+            db: self.db.clone(),
+            event_bus: crate::events::event_bus_for(&self.events_tx),
+            git_actors: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            verifying_tasks: self.verification_tracker.clone(),
+            role_registry: self.role_registry.clone(),
+            health_tracker: self.health.clone(),
+            file_time: Arc::new(crate::file_time::FileTime::new()),
+            lsp: crate::lsp::LspManager::new(),
+            catalog: self.catalog.clone(),
+            coordinator: Arc::new(tokio::sync::Mutex::new(None)),
+            active_tasks: crate::context::ActivityTracker::default(),
+        };
+
+        // Use Reopen as a sentinel for "leave in approved / retry next tick".
+        // The approved → reopen transition is not valid in the state machine, so
+        // we intercept it before calling `repo.transition` and simply skip.
+        const SKIP_SENTINEL: TransitionAction = TransitionAction::Reopen;
+
+        /// Transition actions for the coordinator-driven approved → PR path.
+        const APPROVED_MERGE_ACTIONS: MergeActions = MergeActions {
+            // Direct-merge success (no GitHub App): close the task.
+            approve: TransitionAction::Close,
+            // Merge conflict: reopen so the worker can rebase.
+            conflict: TransitionAction::PrConflict,
+            // Transient / infra failure: leave in approved (retry next tick).
+            release: SKIP_SENTINEL,
+            // No verification gate on this path.
+            verification_fail: None,
+            // PR creation auth/infra failure: leave in approved (retry next tick).
+            pr_creation_fail: Some(SKIP_SENTINEL),
+            // PR created successfully: transition approved → pr_draft.
+            pr_created: Some(TransitionAction::PrCreated),
+        };
+
+        for task in tasks {
+            if !self.is_project_dispatch_enabled(&task.project_id) {
+                continue;
+            }
+
+            tracing::info!(
+                task_id = %task.short_id,
+                task_uuid = %task.id,
+                project_id = %task.project_id,
+                "CoordinatorActor: processing approved task for PR creation"
+            );
+
+            let result = task_merge::merge_and_transition(
+                &task.id,
+                &app_state,
+                &APPROVED_MERGE_ACTIONS,
+                None, // no verification gate
+            )
+            .await;
+
+            match result {
+                Some((action, _)) if action == SKIP_SENTINEL => {
+                    // Transient failure — leave in approved, retry next tick.
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        "CoordinatorActor: approved task PR/merge deferred (will retry)"
+                    );
+                }
+                Some((action, reason)) => {
+                    if let Err(e) = repo
+                        .transition(
+                            &task.id,
+                            action.clone(),
+                            "coordinator",
+                            "system",
+                            reason.as_deref(),
+                            None,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            action = ?action,
+                            error = %e,
+                            "CoordinatorActor: failed to transition approved task"
+                        );
+                    } else {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            action = ?action,
+                            "CoordinatorActor: approved task transitioned"
+                        );
+                    }
+                }
+                None => {
+                    // merge_and_transition returned None — unexpected, log and skip.
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        "CoordinatorActor: merge_and_transition returned None for approved task"
+                    );
+                }
             }
         }
     }

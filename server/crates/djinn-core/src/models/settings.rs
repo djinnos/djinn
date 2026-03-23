@@ -78,12 +78,34 @@ impl DjinnSettings {
         }
     }
 
-    /// Extract a flat deduplicated model list from a legacy per-role model_priority map.
+    /// Extract a flat deduplicated model list from a legacy settings value.
+    ///
+    /// Handles several historical formats:
+    /// - Very old untyped format: nested `coordinator.model_priority` or `execution.model_priority`
+    ///   where `model_priority` is a `{role: [model_id, ...]}` map.
+    /// - Intermediate typed format: flat `model_priority` at root (also a `{role: [model_id, ...]}` map).
+    /// - Another legacy variant: `models.priority` nested map.
     fn extract_models_from_legacy(v: &serde_json::Value) -> Option<Vec<String>> {
+        // Check if this is the intermediate typed format: flat `model_priority` at root that is a
+        // {role: [model_id, ...]} map (written by the previous version of DjinnSettings).
+        if let Some(arr) = v.get("model_priority").and_then(|mp| mp.as_array()) {
+            // Flat list of model IDs (shouldn't normally exist, but handle defensively).
+            let out: Vec<String> = arr
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            if !out.is_empty() {
+                return Some(out);
+            }
+        }
+
         let root = v
             .get("coordinator")
             .and_then(|c| c.get("model_priority"))
             .or_else(|| v.get("execution").and_then(|e| e.get("model_priority")))
+            // Intermediate typed format: `model_priority` is a `{role: [model_id]}` map at root.
+            .or_else(|| v.get("model_priority"))
             .or_else(|| v.get("models").and_then(|m| m.get("priority")))?
             .as_object()?;
 
@@ -183,5 +205,44 @@ mod tests {
         let ms = s.max_sessions.unwrap();
         assert_eq!(ms.get("openai/gpt-4o"), Some(&4));
         assert_eq!(ms.get("anthropic/claude-opus-4-6"), Some(&2));
+    }
+
+    /// Old `DjinnSettings` struct had `model_priority: Option<HashMap<String, Vec<String>>>`.
+    /// Validate that this intermediate typed format is correctly migrated to the new flat `models`
+    /// list, so startups no longer emit the legacy-format warning for these DBs.
+    #[test]
+    fn intermediate_typed_format_model_priority_map_is_migrated() {
+        let raw = r#"{"model_priority":{"worker":["openai/gpt-4o","anthropic/claude-opus-4-6"],"reviewer":["openai/gpt-4o"]},"max_sessions":{"openai/gpt-4o":2}}"#;
+        let s = DjinnSettings::from_db_value(raw);
+        // Should have extracted a deduplicated flat model list.
+        let models = s.models.expect("models should be extracted from model_priority map");
+        assert!(
+            models.contains(&"openai/gpt-4o".to_string()),
+            "gpt-4o should be in models"
+        );
+        assert!(
+            models.contains(&"anthropic/claude-opus-4-6".to_string()),
+            "claude should be in models"
+        );
+        // Deduplication: gpt-4o appears in both worker and reviewer roles — only once in output.
+        assert_eq!(models.iter().filter(|m| m.as_str() == "openai/gpt-4o").count(), 1);
+        // max_sessions should be migrated too.
+        let ms = s.max_sessions.expect("max_sessions should be migrated");
+        assert_eq!(ms.get("openai/gpt-4o"), Some(&2));
+    }
+
+    /// Old format also had a `memory_model` field. Verify it is gracefully dropped during
+    /// migration without causing a panic or losing other fields.
+    #[test]
+    fn intermediate_typed_format_with_memory_model_is_migrated() {
+        let raw = r#"{"model_priority":{"worker":["openai/gpt-4o"]},"memory_model":"openai/gpt-4o-mini","max_sessions":{"openai/gpt-4o":1}}"#;
+        let s = DjinnSettings::from_db_value(raw);
+        // models extracted correctly
+        let models = s.models.expect("models should be extracted");
+        assert_eq!(models, vec!["openai/gpt-4o"]);
+        // memory_model is silently dropped (not a field in the current schema)
+        // max_sessions should still be migrated
+        let ms = s.max_sessions.expect("max_sessions should be migrated");
+        assert_eq!(ms.get("openai/gpt-4o"), Some(&1));
     }
 }

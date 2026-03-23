@@ -366,6 +366,7 @@ impl CoordinatorActor {
                     self.enforce_session_stall_timeout().await;
                     self.detect_and_recover_stuck_filtered(None).await;
                     self.dispatch_ready_tasks(None).await;
+                    self.process_approved_tasks().await;
                     self.poll_pr_statuses().await;
                     if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
                         let app_state = crate::context::AgentContext {
