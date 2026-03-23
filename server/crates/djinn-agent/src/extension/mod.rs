@@ -18,6 +18,7 @@ use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
 use djinn_db::{AgentCreateInput, AgentRepository, VALID_BASE_ROLES};
+use djinn_mcp::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
 
 #[derive(Deserialize)]
 struct IncomingToolCall {
@@ -178,7 +179,8 @@ struct EpicUpdateParams {
     id: String,
     title: Option<String>,
     description: Option<String>,
-    status: Option<String>,
+    #[serde(rename = "status")]
+    _status: Option<String>,
     memory_refs_add: Option<Vec<String>>,
     memory_refs_remove: Option<Vec<String>>,
 }
@@ -296,6 +298,36 @@ struct ReadParams {
 /// for optional parameters instead of omitting them, which breaks SQL filters.
 fn non_empty(opt: Option<String>) -> Option<String> {
     opt.filter(|s| !s.is_empty())
+}
+
+async fn resolve_project_id_for_agent_tools(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<String, String> {
+    let project_id = arguments
+        .as_ref()
+        .and_then(|map| map.get("project"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(|project| async move {
+            let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+            repo.resolve(project)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("project not found: {project}"))
+        });
+
+    if let Some(project_id) = project_id {
+        return project_id.await;
+    }
+
+    let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+    let projects = repo.list().await.map_err(|e| e.to_string())?;
+    match projects.as_slice() {
+        [project] => Ok(project.id.clone()),
+        [] => Err("no project configured for agent tool call".to_string()),
+        _ => Err("project is required when multiple projects are configured".to_string()),
+    }
 }
 
 async fn call_task_list(
@@ -466,13 +498,18 @@ async fn call_epic_show(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: EpicShowParams = parse_args(arguments)?;
+    let project_id = resolve_project_id_for_agent_tools(state, arguments).await?;
     let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
-
-    match repo.resolve(&p.id).await {
-        Ok(Some(epic)) => Ok(serde_json::to_value(epic).map_err(|e| e.to_string())?),
-        Ok(None) => Ok(serde_json::json!({ "error": format!("epic not found: {}", p.id) })),
-        Err(e) => Err(e.to_string()),
-    }
+    let response = djinn_mcp::tools::epic_ops::epic_show(
+        &repo,
+        &project_id,
+        EpicShowRequest {
+            project: String::new(),
+            id: p.id,
+        },
+    )
+    .await;
+    serde_json::to_value(response).map_err(|e| e.to_string())
 }
 
 async fn call_epic_update(
@@ -480,42 +517,25 @@ async fn call_epic_update(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: EpicUpdateParams = parse_args(arguments)?;
+    let project_id = resolve_project_id_for_agent_tools(state, arguments).await?;
     let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
-
-    let Some(epic) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
-        return Ok(serde_json::json!({ "error": format!("epic not found: {}", p.id) }));
-    };
-
-    let title = p.title.as_deref().unwrap_or(&epic.title);
-    let description = p.description.as_deref().unwrap_or(&epic.description);
-    let emoji = epic.emoji.as_str();
-    let color = epic.color.as_str();
-    let owner = epic.owner.as_str();
-
-    let updated = repo
-        .update(
-            &epic.id,
-            djinn_db::EpicUpdateInput {
-                title,
-                description,
-                emoji,
-                color,
-                owner,
-                memory_refs: None,
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if let Some(_status) = p.status.as_deref() {
-        // EpicRepository::update does not currently support status transitions.
-    }
-
-    if p.memory_refs_add.is_some() || p.memory_refs_remove.is_some() {
-        // Epics do not currently persist memory_refs in storage; accepted for forward compatibility.
-    }
-
-    serde_json::to_value(updated).map_err(|e| e.to_string())
+    let response = djinn_mcp::tools::epic_ops::epic_update_with_delta(
+        &repo,
+        &project_id,
+        EpicUpdateDeltaRequest {
+            project: String::new(),
+            id: p.id,
+            title: p.title,
+            description: p.description,
+            emoji: None,
+            color: None,
+            owner: None,
+            memory_refs_add: p.memory_refs_add,
+            memory_refs_remove: p.memory_refs_remove,
+        },
+    )
+    .await;
+    serde_json::to_value(response).map_err(|e| e.to_string())
 }
 
 async fn call_epic_tasks(
@@ -523,37 +543,31 @@ async fn call_epic_tasks(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: EpicTasksParams = parse_args(arguments)?;
+    let project_id = resolve_project_id_for_agent_tools(state, arguments).await?;
     let epic_repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
-
-    let Some(epic) = epic_repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
-        return Ok(serde_json::json!({ "error": format!("epic not found: {}", p.id) }));
-    };
-
     let task_repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
-    let limit = p.limit.unwrap_or(50).clamp(1, 200);
-    let offset = p.offset.unwrap_or(0).max(0);
-    let mut all = task_repo
-        .list_by_epic(&epic.id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let total = i64::try_from(all.len()).unwrap_or(0);
-    let start = usize::try_from(offset).unwrap_or(0).min(all.len());
-    let end = start
-        .saturating_add(usize::try_from(limit).unwrap_or(0))
-        .min(all.len());
-    let tasks = all
-        .drain(start..end)
-        .map(|t| task_to_value(&t))
-        .collect::<Vec<_>>();
-    let has_more = i64::try_from(end).unwrap_or(0) < total;
-
-    Ok(serde_json::json!({
-        "tasks": tasks,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "has_more": has_more,
-    }))
+    let response = djinn_mcp::tools::epic_ops::epic_tasks(
+        &epic_repo,
+        &task_repo,
+        &project_id,
+        EpicTasksRequest {
+            project: String::new(),
+            epic_id: p.id,
+            status: None,
+            issue_type: None,
+            sort: None,
+            limit: p.limit,
+            offset: p.offset,
+        },
+    )
+    .await;
+    let mut value = serde_json::to_value(response).map_err(|e| e.to_string())?;
+    if let Some(map) = value.as_object_mut()
+        && let Some(total_count) = map.remove("total_count")
+    {
+        map.insert("total".to_string(), total_count);
+    }
+    Ok(value)
 }
 
 async fn call_task_create(
@@ -3207,6 +3221,10 @@ mod tests {
     use super::*;
     use crate::AgentType;
     use crate::test_helpers::create_test_db;
+    use crate::test_helpers::{
+        agent_context_from_db, create_test_epic, create_test_project, create_test_task,
+    };
+    use djinn_core::events::EventBus;
     use std::path::Path;
     use tokio_util::sync::CancellationToken;
 
@@ -3523,5 +3541,90 @@ mod tests {
     #[test]
     fn snapshot_architect_tool_schemas() {
         insta::assert_json_snapshot!("architect_tool_schemas", tool_schemas_architect());
+    }
+
+    #[tokio::test]
+    async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
+        let epic = epic_repo
+            .update(
+                &create_test_epic(&db, &project.id).await.id,
+                djinn_db::EpicUpdateInput {
+                    title: "test-epic",
+                    description: "test epic description",
+                    emoji: "🧪",
+                    color: "#0000ff",
+                    owner: "test-owner",
+                    memory_refs: Some("[]"),
+                },
+            )
+            .await
+            .expect("normalize test epic color");
+        let task = create_test_task(&db, &project.id, &epic.id).await;
+        let state = agent_context_from_db(db, CancellationToken::new());
+
+        let show_args = Some(
+            serde_json::json!({
+                "project": project.path,
+                "id": epic.short_id,
+            })
+            .as_object()
+            .expect("show args object")
+            .clone(),
+        );
+        let show_value = call_epic_show(&state, &show_args)
+            .await
+            .expect("epic_show succeeds");
+        assert_eq!(show_value["id"], epic.id);
+        assert_eq!(show_value["task_count"], serde_json::json!(1));
+        assert!(show_value.get("error").is_none());
+
+        let update_args = Some(
+            serde_json::json!({
+                "project": project.path,
+                "id": epic.short_id,
+                "title": "updated epic title",
+                "description": "updated epic description",
+                "status": "ignored-by-extension-contract",
+                "memory_refs_add": ["notes/adr-041"],
+            })
+            .as_object()
+            .expect("update args object")
+            .clone(),
+        );
+        let update_value = call_epic_update(&state, &update_args)
+            .await
+            .expect("epic_update succeeds");
+        let epic_model: djinn_mcp::tools::epic_ops::EpicSingleResponse =
+            serde_json::from_value(update_value.clone()).expect("parse epic update response");
+        let epic_model = epic_model.epic.expect("updated epic payload");
+        assert_eq!(epic_model.title, "updated epic title");
+        assert_eq!(epic_model.description, "updated epic description");
+        assert_eq!(epic_model.memory_refs, vec!["notes/adr-041".to_string()]);
+        assert!(update_value.get("error").is_none());
+
+        let tasks_args = Some(
+            serde_json::json!({
+                "project": project.path,
+                "id": epic.short_id,
+                "limit": 10,
+                "offset": 0,
+            })
+            .as_object()
+            .expect("tasks args object")
+            .clone(),
+        );
+        let tasks_value = call_epic_tasks(&state, &tasks_args)
+            .await
+            .expect("epic_tasks succeeds");
+        assert_eq!(tasks_value["total"], serde_json::json!(1));
+        assert_eq!(tasks_value["limit"], serde_json::json!(10));
+        assert_eq!(tasks_value["offset"], serde_json::json!(0));
+        assert_eq!(tasks_value["has_more"], serde_json::json!(false));
+        assert_eq!(tasks_value["tasks"][0]["id"], task.id);
+        assert!(tasks_value.get("total_count").is_none());
+        assert!(tasks_value.get("error").is_none());
     }
 }
