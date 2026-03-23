@@ -3125,7 +3125,15 @@ pub(crate) async fn call_tool(
     session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
-    dispatch_tool_call(state, &synthetic, worktree_path, None, session_task_id, session_role).await
+    dispatch_tool_call(
+        state,
+        &synthetic,
+        worktree_path,
+        None,
+        session_task_id,
+        session_role,
+    )
+    .await
 }
 
 fn tool_apply_patch() -> RmcpTool {

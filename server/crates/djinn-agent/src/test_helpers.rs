@@ -34,6 +34,10 @@ pub fn test_tempdir(prefix: &str) -> tempfile::TempDir {
         .expect("create test tempdir")
 }
 
+pub fn test_persistent_dir(prefix: &str) -> std::path::PathBuf {
+    test_tempdir(prefix).keep()
+}
+
 pub fn create_test_db() -> Database {
     Database::open_in_memory().expect("failed to create test database")
 }
@@ -61,10 +65,10 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
 pub async fn create_test_project(db: &Database) -> Project {
     let repo = ProjectRepository::new(db.clone(), test_events());
     let id = uuid::Uuid::now_v7();
-    let tempdir = test_tempdir("djinn-test-project-");
-    let path = tempdir.path().to_string_lossy().to_string();
+    let path = test_persistent_dir("djinn-test-project-")
+        .to_string_lossy()
+        .to_string();
     let name = format!("test-project-{id}");
-    std::mem::forget(tempdir);
     repo.create(&name, &path)
         .await
         .expect("failed to create test project")
