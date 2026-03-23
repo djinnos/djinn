@@ -605,6 +605,43 @@ expression: tool_schemas_architect()
     "name": "agent_amend_prompt"
   },
   {
+    "description": "Create a new specialist agent extending a base role (worker, reviewer, resolver). Use when existing agents lack capabilities for a specific domain.",
+    "inputSchema": {
+      "properties": {
+        "base_role": {
+          "description": "Base role to extend: worker, reviewer, or resolver",
+          "type": "string"
+        },
+        "description": {
+          "description": "Short description of what this agent specialises in",
+          "type": "string"
+        },
+        "model_preference": {
+          "description": "Preferred model ID (falls back to project default)",
+          "type": "string"
+        },
+        "name": {
+          "description": "Unique agent name within the project",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path",
+          "type": "string"
+        },
+        "system_prompt_extensions": {
+          "description": "Additional system prompt content appended to the base role prompt",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "base_role"
+      ],
+      "type": "object"
+    },
+    "name": "agent_create"
+  },
+  {
     "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",
     "inputSchema": {
       "properties": {

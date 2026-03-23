@@ -583,8 +583,11 @@ impl DjinnMcpServer {
 
         let repo = AgentRepository::new(self.state.db().clone(), self.state.event_bus());
 
+        // Normalize empty/whitespace-only agent_id to None (return all agents).
+        let agent_id = p.agent_id.filter(|s| !s.trim().is_empty());
+
         // Collect the roles to compute metrics for.
-        let agents: Vec<Agent> = if let Some(ref id_or_name) = p.agent_id {
+        let agents: Vec<Agent> = if let Some(ref id_or_name) = agent_id {
             match resolve_agent(&repo, &project_id, id_or_name).await {
                 Ok(Some(r)) => vec![r],
                 Ok(None) => {

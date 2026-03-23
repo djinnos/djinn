@@ -246,6 +246,25 @@ fn tool_role_amend_prompt() -> RmcpTool {
     )
 }
 
+fn tool_role_create() -> RmcpTool {
+    RmcpTool::new(
+        "agent_create".to_string(),
+        "Create a new specialist agent extending a base role (worker, reviewer, resolver). Use when existing agents lack capabilities for a specific domain."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["name", "base_role"],
+            "properties": {
+                "name": {"type": "string", "description": "Unique agent name within the project"},
+                "base_role": {"type": "string", "description": "Base role to extend: worker, reviewer, or resolver"},
+                "description": {"type": "string", "description": "Short description of what this agent specialises in"},
+                "system_prompt_extensions": {"type": "string", "description": "Additional system prompt content appended to the base role prompt"},
+                "model_preference": {"type": "string", "description": "Preferred model ID (falls back to project default)"}
+            }
+        }),
+    )
+}
+
 fn tool_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
@@ -653,6 +672,7 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
             .expect("serialize tool_memory_build_context"),
         serde_json::to_value(tool_role_metrics()).expect("serialize tool_role_metrics"),
         serde_json::to_value(tool_role_amend_prompt()).expect("serialize tool_role_amend_prompt"),
+        serde_json::to_value(tool_role_create()).expect("serialize tool_role_create"),
         serde_json::to_value(crate::roles::finalize::tool_submit_work())
             .expect("serialize tool_submit_work"),
     ] {

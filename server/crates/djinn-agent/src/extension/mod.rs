@@ -12,7 +12,7 @@ use super::sandbox;
 use crate::context::AgentContext;
 use crate::lsp::format_diagnostics_xml;
 use djinn_core::models::Task;
-use djinn_db::AgentRepository;
+use djinn_db::{AgentCreateInput, AgentRepository, VALID_BASE_ROLES};
 use djinn_db::EpicRepository;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
@@ -86,6 +86,7 @@ where
         "memory_build_context" => call_memory_build_context(state, &call.arguments, session_task_id).await,
         "agent_metrics" => call_agent_metrics(state, &call.arguments).await,
         "agent_amend_prompt" => call_agent_amend_prompt(state, &call.arguments).await,
+        "agent_create" => call_agent_create(state, &call.arguments).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
         "read" => call_read(state, &call.arguments, worktree_path).await,
         "write" => call_write(state, &call.arguments, worktree_path).await,
@@ -244,6 +245,16 @@ struct AgentAmendPromptParams {
     agent_id: String,
     amendment: String,
     metrics_snapshot: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AgentCreateParams {
+    project: Option<String>,
+    name: String,
+    base_role: String,
+    description: Option<String>,
+    system_prompt_extensions: Option<String>,
+    model_preference: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1080,7 +1091,10 @@ async fn call_agent_metrics(
 
     let repo = AgentRepository::new(state.db.clone(), state.event_bus.clone());
 
-    let roles: Vec<djinn_core::models::Agent> = if let Some(ref id_or_name) = p.agent_id {
+    // Normalize empty/whitespace-only agent_id to None (return all agents).
+    let agent_id = p.agent_id.filter(|s| !s.trim().is_empty());
+
+    let roles: Vec<djinn_core::models::Agent> = if let Some(ref id_or_name) = agent_id {
         let role = repo.get(id_or_name).await.map_err(|e| e.to_string())?;
         let role = match role {
             Some(r) if r.project_id == project_id => Some(r),
@@ -1187,6 +1201,59 @@ async fn call_agent_amend_prompt(
         "learned_prompt": updated.learned_prompt,
         "updated_at": updated.updated_at,
         "amendment_appended": true,
+    }))
+}
+
+async fn call_agent_create(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: AgentCreateParams = parse_args(arguments)?;
+    let project_path = resolve_project_path(p.project);
+    let project_id = project_id_for_path(state, &project_path).await?;
+
+    let name = p.name.trim().to_string();
+    if name.is_empty() {
+        return Err("name must not be empty".to_string());
+    }
+    if !VALID_BASE_ROLES.contains(&p.base_role.as_str()) {
+        return Err(format!(
+            "invalid base_role '{}'; must be one of: {}",
+            p.base_role,
+            VALID_BASE_ROLES.join(", ")
+        ));
+    }
+
+    let repo = AgentRepository::new(state.db.clone(), state.event_bus.clone());
+
+    // Enforce name uniqueness within project.
+    if let Ok(Some(_)) = repo.get_by_name_for_project(&project_id, &name).await {
+        return Err(format!("an agent named '{name}' already exists in this project"));
+    }
+
+    let created = repo
+        .create_for_project(
+            &project_id,
+            AgentCreateInput {
+                name: &name,
+                base_role: &p.base_role,
+                description: p.description.as_deref().unwrap_or(""),
+                system_prompt_extensions: p.system_prompt_extensions.as_deref().unwrap_or(""),
+                model_preference: p.model_preference.as_deref(),
+                verification_command: None,
+                mcp_servers: None,
+                skills: None,
+                is_default: false,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "agent_id": created.id,
+        "agent_name": created.name,
+        "base_role": created.base_role,
+        "created": true,
     }))
 }
 
@@ -2113,7 +2180,6 @@ async fn call_task_transition(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    use crate::task_merge::{PM_MERGE_ACTIONS, VerificationGateFn, merge_and_transition};
     use djinn_core::models::{TaskStatus, TransitionAction};
     let p: TaskTransitionParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
@@ -2122,7 +2188,7 @@ async fn call_task_transition(
     };
     let action = TransitionAction::parse(&p.action).map_err(|e| e.to_string())?;
 
-    // Lead approve: squash merge (verification gate runs inside merge_and_transition).
+    // Lead approve: transition to approved; coordinator handles PR creation separately.
     if action == TransitionAction::LeadApprove {
         if task.status != TaskStatus::InLeadIntervention.as_str() {
             return Ok(
@@ -2130,32 +2196,13 @@ async fn call_task_transition(
             );
         }
 
-        let gate_state = state.clone();
-        let gate: VerificationGateFn = Box::new(move |task_id: String, project_path: String| {
-            let s = gate_state.clone();
-            Box::pin(async move {
-                crate::actors::slot::verification::run_verification_gate(
-                    &task_id,
-                    &project_path,
-                    &s,
-                )
-                .await
-            })
-        });
-        let (merge_action, reason) =
-            merge_and_transition(&task.id, state, &PM_MERGE_ACTIONS, Some(gate))
-                .await
-                .unwrap_or((
-                    TransitionAction::LeadInterventionComplete,
-                    Some("merge_and_transition returned None".to_string()),
-                ));
         let updated = repo
             .transition(
                 &task.id,
-                merge_action,
+                TransitionAction::LeadApprove,
                 "lead-agent",
                 "lead",
-                reason.as_deref(),
+                None,
                 None,
             )
             .await
@@ -2649,6 +2696,25 @@ fn tool_role_amend_prompt() -> RmcpTool {
     )
 }
 
+fn tool_role_create() -> RmcpTool {
+    RmcpTool::new(
+        "agent_create".to_string(),
+        "Create a new specialist agent extending a base role (worker, reviewer, resolver). Use when existing agents lack capabilities for a specific domain.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["name", "base_role"],
+            "properties": {
+                "project": {"type": "string", "description": "Absolute project path"},
+                "name": {"type": "string", "description": "Unique agent name within the project"},
+                "base_role": {"type": "string", "description": "Base role to extend: worker, reviewer, or resolver"},
+                "description": {"type": "string", "description": "Short description of what this agent specialises in"},
+                "system_prompt_extensions": {"type": "string", "description": "Additional system prompt content appended to the base role prompt"},
+                "model_preference": {"type": "string", "description": "Preferred model ID (falls back to project default)"}
+            }
+        }),
+    )
+}
+
 fn tool_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
@@ -3014,6 +3080,7 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
             .expect("serialize tool_memory_build_context"),
         serde_json::to_value(tool_role_metrics()).expect("serialize tool_role_metrics"),
         serde_json::to_value(tool_role_amend_prompt()).expect("serialize tool_role_amend_prompt"),
+        serde_json::to_value(tool_role_create()).expect("serialize tool_role_create"),
         serde_json::to_value(crate::roles::finalize::tool_submit_work())
             .expect("serialize tool_submit_work"),
     ] {

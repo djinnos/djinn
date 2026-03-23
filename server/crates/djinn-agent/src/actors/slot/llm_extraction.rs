@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use djinn_db::{NoteRepository, ProjectRepository, SessionRepository, TaskRepository};
+use djinn_db::{NoteRepository, ProjectRepository, SessionRepository, TaskRepository, folder_for_type};
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
 use serde::Deserialize;
@@ -28,6 +28,14 @@ use crate::context::AgentContext;
 
 const SYSTEM_PROMPT: &str = "You are a knowledge extractor. Given a completed agent session \
 summary, extract reusable knowledge as structured notes. Respond with valid JSON only.";
+
+/// Maximum dedup candidates to check before creating a new note.
+const DEDUP_CANDIDATE_LIMIT: usize = 3;
+
+/// BM25 score threshold above which we consider a candidate a near-duplicate
+/// and skip creation. The `dedup_candidates` query already filters to > -3.0;
+/// we raise the bar here to avoid false merges from loosely related notes.
+const DEDUP_SKIP_SCORE_THRESHOLD: f64 = 2.0;
 
 // ── JSON response shape ───────────────────────────────────────────────────────
 
@@ -303,6 +311,34 @@ async fn run_llm_extraction_inner(
 
     for (note_type, notes) in note_pairs {
         for note in notes {
+            // ── Dedup check: skip if a near-duplicate already exists ─────
+            let folder = folder_for_type(note_type);
+            let skip = match note_repo
+                .dedup_candidates(&project.id, folder, note_type, &note.content, DEDUP_CANDIDATE_LIMIT)
+                .await
+            {
+                Ok(candidates) => candidates
+                    .first()
+                    .is_some_and(|c| c.score >= DEDUP_SKIP_SCORE_THRESHOLD),
+                Err(e) => {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        error = %e,
+                        "llm_extraction: dedup candidate lookup failed; proceeding with create"
+                    );
+                    false
+                }
+            };
+            if skip {
+                tracing::debug!(
+                    session_id = %session_id,
+                    note_type = %note_type,
+                    title = %note.title,
+                    "llm_extraction: skipping near-duplicate note"
+                );
+                continue;
+            }
+
             let content_with_provenance = format!("{}{}", note.content, provenance);
             match note_repo
                 .create(

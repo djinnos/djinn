@@ -25,5 +25,6 @@ expression: names
   "memory_build_context",
   "agent_metrics",
   "agent_amend_prompt",
+  "agent_create",
   "submit_work"
 ]
