@@ -3220,6 +3220,9 @@ mod tests {
     use super::*;
     use crate::AgentType;
     use crate::test_helpers::create_test_db;
+    use crate::test_helpers::{
+        agent_context_from_db, create_test_epic, create_test_project, create_test_task,
+    };
     use std::path::Path;
     use tokio_util::sync::CancellationToken;
 
@@ -3536,5 +3539,79 @@ mod tests {
     #[test]
     fn snapshot_architect_tool_schemas() {
         insta::assert_json_snapshot!("architect_tool_schemas", tool_schemas_architect());
+    }
+
+    #[tokio::test]
+    async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let task = create_test_task(&db, &project.id, &epic.id).await;
+        let state = agent_context_from_db(db, CancellationToken::new());
+
+        let show_args = Some(
+            serde_json::json!({
+                "project": project.path,
+                "id": epic.short_id,
+            })
+            .as_object()
+            .expect("show args object")
+            .clone(),
+        );
+        let show_value = call_epic_show(&state, &show_args)
+            .await
+            .expect("epic_show succeeds");
+        assert_eq!(show_value["id"], epic.id);
+        assert_eq!(show_value["task_count"], serde_json::json!(1));
+        assert!(show_value.get("error").is_none());
+
+        let update_args = Some(
+            serde_json::json!({
+                "project": project.path,
+                "id": epic.short_id,
+                "title": "updated epic title",
+                "description": "updated epic description",
+                "status": "ignored-by-extension-contract",
+                "memory_refs_add": ["notes/adr-041"],
+            })
+            .as_object()
+            .expect("update args object")
+            .clone(),
+        );
+        let update_value = call_epic_update(&state, &update_args)
+            .await
+            .expect("epic_update succeeds");
+        assert_eq!(update_value["title"], "updated epic title");
+        assert_eq!(
+            update_value["description"],
+            "updated epic description"
+        );
+        assert_eq!(
+            update_value["memory_refs"],
+            serde_json::json!(["notes/adr-041"])
+        );
+        assert!(update_value.get("error").is_none());
+
+        let tasks_args = Some(
+            serde_json::json!({
+                "project": project.path,
+                "id": epic.short_id,
+                "limit": 10,
+                "offset": 0,
+            })
+            .as_object()
+            .expect("tasks args object")
+            .clone(),
+        );
+        let tasks_value = call_epic_tasks(&state, &tasks_args)
+            .await
+            .expect("epic_tasks succeeds");
+        assert_eq!(tasks_value["total"], serde_json::json!(1));
+        assert_eq!(tasks_value["limit"], serde_json::json!(10));
+        assert_eq!(tasks_value["offset"], serde_json::json!(0));
+        assert_eq!(tasks_value["has_more"], serde_json::json!(false));
+        assert_eq!(tasks_value["tasks"][0]["id"], task.id);
+        assert!(tasks_value.get("total_count").is_none());
+        assert!(tasks_value.get("error").is_none());
     }
 }
