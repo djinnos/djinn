@@ -76,7 +76,7 @@ export async function retryServerDiscovery(): Promise<number> {
 }
 
 export type ConnectionMode =
-  | { type: "embedded" }
+  | { type: "daemon" }
   | { type: "remote"; url: string };
 
 export async function getConnectionMode(): Promise<ConnectionMode> {

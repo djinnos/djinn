@@ -4,19 +4,23 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConnectionMode {
-    /// Run the server in-process as a background tokio task (default).
-    Embedded,
+    /// Spawn and manage a local djinn-server daemon (default).
+    ///
+    /// The daemon is a separate process that survives desktop restarts and can
+    /// be shared with Claude Code and other MCP clients.
+    #[serde(alias = "embedded")]
+    Daemon,
     /// Connect to an externally-managed server (VPS, WSL, etc.).
     Remote { url: String },
 }
 
 impl Default for ConnectionMode {
     fn default() -> Self {
-        ConnectionMode::Embedded
+        ConnectionMode::Daemon
     }
 }
 
-/// Load the persisted connection mode, falling back to `Embedded` on any error.
+/// Load the persisted connection mode, falling back to `Daemon` on any error.
 pub fn load() -> ConnectionMode {
     let path = prefs_path();
     let Ok(content) = std::fs::read_to_string(&path) else {

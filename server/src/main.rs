@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -232,61 +231,9 @@ async fn run_stdio_bridge(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn ensure_daemon_running(port: u16, db_path: Option<&std::path::Path>) -> Result<(), String> {
-    if let Some(info) = read_daemon_info()
-        && daemon::pid_is_alive(info.pid)
-    {
-        tracing::info!(pid = info.pid, port = info.port, "daemon already running");
-        return Ok(());
-    }
-
     let exe = std::env::current_exe().map_err(|e| format!("resolve current exe: {e}"))?;
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--port").arg(port.to_string());
-    if let Some(path) = db_path {
-        cmd.arg("--db-path").arg(path);
-    }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    // Place the daemon in its own session so it is immune to SIGHUP/SIGINT
-    // from the parent's terminal or process group (e.g. when a Claude Code
-    // stdio bridge exits or the user closes a terminal tab).
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: setsid() is async-signal-safe (POSIX) and has no
-        // preconditions beyond "caller is not already a session leader",
-        // which holds for a freshly forked child.
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn daemon process: {e}"))?;
-
-    for _ in 0..40 {
-        if let Some(info) = read_daemon_info()
-            && daemon::pid_is_alive(info.pid)
-        {
-            tracing::info!(pid = info.pid, port = info.port, "daemon started");
-            return Ok(());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-
-    match child.try_wait() {
-        Ok(Some(status)) => Err(format!("daemon process exited early: {status}")),
-        Ok(None) => Err("daemon did not become healthy in time".to_string()),
-        Err(e) => Err(format!("check daemon process status: {e}")),
-    }
+    daemon::ensure_running(port, db_path, &exe).await?;
+    Ok(())
 }
 
 fn resolve_upstream_url(
@@ -303,9 +250,7 @@ fn resolve_upstream_url(
 }
 
 fn read_daemon_info() -> Option<daemon::DaemonInfo> {
-    let path = daemon::daemon_file_path().ok()?;
-    let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<daemon::DaemonInfo>(&raw).ok()
+    daemon::read_info_default()
 }
 
 fn init_logging() -> (WorkerGuard, WorkerGuard) {

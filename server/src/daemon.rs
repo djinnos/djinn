@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -77,7 +78,7 @@ pub fn acquire(port: u16) -> Result<DaemonLock, String> {
     Ok(DaemonLock { path })
 }
 
-fn read_daemon_info(path: &Path) -> Result<Option<DaemonInfo>, String> {
+pub fn read_daemon_info(path: &Path) -> Result<Option<DaemonInfo>, String> {
     let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -166,6 +167,85 @@ pub fn pid_is_alive(pid: u32) -> bool {
     #[cfg(not(unix))]
     {
         false
+    }
+}
+
+/// Read daemon info from the default path (`~/.djinn/daemon.json`).
+pub fn read_info_default() -> Option<DaemonInfo> {
+    let path = daemon_file_path().ok()?;
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Ensure a daemon is running on the given port, spawning one from
+/// `server_bin` if necessary. Returns the [`DaemonInfo`] of the running
+/// daemon.
+pub async fn ensure_running(
+    port: u16,
+    db_path: Option<&Path>,
+    server_bin: &Path,
+) -> Result<DaemonInfo, String> {
+    if let Some(info) = read_info_default() {
+        if pid_is_alive(info.pid) {
+            tracing::info!(pid = info.pid, port = info.port, "daemon already running");
+            return Ok(info);
+        }
+    }
+
+    let child = spawn_daemon(server_bin, port, db_path)?;
+    wait_for_daemon(child).await
+}
+
+fn spawn_daemon(
+    server_bin: &Path,
+    port: u16,
+    db_path: Option<&Path>,
+) -> Result<std::process::Child, String> {
+    let mut cmd = std::process::Command::new(server_bin);
+    cmd.arg("--port").arg(port.to_string());
+    if let Some(path) = db_path {
+        cmd.arg("--db-path").arg(path);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    // Place the daemon in its own session so it is immune to SIGHUP/SIGINT
+    // from the parent's terminal or process group.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid() is async-signal-safe (POSIX) and has no
+        // preconditions beyond "caller is not already a session leader".
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    cmd.spawn()
+        .map_err(|e| format!("spawn daemon process from {}: {e}", server_bin.display()))
+}
+
+async fn wait_for_daemon(mut child: std::process::Child) -> Result<DaemonInfo, String> {
+    for _ in 0..40 {
+        if let Some(info) = read_info_default() {
+            if pid_is_alive(info.pid) {
+                tracing::info!(pid = info.pid, port = info.port, "daemon started");
+                return Ok(info);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    match child.try_wait() {
+        Ok(Some(status)) => Err(format!("daemon process exited early: {status}")),
+        Ok(None) => Err("daemon did not become healthy in time".to_string()),
+        Err(e) => Err(format!("check daemon process status: {e}")),
     }
 }
 

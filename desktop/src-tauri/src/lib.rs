@@ -1,6 +1,5 @@
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
-use tokio_util::sync::CancellationToken;
 
 mod auth;
 mod commands;
@@ -13,12 +12,6 @@ pub use server::ServerState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Shared cancellation token — cancelled on window close to trigger
-    // graceful shutdown of the embedded server.
-    let shutdown_token = CancellationToken::new();
-    let shutdown_token_for_exit = shutdown_token.clone();
-    let shutdown_token_for_setup = shutdown_token.clone();
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
@@ -31,19 +24,17 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(server::init_server_state()))
-        .manage(shutdown_token)
         .setup(move |app| {
             let app_handle = app.handle().clone();
-            let cancel = shutdown_token_for_setup;
 
             // Start or connect to server based on configured connection mode.
             tauri::async_runtime::spawn(async move {
                 let mode = connection_mode::load();
 
                 let startup_result = match mode {
-                    connection_mode::ConnectionMode::Embedded => {
-                        log::info!("Connection mode: embedded — starting server in-process");
-                        server::start_embedded(cancel).await
+                    connection_mode::ConnectionMode::Daemon => {
+                        log::info!("Connection mode: daemon — ensuring server is running");
+                        server::ensure_daemon().await
                     }
                     connection_mode::ConnectionMode::Remote { ref url } => {
                         log::info!("Connection mode: remote — connecting to {url}");
@@ -127,12 +118,6 @@ pub fn run() {
             }
 
             Ok(())
-        })
-        .on_window_event(move |_window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
-                // Signal the embedded server to shut down gracefully.
-                shutdown_token_for_exit.cancel();
-            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::start_github_login,

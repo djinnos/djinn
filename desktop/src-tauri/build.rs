@@ -11,6 +11,8 @@ fn main() {
             let _ = std::fs::create_dir_all(bin_dir);
             let _ = std::fs::write(&sidecar, "placeholder");
         }
+        // Make the target triple available at compile time for sidecar resolution.
+        println!("cargo:rustc-env=DJINN_TARGET_TRIPLE={target_triple}");
     }
 
     tauri_build::build()
