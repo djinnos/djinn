@@ -289,8 +289,26 @@ export function KanbanBoard({
       columnMap.set(epicKey, existing);
     }
 
+    // Seed empty epics into the Open column so they're visible on the board
+    const epicIdsWithTasks = new Set<string>();
+    for (const columnMap of byColumn.values()) {
+      for (const epicKey of columnMap.keys()) {
+        epicIdsWithTasks.add(epicKey);
+      }
+    }
+    const openColumn = byColumn.get("open");
+    if (openColumn) {
+      const visibleEpicIds = epicFilters.length > 0 ? new Set(epicFilters) : null;
+      for (const [epicId, epic] of epics) {
+        if (epic.status !== "open") continue;
+        if (epicIdsWithTasks.has(epicId)) continue;
+        if (visibleEpicIds && !visibleEpicIds.has(epicId)) continue;
+        openColumn.set(epicId, []);
+      }
+    }
+
     return byColumn;
-  }, [filteredTasks]);
+  }, [filteredTasks, epics, epicFilters]);
 
   const toggleEpic = (columnKey: ColumnKey, epicKey: string) => {
     const collapseKey = `${columnKey}:${epicKey}`;
@@ -455,6 +473,7 @@ export function KanbanBoard({
           const statusMap = groupedByStatusThenEpic.get(column.key) ?? new Map<string, Task[]>();
           const epicGroups = Array.from(statusMap.entries());
           const taskCount = epicGroups.reduce((total, [, epicTasks]) => total + epicTasks.length, 0);
+          const hasContent = epicGroups.length > 0;
 
           return (
             <div key={column.key} className="flex min-h-0 min-w-[360px] flex-1">
@@ -491,12 +510,12 @@ export function KanbanBoard({
               </div>
 
               <CardContent className="relative z-10 flex-1 overflow-y-auto px-3 pt-4">
-                {taskCount === 0 ? (
+                {!hasContent ? (
                   <p className="px-1 text-xs text-muted-foreground/50">No tasks</p>
                 ) : (
                 <div className="flex flex-col gap-3.5">
                   {epicGroups.map(([epicKey, epicTasks]) => {
-                    const firstTaskEpicId = epicTasks[0]?.epic_id;
+                    const firstTaskEpicId = epicTasks[0]?.epic_id ?? (epicKey !== "no-epic" ? epicKey : undefined);
                     const epic = firstTaskEpicId ? epics.get(firstTaskEpicId) : undefined;
                     const collapseKey = `${column.key}:${epicKey}`;
                     const isCollapsed = !!collapsedEpics[collapseKey];
@@ -515,7 +534,11 @@ export function KanbanBoard({
                             />
                           </div>
 
-                          {!isCollapsed && (
+                          {!isCollapsed && epicTasks.length === 0 && (
+                            <p className="px-1 pt-1.5 text-xs text-muted-foreground/50">No tasks yet</p>
+                          )}
+
+                          {!isCollapsed && epicTasks.length > 0 && (
                             column.key === "done" ? (
                               <ul className="flex flex-col pt-1.5" onClick={(e) => e.stopPropagation()}>
                                 {epicTasks.map((task) => (

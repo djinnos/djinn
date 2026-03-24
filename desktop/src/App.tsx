@@ -15,6 +15,10 @@ import { useEffect } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
 import { useSelectedProjectId } from "@/stores/useProjectStore";
 import { Navigate, Route, Routes } from "react-router-dom";
+import { useProviderGateStore } from "@/stores/providerGateStore";
+import { ProviderOnboarding } from "@/components/ProviderOnboarding";
+import { useModelGateStore } from "@/stores/modelGateStore";
+import { ModelOnboarding } from "@/components/ModelOnboarding";
 
 function MainLayout() {
   return (
@@ -58,9 +62,18 @@ function MainLayout() {
 export default function App() {
   const { status, error, retry, isRetrying } = useServerHealth();
   const selectedProjectId = useSelectedProjectId();
+  const { hasProvider, refresh: refreshGate } = useProviderGateStore();
+  const { hasModels, refresh: refreshModelGate } = useModelGateStore();
 
   useProjectsBootstrap(status);
   useEventSource(selectedProjectId);
+
+  useEffect(() => {
+    if (status === 'connected') {
+      void refreshGate();
+      void refreshModelGate();
+    }
+  }, [status, refreshGate, refreshModelGate]);
 
   useEffect(() => {
     if (status === "connected") {
@@ -86,6 +99,14 @@ export default function App() {
         isRetrying={isRetrying}
       />
     );
+  }
+
+  if (hasProvider === false) {
+    return <ProviderOnboarding />;
+  }
+
+  if (hasModels === false) {
+    return <ModelOnboarding />;
   }
 
   return <MainLayout />;
