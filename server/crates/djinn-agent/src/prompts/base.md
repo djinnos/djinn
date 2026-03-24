@@ -46,6 +46,7 @@ You have access to these tools via the `djinn` extension:
 - `task_comment_add(id, body)` — leave notes for other agents
 - `memory_read(project, url)` — read a knowledge base note by URL
 - `memory_search(project, query)` — search the project knowledge base for ADRs, patterns, decisions
+- `ci_job_log(job_id, step?)` — fetch the full log for a GitHub Actions CI job. When the activity log reports a CI failure with a job_id, call this to see the actual error output. Use the optional `step` parameter to filter to a specific failed step (e.g. `step="Tests"`). If the output is large, use `output_view` / `output_grep` to navigate.
 - `shell(command)` — execute shell commands in the workspace
 
 {{setup_commands_section}}

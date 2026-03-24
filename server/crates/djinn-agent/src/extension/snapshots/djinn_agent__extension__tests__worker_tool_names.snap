@@ -1,6 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 3213
+assertion_line: 3924
 expression: names
 ---
 [
@@ -13,6 +13,7 @@ expression: names
   "shell",
   "read",
   "lsp",
+  "ci_job_log",
   "output_view",
   "output_grep",
   "write",
