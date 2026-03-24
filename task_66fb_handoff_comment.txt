@@ -1,0 +1,39 @@
+Follow-on task 66fb import/call pattern from fresh main:
+
+```rust
+use djinn_mcp::server::DjinnMcpServer;
+use djinn_mcp::tools::task_tools::{
+    CommentTaskRequest, CreateTaskRequest, TransitionTaskRequest, UpdateTaskRequest,
+    add_task_comment, create_task, transition_task, update_task,
+};
+
+let server = DjinnMcpServer::new(state.clone());
+let project_id = server.require_project_id_public(project_path).await?;
+
+let created = create_task(
+    &server,
+    &project_id,
+    CreateTaskRequest {
+        title: title.to_string(),
+        description: description.to_string(),
+        design: design.to_string(),
+        issue_type: "task".to_string(),
+        priority,
+        owner: owner.to_string(),
+        status: None,
+        acceptance_criteria: Some(acceptance_criteria),
+        labels,
+        memory_refs,
+        blocked_by_refs,
+        agent_type,
+        epic_ref,
+    },
+)
+.await;
+
+let updated = update_task(&server, &project_id, UpdateTaskRequest { /* ... */ }).await;
+let transitioned = transition_task(&server, &project_id, TransitionTaskRequest { /* ... */ }).await;
+let commented = add_task_comment(&server, &project_id, CommentTaskRequest { /* ... */ }).await;
+```
+
+Caller contract: reuse a real `DjinnMcpServer` backed by MCP `McpState`, resolve the project path once via `require_project_id_public`, and pass the returned canonical project id into the shared ops so task resolution, epic lookup, blocker validation, repository writes, and event-bus side effects stay identical to the MCP tool wrappers.

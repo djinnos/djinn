@@ -20,10 +20,10 @@ use djinn_db::SessionRepository;
 use djinn_db::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository};
 
 mod board;
-mod ops;
+pub mod ops;
 mod types;
 
-use self::ops::{
+pub use self::ops::{
     CommentTaskRequest, CreateTaskRequest, TransitionTaskRequest, UpdateTaskRequest,
     add_task_comment, create_task, transition_task, update_task,
 };
@@ -43,6 +43,84 @@ fn collapse_acceptance_criteria(
     })
 }
 
+fn validate_create_request(request: &CreateTaskRequest) -> Result<(), ErrorResponse> {
+    validate_title(&request.title).map_err(ErrorResponse::new)?;
+    validate_description(&request.description).map_err(ErrorResponse::new)?;
+    validate_design(&request.design).map_err(ErrorResponse::new)?;
+    validate_issue_type(&request.issue_type).map_err(ErrorResponse::new)?;
+    validate_priority(request.priority).map_err(ErrorResponse::new)?;
+    validate_owner(&request.owner).map_err(ErrorResponse::new)?;
+
+    if let Some(status) = request.status.as_deref() {
+        validate_task_create_status(Some(status)).map_err(ErrorResponse::new)?;
+    } else {
+        validate_task_create_status(None).map_err(ErrorResponse::new)?;
+    }
+
+    validate_labels(&request.labels).map_err(ErrorResponse::new)?;
+
+    if let Some(ac) = request.acceptance_criteria.as_ref() {
+        validate_ac_count(ac.len()).map_err(ErrorResponse::new)?;
+    }
+
+    let uses_simple = IssueType::parse(&request.issue_type)
+        .map(|issue_type| issue_type.uses_simple_lifecycle())
+        .unwrap_or(false);
+    if !uses_simple {
+        let ac_empty = request
+            .acceptance_criteria
+            .as_ref()
+            .map(|ac| ac.is_empty())
+            .unwrap_or(true);
+        if ac_empty {
+            return Err(ErrorResponse::new(
+                "acceptance_criteria is required for task/feature/bug issue types",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_update_request(request: &UpdateTaskRequest) -> Result<(), ErrorResponse> {
+    if let Some(title) = request.title.as_deref() {
+        validate_title(title).map_err(ErrorResponse::new)?;
+    }
+    if let Some(description) = request.description.as_deref() {
+        validate_description(description).map_err(ErrorResponse::new)?;
+    }
+    if let Some(design) = request.design.as_deref() {
+        validate_design(design).map_err(ErrorResponse::new)?;
+    }
+    if let Some(priority) = request.priority {
+        validate_priority(priority).map_err(ErrorResponse::new)?;
+    }
+    if let Some(owner) = request.owner.as_deref() {
+        validate_owner(owner).map_err(ErrorResponse::new)?;
+    }
+    validate_labels(&request.labels_add).map_err(ErrorResponse::new)?;
+    if let Some(ac) = request.acceptance_criteria.as_ref() {
+        validate_ac_count(ac.len()).map_err(ErrorResponse::new)?;
+    }
+    Ok(())
+}
+
+fn validate_transition_request(request: &TransitionTaskRequest) -> Result<(), ErrorResponse> {
+    validate_actor_id(&request.actor_id).map_err(ErrorResponse::new)?;
+    validate_actor_role(&request.actor_role).map_err(ErrorResponse::new)?;
+    if let Some(reason) = request.reason.as_deref() {
+        validate_reason(reason).map_err(ErrorResponse::new)?;
+    }
+    Ok(())
+}
+
+fn validate_comment_request(request: &CommentTaskRequest) -> Result<(), ErrorResponse> {
+    validate_body(&request.body).map_err(ErrorResponse::new)?;
+    validate_actor_id(&request.actor_id).map_err(ErrorResponse::new)?;
+    validate_actor_role(&request.actor_role).map_err(ErrorResponse::new)?;
+    Ok(())
+}
+
 // ── Tool implementations ─────────────────────────────────────────────────────
 
 #[tool_router(router = task_tool_router, vis = "pub")]
@@ -55,62 +133,28 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskCreateParams>,
     ) -> Json<ErrorOr<TaskResponse>> {
-        // Validate fields.
-        let title = match validate_title(&p.title) {
-            Ok(t) => t,
-            Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e))),
+        let description = p.description.unwrap_or_default();
+        let design = p.design.unwrap_or_default();
+        let issue_type = p.issue_type.unwrap_or_else(|| "task".to_owned());
+        let status = p.status;
+        let request = CreateTaskRequest {
+            title: p.title,
+            description,
+            design,
+            issue_type,
+            priority: p.priority.unwrap_or(0),
+            owner: p.owner.unwrap_or_default(),
+            status,
+            acceptance_criteria: collapse_acceptance_criteria(p.acceptance_criteria),
+            labels: p.labels.unwrap_or_default(),
+            memory_refs: p.memory_refs.unwrap_or_default(),
+            blocked_by_refs: p.blocked_by.unwrap_or_default(),
+            agent_type: p.agent_type,
+            epic_ref: p.epic_id,
         };
-        let description = p.description.as_deref().unwrap_or("");
-        if let Err(e) = validate_description(description) {
-            return Json(ErrorOr::Error(ErrorResponse::new(e)));
-        }
-        let design = p.design.as_deref().unwrap_or("");
-        if let Err(e) = validate_design(design) {
-            return Json(ErrorOr::Error(ErrorResponse::new(e)));
-        }
-        let issue_type = p.issue_type.as_deref().unwrap_or("task");
-        if let Err(e) = validate_issue_type(issue_type) {
-            return Json(ErrorOr::Error(ErrorResponse::new(e)));
-        }
-        let priority = p.priority.unwrap_or(0);
-        if let Err(e) = validate_priority(priority) {
-            return Json(ErrorOr::Error(ErrorResponse::new(e)));
-        }
-        let owner = match validate_owner(p.owner.as_deref().unwrap_or("")) {
-            Ok(o) => o,
-            Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e))),
-        };
-        let status = match validate_task_create_status(p.status.as_deref()) {
-            Ok(s) => s.map(str::to_owned),
-            Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e))),
-        };
-        if let Some(ref labels) = p.labels
-            && let Err(e) = validate_labels(labels)
-        {
-            return Json(ErrorOr::Error(ErrorResponse::new(e)));
-        }
-        if let Some(ref ac) = p.acceptance_criteria
-            && let Err(e) = validate_ac_count(ac.len())
-        {
-            return Json(ErrorOr::Error(ErrorResponse::new(e)));
-        }
-        // Non-simple-lifecycle tasks (task, feature, bug) require acceptance criteria.
-        // Simple-lifecycle types (decomposition, spike, research, review) are created
-        // by the system without AC — the work product IS the output of their session.
-        let uses_simple = IssueType::parse(issue_type)
-            .map(|it| it.uses_simple_lifecycle())
-            .unwrap_or(false);
-        if !uses_simple {
-            let ac_empty = p
-                .acceptance_criteria
-                .as_ref()
-                .map(|ac| ac.is_empty())
-                .unwrap_or(true);
-            if ac_empty {
-                return Json(ErrorOr::Error(ErrorResponse::new(
-                    "acceptance_criteria is required for task/feature/bug issue types",
-                )));
-            }
+
+        if let Err(e) = validate_create_request(&request) {
+            return Json(ErrorOr::Error(e));
         }
 
         let project_id = match self.require_project_id(&p.project).await {
@@ -118,26 +162,7 @@ impl DjinnMcpServer {
             Err(e) => return Json(ErrorOr::Error(e)),
         };
 
-        create_task(
-            self,
-            &project_id,
-            CreateTaskRequest {
-                title,
-                description: description.to_owned(),
-                design: design.to_owned(),
-                issue_type: issue_type.to_owned(),
-                priority,
-                owner,
-                status,
-                acceptance_criteria: collapse_acceptance_criteria(p.acceptance_criteria),
-                labels: p.labels.unwrap_or_default(),
-                memory_refs: p.memory_refs.unwrap_or_default(),
-                blocked_by_refs: p.blocked_by.unwrap_or_default(),
-                agent_type: p.agent_type,
-                epic_ref: p.epic_id,
-            },
-        )
-        .await
+        create_task(self, &project_id, request).await
     }
 
     /// Update allowed fields of a work item.
@@ -148,41 +173,30 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskUpdateParams>,
     ) -> Json<ErrorOr<TaskResponse>> {
-        // Validate provided fields.
-        if let Some(ref t) = p.title
-            && let Err(e) = validate_title(t)
-        {
-            return Json(ErrorOr::Error(ErrorResponse::new(e)));
-        }
-        if let Some(ref d) = p.description
-            && let Err(e) = validate_description(d)
-        {
-            return Json(ErrorOr::Error(ErrorResponse::new(e)));
-        }
-        if let Some(ref d) = p.design
-            && let Err(e) = validate_design(d)
-        {
-            return Json(ErrorOr::Error(ErrorResponse::new(e)));
-        }
-        if let Some(prio) = p.priority
-            && let Err(e) = validate_priority(prio)
-        {
-            return Json(ErrorOr::Error(ErrorResponse::new(e)));
-        }
-        if let Some(ref o) = p.owner
-            && let Err(e) = validate_owner(o)
-        {
-            return Json(ErrorOr::Error(ErrorResponse::new(e)));
-        }
-        if let Some(ref add) = p.labels_add
-            && let Err(e) = validate_labels(add)
-        {
-            return Json(ErrorOr::Error(ErrorResponse::new(e)));
-        }
-        if let Some(ref ac) = p.acceptance_criteria
-            && let Err(e) = validate_ac_count(ac.len())
-        {
-            return Json(ErrorOr::Error(ErrorResponse::new(e)));
+        let request = UpdateTaskRequest {
+            id: p.id,
+            title: p.title,
+            description: p.description,
+            design: p.design,
+            priority: p.priority,
+            owner: p.owner,
+            acceptance_criteria: collapse_acceptance_criteria(p.acceptance_criteria),
+            labels_add: p.labels_add.unwrap_or_default(),
+            labels_remove: p.labels_remove.unwrap_or_default().into_iter().collect(),
+            memory_refs_add: p.memory_refs_add.unwrap_or_default(),
+            memory_refs_remove: p
+                .memory_refs_remove
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            blocked_by_add_refs: p.blocked_by_add.unwrap_or_default(),
+            blocked_by_remove_refs: p.blocked_by_remove.unwrap_or_default(),
+            agent_type: p.agent_type,
+            epic_ref: p.epic_id,
+        };
+
+        if let Err(e) = validate_update_request(&request) {
+            return Json(ErrorOr::Error(e));
         }
 
         let project_id = match self.require_project_id(&p.project).await {
@@ -190,32 +204,7 @@ impl DjinnMcpServer {
             Err(e) => return Json(ErrorOr::Error(e)),
         };
 
-        update_task(
-            self,
-            &project_id,
-            UpdateTaskRequest {
-                id: p.id,
-                title: p.title,
-                description: p.description,
-                design: p.design,
-                priority: p.priority,
-                owner: p.owner,
-                acceptance_criteria: collapse_acceptance_criteria(p.acceptance_criteria),
-                labels_add: p.labels_add.unwrap_or_default(),
-                labels_remove: p.labels_remove.unwrap_or_default().into_iter().collect(),
-                memory_refs_add: p.memory_refs_add.unwrap_or_default(),
-                memory_refs_remove: p
-                    .memory_refs_remove
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect(),
-                blocked_by_add_refs: p.blocked_by_add.unwrap_or_default(),
-                blocked_by_remove_refs: p.blocked_by_remove.unwrap_or_default(),
-                agent_type: p.agent_type,
-                epic_ref: p.epic_id,
-            },
-        )
-        .await
+        update_task(self, &project_id, request).await
     }
 
     /// Show details of a work item. Accepts task UUID or short_id.
@@ -802,6 +791,17 @@ impl DjinnMcpServer {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 impl DjinnMcpServer {
+    /// Resolve an absolute project path to the canonical project UUID required by the public
+    /// task mutation seam. External crates should call
+    /// `djinn_mcp::tools::task_tools::{create_task, update_task, transition_task, add_task_comment}`
+    /// with this project ID rather than re-implementing MCP/project lookup locally.
+    pub async fn require_project_id_public(
+        &self,
+        project: &str,
+    ) -> std::result::Result<String, ErrorResponse> {
+        self.require_project_id(project).await
+    }
+
     async fn require_project_id(
         &self,
         project: &str,

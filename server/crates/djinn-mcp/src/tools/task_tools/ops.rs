@@ -1,3 +1,24 @@
+//! Public task-mutation operation seam shared by MCP handlers and external adapters.
+//!
+//! External callers should construct a [`DjinnMcpServer`] from an existing [`crate::McpState`],
+//! resolve the project once with [`DjinnMcpServer::require_project_id_public`], then call the
+//! mutation helpers re-exported from [`crate::tools::task_tools`]:
+//!
+//! ```ignore
+//! use djinn_mcp::server::DjinnMcpServer;
+//! use djinn_mcp::tools::task_tools::{
+//!     CommentTaskRequest, CreateTaskRequest, TransitionTaskRequest, UpdateTaskRequest,
+//!     add_task_comment, create_task, transition_task, update_task,
+//! };
+//!
+//! let server = DjinnMcpServer::new(state.clone());
+//! let project_id = server.require_project_id_public(project_path).await?;
+//! let response = create_task(&server, &project_id, CreateTaskRequest { /* ... */ }).await;
+//! ```
+//!
+//! Contract: callers must supply a server backed by real MCP state so repository/event-bus access,
+//! project resolution, and blocker validation behave exactly like the MCP tool wrappers.
+
 use rmcp::Json;
 
 use std::collections::HashSet;
@@ -9,7 +30,7 @@ use crate::tools::task_tools::types::{
 use djinn_core::models::{ActivityEntry, Task, TaskStatus, TransitionAction};
 use djinn_db::TaskRepository;
 
-pub(super) fn task_to_response(task: &Task) -> TaskResponse {
+pub(crate) fn task_to_response(task: &Task) -> TaskResponse {
     TaskResponse {
         id: task.id.clone(),
         short_id: task.short_id.clone(),
@@ -53,7 +74,7 @@ pub(super) fn task_to_response(task: &Task) -> TaskResponse {
     }
 }
 
-pub(super) fn activity_entry_response(entry: ActivityEntry) -> ActivityEntryResponse {
+pub(crate) fn activity_entry_response(entry: ActivityEntry) -> ActivityEntryResponse {
     ActivityEntryResponse {
         id: entry.id,
         task_id: entry.task_id,
@@ -65,20 +86,20 @@ pub(super) fn activity_entry_response(entry: ActivityEntry) -> ActivityEntryResp
     }
 }
 
-pub(super) fn parse_string_array(value: &str) -> Vec<String> {
+pub(crate) fn parse_string_array(value: &str) -> Vec<String> {
     serde_json::from_str(value).unwrap_or_default()
 }
 
-pub(super) fn parse_any_json(value: &str) -> crate::tools::AnyJson {
+pub(crate) fn parse_any_json(value: &str) -> crate::tools::AnyJson {
     serde_json::from_str(value)
         .unwrap_or_else(|_| serde_json::Value::String(value.to_owned()).into())
 }
 
-pub(super) fn not_found(id: &str) -> ErrorResponse {
+pub(crate) fn not_found(id: &str) -> ErrorResponse {
     ErrorResponse::new(format!("task not found: {id}"))
 }
 
-pub(super) async fn create_task(
+pub async fn create_task(
     server: &DjinnMcpServer,
     project_id: &str,
     request: CreateTaskRequest,
@@ -183,7 +204,7 @@ pub(super) async fn create_task(
     Json(ErrorOr::Ok(task_to_response(&task)))
 }
 
-pub(super) async fn update_task(
+pub async fn update_task(
     server: &DjinnMcpServer,
     project_id: &str,
     request: UpdateTaskRequest,
@@ -316,11 +337,15 @@ pub(super) async fn update_task(
     Json(ErrorOr::Ok(task_to_response(&updated)))
 }
 
-pub(super) async fn transition_task(
+pub async fn transition_task(
     server: &DjinnMcpServer,
     project_id: &str,
     request: TransitionTaskRequest,
 ) -> Json<ErrorOr<TaskResponse>> {
+    if let Err(error) = super::validate_transition_request(&request) {
+        return Json(ErrorOr::Error(error));
+    }
+
     let repo = TaskRepository::new(server.state.db().clone(), server.state.event_bus());
 
     let Some(task) = repo
@@ -371,11 +396,15 @@ pub(super) async fn transition_task(
     }
 }
 
-pub(super) async fn add_task_comment(
+pub async fn add_task_comment(
     server: &DjinnMcpServer,
     project_id: &str,
     request: CommentTaskRequest,
 ) -> Json<ErrorOr<ActivityEntryResponse>> {
+    if let Err(error) = super::validate_comment_request(&request) {
+        return Json(ErrorOr::Error(error));
+    }
+
     let repo = TaskRepository::new(server.state.db().clone(), server.state.event_bus());
 
     let Some(task) = repo
@@ -403,8 +432,8 @@ pub(super) async fn add_task_comment(
     }
 }
 
-#[derive(Debug)]
-pub(super) struct CreateTaskRequest {
+#[derive(Debug, Clone)]
+pub struct CreateTaskRequest {
     pub title: String,
     pub description: String,
     pub design: String,
@@ -420,8 +449,8 @@ pub(super) struct CreateTaskRequest {
     pub epic_ref: Option<String>,
 }
 
-#[derive(Debug)]
-pub(super) struct UpdateTaskRequest {
+#[derive(Debug, Clone)]
+pub struct UpdateTaskRequest {
     pub id: String,
     pub title: Option<String>,
     pub description: Option<String>,
@@ -439,8 +468,8 @@ pub(super) struct UpdateTaskRequest {
     pub epic_ref: Option<String>,
 }
 
-#[derive(Debug)]
-pub(super) struct TransitionTaskRequest {
+#[derive(Debug, Clone)]
+pub struct TransitionTaskRequest {
     pub id: String,
     pub action: TransitionAction,
     pub actor_id: String,
@@ -449,8 +478,8 @@ pub(super) struct TransitionTaskRequest {
     pub target_override: Option<TaskStatus>,
 }
 
-#[derive(Debug)]
-pub(super) struct CommentTaskRequest {
+#[derive(Debug, Clone)]
+pub struct CommentTaskRequest {
     pub id: String,
     pub body: String,
     pub actor_id: String,

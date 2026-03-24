@@ -4,13 +4,7 @@ use djinn_core::models::Agent;
 use crate::database::Database;
 use crate::{Error, Result};
 
-pub const VALID_BASE_ROLES: &[&str] = &[
-    "worker",
-    "lead",
-    "planner",
-    "architect",
-    "reviewer",
-];
+pub const VALID_BASE_ROLES: &[&str] = &["worker", "lead", "planner", "architect", "reviewer"];
 
 pub struct AgentCreateInput<'a> {
     pub name: &'a str,
