@@ -37,6 +37,7 @@ ring = "0.17"
 time = { version = "0.3", features = ["formatting"] }
 uuid = { version = "1", features = ["v7"] }
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros"] }
+async-trait = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
