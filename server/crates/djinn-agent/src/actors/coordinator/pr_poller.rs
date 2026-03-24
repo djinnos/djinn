@@ -15,6 +15,19 @@ use super::*;
 /// rather than re-dispatching a worker.
 const PR_REVIEW_ROUND_THRESHOLD: u32 = 3;
 
+/// Minimum seconds a task must have been in `pr_draft` before the poller will
+/// check CI and potentially undraft it.  This prevents a race where the poller
+/// runs before GitHub has registered the required check-runs for a newly-pushed
+/// commit, sees an empty/stale check-run list, and incorrectly concludes CI
+/// has passed.
+const PR_DRAFT_MIN_AGE_SECS: i64 = 10;
+
+/// Maximum consecutive merge failures before the poller invalidates its CI
+/// cache and forces a full re-check.  This catches cases where CI failed
+/// after we cached a "green" SHA, or where branch-protection rules block
+/// the merge for reasons we didn't anticipate.
+const MERGE_RETRY_RECHECK_THRESHOLD: u32 = 3;
+
 /// Activity log event type for stored PR review feedback payloads.
 ///
 /// Re-exported so the worker lifecycle layer can query for PR review feedback
@@ -85,6 +98,23 @@ impl CoordinatorActor {
         );
 
         for task in tasks_with_pr {
+            // ── Minimum-age guard ───────────────────────────────────────────
+            // Skip tasks that just entered pr_draft — GitHub needs a few
+            // seconds to register workflow check-runs for the new commit.
+            let first_seen = *self
+                .pr_draft_first_seen
+                .entry(task.id.clone())
+                .or_insert_with(StdInstant::now);
+            let age = first_seen.elapsed();
+            if age < Duration::from_secs(PR_DRAFT_MIN_AGE_SECS as u64) {
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    age_secs = age.as_secs(),
+                    "PR poller: pr_draft task too young, waiting for check-runs to register"
+                );
+                continue;
+            }
+
             let pr_url = task.pr_url.as_deref().unwrap();
             let Some((owner, repo, pull_number)) = parse_pr_url(pr_url) else {
                 tracing::warn!(
@@ -120,6 +150,7 @@ impl CoordinatorActor {
                 self.apply_pr_transition(&task.id, TransitionAction::PrMerge, None)
                     .await;
                 self.pr_status_cache.remove(&task.id);
+                self.pr_draft_first_seen.remove(&task.id);
                 continue;
             }
 
@@ -137,6 +168,7 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.pr_draft_first_seen.remove(&task.id);
                 continue;
             }
 
@@ -190,6 +222,7 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.pr_draft_first_seen.remove(&task.id);
                 continue;
             }
 
@@ -207,6 +240,7 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.pr_draft_first_seen.remove(&task.id);
                 continue;
             }
 
@@ -221,6 +255,7 @@ impl CoordinatorActor {
                     self.apply_pr_transition(&task.id, TransitionAction::PrUndraft, None)
                         .await;
                     self.pr_status_cache.remove(&task.id);
+                    self.pr_draft_first_seen.remove(&task.id);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -299,6 +334,7 @@ impl CoordinatorActor {
                 self.apply_pr_transition(&task.id, TransitionAction::PrMerge, None)
                     .await;
                 self.pr_status_cache.remove(&task.id);
+                self.merge_fail_count.remove(&task.id);
                 continue;
             }
 
@@ -316,6 +352,7 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.merge_fail_count.remove(&task.id);
                 continue;
             }
 
@@ -378,21 +415,26 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.merge_fail_count.remove(&task.id);
                 continue;
             }
 
             // ── CI checks on review PR (cached per head SHA) ──────────────────
+            // Only skip CI re-check if the SHA hasn't changed AND we previously
+            // confirmed all checks completed successfully.  If checks were still
+            // in-progress last time we looked, we must re-check.
             let sha_changed = self
                 .pr_status_cache
                 .get(&task.id)
                 .map(|cached| cached != &current_sha)
                 .unwrap_or(true);
 
-            if sha_changed {
-                self.pr_status_cache
-                    .insert(task.id.clone(), current_sha.clone());
+            if (sha_changed || !self.pr_status_cache.contains_key(&task.id))
+                && !checks.check_runs.is_empty()
+            {
+                    let all_completed =
+                        checks.check_runs.iter().all(|cr| cr.status == "completed");
 
-                if !checks.check_runs.is_empty() {
                     let failed_checks: Vec<&CheckRun> = checks
                         .check_runs
                         .iter()
@@ -429,9 +471,17 @@ impl CoordinatorActor {
                         )
                         .await;
                         self.pr_status_cache.remove(&task.id);
+                        self.merge_fail_count.remove(&task.id);
                         continue;
                     }
-                }
+
+                    // Only cache SHA once all checks have completed successfully.
+                    // If checks are still running, don't cache so we re-check
+                    // next tick.
+                    if all_completed {
+                        self.pr_status_cache
+                            .insert(task.id.clone(), current_sha.clone());
+                    }
             }
 
             // ── Merge eligibility check ───────────────────────────────────────
@@ -450,6 +500,7 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.merge_fail_count.remove(&task.id);
                 continue;
             }
 
@@ -492,16 +543,35 @@ impl CoordinatorActor {
                     self.apply_pr_transition(&task.id, TransitionAction::PrMerge, None)
                         .await;
                     self.pr_status_cache.remove(&task.id);
+                    self.merge_fail_count.remove(&task.id);
                 }
                 Err(e) => {
+                    let count = self
+                        .merge_fail_count
+                        .entry(task.id.clone())
+                        .or_insert(0);
+                    *count += 1;
                     tracing::warn!(
                         task_id = %task.short_id,
                         pr = pull_number,
+                        attempt = *count,
                         error = %e,
                         "PR poller: merge failed (will retry next tick)"
                     );
-                    // Don't transition — the merge may have been blocked by branch
-                    // protection requiring reviews. The poller will retry next tick.
+                    // After repeated failures, invalidate the CI cache so the
+                    // next tick re-checks whether checks actually passed.
+                    // This catches the case where CI failed after we cached
+                    // a "green" SHA.
+                    if *count >= MERGE_RETRY_RECHECK_THRESHOLD {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            "PR poller: {} consecutive merge failures, invalidating CI cache for re-check",
+                            *count
+                        );
+                        self.pr_status_cache.remove(&task.id);
+                        *count = 0;
+                    }
                 }
             }
         }
