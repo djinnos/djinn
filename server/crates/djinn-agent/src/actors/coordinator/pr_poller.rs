@@ -973,8 +973,17 @@ impl CoordinatorActor {
                     }
                 }
                 Ok(_) => {
-                    // No annotations — the check run may use logs instead.
-                    check_lines.push("  - _(no annotations — check the Actions log)_".to_string());
+                    // No annotations — fetch the Actions job logs instead.
+                    // Parse run_id from the check run URL to find the failed jobs.
+                    let log_snippet = self
+                        .fetch_failed_job_log_snippet(gh_client, owner, repo, &cr.html_url)
+                        .await;
+                    if let Some(snippet) = log_snippet {
+                        check_lines.push(format!("  - **Job log (last {} chars):**", snippet.len()));
+                        check_lines.push(format!("```\n{}\n```", snippet));
+                    } else {
+                        check_lines.push("  - _(no annotations or job logs available)_".to_string());
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1001,7 +1010,7 @@ impl CoordinatorActor {
         let payload = serde_json::json!({ "body": body }).to_string();
         let task_repo = self.task_repo();
         if let Err(e) = task_repo
-            .log_activity(Some(task_id), "pr_poller", "system", "comment", &payload)
+            .log_activity(Some(task_id), "pr_poller", "verification", "comment", &payload)
             .await
         {
             tracing::warn!(
@@ -1009,6 +1018,70 @@ impl CoordinatorActor {
                 error = %e,
                 "PR poller: failed to log CI failure comment"
             );
+        }
+    }
+
+    /// Fetch the tail of the first failed job's log from a GitHub Actions run.
+    ///
+    /// Parses the run_id from the check run URL, lists jobs in that run,
+    /// finds the first failed job, and returns the last `MAX_LOG_SNIPPET_CHARS`
+    /// of its log output.
+    async fn fetch_failed_job_log_snippet(
+        &self,
+        gh_client: &GitHubApiClient,
+        owner: &str,
+        repo: &str,
+        check_run_url: &str,
+    ) -> Option<String> {
+        /// Maximum characters to include from a job log tail.
+        const MAX_LOG_SNIPPET_CHARS: usize = 4000;
+
+        // Parse run_id from URL like:
+        //   https://github.com/{owner}/{repo}/actions/runs/{run_id}/job/{job_id}
+        let run_id = check_run_url
+            .split("/actions/runs/")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .and_then(|s| s.parse::<u64>().ok())?;
+
+        let jobs = match gh_client.list_run_jobs(owner, repo, run_id).await {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                tracing::debug!(
+                    run_id,
+                    error = %e,
+                    "PR poller: failed to list jobs for run"
+                );
+                return None;
+            }
+        };
+
+        // Find the first failed job.
+        let failed_job = jobs.iter().find(|j| {
+            matches!(
+                j.conclusion.as_deref(),
+                Some("failure") | Some("timed_out") | Some("cancelled")
+            )
+        })?;
+
+        match gh_client.get_job_logs(owner, repo, failed_job.id).await {
+            Ok(log) => {
+                // Take the tail — error output is usually at the end.
+                let snippet = if log.len() > MAX_LOG_SNIPPET_CHARS {
+                    &log[log.len() - MAX_LOG_SNIPPET_CHARS..]
+                } else {
+                    &log
+                };
+                Some(snippet.to_string())
+            }
+            Err(e) => {
+                tracing::debug!(
+                    job_id = failed_job.id,
+                    error = %e,
+                    "PR poller: failed to fetch job logs"
+                );
+                None
+            }
         }
     }
 }
