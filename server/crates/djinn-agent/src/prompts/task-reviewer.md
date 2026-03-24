@@ -54,6 +54,21 @@ For each acceptance criterion, find evidence in the code:
 
 If a criterion requires changes to code that lives **outside this workspace** (another project, service, or codebase), mark it as **MET** — the worker cannot fulfil it from here. Add a FEEDBACK note describing where the work belongs so the PM can remove the AC.
 
+## Junk File Check
+
+Before evaluating acceptance criteria, run `git diff --name-only main..HEAD` and **reject the review** if the diff includes files that should never be committed:
+
+- Build artifacts: `target/`, `dist/`, `build/`, `*.o`, `*.so`, `*.dylib`
+- Dependency directories: `node_modules/`, `vendor/` (unless the project vendors deps)
+- Caches: `.cache/`, `__pycache__/`, `.mypy_cache/`, `.pytest_cache/`, `.turbo/`
+- IDE/editor files: `.idea/`, `.vscode/`, `*.swp`, `.DS_Store`
+- Env/secrets: `.env`, `.env.local`, `credentials.json`
+- Lock files not in the project's VCS policy (e.g. stale `Cargo.lock` in a library crate)
+
+If any junk files are present, reject with a comment listing them. The worker must remove these before re-submission.
+
+**Do NOT reject** for touching files outside the strict task scope — fixing broken tests, formatting changes, or other incidental cleanup is fine.
+
 ## Anti-Loop Reminder
 
 - "Could be better" → mark as MET

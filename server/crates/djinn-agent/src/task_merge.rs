@@ -13,6 +13,7 @@ use djinn_provider::repos::CredentialRepository;
 
 const MERGE_CONFLICT_PREFIX: &str = "merge_conflict:";
 const MERGE_VALIDATION_PREFIX: &str = "merge_validation_failed:";
+const EMPTY_BRANCH_PREFIX: &str = "empty_branch:";
 
 /// Callback type for running a pre-merge verification gate.
 ///
@@ -155,6 +156,27 @@ async fn try_create_github_pr(
         .ok()
         .flatten()
         .ok_or_else(|| "task not found for PR body".to_string())?;
+
+    // Check whether the branch has any commits not already on the merge target.
+    // If not, the work was absorbed via prerequisite merges and there is nothing
+    // to PR — return a distinct error so the caller can close the task.
+    let rev_list = djinn_git::run_git_command(
+        project_dir.to_path_buf(),
+        vec![
+            "rev-list".into(),
+            "--count".into(),
+            format!("origin/{merge_target}..{base_branch}"),
+        ],
+    )
+    .await
+    .map(|o| o.stdout.trim().to_string())
+    .unwrap_or_else(|_| String::new());
+
+    if rev_list == "0" {
+        return Err(format!(
+            "{EMPTY_BRANCH_PREFIX} no commits between {merge_target} and {base_branch}"
+        ));
+    }
 
     // Build diff stat via `git diff --stat origin/{merge_target}..{base_branch}`.
     let diff_stat = djinn_git::run_git_command(
@@ -430,6 +452,38 @@ pub(crate) async fn merge_and_transition(
         }
         Ok(None) => {
             // No GitHub App credential — fall through to direct-push merge below.
+        }
+        Err(reason) if reason.starts_with(EMPTY_BRANCH_PREFIX) => {
+            // Branch has no unique commits vs the merge target — the work was
+            // already absorbed (e.g. prerequisite tasks merged separately).
+            // Close the task and clean up the branch.
+            tracing::info!(
+                task_id = %task.short_id,
+                "Branch has no unique commits vs merge target; closing as already merged"
+            );
+            let worktree_path = project_dir
+                .join(".djinn")
+                .join("worktrees")
+                .join(&task.short_id);
+            crate::actors::slot::teardown_worktree(
+                &task.short_id,
+                &worktree_path,
+                &project_dir,
+                app_state,
+                true, // delete the branch — nothing to keep
+            )
+            .await;
+            cleanup_paused_worker_session(task_id, app_state).await;
+            let _ = repo
+                .log_activity(
+                    Some(task_id),
+                    "agent-supervisor",
+                    "system",
+                    "pr_skipped_empty_branch",
+                    &serde_json::json!({ "reason": reason }).to_string(),
+                )
+                .await;
+            return Some((actions.approve.clone(), Some(reason)));
         }
         Err(reason) => {
             tracing::warn!(
