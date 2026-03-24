@@ -78,7 +78,7 @@ pub(crate) trait AgentRole: Send + Sync + 'static {
     }
     /// Whether this role should build epic context for the prompt.
     fn needs_epic_context(&self) -> bool {
-        false
+        true
     }
     /// Build the initial user message for a fresh session.
     /// Workers override this to include recent feedback from the activity log.

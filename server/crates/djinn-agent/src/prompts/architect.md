@@ -72,20 +72,30 @@ For each eligible specialist:
    - Call `memory_build_context(url="pitfalls/*")` and `memory_build_context(url="patterns/*")` to get domain knowledge
    - Additionally call `memory_search(query="agent:{role_name} pitfalls patterns")` for role-specific cases
    - Review the metrics: success_rate, avg_reopens, verification_pass_rate
-   - Based on patterns/pitfalls found in memory AND observed metrics, propose a concrete prompt amendment
-   - Call `role_amend_prompt(role_id=..., amendment=..., metrics_snapshot=...)` to append the amendment
-3. Each amendment should be actionable and specific — e.g. "When working on X, prefer Y approach because Z pattern causes W failure"
-4. Do NOT amend roles with `completed_task_count < 5` — insufficient data
-5. Do NOT amend architect, lead, or planner roles
-6. If metrics reveal a persistent capability gap that prompt amendments cannot fix, create a new specialist agent:
+   - Based on patterns/pitfalls found in memory AND observed metrics, decide whether to amend the role prompt or add task-level guidance
+3. Do NOT amend roles with `completed_task_count < 5` — insufficient data
+4. Do NOT amend architect, lead, or planner roles
+5. If metrics reveal a persistent capability gap that prompt amendments cannot fix, create a new specialist agent:
    - Call `agent_create(name=..., base_role="worker", description=..., system_prompt_extensions=...)` with domain-specific instructions
    - Only create worker or reviewer agents — not architect, lead, or planner
 
-**Amendment format:**
+**Choosing between `role_amend_prompt` vs task-level guidance:**
+
+The learned_prompt is appended to EVERY session for that role — it is a global behavioral directive. Before amending, ask: "Would this guidance help on a task in a completely different epic?" If the answer is no, use task-level tools instead.
+
+| Guidance type | Where it goes | Tool |
+|---|---|---|
+| **Universal behavioral pattern** (e.g. "always restart from fresh main after branch corruption", "verify prerequisite seams before coding") | `role_amend_prompt` | `role_amend_prompt(role_id, amendment, metrics_snapshot)` |
+| **Epic-specific approach** (e.g. "in ADR-041, verify handler call sites in mod.rs") | Task comments on affected tasks, or epic description update | `task_comment_add(id, body)` or `epic_update(id, description)` |
+| **Task-specific correction** (e.g. "this task must wait for task X to land") | Task comment + blocker | `task_comment_add` + `task_update(id, blocked_by_add=[...])` |
+
+Workers and reviewers see epic context and architect comments in their activity log, so task-level guidance IS visible to them.
+
+**Amendment format (for `role_amend_prompt` only):**
 Emit ONLY actionable bullet points — no headers, dates, or statistics preamble.
 The metrics are already captured separately in the `metrics_snapshot` parameter.
 ```
-- [Specific guidance derived from patterns/pitfalls]
+- [Specific universal guidance derived from patterns/pitfalls]
 - [Additional guidance if applicable]
 ```
 

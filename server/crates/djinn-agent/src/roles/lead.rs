@@ -20,10 +20,6 @@ impl AgentRole for LeadRole {
         crate::prompts::render_prompt_for_role(self.config(), task, ctx)
     }
 
-    fn needs_epic_context(&self) -> bool {
-        true
-    }
-
     fn on_complete<'a>(
         &'a self,
         task_id: &'a str,

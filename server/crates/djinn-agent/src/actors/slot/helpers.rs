@@ -35,6 +35,7 @@ pub(crate) fn recent_feedback(
             e.event_type == "comment"
                 && (e.actor_role == "lead"
                     || e.actor_role == "pm"
+                    || e.actor_role == "architect"
                     || e.actor_role == "reviewer"
                     || e.actor_role == "task_reviewer"
                     || e.actor_role == "verification")
@@ -51,6 +52,7 @@ pub(crate) fn recent_feedback(
             let body = payload.get("body").and_then(|v| v.as_str())?;
             let label = match e.actor_role.as_str() {
                 "lead" | "pm" => "Lead guidance",
+                "architect" => "Architect directive",
                 "reviewer" | "task_reviewer" => "Reviewer feedback",
                 "verification" => "Verification failure",
                 _ => "Feedback",
