@@ -243,13 +243,13 @@ pub(crate) fn tool_task_create() -> RmcpTool {
         "Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.".to_string(),
         object!({
             "type": "object",
-            "required": ["epic_id", "title"],
+            "required": ["epic_id", "title", "acceptance_criteria"],
             "properties": {
                 "epic_id": {"type": "string", "description": "Parent epic UUID or short ID"},
                 "title": {"type": "string"},
                 "description": {"type": "string"},
                 "design": {"type": "string"},
-                "acceptance_criteria": {"type": "array", "items": {"type": "object"}},
+                "acceptance_criteria": {"type": "array", "items": {"type": "object"}, "description": "Required. At least one criterion object with 'criterion' (string) and 'met' (bool) fields. Tasks without acceptance criteria cannot be dispatched.", "minItems": 1},
                 "issue_type": {"type": "string"},
                 "priority": {"type": "integer"},
                 "owner": {"type": "string"},

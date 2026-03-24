@@ -43,7 +43,7 @@ fn collapse_acceptance_criteria(
     })
 }
 
-fn validate_create_request(request: &CreateTaskRequest) -> Result<(), ErrorResponse> {
+pub(crate) fn validate_create_request(request: &CreateTaskRequest) -> Result<(), ErrorResponse> {
     validate_title(&request.title).map_err(ErrorResponse::new)?;
     validate_description(&request.description).map_err(ErrorResponse::new)?;
     validate_design(&request.design).map_err(ErrorResponse::new)?;

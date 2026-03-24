@@ -98,7 +98,7 @@ Then update the epic to reference it: `epic_update(id, memory_refs=[..., "<roadm
 
 **Worker tasks (direct creation):**
 - Create 3–5 tasks with `issue_type="task"` (or `"research"` for investigation tasks).
-- Each task must have: clear title, description with design context, and at least 1 acceptance criterion.
+- **MANDATORY: Every task MUST include `acceptance_criteria` with at least one criterion.** Tasks created without acceptance criteria cannot be dispatched and will block the entire execution pipeline. This is a hard system requirement, not a suggestion. Example: `acceptance_criteria=[{"criterion": "X is implemented and tests pass", "met": false}]`
 - Set `blocked_by` relationships when tasks depend on each other.
 - Reference relevant ADR permalinks in `memory_refs` when architectural decisions apply.
 
@@ -113,6 +113,7 @@ Then update the epic to reference it: `epic_update(id, memory_refs=[..., "<roadm
 ### Task quality bar (before creating a task)
 
 A task is ready only when:
+- **`acceptance_criteria` is set with at least one criterion.** A task without AC will fail to dispatch and loop forever. This is the single most important field — never omit it.
 - AC are verifiable, objective, and achievable in a single session.
 - Design references **existing** file paths and function/type names (verify with `shell`).
 - Dependencies on sibling tasks are expressed via `blocked_by`.
