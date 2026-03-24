@@ -242,7 +242,7 @@ export function AddProviderModal({ open, onOpenChange, configuredProviderIds, on
     <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogPortal>
         <AlertDialogOverlay />
-        <AlertDialogContent className={cn('p-0 overflow-hidden', chatGPTConnected ? 'max-w-sm w-full' : 'max-w-2xl w-full')}>
+        <AlertDialogContent size="unsized" className={cn('p-0 overflow-hidden', chatGPTConnected ? 'max-w-sm w-full' : 'max-w-4xl w-full')}>
 
           {/* Header */}
           <div className="flex items-center justify-between border-b border-border px-5 py-4">

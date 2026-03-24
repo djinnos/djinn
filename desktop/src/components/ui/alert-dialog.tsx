@@ -43,7 +43,7 @@ function AlertDialogContent({
   size = "default",
   ...props
 }: AlertDialogPrimitive.Popup.Props & {
-  size?: "default" | "sm"
+  size?: "default" | "sm" | "unsized"
 }) {
   return (
     <AlertDialogPortal>
