@@ -167,12 +167,8 @@ impl AgentContext {
         let project = self
             .task_ops_project_path_override
             .as_ref()
-            .and_then(|override_path| {
-                override_path
-                    .to_str()
-                    .filter(|path| !path.is_empty())
-                    .filter(|_| Path::new(project).starts_with("/tmp"))
-            })
+            .and_then(|override_path| override_path.to_str())
+            .filter(|path| !path.is_empty())
             .unwrap_or(project);
         let server = djinn_mcp::server::DjinnMcpServer::new(self.to_mcp_state());
         server.require_project_id_public(project).await

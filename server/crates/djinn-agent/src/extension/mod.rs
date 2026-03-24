@@ -3191,7 +3191,6 @@ fn tool_lsp() -> RmcpTool {
 mod tests {
     use super::*;
     use crate::AgentType;
-    use crate::context::AgentContext;
     use crate::test_helpers::create_test_db;
     use crate::test_helpers::{
         agent_context_from_db, create_test_epic, create_test_project, create_test_task,
