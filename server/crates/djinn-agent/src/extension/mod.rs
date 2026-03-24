@@ -19,6 +19,10 @@ use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
 use djinn_db::{AgentCreateInput, AgentRepository, VALID_BASE_ROLES};
 use djinn_mcp::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
+use djinn_mcp::tools::memory_tools::{
+    BuildContextParams as SharedMemoryBuildContextParams, ListParams as SharedMemoryListParams,
+    ReadParams as SharedMemoryReadParams, SearchParams as SharedMemorySearchParams,
+};
 use djinn_mcp::tools::task_tools::{
     CommentTaskRequest as SharedCommentTaskRequest, CreateTaskRequest as SharedCreateTaskRequest,
     TransitionTaskRequest as SharedTransitionTaskRequest,
@@ -924,15 +928,18 @@ async fn call_memory_read(
 ) -> Result<serde_json::Value, String> {
     let p: MemoryReadParams = parse_args(arguments)?;
     let project_path = resolve_project_path(p.project);
-    let project_id = project_id_for_path(state, &project_path).await?;
-
-    let repo = NoteRepository::new(state.db.clone(), state.event_bus.clone());
-    let note = resolve_note_by_identifier(&repo, &project_id, &p.identifier)
-        .await
-        .ok_or_else(|| format!("note not found: {}", p.identifier))?;
-
-    let _ = repo.touch_accessed(&note.id).await;
-    Ok(note_to_value(&note))
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    Ok(serde_json::to_value(
+        djinn_mcp::tools::memory_tools::ops::memory_read(
+            &server,
+            SharedMemoryReadParams {
+                project: project_path,
+                identifier: p.identifier,
+            },
+        )
+        .await,
+    )
+    .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize memory_read response" })))
 }
 
 async fn call_memory_search(
@@ -942,40 +949,25 @@ async fn call_memory_search(
 ) -> Result<serde_json::Value, String> {
     let p: MemorySearchParams = parse_args(arguments)?;
     let project_path = resolve_project_path(p.project);
-    let project_id = project_id_for_path(state, &project_path).await?;
-
-    // Use task_id from args if provided, otherwise fall back to session context.
-    let task_id = p.task_id.as_deref().or(session_task_id);
-
-    let repo = NoteRepository::new(state.db.clone(), state.event_bus.clone());
-    let limit = p.limit.unwrap_or(10).clamp(1, 100) as usize;
-    let results = repo
-        .search(
-            &project_id,
-            &p.query,
-            task_id,
-            p.folder.as_deref(),
-            p.note_type.as_deref(),
-            limit,
+    let task_id = p.task_id.or_else(|| session_task_id.map(ToOwned::to_owned));
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    Ok(serde_json::to_value(
+        djinn_mcp::tools::memory_tools::ops::memory_search(
+            &server,
+            SharedMemorySearchParams {
+                project: project_path,
+                query: p.query,
+                folder: p.folder,
+                note_type: p.note_type,
+                limit: p.limit,
+            },
+            task_id.as_deref(),
         )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let items: Vec<serde_json::Value> = results
-        .into_iter()
-        .map(|r| {
-            serde_json::json!({
-                "id": r.id,
-                "permalink": r.permalink,
-                "title": r.title,
-                "folder": r.folder,
-                "note_type": r.note_type,
-                "snippet": r.snippet,
-            })
-        })
-        .collect();
-
-    Ok(serde_json::json!({ "results": items }))
+        .await,
+    )
+    .unwrap_or_else(
+        |_| serde_json::json!({ "error": "failed to serialize memory_search response" }),
+    ))
 }
 
 async fn call_memory_list(
@@ -984,36 +976,20 @@ async fn call_memory_list(
 ) -> Result<serde_json::Value, String> {
     let p: MemoryListParams = parse_args(arguments)?;
     let project_path = resolve_project_path(p.project);
-    let project_id = project_id_for_path(state, &project_path).await?;
-
-    let repo = NoteRepository::new(state.db.clone(), state.event_bus.clone());
-    let depth = p.depth.unwrap_or(1);
-
-    let notes = repo
-        .list_compact(
-            &project_id,
-            p.folder.as_deref(),
-            p.note_type.as_deref(),
-            depth,
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    Ok(serde_json::to_value(
+        djinn_mcp::tools::memory_tools::ops::memory_list(
+            &server,
+            SharedMemoryListParams {
+                project: project_path,
+                folder: p.folder,
+                note_type: p.note_type,
+                depth: p.depth,
+            },
         )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let items: Vec<serde_json::Value> = notes
-        .into_iter()
-        .map(|n| {
-            serde_json::json!({
-                "id": n.id,
-                "permalink": n.permalink,
-                "title": n.title,
-                "note_type": n.note_type,
-                "folder": n.folder,
-                "updated_at": n.updated_at,
-            })
-        })
-        .collect();
-
-    Ok(serde_json::json!({ "notes": items }))
+        .await,
+    )
+    .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize memory_list response" })))
 }
 
 async fn call_memory_build_context(
@@ -1023,61 +999,26 @@ async fn call_memory_build_context(
 ) -> Result<serde_json::Value, String> {
     let p: MemoryBuildContextParams = parse_args(arguments)?;
     let project_path = resolve_project_path(p.project);
-    let project_id = project_id_for_path(state, &project_path).await?;
-
-    let repo = NoteRepository::new(state.db.clone(), state.event_bus.clone());
-    let max_related = p.max_related.unwrap_or(10).clamp(1, 50) as usize;
-    let budget = p.budget.map(|b| b as usize);
-    let task_id = p.task_id.as_deref().or(session_task_id);
-
-    // Strip memory:// prefix.
-    let url = p.url.strip_prefix("memory://").unwrap_or(&p.url);
-
-    // Wildcard: return all notes in folder as primary.
-    if url.ends_with("/*") {
-        let folder = url.trim_end_matches("/*");
-        let all = repo
-            .list(&project_id, Some(folder))
-            .await
-            .map_err(|e| e.to_string())?;
-        return Ok(serde_json::json!({
-            "primary": all.iter().map(|n| serde_json::json!({
-                "id": n.id,
-                "permalink": n.permalink,
-                "title": n.title,
-                "content": n.content,
-            })).collect::<Vec<_>>(),
-            "related_l1": [],
-            "related_l0": [],
-        }));
-    }
-
-    match repo
-        .build_context(&project_id, url, budget, task_id, max_related)
-        .await
-    {
-        Ok(result) => Ok(serde_json::json!({
-            "primary": result.primary.iter().map(|n| serde_json::json!({
-                "id": n.id,
-                "permalink": n.permalink,
-                "title": n.title,
-                "content": n.content,
-            })).collect::<Vec<_>>(),
-            "related_l1": result.related_l1.iter().map(|n| serde_json::json!({
-                "id": n.id,
-                "permalink": n.permalink,
-                "title": n.title,
-                "overview": n.overview_text,
-            })).collect::<Vec<_>>(),
-            "related_l0": result.related_l0.iter().map(|n| serde_json::json!({
-                "id": n.id,
-                "permalink": n.permalink,
-                "title": n.title,
-                "abstract": n.abstract_text,
-            })).collect::<Vec<_>>(),
-        })),
-        Err(e) => Err(e.to_string()),
-    }
+    let task_id = p.task_id.or_else(|| session_task_id.map(ToOwned::to_owned));
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    Ok(serde_json::to_value(
+        djinn_mcp::tools::memory_tools::ops::memory_build_context(
+            &server,
+            SharedMemoryBuildContextParams {
+                project: project_path,
+                url: p.url,
+                depth: None,
+                max_related: p.max_related,
+                budget: p.budget,
+                task_id: task_id.clone(),
+            },
+            task_id.as_deref(),
+        )
+        .await,
+    )
+    .unwrap_or_else(
+        |_| serde_json::json!({ "error": "failed to serialize memory_build_context response" }),
+    ))
 }
 
 async fn call_agent_metrics(
@@ -2091,18 +2032,6 @@ fn resolve_project_path(project: Option<String>) -> String {
             .display()
             .to_string(),
     }
-}
-
-async fn resolve_note_by_identifier(
-    repo: &NoteRepository,
-    project_id: &str,
-    identifier: &str,
-) -> Option<djinn_core::models::Note> {
-    repo.resolve(project_id, identifier).await.ok().flatten()
-}
-
-fn note_to_value(note: &djinn_core::models::Note) -> serde_json::Value {
-    note.to_value()
 }
 
 fn task_to_value(t: &Task) -> serde_json::Value {
@@ -3561,6 +3490,169 @@ mod tests {
         assert_eq!(
             transitioned.get("title").and_then(|v| v.as_str()),
             Some(task.title.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let task = create_test_task(&db, &project.id, &epic.id).await;
+        let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
+        state.task_ops_project_path_override = Some(project.path.clone().into());
+
+        let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+        let seed = note_repo
+            .create(
+                &project.id,
+                Path::new(&project.path),
+                "Shared Memory Seed",
+                "Architecture guidance with [[Shared Memory Related]] references.",
+                "adr",
+                "[]",
+            )
+            .await
+            .expect("create seed note");
+        note_repo
+            .create(
+                &project.id,
+                Path::new(&project.path),
+                "Shared Memory Related",
+                "Related architecture context.",
+                "reference",
+                "[]",
+            )
+            .await
+            .expect("create related note");
+
+        let search_response = call_tool(
+            &state,
+            "memory_search",
+            Some(
+                serde_json::json!({
+                    "project": project.path,
+                    "query": "architecture",
+                    "limit": 5
+                })
+                .as_object()
+                .expect("memory_search args object")
+                .clone(),
+            ),
+            Path::new(&project.path),
+            Some(&task.id),
+            Some("architect"),
+        )
+        .await
+        .expect("memory_search dispatch should succeed");
+        assert!(
+            search_response.get("error").is_none()
+                || search_response
+                    .get("error")
+                    .is_some_and(|value| value.is_null())
+        );
+        assert!(
+            search_response
+                .get("results")
+                .and_then(|value| value.as_array())
+                .is_some_and(|results| !results.is_empty())
+        );
+
+        let read_response = call_tool(
+            &state,
+            "memory_read",
+            Some(
+                serde_json::json!({
+                    "project": project.path,
+                    "identifier": seed.permalink
+                })
+                .as_object()
+                .expect("memory_read args object")
+                .clone(),
+            ),
+            Path::new(&project.path),
+            Some(&task.id),
+            Some("architect"),
+        )
+        .await
+        .expect("memory_read dispatch should succeed");
+        assert!(
+            read_response.get("error").is_none()
+                || read_response
+                    .get("error")
+                    .is_some_and(|value| value.is_null())
+        );
+        assert_eq!(
+            read_response
+                .get("permalink")
+                .and_then(|value| value.as_str()),
+            Some(seed.permalink.as_str())
+        );
+
+        let list_response = call_tool(
+            &state,
+            "memory_list",
+            Some(
+                serde_json::json!({
+                    "project": project.path,
+                    "folder": "decisions",
+                    "depth": 1
+                })
+                .as_object()
+                .expect("memory_list args object")
+                .clone(),
+            ),
+            Path::new(&project.path),
+            Some(&task.id),
+            Some("architect"),
+        )
+        .await
+        .expect("memory_list dispatch should succeed");
+        assert!(
+            list_response.get("error").is_none()
+                || list_response
+                    .get("error")
+                    .is_some_and(|value| value.is_null())
+        );
+        assert!(
+            list_response
+                .get("notes")
+                .and_then(|value| value.as_array())
+                .is_some_and(|notes| !notes.is_empty())
+        );
+
+        let context_response = call_tool(
+            &state,
+            "memory_build_context",
+            Some(
+                serde_json::json!({
+                    "project": project.path,
+                    "url": format!("memory://{}", seed.permalink),
+                    "budget": 512,
+                    "max_related": 5
+                })
+                .as_object()
+                .expect("memory_build_context args object")
+                .clone(),
+            ),
+            Path::new(&project.path),
+            Some(&task.id),
+            Some("architect"),
+        )
+        .await
+        .expect("memory_build_context dispatch should succeed");
+        assert!(
+            context_response.get("error").is_none()
+                || context_response
+                    .get("error")
+                    .is_some_and(|value| value.is_null())
+        );
+        assert_eq!(
+            context_response
+                .get("primary")
+                .and_then(|value| value.as_array())
+                .map(|items| items.len()),
+            Some(1)
         );
     }
 

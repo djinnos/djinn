@@ -1,3 +1,4 @@
+use super::ops;
 use super::*;
 
 #[tool_router(router = memory_search_router, vis = "pub(super)")]
@@ -11,53 +12,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<SearchParams>,
     ) -> Json<MemorySearchResponse> {
-        let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(MemorySearchResponse {
-                results: vec![],
-                error: Some(format!("project not found: {}", p.project)),
-            });
-        };
-
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
-        let limit = p.limit.unwrap_or(10).clamp(1, 100) as usize;
-
-        let results = match repo
-            .search(
-                &project_id,
-                &p.query,
-                None,
-                p.folder.as_deref(),
-                p.note_type.as_deref(),
-                limit,
-            )
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return Json(MemorySearchResponse {
-                    results: vec![],
-                    error: Some(format!("search failed: {e}")),
-                });
-            }
-        };
-
-        let items: Vec<MemorySearchResultItem> = results
-            .into_iter()
-            .map(|r| MemorySearchResultItem {
-                id: r.id,
-                permalink: r.permalink,
-                title: r.title,
-                folder: r.folder,
-                note_type: r.note_type,
-                snippet: r.snippet,
-                score: r.score,
-            })
-            .collect();
-
-        Json(MemorySearchResponse {
-            results: items,
-            error: None,
-        })
+        Json(ops::memory_search(self, p, None).await)
     }
 
     /// Returns the full knowledge graph for visualization — all notes with
@@ -162,55 +117,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<BuildContextParams>,
     ) -> Json<MemoryBuildContextResponse> {
-        let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(MemoryBuildContextResponse {
-                primary: vec![],
-                related_l1: vec![],
-                related_l0: vec![],
-                error: Some(format!("project not found: {}", p.project)),
-            });
-        };
-
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
-        let max_related = p.max_related.unwrap_or(10).clamp(1, 50) as usize;
-        let budget = p.budget.map(|b| b as usize);
-        let task_id = p.task_id.as_deref();
-
-        // Strip memory:// prefix.
-        let url = p.url.strip_prefix("memory://").unwrap_or(&p.url);
-
-        // Wildcard: return all notes in folder as primary.
-        if url.ends_with("/*") {
-            let folder = url.trim_end_matches("/*");
-            let all = repo
-                .list(&project_id, Some(folder))
-                .await
-                .unwrap_or_default();
-            return Json(MemoryBuildContextResponse {
-                primary: all.into_iter().map(|n| note_to_view(&n)).collect(),
-                related_l1: vec![],
-                related_l0: vec![],
-                error: None,
-            });
-        }
-
-        // Use the new build_context method from repository
-        match repo
-            .build_context(&project_id, url, budget, task_id, max_related)
-            .await
-        {
-            Ok(response) => Json(MemoryBuildContextResponse {
-                primary: response.primary.iter().map(note_to_view).collect(),
-                related_l1: response.related_l1,
-                related_l0: response.related_l0,
-                error: None,
-            }),
-            Err(e) => Json(MemoryBuildContextResponse {
-                primary: vec![],
-                related_l1: vec![],
-                related_l0: vec![],
-                error: Some(format!("build_context failed: {e}")),
-            }),
-        }
+        let task_id = p.task_id.clone();
+        Json(ops::memory_build_context(self, p, task_id.as_deref()).await)
     }
 }
