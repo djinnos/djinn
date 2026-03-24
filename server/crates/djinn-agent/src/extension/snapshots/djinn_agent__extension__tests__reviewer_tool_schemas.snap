@@ -1,6 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 3941
+assertion_line: 3779
 expression: tool_schemas_reviewer()
 ---
 [
@@ -91,6 +91,7 @@ expression: tool_schemas_reviewer()
     "inputSchema": {
       "properties": {
         "identifier": {
+          "description": "Permalink or title",
           "type": "string"
         },
         "project": {
@@ -99,6 +100,7 @@ expression: tool_schemas_reviewer()
         }
       },
       "required": [
+        "project",
         "identifier"
       ],
       "type": "object"
@@ -131,6 +133,7 @@ expression: tool_schemas_reviewer()
         }
       },
       "required": [
+        "project",
         "query"
       ],
       "type": "object"
@@ -158,6 +161,9 @@ expression: tool_schemas_reviewer()
           "type": "string"
         }
       },
+      "required": [
+        "project"
+      ],
       "type": "object"
     },
     "name": "memory_list"

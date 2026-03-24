@@ -1,29 +1,29 @@
-use std::path::{Path, PathBuf};
-
-use std::process::Stdio;
-
-use tokio::time::Duration;
+mod shared_schemas;
 
 use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
+
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use shared_schemas::{
+    tool_epic_show, tool_epic_tasks, tool_epic_update, tool_memory_build_context, tool_memory_list,
+    tool_memory_read, tool_memory_search, tool_role_create, tool_role_metrics,
+    tool_task_activity_list, tool_task_blocked_list, tool_task_comment_add, tool_task_create,
+    tool_task_list, tool_task_show, tool_task_transition, tool_task_update,
+};
 
 use super::sandbox;
 use crate::context::AgentContext;
 use crate::lsp::format_diagnostics_xml;
 use djinn_core::models::Task;
+use djinn_db::AgentRepository;
 use djinn_db::EpicRepository;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
-use djinn_db::AgentRepository;
 use djinn_mcp::tools::agent_tools::{
     AgentCreateParams as SharedAgentCreateParams, AgentMetricsParams as SharedAgentMetricsParams,
     create_agent as shared_create_agent, metrics_for_agents as shared_metrics_for_agents,
 };
-use djinn_provider::github_api::GitHubApiClient;
-use djinn_provider::repos::CredentialRepository;
-use std::sync::Arc;
 use djinn_mcp::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
 use djinn_mcp::tools::memory_tools::{
     BuildContextParams as SharedMemoryBuildContextParams, ListParams as SharedMemoryListParams,
@@ -36,8 +36,14 @@ use djinn_mcp::tools::task_tools::{
     create_task as shared_create_task, transition_task as shared_transition_task,
     update_task as shared_update_task,
 };
+use djinn_provider::github_api::GitHubApiClient;
+use djinn_provider::repos::CredentialRepository;
 use rmcp::Json;
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Deserialize)]
 struct IncomingToolCall {
@@ -1169,8 +1175,7 @@ async fn call_ci_job_log(
 ) -> Result<serde_json::Value, String> {
     let p: CiJobLogParams = parse_args(arguments)?;
 
-    let task_id = session_task_id
-        .ok_or("ci_job_log requires a task context (session_task_id)")?;
+    let task_id = session_task_id.ok_or("ci_job_log requires a task context (session_task_id)")?;
 
     // Find the CI failure activity entry that contains the owner/repo context.
     // The PR poller stores this alongside the body when logging CI failures.
@@ -2484,76 +2489,6 @@ async fn call_task_kill_session(
     }))
 }
 
-fn tool_epic_show() -> RmcpTool {
-    RmcpTool::new(
-        "epic_show".to_string(),
-        "Show details for an epic by UUID or short ID.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["id"],
-            "properties": {
-                "id": {"type": "string", "description": "Epic UUID or short ID"}
-            }
-        }),
-    )
-}
-
-fn tool_epic_update() -> RmcpTool {
-    RmcpTool::new(
-        "epic_update".to_string(),
-        "Update epic fields (title/description) and accept memory ref delta args for planner workflows.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["id"],
-            "properties": {
-                "id": {"type": "string", "description": "Epic UUID or short ID"},
-                "title": {"type": "string"},
-                "description": {"type": "string"},
-                "status": {"type": "string"},
-                "memory_refs_add": {"type": "array", "items": {"type": "string"}},
-                "memory_refs_remove": {"type": "array", "items": {"type": "string"}}
-            }
-        }),
-    )
-}
-
-fn tool_epic_tasks() -> RmcpTool {
-    RmcpTool::new(
-        "epic_tasks".to_string(),
-        "List tasks for an epic with pagination.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["id"],
-            "properties": {
-                "id": {"type": "string", "description": "Epic UUID or short ID"},
-                "limit": {"type": "integer"},
-                "offset": {"type": "integer"}
-            }
-        }),
-    )
-}
-
-fn tool_task_list() -> RmcpTool {
-    RmcpTool::new(
-        "task_list".to_string(),
-        "List tasks with optional filters and pagination.".to_string(),
-        object!({
-            "type": "object",
-            "properties": {
-                "status": {"type": "string"},
-                "issue_type": {"type": "string"},
-                "priority": {"type": "integer"},
-                "text": {"type": "string", "description": "Free-text search in title/description"},
-                "label": {"type": "string"},
-                "parent": {"type": "string", "description": "Epic ID to filter by"},
-                "sort": {"type": "string"},
-                "limit": {"type": "integer"},
-                "offset": {"type": "integer"}
-            }
-        }),
-    )
-}
-
 async fn call_task_blocked_list(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -2579,51 +2514,6 @@ async fn call_task_blocked_list(
         })
         .collect();
     Ok(serde_json::json!({ "tasks": tasks }))
-}
-
-fn tool_task_blocked_list() -> RmcpTool {
-    RmcpTool::new(
-        "task_blocked_list".to_string(),
-        "List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["id"],
-            "properties": {
-                "id": {"type": "string", "description": "Task UUID or short ID"}
-            }
-        }),
-    )
-}
-
-fn tool_task_activity_list() -> RmcpTool {
-    RmcpTool::new(
-        "task_activity_list".to_string(),
-        "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["id"],
-            "properties": {
-                "id": {"type": "string", "description": "Task UUID or short ID"},
-                "event_type": {"type": "string", "description": "Filter by event type: comment, status_changed, commands_run, merge_conflict, task_review_start"},
-                "actor_role": {"type": "string", "description": "Filter by actor: lead, reviewer, worker, verification, system"},
-                "limit": {"type": "integer", "description": "Max entries to return (default 30, max 50)"}
-            }
-        }),
-    )
-}
-
-fn tool_task_show() -> RmcpTool {
-    RmcpTool::new(
-        "task_show".to_string(),
-        "Show details of a work item including recent activity and blockers.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["id"],
-            "properties": {
-                "id": {"type": "string", "description": "Task UUID or short ID"}
-            }
-        }),
-    )
 }
 
 fn tool_request_lead() -> RmcpTool {
@@ -2659,90 +2549,6 @@ fn tool_request_architect() -> RmcpTool {
     )
 }
 
-fn tool_memory_read() -> RmcpTool {
-    RmcpTool::new(
-        "memory_read".to_string(),
-        "Read a note by permalink or title.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["identifier"],
-            "properties": {
-                "project": {"type": "string", "description": "Absolute project path"},
-                "identifier": {"type": "string"}
-            }
-        }),
-    )
-}
-
-fn tool_memory_search() -> RmcpTool {
-    RmcpTool::new(
-        "memory_search".to_string(),
-        "Search notes in project memory.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "project": {"type": "string", "description": "Absolute project path"},
-                "query": {"type": "string"},
-                "folder": {"type": "string"},
-                "type": {"type": "string"},
-                "limit": {"type": "integer"},
-                "task_id": {"type": "string", "description": "Task ID for affinity scoring; defaults to the current session task"}
-            }
-        }),
-    )
-}
-
-fn tool_memory_list() -> RmcpTool {
-    RmcpTool::new(
-        "memory_list".to_string(),
-        "List notes in project memory. Returns compact summaries without full content.".to_string(),
-        object!({
-            "type": "object",
-            "properties": {
-                "project": {"type": "string", "description": "Absolute project path"},
-                "folder": {"type": "string", "description": "Filter by folder (e.g. \"decisions\")"},
-                "type": {"type": "string", "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\")"},
-                "depth": {"type": "integer", "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels"}
-            }
-        }),
-    )
-}
-
-fn tool_memory_build_context() -> RmcpTool {
-    RmcpTool::new(
-        "memory_build_context".to_string(),
-        "Build context from a memory note with progressive disclosure. Returns full content for primary notes, overview for direct linked notes, abstract for discovered related notes. Use url='folder/*' to return all notes in a folder. Seed notes are never dropped by budget constraints.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["url"],
-            "properties": {
-                "project": {"type": "string", "description": "Absolute project path"},
-                "url": {"type": "string", "description": "Memory URI: 'memory://folder/note', 'folder/note', or 'folder/*' for all notes in a folder"},
-                "depth": {"type": "integer", "description": "Link traversal depth (default 1)"},
-                "max_related": {"type": "integer", "description": "Maximum related notes to return (default 10)"},
-                "budget": {"type": "integer", "description": "Token budget for context (default 4096)"},
-                "task_id": {"type": "string", "description": "Task ID for affinity scoring"}
-            }
-        }),
-    )
-}
-
-fn tool_role_metrics() -> RmcpTool {
-    RmcpTool::new(
-        "agent_metrics".to_string(),
-        "Return aggregated effectiveness metrics per agent: success_rate, avg_tokens, avg_time_seconds, verification_pass_rate, avg_reopens, completed_task_count. Omit agent_id to return metrics for all agents in the project.".to_string(),
-        object!({
-            "type": "object",
-            "properties": {
-                "project": {"type": "string", "description": "Absolute project path"},
-                "agent_id": {"type": "string", "description": "Agent UUID or name; omit for all agents"},
-                "window_days": {"type": "integer", "description": "Days back for session data (default 30)"}
-            }
-        }),
-    )
-}
-
 fn tool_role_amend_prompt() -> RmcpTool {
     RmcpTool::new(
         "agent_amend_prompt".to_string(),
@@ -2755,25 +2561,6 @@ fn tool_role_amend_prompt() -> RmcpTool {
                 "agent_id": {"type": "string", "description": "Agent UUID or name to amend"},
                 "amendment": {"type": "string", "description": "Amendment text to append to learned_prompt"},
                 "metrics_snapshot": {"type": "string", "description": "JSON string of current metrics for the history record"}
-            }
-        }),
-    )
-}
-
-fn tool_role_create() -> RmcpTool {
-    RmcpTool::new(
-        "agent_create".to_string(),
-        "Create a new specialist agent extending a base role (worker or reviewer). Use when existing agents lack capabilities for a specific domain.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["name", "base_role"],
-            "properties": {
-                "project": {"type": "string", "description": "Absolute project path"},
-                "name": {"type": "string", "description": "Unique agent name within the project"},
-                "base_role": {"type": "string", "description": "Base role to extend: worker or reviewer"},
-                "description": {"type": "string", "description": "Short description of what this agent specialises in"},
-                "system_prompt_extensions": {"type": "string", "description": "Additional system prompt content appended to the base role prompt"},
-                "model_preference": {"type": "string", "description": "Preferred model ID (falls back to project default)"}
             }
         }),
     )
@@ -2842,75 +2629,6 @@ fn tool_edit() -> RmcpTool {
     )
 }
 
-fn tool_task_create() -> RmcpTool {
-    RmcpTool::new(
-        "task_create".to_string(),
-        "Create a new task under an epic. Use blocked_by to set dependencies and acceptance_criteria to define success criteria at creation.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["epic_id", "title"],
-            "properties": {
-                "epic_id": {"type": "string"},
-                "title": {"type": "string"},
-                "issue_type": {"type": "string"},
-                "description": {"type": "string"},
-                "design": {"type": "string"},
-                "priority": {"type": "integer"},
-                "owner": {"type": "string"},
-                "status": {"type": "string", "description": "Optional initial status. Allowed: open (default)."},
-                "acceptance_criteria": {"type": "array", "items": {"type": "string"}, "description": "List of acceptance criteria strings."},
-                "blocked_by": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) that block this task."},
-                "memory_refs": {"type": "array", "items": {"type": "string"}, "description": "Memory note permalinks to attach."},
-                "agent_type": {"type": "string", "description": "Specialist role name to route this task (e.g. 'rust-expert'). Must match a configured AgentRole name for this project."}
-            }
-        }),
-    )
-}
-
-fn tool_task_update() -> RmcpTool {
-    RmcpTool::new(
-        "task_update".to_string(),
-        "Update task fields: title, description, design, priority, owner, labels, acceptance_criteria, memory_refs, blocked_by.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["id"],
-            "properties": {
-                "id": {"type": "string"},
-                "title": {"type": "string"},
-                "description": {"type": "string"},
-                "design": {"type": "string"},
-                "priority": {"type": "integer"},
-                "owner": {"type": "string"},
-                "labels_add": {"type": "array", "items": {"type": "string"}},
-                "labels_remove": {"type": "array", "items": {"type": "string"}},
-                "acceptance_criteria": {"type": "array", "items": {"type": "object"}},
-                "memory_refs_add": {"type": "array", "items": {"type": "string"}},
-                "memory_refs_remove": {"type": "array", "items": {"type": "string"}},
-                "blocked_by_add": {"type": "array", "items": {"type": "string"}, "description": "Task IDs to add as blockers"},
-                "blocked_by_remove": {"type": "array", "items": {"type": "string"}, "description": "Task IDs to remove as blockers"}
-            }
-        }),
-    )
-}
-
-fn tool_task_transition() -> RmcpTool {
-    RmcpTool::new(
-        "task_transition".to_string(),
-        "Execute a state machine transition on a task. Lead can use: lead_intervention_complete (rescope and reopen for worker), lead_approve (approve implementation and merge), force_close (requires replacement_task_ids for decomposition OR reason for redundant/already-landed tasks), escalate.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["id", "action"],
-            "properties": {
-                "id": {"type": "string", "description": "Task UUID or short ID"},
-                "action": {"type": "string", "description": "Transition action"},
-                "reason": {"type": "string"},
-                "target_status": {"type": "string"},
-                "replacement_task_ids": {"type": "array", "items": {"type": "string"}, "description": "For force_close with decomposition: IDs of replacement subtasks. Not required if closing a redundant task with a reason."}
-            }
-        }),
-    )
-}
-
 fn tool_task_delete_branch() -> RmcpTool {
     RmcpTool::new(
         "task_delete_branch".to_string(),
@@ -2962,21 +2680,6 @@ fn tool_task_kill_session() -> RmcpTool {
             "required": ["id"],
             "properties": {
                 "id": {"type": "string", "description": "Task UUID or short ID"}
-            }
-        }),
-    )
-}
-
-fn tool_task_comment_add() -> RmcpTool {
-    RmcpTool::new(
-        "task_comment_add".to_string(),
-        "Add a comment or strategic observation to a task's activity log.".to_string(),
-        object!({
-            "type": "object",
-            "required": ["id", "body"],
-            "properties": {
-                "id": {"type": "string", "description": "Task UUID or short ID"},
-                "body": {"type": "string", "description": "Comment body to add to the activity log"}
             }
         }),
     )
@@ -3056,8 +2759,7 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
     tool_values.push(serde_json::to_value(tool_read()).expect("serialize tool_read"));
     tool_values.push(serde_json::to_value(tool_lsp()).expect("serialize tool_lsp"));
-    tool_values
-        .push(serde_json::to_value(tool_ci_job_log()).expect("serialize tool_ci_job_log"));
+    tool_values.push(serde_json::to_value(tool_ci_job_log()).expect("serialize tool_ci_job_log"));
     tool_values.push(serde_json::to_value(tool_output_view()).expect("serialize tool_output_view"));
     tool_values.push(serde_json::to_value(tool_output_grep()).expect("serialize tool_output_grep"));
     tool_values
@@ -3287,7 +2989,7 @@ mod tests {
     };
     use djinn_core::events::EventBus;
     use djinn_db::NoteRepository;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tokio_util::sync::CancellationToken;
 
     pub(crate) mod fuzzy_replace_tests {
