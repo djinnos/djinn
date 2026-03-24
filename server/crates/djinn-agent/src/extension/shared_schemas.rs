@@ -23,29 +23,6 @@ pub(crate) fn shared_pm_tool_schemas() -> Vec<serde_json::Value> {
     ]
 }
 
-pub(crate) fn shared_planner_tool_schemas() -> Vec<serde_json::Value> {
-    let mut tool_values = shared_pm_tool_schemas();
-    tool_values.push(
-        serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
-    );
-    tool_values
-}
-
-pub(crate) fn shared_architect_tool_schemas() -> Vec<serde_json::Value> {
-    let mut tool_values = shared_planner_tool_schemas();
-    tool_values.push(
-        serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
-    );
-    tool_values.push(
-        serde_json::to_value(tool_memory_build_context())
-            .expect("serialize tool_memory_build_context"),
-    );
-    tool_values
-        .push(serde_json::to_value(tool_role_metrics()).expect("serialize tool_role_metrics"));
-    tool_values.push(serde_json::to_value(tool_role_create()).expect("serialize tool_role_create"));
-    tool_values
-}
-
 pub(crate) fn tool_epic_show() -> RmcpTool {
     RmcpTool::new(
         "epic_show".to_string(),

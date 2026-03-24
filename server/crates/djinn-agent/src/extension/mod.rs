@@ -4,10 +4,7 @@ use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use shared_schemas::{
-    shared_architect_tool_schemas, shared_base_tool_schemas, shared_planner_tool_schemas,
-    shared_pm_tool_schemas,
-};
+use shared_schemas::{shared_base_tool_schemas, shared_pm_tool_schemas, tool_task_transition};
 
 use super::sandbox;
 use crate::context::AgentContext;
@@ -2792,7 +2789,10 @@ pub(crate) fn tool_schemas_lead() -> Vec<serde_json::Value> {
 /// task_comment_add and task_transition are excluded — submit_decision drives transitions.
 pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    for value in shared_pm_tool_schemas().into_iter().chain([
+    for value in shared_pm_tool_schemas() {
+        tool_values.push(value);
+    }
+    for value in [
         serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
         serde_json::to_value(tool_task_archive_activity())
             .expect("serialize tool_task_archive_activity"),
@@ -2802,7 +2802,7 @@ pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_request_architect()).expect("serialize tool_request_architect"),
         serde_json::to_value(crate::roles::finalize::tool_submit_decision())
             .expect("serialize tool_submit_decision"),
-    ]) {
+    ] {
         tool_values.push(value);
     }
     tool_values
@@ -2812,7 +2812,13 @@ pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
 /// task_comment_add is excluded — submit_grooming captures session output.
 pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    for value in shared_planner_tool_schemas().into_iter().chain([
+    for value in shared_pm_tool_schemas() {
+        tool_values.push(value);
+    }
+    tool_values.push(
+        serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
+    );
+    for value in [
         serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
         serde_json::to_value(tool_task_archive_activity())
             .expect("serialize tool_task_archive_activity"),
@@ -2821,7 +2827,7 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
         serde_json::to_value(crate::roles::finalize::tool_submit_grooming())
             .expect("serialize tool_submit_grooming"),
-    ]) {
+    ] {
         tool_values.push(value);
     }
     tool_values
@@ -2832,7 +2838,29 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
 /// Does not include write/edit/apply_patch. The Architect diagnoses and directs but does not write code.
 pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    for value in shared_architect_tool_schemas().into_iter().chain([
+    for value in shared_pm_tool_schemas() {
+        tool_values.push(value);
+    }
+    tool_values.push(
+        serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_task_comment_add())
+            .expect("serialize tool_task_comment_add"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_memory_build_context())
+            .expect("serialize tool_memory_build_context"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_role_metrics())
+            .expect("serialize tool_role_metrics"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_role_create())
+            .expect("serialize tool_role_create"),
+    );
+    for value in [
         serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
         serde_json::to_value(tool_task_archive_activity())
             .expect("serialize tool_task_archive_activity"),
@@ -2842,7 +2870,7 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_role_amend_prompt()).expect("serialize tool_role_amend_prompt"),
         serde_json::to_value(crate::roles::finalize::tool_submit_work())
             .expect("serialize tool_submit_work"),
-    ]) {
+    ] {
         tool_values.push(value);
     }
     tool_values
