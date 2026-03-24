@@ -940,71 +940,139 @@ impl CoordinatorActor {
         owner: &str,
         repo: &str,
     ) {
-        let mut check_lines: Vec<String> = Vec::new();
+        let mut sections: Vec<String> = Vec::new();
 
-        for cr in failed_checks {
-            let conclusion = cr.conclusion.as_deref().unwrap_or("unknown");
-            check_lines.push(format!(
-                "- **{}** ({}): {}",
-                cr.name, conclusion, cr.html_url
-            ));
+        // Try to get rich job/step info from the Actions API.
+        // Parse run_id from the first failed check run's URL.
+        let run_id = failed_checks
+            .first()
+            .and_then(|cr| {
+                cr.html_url
+                    .split("/actions/runs/")
+                    .nth(1)
+                    .and_then(|rest| rest.split('/').next())
+                    .and_then(|s| s.parse::<u64>().ok())
+            });
 
-            // Fetch annotations for this check run to surface actual error messages.
-            match gh_client
-                .get_check_run_annotations(owner, repo, cr.id)
-                .await
-            {
-                Ok(annotations) if !annotations.is_empty() => {
-                    for ann in &annotations {
-                        let title_part = ann
-                            .title
-                            .as_deref()
-                            .map(|t| format!(" ({})", t))
-                            .unwrap_or_default();
-                        check_lines.push(format!(
-                            "  - `{}` L{}-L{} [{}]{}: {}",
-                            ann.path,
-                            ann.start_line,
-                            ann.end_line,
-                            ann.annotation_level,
-                            title_part,
-                            ann.message,
+        let jobs = if let Some(rid) = run_id {
+            gh_client.list_run_jobs(owner, repo, rid).await.ok()
+        } else {
+            None
+        };
+
+        // Build the structural overview: workflow, jobs, failed steps.
+        if let Some(ref jobs) = jobs {
+            if let Some(workflow_name) = jobs.first().and_then(|j| j.workflow_name.as_deref()) {
+                sections.push(format!("**Workflow:** {workflow_name}"));
+            }
+
+            for job in jobs.iter().filter(|j| {
+                matches!(
+                    j.conclusion.as_deref(),
+                    Some("failure") | Some("timed_out") | Some("cancelled")
+                )
+            }) {
+                let conclusion = job.conclusion.as_deref().unwrap_or("unknown");
+                sections.push(format!("**Failed job:** {} ({})", job.name, conclusion));
+
+                let failed_steps: Vec<_> = job
+                    .steps
+                    .iter()
+                    .filter(|s| {
+                        matches!(
+                            s.conclusion.as_deref(),
+                            Some("failure") | Some("timed_out") | Some("cancelled")
+                        )
+                    })
+                    .collect();
+
+                if !failed_steps.is_empty() {
+                    for step in &failed_steps {
+                        let step_conclusion = step.conclusion.as_deref().unwrap_or("unknown");
+                        sections.push(format!(
+                            "**Failed step:** {} (step #{}, {})",
+                            step.name, step.number, step_conclusion
                         ));
                     }
                 }
-                Ok(_) => {
-                    // No annotations — fetch the Actions job logs instead.
-                    // Parse run_id from the check run URL to find the failed jobs.
-                    let log_snippet = self
-                        .fetch_failed_job_log_snippet(gh_client, owner, repo, &cr.html_url)
-                        .await;
-                    if let Some(snippet) = log_snippet {
-                        check_lines.push(format!("  - **Job log (last {} chars):**", snippet.len()));
-                        check_lines.push(format!("```\n{}\n```", snippet));
-                    } else {
-                        check_lines.push("  - _(no annotations or job logs available)_".to_string());
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        task_id,
-                        check_run_id = cr.id,
-                        error = %e,
-                        "PR poller: failed to fetch check run annotations"
-                    );
-                    check_lines.push(format!("  - _(failed to fetch annotations: {})_", e));
+
+                sections.push(format!("Job URL: {}", job.html_url));
+            }
+        } else {
+            // Fallback: just list the check run names.
+            for cr in failed_checks {
+                let conclusion = cr.conclusion.as_deref().unwrap_or("unknown");
+                sections.push(format!("- **{}** ({}): {}", cr.name, conclusion, cr.html_url));
+            }
+        }
+
+        // Now add error details: annotations first, then job logs as fallback.
+        let mut has_annotations = false;
+        for cr in failed_checks {
+            if let Ok(annotations) = gh_client
+                .get_check_run_annotations(owner, repo, cr.id)
+                .await
+                && !annotations.is_empty()
+            {
+                has_annotations = true;
+                sections.push(format!("\n**Annotations for {}:**", cr.name));
+                for ann in &annotations {
+                    let title_part = ann
+                        .title
+                        .as_deref()
+                        .map(|t| format!(" ({})", t))
+                        .unwrap_or_default();
+                    sections.push(format!(
+                        "  - `{}` L{}-L{} [{}]{}: {}",
+                        ann.path,
+                        ann.start_line,
+                        ann.end_line,
+                        ann.annotation_level,
+                        title_part,
+                        ann.message,
+                    ));
                 }
             }
         }
 
+        // If no annotations, fetch the first failed job's log.
+        if !has_annotations
+            && let Some(ref jobs) = jobs
+        {
+            let failed_job = jobs.iter().find(|j| {
+                matches!(
+                    j.conclusion.as_deref(),
+                    Some("failure") | Some("timed_out") | Some("cancelled")
+                )
+            });
+            if let Some(job) = failed_job {
+                match gh_client.get_job_logs(owner, repo, job.id).await {
+                    Ok(raw_log) => {
+                        let snippet = Self::clean_and_truncate_log(&raw_log);
+                        sections.push(format!(
+                            "\n**Job log ({}**, truncated):\n```\n{}\n```",
+                            job.name, snippet
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            job_id = job.id,
+                            error = %e,
+                            "PR poller: failed to fetch job logs"
+                        );
+                    }
+                }
+            }
+        }
+
+        sections.push(format!(
+            "\nTo investigate, check the workflow file in `.github/workflows/` and the job log at the URL above.\n\nPR: {pr_url}",
+        ));
+
         let body = format!(
-            "**CI checks failed on PR** (commit `{sha}`)\n\n\
-             The following CI checks failed. Review the error details below and fix the failures before the PR can merge.\n\n\
-             {checks}\n\n\
-             PR: {pr_url}",
+            "**CI checks failed on PR** (commit `{sha}`)\n\n{sections}",
             sha = &sha[..sha.len().min(12)],
-            checks = check_lines.join("\n"),
-            pr_url = pr_url,
+            sections = sections.join("\n"),
         );
 
         let payload = serde_json::json!({ "body": body }).to_string();
@@ -1021,97 +1089,41 @@ impl CoordinatorActor {
         }
     }
 
-    /// Fetch a cleaned-up snippet of the first failed job's log from a GitHub
-    /// Actions run.
+    /// Strip GitHub Actions noise from a raw job log and smart-truncate it.
     ///
-    /// Parses the run_id from the check run URL, lists jobs in that run,
-    /// finds the first failed job, strips GitHub Actions timestamp prefixes,
-    /// and returns a smart-truncated snippet (head+tail split) so the worker
-    /// sees both context and the actual error output.
-    async fn fetch_failed_job_log_snippet(
-        &self,
-        gh_client: &GitHubApiClient,
-        owner: &str,
-        repo: &str,
-        check_run_url: &str,
-    ) -> Option<String> {
-        /// Maximum characters to include in the snippet.  Sized to fit
-        /// comfortably within the `MAX_VERIFICATION_CHARS` budget (3000)
-        /// after `recent_feedback()` applies its own truncation, while
-        /// still carrying enough context for the worker to diagnose.
+    /// Removes ISO-8601 timestamp prefixes and `##[group]`/`##[endgroup]`
+    /// markers, then applies a 60/40 head+tail split so the worker sees
+    /// both initial context and the actual error output.
+    fn clean_and_truncate_log(raw_log: &str) -> String {
+        /// Maximum characters to include in the snippet.
         const MAX_LOG_SNIPPET_CHARS: usize = 6000;
 
-        // Parse run_id from URL like:
-        //   https://github.com/{owner}/{repo}/actions/runs/{run_id}/job/{job_id}
-        let run_id = check_run_url
-            .split("/actions/runs/")
-            .nth(1)
-            .and_then(|rest| rest.split('/').next())
-            .and_then(|s| s.parse::<u64>().ok())?;
-
-        let jobs = match gh_client.list_run_jobs(owner, repo, run_id).await {
-            Ok(jobs) => jobs,
-            Err(e) => {
-                tracing::debug!(
-                    run_id,
-                    error = %e,
-                    "PR poller: failed to list jobs for run"
-                );
-                return None;
-            }
-        };
-
-        // Find the first failed job.
-        let failed_job = jobs.iter().find(|j| {
-            matches!(
-                j.conclusion.as_deref(),
-                Some("failure") | Some("timed_out") | Some("cancelled")
-            )
-        })?;
-
-        match gh_client.get_job_logs(owner, repo, failed_job.id).await {
-            Ok(raw_log) => {
-                // Strip GitHub Actions timestamp prefixes (e.g. "2024-01-15T12:34:56.1234567Z ")
-                // and group-command markers (##[group], ##[endgroup], ##[error], etc.)
-                let cleaned: String = raw_log
-                    .lines()
-                    .map(|line| {
-                        // Strip leading ISO-8601 timestamp prefix
-                        line.get(..29)
-                            .filter(|prefix| {
-                                prefix.len() >= 20
-                                    && prefix.as_bytes().first() == Some(&b'2')
-                                    && prefix.contains('T')
-                                    && prefix.ends_with(' ')
-                            })
-                            .map(|_| &line[29..])
-                            .unwrap_or(line)
+        let cleaned: String = raw_log
+            .lines()
+            .map(|line| {
+                // Strip leading ISO-8601 timestamp prefix
+                line.get(..29)
+                    .filter(|prefix| {
+                        prefix.len() >= 20
+                            && prefix.as_bytes().first() == Some(&b'2')
+                            && prefix.contains('T')
+                            && prefix.ends_with(' ')
                     })
-                    // Drop GitHub Actions command markers but keep their content
-                    .filter(|line| !line.starts_with("##[endgroup]"))
-                    .map(|line| {
-                        line.strip_prefix("##[group]")
-                            .or_else(|| line.strip_prefix("##[error]"))
-                            .or_else(|| line.strip_prefix("##[warning]"))
-                            .unwrap_or(line)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                    .map(|_| &line[29..])
+                    .unwrap_or(line)
+            })
+            // Drop GitHub Actions command markers but keep their content
+            .filter(|line| !line.starts_with("##[endgroup]"))
+            .map(|line| {
+                line.strip_prefix("##[group]")
+                    .or_else(|| line.strip_prefix("##[error]"))
+                    .or_else(|| line.strip_prefix("##[warning]"))
+                    .unwrap_or(line)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
-                Some(crate::truncate::smart_truncate(
-                    &cleaned,
-                    MAX_LOG_SNIPPET_CHARS,
-                ))
-            }
-            Err(e) => {
-                tracing::debug!(
-                    job_id = failed_job.id,
-                    error = %e,
-                    "PR poller: failed to fetch job logs"
-                );
-                None
-            }
-        }
+        crate::truncate::smart_truncate(&cleaned, MAX_LOG_SNIPPET_CHARS)
     }
 }
 
