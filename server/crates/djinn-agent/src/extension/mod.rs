@@ -708,8 +708,8 @@ async fn call_task_update(
                 .unwrap_or_default()
                 .into_iter()
                 .collect::<HashSet<_>>(),
-            blocked_by_add_refs: Vec::new(),
-            blocked_by_remove_refs: Vec::new(),
+            blocked_by_add_refs: p.blocked_by_add.unwrap_or_default(),
+            blocked_by_remove_refs: p.blocked_by_remove.unwrap_or_default(),
             agent_type: None,
             epic_ref: None,
         },
