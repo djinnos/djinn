@@ -20,10 +20,10 @@ use djinn_db::SessionRepository;
 use djinn_db::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository};
 
 mod board;
-mod ops;
+pub mod ops;
 mod types;
 
-use self::ops::{
+pub use self::ops::{
     CommentTaskRequest, CreateTaskRequest, TransitionTaskRequest, UpdateTaskRequest,
     add_task_comment, create_task, transition_task, update_task,
 };
@@ -802,6 +802,16 @@ impl DjinnMcpServer {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 impl DjinnMcpServer {
+    /// Resolve an absolute project path to the canonical project UUID required by the public task
+    /// mutation seam. External adapters should call this once, then pass the returned project ID
+    /// into the exported task mutation helpers.
+    pub async fn require_project_id_public(
+        &self,
+        project: &str,
+    ) -> std::result::Result<String, ErrorResponse> {
+        self.require_project_id(project).await
+    }
+
     async fn require_project_id(
         &self,
         project: &str,

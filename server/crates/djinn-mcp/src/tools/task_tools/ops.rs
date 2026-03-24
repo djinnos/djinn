@@ -1,3 +1,23 @@
+//! Public task-mutation operation seam shared by MCP handlers and external adapters.
+//!
+//! External callers should construct a [`DjinnMcpServer`] from an existing [`crate::McpState`],
+//! resolve the project once, then call the mutation helpers in this module:
+//!
+//! ```ignore
+//! use djinn_mcp::server::DjinnMcpServer;
+//! use djinn_mcp::tools::task_tools::{
+//!     add_task_comment, create_task, transition_task, update_task, CommentTaskRequest,
+//!     CreateTaskRequest, TransitionTaskRequest, UpdateTaskRequest,
+//! };
+//!
+//! let server = DjinnMcpServer::new(state.clone());
+//! let project_id = server.require_project_id_public(project_path).await?;
+//! let response = create_task(&server, &project_id, CreateTaskRequest { /* ... */ }).await;
+//! ```
+//!
+//! Contract: callers must supply a server backed by real MCP state so repository/event-bus access,
+//! project resolution, and blocker validation behave exactly like the MCP tool wrappers.
+
 use rmcp::Json;
 
 use std::collections::HashSet;
@@ -78,7 +98,7 @@ pub(super) fn not_found(id: &str) -> ErrorResponse {
     ErrorResponse::new(format!("task not found: {id}"))
 }
 
-pub(super) async fn create_task(
+pub async fn create_task(
     server: &DjinnMcpServer,
     project_id: &str,
     request: CreateTaskRequest,
@@ -183,7 +203,7 @@ pub(super) async fn create_task(
     Json(ErrorOr::Ok(task_to_response(&task)))
 }
 
-pub(super) async fn update_task(
+pub async fn update_task(
     server: &DjinnMcpServer,
     project_id: &str,
     request: UpdateTaskRequest,
@@ -316,7 +336,7 @@ pub(super) async fn update_task(
     Json(ErrorOr::Ok(task_to_response(&updated)))
 }
 
-pub(super) async fn transition_task(
+pub async fn transition_task(
     server: &DjinnMcpServer,
     project_id: &str,
     request: TransitionTaskRequest,
@@ -371,7 +391,7 @@ pub(super) async fn transition_task(
     }
 }
 
-pub(super) async fn add_task_comment(
+pub async fn add_task_comment(
     server: &DjinnMcpServer,
     project_id: &str,
     request: CommentTaskRequest,
@@ -404,7 +424,7 @@ pub(super) async fn add_task_comment(
 }
 
 #[derive(Debug)]
-pub(super) struct CreateTaskRequest {
+pub struct CreateTaskRequest {
     pub title: String,
     pub description: String,
     pub design: String,
@@ -421,7 +441,7 @@ pub(super) struct CreateTaskRequest {
 }
 
 #[derive(Debug)]
-pub(super) struct UpdateTaskRequest {
+pub struct UpdateTaskRequest {
     pub id: String,
     pub title: Option<String>,
     pub description: Option<String>,
@@ -440,7 +460,7 @@ pub(super) struct UpdateTaskRequest {
 }
 
 #[derive(Debug)]
-pub(super) struct TransitionTaskRequest {
+pub struct TransitionTaskRequest {
     pub id: String,
     pub action: TransitionAction,
     pub actor_id: String,
@@ -450,7 +470,7 @@ pub(super) struct TransitionTaskRequest {
 }
 
 #[derive(Debug)]
-pub(super) struct CommentTaskRequest {
+pub struct CommentTaskRequest {
     pub id: String,
     pub body: String,
     pub actor_id: String,
