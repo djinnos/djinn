@@ -3,3 +3,7 @@
 .djinn/.obsidian/
 .planning/
 .claude/
+
+# Build / test artifacts
+target/
+tmp/
