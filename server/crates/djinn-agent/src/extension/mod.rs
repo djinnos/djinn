@@ -3191,6 +3191,7 @@ fn tool_lsp() -> RmcpTool {
 mod tests {
     use super::*;
     use crate::AgentType;
+    use crate::context::AgentContext;
     use crate::test_helpers::create_test_db;
     use crate::test_helpers::{
         agent_context_from_db, create_test_epic, create_test_project, create_test_task,
@@ -3314,7 +3315,8 @@ mod tests {
         let db = create_test_db();
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
-        let state = agent_context_from_db(db.clone(), CancellationToken::new());
+        let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
+        state.task_ops_project_path_override = Some(project.path.clone().into());
 
         let response = call_tool(
             &state,
@@ -3386,7 +3388,8 @@ mod tests {
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
         let task = create_test_task(&db, &project.id, &epic.id).await;
-        let state = agent_context_from_db(db.clone(), CancellationToken::new());
+        let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
+        state.task_ops_project_path_override = Some(project.path.clone().into());
 
         let response = call_tool(
             &state,
@@ -3475,7 +3478,8 @@ mod tests {
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
         let task = create_test_task(&db, &project.id, &epic.id).await;
-        let state = agent_context_from_db(db.clone(), CancellationToken::new());
+        let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
+        state.task_ops_project_path_override = Some(project.path.clone().into());
 
         let comment = call_tool(
             &state,

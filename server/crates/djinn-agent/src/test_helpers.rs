@@ -77,6 +77,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
         catalog: CatalogService::new(),
         coordinator: Arc::new(tokio::sync::Mutex::new(None)),
         active_tasks: crate::context::ActivityTracker::default(),
+        task_ops_project_path_override: None,
     }
 }
 
