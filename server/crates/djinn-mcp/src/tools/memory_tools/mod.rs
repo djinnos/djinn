@@ -17,6 +17,7 @@ pub use types::*;
 mod associations;
 mod confirm;
 pub(crate) mod contradiction;
+pub mod ops;
 mod reads;
 mod search;
 pub(crate) mod summaries;
@@ -27,6 +28,8 @@ mod writes;
 mod associations_tests;
 #[cfg(test)]
 mod build_context_tests;
+#[cfg(test)]
+mod ops_tests;
 #[cfg(test)]
 mod writes_tests;
 

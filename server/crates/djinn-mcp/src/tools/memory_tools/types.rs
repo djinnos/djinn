@@ -226,7 +226,7 @@ pub struct MemoryConfirmResponse {
 }
 
 impl MemoryConfirmResponse {
-    pub(super) fn error(error: String) -> Self {
+    pub fn error(error: String) -> Self {
         Self {
             note_id: None,
             permalink: None,
@@ -406,7 +406,7 @@ impl From<&djinn_core::models::Note> for MemoryNoteView {
 }
 
 impl MemoryNoteResponse {
-    pub(super) fn from_note(note: &djinn_core::models::Note) -> Self {
+    pub fn from_note(note: &djinn_core::models::Note) -> Self {
         Self {
             id: Some(note.id.clone()),
             project_id: Some(note.project_id.clone()),

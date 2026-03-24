@@ -1,3 +1,4 @@
+use super::ops;
 use super::*;
 
 #[tool_router(router = memory_reads_router, vis = "pub(super)")]
@@ -8,53 +9,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<ReadParams>,
     ) -> Json<MemoryNoteResponse> {
-        let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(MemoryNoteResponse::error(format!(
-                "project not found: {}",
-                p.project
-            )));
-        };
-
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
-
-        // Try permalink first, then title search.
-        let note = match repo.get_by_permalink(&project_id, &p.identifier).await {
-            Ok(Some(n)) => n,
-            _ => {
-                // Fallback: search by title
-                match repo
-                    .search(&project_id, &p.identifier, None, None, None, 1)
-                    .await
-                {
-                    Ok(results) if !results.is_empty() => {
-                        match repo.get(&results[0].id).await.ok().flatten() {
-                            Some(n) => n,
-                            None => {
-                                return Json(MemoryNoteResponse::error(format!(
-                                    "note not found: {}",
-                                    p.identifier
-                                )));
-                            }
-                        }
-                    }
-                    _ => {
-                        return Json(MemoryNoteResponse::error(format!(
-                            "note not found: {}",
-                            p.identifier
-                        )));
-                    }
-                }
-            }
-        };
-
-        // Update last_accessed in the background (best-effort).
-        let _ = repo.touch_accessed(&note.id).await;
-        if note.abstract_.is_none() || note.overview.is_none() {
-            self.enqueue_missing_summary_backfill(&note.id).await;
-        }
-        self.record_memory_read(&note.id).await;
-
-        Json(MemoryNoteResponse::from_note(&note))
+        Json(ops::memory_read(self, p).await)
     }
 
     /// List notes in a folder with depth control. Returns compact summaries
@@ -66,27 +21,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<ListParams>,
     ) -> Json<MemoryListResponse> {
-        let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(MemoryListResponse {
-                notes: vec![],
-                error: Some(format!("project not found: {}", p.project)),
-            });
-        };
-
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
-        let depth = p.depth.unwrap_or(1);
-
-        let notes = repo
-            .list_compact(
-                &project_id,
-                p.folder.as_deref(),
-                p.note_type.as_deref(),
-                depth,
-            )
-            .await
-            .unwrap_or_default();
-
-        Json(MemoryListResponse { notes, error: None })
+        Json(ops::memory_list(self, p).await)
     }
 
     /// Read the auto-generated knowledge base catalog. Returns the full catalog
