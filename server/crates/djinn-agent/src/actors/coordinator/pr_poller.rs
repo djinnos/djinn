@@ -1021,11 +1021,13 @@ impl CoordinatorActor {
         }
     }
 
-    /// Fetch the tail of the first failed job's log from a GitHub Actions run.
+    /// Fetch a cleaned-up snippet of the first failed job's log from a GitHub
+    /// Actions run.
     ///
     /// Parses the run_id from the check run URL, lists jobs in that run,
-    /// finds the first failed job, and returns the last `MAX_LOG_SNIPPET_CHARS`
-    /// of its log output.
+    /// finds the first failed job, strips GitHub Actions timestamp prefixes,
+    /// and returns a smart-truncated snippet (head+tail split) so the worker
+    /// sees both context and the actual error output.
     async fn fetch_failed_job_log_snippet(
         &self,
         gh_client: &GitHubApiClient,
@@ -1033,8 +1035,11 @@ impl CoordinatorActor {
         repo: &str,
         check_run_url: &str,
     ) -> Option<String> {
-        /// Maximum characters to include from a job log tail.
-        const MAX_LOG_SNIPPET_CHARS: usize = 4000;
+        /// Maximum characters to include in the snippet.  Sized to fit
+        /// comfortably within the `MAX_VERIFICATION_CHARS` budget (3000)
+        /// after `recent_feedback()` applies its own truncation, while
+        /// still carrying enough context for the worker to diagnose.
+        const MAX_LOG_SNIPPET_CHARS: usize = 6000;
 
         // Parse run_id from URL like:
         //   https://github.com/{owner}/{repo}/actions/runs/{run_id}/job/{job_id}
@@ -1065,14 +1070,38 @@ impl CoordinatorActor {
         })?;
 
         match gh_client.get_job_logs(owner, repo, failed_job.id).await {
-            Ok(log) => {
-                // Take the tail — error output is usually at the end.
-                let snippet = if log.len() > MAX_LOG_SNIPPET_CHARS {
-                    &log[log.len() - MAX_LOG_SNIPPET_CHARS..]
-                } else {
-                    &log
-                };
-                Some(snippet.to_string())
+            Ok(raw_log) => {
+                // Strip GitHub Actions timestamp prefixes (e.g. "2024-01-15T12:34:56.1234567Z ")
+                // and group-command markers (##[group], ##[endgroup], ##[error], etc.)
+                let cleaned: String = raw_log
+                    .lines()
+                    .map(|line| {
+                        // Strip leading ISO-8601 timestamp prefix
+                        line.get(..29)
+                            .filter(|prefix| {
+                                prefix.len() >= 20
+                                    && prefix.as_bytes().first() == Some(&b'2')
+                                    && prefix.contains('T')
+                                    && prefix.ends_with(' ')
+                            })
+                            .map(|_| &line[29..])
+                            .unwrap_or(line)
+                    })
+                    // Drop GitHub Actions command markers but keep their content
+                    .filter(|line| !line.starts_with("##[endgroup]"))
+                    .map(|line| {
+                        line.strip_prefix("##[group]")
+                            .or_else(|| line.strip_prefix("##[error]"))
+                            .or_else(|| line.strip_prefix("##[warning]"))
+                            .unwrap_or(line)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                Some(crate::truncate::smart_truncate(
+                    &cleaned,
+                    MAX_LOG_SNIPPET_CHARS,
+                ))
             }
             Err(e) => {
                 tracing::debug!(
