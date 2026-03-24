@@ -14,10 +14,7 @@ pub use self::ops::{
     AgentSingleResponse, create_agent, metrics_for_agents,
 };
 
-use self::ops::{
-    agent_not_found_error, resolve_agent, validate_agent_name,
-    validate_base_role,
-};
+use self::ops::{agent_not_found_error, resolve_agent, validate_agent_name, validate_base_role};
 use crate::tools::json_object::AnyJson;
 
 // ── Response types ────────────────────────────────────────────────────────────
