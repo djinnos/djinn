@@ -457,7 +457,7 @@ export function KanbanBoard({
           const taskCount = epicGroups.reduce((total, [, epicTasks]) => total + epicTasks.length, 0);
 
           return (
-            <div key={column.key} className="flex min-h-0 min-w-[320px] flex-1">
+            <div key={column.key} className="flex min-h-0 min-w-[360px] flex-1">
               {colIdx > 0 && <div className="w-px shrink-0 self-stretch bg-white/[0.03]" />}
               <Card
                 className="relative min-h-0 flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
