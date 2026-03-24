@@ -82,10 +82,9 @@ For each eligible specialist:
    - Only create worker or reviewer agents — not architect, lead, or planner
 
 **Amendment format:**
+Emit ONLY actionable bullet points — no headers, dates, or statistics preamble.
+The metrics are already captured separately in the `metrics_snapshot` parameter.
 ```
-## Auto-Amendment: {date}
-
-Based on {N} completed tasks ({success_rate}% success, {avg_reopens:.1} avg reopens):
 - [Specific guidance derived from patterns/pitfalls]
 - [Additional guidance if applicable]
 ```

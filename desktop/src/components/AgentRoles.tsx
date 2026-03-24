@@ -173,8 +173,8 @@ function AmendmentEntry({ amendment }: { amendment: LearnedPromptAmendment }) {
       {metricKeys.length > 0 && (
         <div className="flex flex-wrap gap-3 text-muted-foreground">
           {metricKeys.map((key) => {
-            const before = amendment.metrics_before[key] ?? 0;
-            const after = amendment.metrics_after[key] ?? 0;
+            const before = Number(amendment.metrics_before[key] ?? 0);
+            const after = Number(amendment.metrics_after[key] ?? 0);
             const delta = after - before;
             return (
               <span key={key}>
