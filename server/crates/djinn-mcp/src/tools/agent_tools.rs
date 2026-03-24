@@ -15,7 +15,6 @@ pub use self::ops::{
 };
 
 use self::ops::{agent_not_found_error, resolve_agent, validate_agent_name, validate_base_role};
-use crate::tools::json_object::AnyJson;
 
 // ── Response types ────────────────────────────────────────────────────────────
 
