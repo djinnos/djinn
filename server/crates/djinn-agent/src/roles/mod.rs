@@ -116,7 +116,7 @@ pub(crate) fn role_impl_for(agent_type: AgentType) -> Arc<dyn AgentRole> {
 /// Resolve `Arc<dyn AgentRole>` directly from a task and dispatch context,
 /// without exposing `AgentType` to the caller.
 ///
-/// Checks `issue_type` first so decomposition/spike/review tasks get the
+/// Checks `issue_type` first so planning/spike/review tasks get the
 /// correct role (Planner/Architect) instead of always defaulting to Worker.
 pub(crate) fn role_for_task_dispatch(
     task: &Task,
@@ -124,7 +124,7 @@ pub(crate) fn role_for_task_dispatch(
 ) -> Arc<dyn AgentRole> {
     // Issue-type-specific routing takes priority over status-based routing.
     match task.issue_type.as_str() {
-        "decomposition" => return role_impl_for(AgentType::Planner),
+        "planning" | "decomposition" => return role_impl_for(AgentType::Planner),
         "spike" | "review" => return role_impl_for(AgentType::Architect),
         _ => {}
     }
@@ -163,8 +163,8 @@ impl RoleRegistry {
         let dispatch_rules = vec![
             // Architect claims spike/review tasks (open status) first.
             architect_dispatch_rule(),
-            // Decomposition tasks go to Planner.
-            decomposition_dispatch_rule(),
+            // Planning tasks go to Planner.
+            planning_dispatch_rule(),
             worker_dispatch_rule(),
             reviewer_dispatch_rule(),
             lead_dispatch_rule(),
@@ -221,30 +221,31 @@ fn architect_dispatch_rule() -> DispatchRule {
     }
 }
 
-/// Returns `true` if the task's `issue_type` is `decomposition` (simple lifecycle,
-/// dispatched to the Planner role).
-fn decomposition_claims(task: &Task, _ctx: &DispatchContext) -> bool {
+/// Returns `true` if the task's `issue_type` is `planning` (simple lifecycle,
+/// dispatched to the Planner role). Also matches legacy `decomposition` for
+/// backward compatibility with existing DB rows.
+fn planning_claims(task: &Task, _ctx: &DispatchContext) -> bool {
     matches!(task.status.as_str(), "open" | "in_progress")
-        && task.issue_type.as_str() == "decomposition"
+        && matches!(task.issue_type.as_str(), "planning" | "decomposition")
 }
 
-fn decomposition_dispatch_rule() -> DispatchRule {
+fn planning_dispatch_rule() -> DispatchRule {
     DispatchRule {
         role_name: "planner",
-        claims: decomposition_claims,
+        claims: planning_claims,
     }
 }
 
 fn worker_claims(task: &Task, _ctx: &DispatchContext) -> bool {
-    // Spike, research, review, and decomposition tasks with simple lifecycle
-    // are handled by architect_claims / decomposition_claims / a direct worker path.
+    // Spike, research, review, and planning tasks with simple lifecycle
+    // are handled by architect_claims / planning_claims / a direct worker path.
     // Research tasks go to the worker role (open-ended but same execution model).
     !matches!(
         task.status.as_str(),
         "needs_task_review" | "in_task_review" | "needs_lead_intervention" | "in_lead_intervention"
     ) && !matches!(
         task.issue_type.as_str(),
-        "spike" | "review" | "decomposition"
+        "spike" | "review" | "planning" | "decomposition"
     )
 }
 
@@ -433,19 +434,30 @@ mod tests {
     }
 
     #[test]
-    fn decomposition_tasks_dispatch_to_planner() {
+    fn planning_tasks_dispatch_to_planner() {
         let registry = RoleRegistry::new();
         let ctx = DispatchContext;
 
         for status in ["open", "in_progress"] {
-            let task = make_task_with_type(status, "decomposition");
+            let task = make_task_with_type(status, "planning");
             let role = registry.role_for_task(&task, &ctx);
             assert_eq!(
                 role,
                 Some("planner"),
-                "decomposition/{status} task should dispatch to planner"
+                "planning/{status} task should dispatch to planner"
             );
         }
+    }
+
+    #[test]
+    fn legacy_decomposition_tasks_dispatch_to_planner() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+
+        // Backward compat: existing DB rows with "decomposition" still route to planner.
+        let task = make_task_with_type("open", "decomposition");
+        let role = registry.role_for_task(&task, &ctx);
+        assert_eq!(role, Some("planner"));
     }
 
     #[test]

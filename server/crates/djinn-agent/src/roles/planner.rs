@@ -31,10 +31,10 @@ impl AgentRole for PlannerRole {
         app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
         Box::pin(async move {
-            // Decomposition tasks use the simple lifecycle: close on completion.
+            // Planning tasks use the simple lifecycle: close on completion.
             let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
             if let Ok(Some(task)) = repo.get(task_id).await
-                && task.issue_type == "decomposition"
+                && matches!(task.issue_type.as_str(), "planning" | "decomposition")
             {
                 return Some((TransitionAction::Close, None));
             }

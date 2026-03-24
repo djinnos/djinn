@@ -9,9 +9,9 @@ pub struct TaskCreateParams {
     /// Parent epic ID - UUID or short_id (required).
     pub epic_id: Option<String>,
     pub title: String,
-    /// Task type: "task" (default), "feature", "bug", "spike", "research", "decomposition", or "review".
-    /// Spike, research, decomposition, and review use a simple lifecycle: open → in_progress → closed.
-    /// Decomposition tasks are routed to the Planner; spike and review tasks are routed to the Architect.
+    /// Task type: "task" (default), "feature", "bug", "spike", "research", "planning", or "review".
+    /// Spike, research, planning, and review use a simple lifecycle: open → in_progress → closed.
+    /// Planning tasks are routed to the Planner; spike and review tasks are routed to the Architect.
     pub issue_type: Option<String>,
     pub description: Option<String>,
     pub design: Option<String>,

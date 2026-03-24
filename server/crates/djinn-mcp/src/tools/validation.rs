@@ -75,12 +75,14 @@ pub fn validate_priority(p: i64) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate issue_type: "task", "feature", "bug", "spike", "research", "decomposition", or "review".
+/// Validate issue_type: "task", "feature", "bug", "spike", "research", "planning", or "review".
+/// Also accepts legacy "decomposition" (mapped to "planning" at the model layer).
 pub fn validate_issue_type(s: &str) -> Result<(), String> {
     match s {
-        "task" | "feature" | "bug" | "spike" | "research" | "decomposition" | "review" => Ok(()),
+        "task" | "feature" | "bug" | "spike" | "research" | "planning" | "decomposition"
+        | "review" => Ok(()),
         other => Err(format!(
-            "invalid issue_type: {other:?} (expected task, feature, bug, spike, research, decomposition, or review)"
+            "invalid issue_type: {other:?} (expected task, feature, bug, spike, research, planning, or review)"
         )),
     }
 }
@@ -272,7 +274,8 @@ mod tests {
         assert!(validate_issue_type("bug").is_ok());
         assert!(validate_issue_type("spike").is_ok());
         assert!(validate_issue_type("research").is_ok());
-        assert!(validate_issue_type("decomposition").is_ok());
+        assert!(validate_issue_type("planning").is_ok());
+        assert!(validate_issue_type("decomposition").is_ok()); // legacy compat
         assert!(validate_issue_type("review").is_ok());
         assert!(validate_issue_type("epic").is_err());
         assert!(validate_issue_type("").is_err());

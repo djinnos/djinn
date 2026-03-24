@@ -1,17 +1,17 @@
-// Wave-based Planner decomposition (task `watx`).
+// Wave-based Planner planning (task `watx`).
 //
-// When an epic is created, the coordinator creates a single `decomposition`
+// When an epic is created, the coordinator creates a single `planning`
 // task so the Planner can plan the first wave of work.  When all
-// non-decomposition worker tasks under the epic are closed (and the epic
-// itself is still open), a new decomposition task is created for the next
+// non-planning worker tasks under the epic are closed (and the epic
+// itself is still open), a new planning task is created for the next
 // wave.
 //
 // Rules
 // ─────
-// • Only one open/in-progress decomposition task per epic at a time.
-// • Decomposition tasks are never counted as "worker tasks" for batch-
-//   completion purposes (`issue_type == "decomposition"` is excluded).
-// • Non-worker issue types: decomposition, spike, review.  All other tasks
+// • Only one open/in-progress planning task per epic at a time.
+// • Planning tasks are never counted as "worker tasks" for batch-
+//   completion purposes (`issue_type == "planning"` is excluded).
+// • Non-worker issue types: planning, spike, review.  All other tasks
 //   (task, research, …) are worker tasks.
 
 use super::*;
@@ -22,9 +22,9 @@ use djinn_db::EpicRepository;
 const WORKER_ISSUE_TYPES: &[&str] = &["task", "research", "feature"];
 
 impl CoordinatorActor {
-    /// Called when an epic is created.  Creates the first decomposition task
+    /// Called when an epic is created.  Creates the first planning task
     /// unless one already exists for the epic (idempotent).
-    pub(super) async fn maybe_create_decomposition_task(
+    pub(super) async fn maybe_create_planning_task(
         &mut self,
         epic: &djinn_core::models::Epic,
     ) {
@@ -34,14 +34,14 @@ impl CoordinatorActor {
         let task_repo = self.task_repo();
         match task_repo.list_by_epic(&epic.id).await {
             Ok(tasks) => {
-                let has_open_decomp = tasks.iter().any(|t| {
-                    t.issue_type == "decomposition"
+                let has_open_planning = tasks.iter().any(|t| {
+                    matches!(t.issue_type.as_str(), "planning" | "decomposition")
                         && matches!(t.status.as_str(), "open" | "in_progress")
                 });
-                if has_open_decomp {
+                if has_open_planning {
                     tracing::debug!(
                         epic_id = %epic.short_id,
-                        "CoordinatorActor: decomposition task already exists, skipping"
+                        "CoordinatorActor: planning task already exists, skipping"
                     );
                     return;
                 }
@@ -50,19 +50,19 @@ impl CoordinatorActor {
                 tracing::warn!(
                     epic_id = %epic.id,
                     error = %e,
-                    "CoordinatorActor: failed to list tasks for decomposition check"
+                    "CoordinatorActor: failed to list tasks for planning task check"
                 );
                 return;
             }
         }
 
-        self.create_decomposition_task(epic).await;
+        self.create_planning_task(epic).await;
     }
 
     /// Called when a task is closed.  Checks whether all worker tasks under
     /// the epic are now closed (batch complete) and if so creates a new
-    /// decomposition task for the next wave.
-    pub(super) async fn maybe_create_next_wave_decomposition(
+    /// planning task for the next wave.
+    pub(super) async fn maybe_create_next_wave_planning(
         &mut self,
         epic_id: &str,
         project_id: &str,
@@ -103,12 +103,12 @@ impl CoordinatorActor {
             }
         };
 
-        // Check for an existing open/in-progress decomposition task — if one
+        // Check for an existing open/in-progress planning task — if one
         // exists we don't create another.
-        let has_open_decomp = all_tasks.iter().any(|t| {
-            t.issue_type == "decomposition" && matches!(t.status.as_str(), "open" | "in_progress")
+        let has_open_planning = all_tasks.iter().any(|t| {
+            matches!(t.issue_type.as_str(), "planning" | "decomposition") && matches!(t.status.as_str(), "open" | "in_progress")
         });
-        if has_open_decomp {
+        if has_open_planning {
             return;
         }
 
@@ -135,19 +135,19 @@ impl CoordinatorActor {
             epic_id,
             project_id,
             worker_count = worker_tasks.len(),
-            "CoordinatorActor: batch complete — creating next-wave decomposition task"
+            "CoordinatorActor: batch complete — creating next-wave planning task"
         );
 
-        self.create_decomposition_task(&epic).await;
+        self.create_planning_task(&epic).await;
     }
 
-    /// Internal: create a decomposition task for an epic and trigger dispatch.
-    async fn create_decomposition_task(&mut self, epic: &djinn_core::models::Epic) {
+    /// Internal: create a planning task for an epic and trigger dispatch.
+    async fn create_planning_task(&mut self, epic: &djinn_core::models::Epic) {
         let task_repo = self.task_repo();
 
         let title = format!("Plan next wave: {}", epic.title);
         let description = format!(
-            "Wave-based decomposition task for epic '{}' ({}). \
+            "Planning task for epic '{}' ({}). \
              The Planner should:\n\
              1. Read the epic's memory_refs for context and prior roadmap notes.\n\
              2. Review any previous wave results (closed tasks, session reflections).\n\
@@ -176,7 +176,7 @@ impl CoordinatorActor {
                 &title,
                 &description,
                 &design,
-                "decomposition",
+                "planning",
                 0,
                 "planner",
                 Some("open"),
@@ -188,7 +188,7 @@ impl CoordinatorActor {
                 tracing::info!(
                     epic_id = %epic.short_id,
                     task_id = %task.short_id,
-                    "CoordinatorActor: created decomposition task for epic"
+                    "CoordinatorActor: created planning task for epic"
                 );
                 self.dispatch_ready_tasks(Some(&epic.project_id)).await;
             }
@@ -196,7 +196,7 @@ impl CoordinatorActor {
                 tracing::warn!(
                     epic_id = %epic.id,
                     error = %e,
-                    "CoordinatorActor: failed to create decomposition task"
+                    "CoordinatorActor: failed to create planning task"
                 );
             }
         }

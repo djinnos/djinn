@@ -1822,7 +1822,7 @@ mod task_tools {
         let sid = initialize_mcp_session(&app).await;
 
         // Simple-lifecycle types should succeed without AC
-        for issue_type in ["spike", "research", "decomposition", "review"] {
+        for issue_type in ["spike", "research", "planning", "review"] {
             let result = mcp_call_tool(
                 &app,
                 &sid,
