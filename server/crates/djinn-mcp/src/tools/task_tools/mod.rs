@@ -27,7 +27,7 @@ use self::ops::{
     CommentTaskRequest, CreateTaskRequest, TransitionTaskRequest, UpdateTaskRequest,
     add_task_comment, create_task, transition_task, update_task,
 };
-pub use types::*;
+pub use self::types::*;
 
 // ── Tool implementations ─────────────────────────────────────────────────────
 
