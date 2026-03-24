@@ -205,6 +205,8 @@ struct TaskUpdateParams {
     acceptance_criteria: Option<Vec<serde_json::Value>>,
     memory_refs_add: Option<Vec<String>>,
     memory_refs_remove: Option<Vec<String>>,
+    blocked_by_add: Option<Vec<String>>,
+    blocked_by_remove: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
