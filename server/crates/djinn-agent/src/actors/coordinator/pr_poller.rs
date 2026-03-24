@@ -1102,7 +1102,6 @@ impl CoordinatorActor {
             );
         }
     }
-
 }
 
 /// Parse a GitHub PR URL into `(owner, repo, pull_number)`.
