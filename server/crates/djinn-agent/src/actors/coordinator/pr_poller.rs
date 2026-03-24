@@ -1006,8 +1006,10 @@ impl CoordinatorActor {
             }
         }
 
-        // Fetch job logs for each failed job — annotations are unreliable
-        // (GitHub often only reports "Process completed with exit code N").
+        // Build structured CI job metadata for the `ci_job_log` tool instead of
+        // inlining truncated logs. The worker can call `ci_job_log(job_id=...)` to
+        // fetch the full log on demand, with output_view/output_grep for navigation.
+        let mut ci_jobs = Vec::new();
         if let Some(ref jobs) = jobs {
             for job in jobs.iter().filter(|j| {
                 matches!(
@@ -1015,28 +1017,62 @@ impl CoordinatorActor {
                     Some("failure") | Some("timed_out") | Some("cancelled")
                 )
             }) {
-                match gh_client.get_job_logs(owner, repo, job.id).await {
-                    Ok(raw_log) => {
-                        let snippet = Self::clean_and_truncate_log(&raw_log);
-                        sections.push(format!(
-                            "\n**Job log ({}):**\n```\n{}\n```",
-                            job.name, snippet
-                        ));
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            job_id = job.id,
-                            error = %e,
-                            "PR poller: failed to fetch job logs"
-                        );
-                    }
-                }
+                let failed_step_names: Vec<serde_json::Value> = job
+                    .steps
+                    .iter()
+                    .filter(|s| {
+                        matches!(
+                            s.conclusion.as_deref(),
+                            Some("failure") | Some("timed_out") | Some("cancelled")
+                        )
+                    })
+                    .map(|s| {
+                        serde_json::json!({
+                            "name": s.name,
+                            "number": s.number,
+                        })
+                    })
+                    .collect();
+
+                ci_jobs.push(serde_json::json!({
+                    "job_id": job.id,
+                    "name": job.name,
+                    "failed_steps": failed_step_names,
+                }));
             }
         }
 
-        sections.push(format!(
-            "\nTo investigate, check the workflow file in `.github/workflows/` and the job log at the URL above.\n\nPR: {pr_url}",
-        ));
+        // Build ci_job_log hint lines so the worker knows exactly which tool
+        // call to make for each failed job.
+        if !ci_jobs.is_empty() {
+            let hints: Vec<String> = ci_jobs
+                .iter()
+                .map(|j| {
+                    let job_id = j["job_id"].as_u64().unwrap_or(0);
+                    let name = j["name"].as_str().unwrap_or("unknown");
+                    let steps: Vec<String> = j["failed_steps"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|s| s["name"].as_str().map(|n| n.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if let Some(step) = steps.first() {
+                        format!(
+                            "Use `ci_job_log(job_id={job_id}, step=\"{step}\")` to view the **{name}** failed step log."
+                        )
+                    } else {
+                        format!(
+                            "Use `ci_job_log(job_id={job_id})` to view the **{name}** job log."
+                        )
+                    }
+                })
+                .collect();
+            sections.push(format!("\n{}", hints.join("\n")));
+        }
+
+        sections.push(format!("\nPR: {pr_url}"));
 
         let body = format!(
             "**CI checks failed on PR** (commit `{sha}`)\n\n{sections}",
@@ -1044,7 +1080,13 @@ impl CoordinatorActor {
             sections = sections.join("\n"),
         );
 
-        let payload = serde_json::json!({ "body": body }).to_string();
+        let payload = serde_json::json!({
+            "body": body,
+            "ci_jobs": ci_jobs,
+            "owner": owner,
+            "repo": repo,
+        })
+        .to_string();
         let task_repo = self.task_repo();
         if let Err(e) = task_repo
             .log_activity(Some(task_id), "pr_poller", "verification", "comment", &payload)
@@ -1058,42 +1100,6 @@ impl CoordinatorActor {
         }
     }
 
-    /// Strip GitHub Actions noise from a raw job log and smart-truncate it.
-    ///
-    /// Removes ISO-8601 timestamp prefixes and `##[group]`/`##[endgroup]`
-    /// markers, then applies a 60/40 head+tail split so the worker sees
-    /// both initial context and the actual error output.
-    fn clean_and_truncate_log(raw_log: &str) -> String {
-        /// Maximum characters to include in the snippet.
-        const MAX_LOG_SNIPPET_CHARS: usize = 6000;
-
-        let cleaned: String = raw_log
-            .lines()
-            .map(|line| {
-                // Strip leading ISO-8601 timestamp prefix
-                line.get(..29)
-                    .filter(|prefix| {
-                        prefix.len() >= 20
-                            && prefix.as_bytes().first() == Some(&b'2')
-                            && prefix.contains('T')
-                            && prefix.ends_with(' ')
-                    })
-                    .map(|_| &line[29..])
-                    .unwrap_or(line)
-            })
-            // Drop GitHub Actions command markers but keep their content
-            .filter(|line| !line.starts_with("##[endgroup]"))
-            .map(|line| {
-                line.strip_prefix("##[group]")
-                    .or_else(|| line.strip_prefix("##[error]"))
-                    .or_else(|| line.strip_prefix("##[warning]"))
-                    .unwrap_or(line)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        crate::truncate::smart_truncate(&cleaned, MAX_LOG_SNIPPET_CHARS)
-    }
 }
 
 /// Parse a GitHub PR URL into `(owner, repo, pull_number)`.
