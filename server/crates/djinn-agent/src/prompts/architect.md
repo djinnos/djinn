@@ -67,8 +67,9 @@ Review specialist agent roles that have accumulated sufficient task history.
 **Only review roles with `completed_task_count >= 5` in the window.**
 
 For each eligible specialist:
-1. Call `role_metrics()` to get effectiveness data for all roles
+1. Call `role_metrics()` to get effectiveness data for all roles — the response includes each role's current `learned_prompt` so you can see what amendments already exist
 2. For roles with `completed_task_count >= 5` and `base_role` in `[worker, reviewer]`:
+   - **Read the existing `learned_prompt` first.** Do not duplicate or rephrase guidance that is already present. Only amend if the new guidance is genuinely novel.
    - Call `memory_build_context(url="pitfalls/*")` and `memory_build_context(url="patterns/*")` to get domain knowledge
    - Additionally call `memory_search(query="agent:{role_name} pitfalls patterns")` for role-specific cases
    - Review the metrics: success_rate, avg_reopens, verification_pass_rate
