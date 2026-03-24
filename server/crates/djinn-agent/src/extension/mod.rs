@@ -19,11 +19,73 @@ use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
 use djinn_db::{AgentCreateInput, AgentRepository, VALID_BASE_ROLES};
 use djinn_mcp::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
+use djinn_mcp::tools::task_tools::{
+    CommentTaskRequest as SharedCommentTaskRequest, CreateTaskRequest as SharedCreateTaskRequest,
+    TransitionTaskRequest as SharedTransitionTaskRequest,
+    UpdateTaskRequest as SharedUpdateTaskRequest, add_task_comment as shared_add_task_comment,
+    create_task as shared_create_task, transition_task as shared_transition_task,
+    update_task as shared_update_task,
+};
+use rmcp::Json;
+use std::collections::HashSet;
 
 #[derive(Deserialize)]
 struct IncomingToolCall {
     name: String,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Supported djinn-agent → djinn-mcp integration seam for shared task mutation ops.
+///
+/// External callers should bridge their existing runtime context through
+/// [`AgentContext::to_mcp_state`] and resolve the project id with
+/// [`AgentContext::require_project_id_for_task_ops`] using the session/worktree root
+/// rather than a crate-local source path. This preserves MCP-side project resolution
+/// semantics and lets shared mutation helpers return the same public response shapes
+/// and JSON error envelopes that agent dispatch tests assert.
+async fn project_id_for_path(state: &AgentContext, project_path: &str) -> Result<String, String> {
+    state
+        .require_project_id_for_task_ops(project_path)
+        .await
+        .map_err(|error| error.error)
+}
+
+fn acceptance_criterion_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => map
+            .get("criterion")
+            .and_then(|criterion| criterion.as_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| value.to_string()),
+        serde_json::Value::String(text) => text.clone(),
+        _ => value.to_string(),
+    }
+}
+
+fn task_response_to_value(
+    response: djinn_mcp::tools::task_tools::TaskResponse,
+) -> serde_json::Value {
+    serde_json::to_value(response)
+        .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize task response" }))
+}
+
+fn activity_entry_to_value(
+    response: djinn_mcp::tools::task_tools::ActivityEntryResponse,
+) -> serde_json::Value {
+    serde_json::to_value(response)
+        .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize activity response" }))
+}
+
+fn error_or_to_value<T>(
+    response: djinn_mcp::tools::task_tools::ErrorOr<T>,
+    ok: impl FnOnce(T) -> serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    Ok(match response {
+        djinn_mcp::tools::task_tools::ErrorOr::Ok(value) => ok(value),
+        djinn_mcp::tools::task_tools::ErrorOr::Error(error) => {
+            serde_json::json!({ "error": error.error })
+        }
+    })
 }
 
 /// Find the largest byte index <= `idx` that is a valid UTF-8 char boundary.
@@ -53,6 +115,7 @@ where
         let path_str = worktree_path.to_string_lossy();
         repo.resolve(&path_str).await.ok().flatten()
     };
+    let worktree_project_path = worktree_path.display().to_string();
 
     if let Some(schemas) = allowed_schemas
         && !is_tool_allowed_for_schemas(schemas, &call.name)
@@ -66,13 +129,18 @@ where
     match call.name.as_str() {
         "task_list" => call_task_list(state, &call.arguments, project_id.as_deref()).await,
         "task_show" => call_task_show(state, &call.arguments).await,
-        "task_create" => call_task_create(state, &call.arguments).await,
-        "task_update" => call_task_update(state, &call.arguments).await,
+        "task_create" => call_task_create(state, &call.arguments, &worktree_project_path).await,
+        "task_update" => call_task_update(state, &call.arguments, &worktree_project_path).await,
         "task_update_ac" => call_task_update_ac(state, &call.arguments).await,
-        "task_comment_add" => call_task_comment_add(state, &call.arguments, session_role).await,
+        "task_comment_add" => {
+            call_task_comment_add(state, &call.arguments, session_role, &worktree_project_path)
+                .await
+        }
         "request_lead" => call_request_lead(state, &call.arguments).await,
         "request_architect" => call_request_architect(state, &call.arguments).await,
-        "task_transition" => call_task_transition(state, &call.arguments).await,
+        "task_transition" => {
+            call_task_transition(state, &call.arguments, &worktree_project_path).await
+        }
         "task_delete_branch" => call_task_delete_branch(state, &call.arguments).await,
         "task_archive_activity" => call_task_archive_activity(state, &call.arguments).await,
         "task_reset_counters" => call_task_reset_counters(state, &call.arguments).await,
@@ -144,8 +212,10 @@ struct TaskUpdateParams {
     acceptance_criteria: Option<Vec<serde_json::Value>>,
     memory_refs_add: Option<Vec<String>>,
     memory_refs_remove: Option<Vec<String>>,
-    blocked_by_add: Option<Vec<String>>,
-    blocked_by_remove: Option<Vec<String>>,
+    #[serde(default)]
+    blocked_by_add: Vec<String>,
+    #[serde(default)]
+    blocked_by_remove: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -575,15 +645,9 @@ async fn call_epic_tasks(
 async fn call_task_create(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: TaskCreateParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
-
-    let issue_type = p.issue_type.as_deref().unwrap_or("task");
-    let description = p.description.as_deref().unwrap_or("");
-    let design = p.design.as_deref().unwrap_or("");
-    let priority = p.priority.unwrap_or(0);
-    let owner = p.owner.as_deref().unwrap_or("");
     let status = match p.status.as_deref() {
         None => None,
         Some("open") => Some("open"),
@@ -591,185 +655,77 @@ async fn call_task_create(
             return Err(format!("invalid status: {other:?} (expected open)"));
         }
     };
+    let project_id = project_id_for_path(state, project_path).await?;
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let Json(response) = shared_create_task(
+        &server,
+        &project_id,
+        SharedCreateTaskRequest {
+            title: p.title,
+            description: p.description.unwrap_or_default(),
+            design: p.design.unwrap_or_default(),
+            issue_type: p.issue_type.unwrap_or_else(|| "task".to_string()),
+            priority: p.priority.unwrap_or(0),
+            owner: p.owner.unwrap_or_default(),
+            status: status.map(str::to_string),
+            acceptance_criteria: p.acceptance_criteria,
+            labels: Vec::new(),
+            memory_refs: p.memory_refs.unwrap_or_default(),
+            blocked_by_refs: p.blocked_by.unwrap_or_default(),
+            agent_type: p.agent_type,
+            epic_ref: Some(p.epic_id),
+        },
+    )
+    .await;
 
-    // Resolve epic_id (accepts UUID or short_id).
-    let epic_repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
-    let epic = epic_repo
-        .resolve(&p.epic_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("epic not found: {}", p.epic_id))?;
-
-    let mut task = repo
-        .create(
-            &epic.id,
-            &p.title,
-            description,
-            design,
-            issue_type,
-            priority,
-            owner,
-            status,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Set acceptance criteria if provided.
-    if let Some(ref ac) = p.acceptance_criteria {
-        let ac_items: Vec<serde_json::Value> = ac
-            .iter()
-            .map(|c| serde_json::json!({"criterion": c, "met": false}))
-            .collect();
-        let ac_json = serde_json::to_string(&ac_items).unwrap_or_else(|_| "[]".into());
-        task = repo
-            .update(
-                &task.id,
-                &task.title,
-                &task.description,
-                &task.design,
-                task.priority,
-                &task.owner,
-                &task.labels,
-                &ac_json,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-
-    // Set memory_refs if provided.
-    if let Some(ref refs) = p.memory_refs
-        && !refs.is_empty()
-    {
-        let refs_json = serde_json::to_string(refs).unwrap_or_else(|_| "[]".into());
-        if let Ok(t) = repo.update_memory_refs(&task.id, &refs_json).await {
-            task = t;
-        }
-    }
-
-    // Set blocked_by relationships if provided.
-    if let Some(ref blockers) = p.blocked_by {
-        for blocker_ref in blockers {
-            // Resolve short_id to full UUID if needed.
-            if let Ok(Some(blocker_task)) = repo.resolve(blocker_ref).await {
-                let _ = repo.add_blocker(&task.id, &blocker_task.id).await;
-            }
-        }
-    }
-
-    // Set agent_type (specialist routing) if provided.
-    if let Some(ref agent_type) = p.agent_type
-        && !agent_type.is_empty()
-        && let Ok(t) = repo.update_agent_type(&task.id, Some(agent_type)).await
-    {
-        task = t;
-    }
-
-    Ok(task_to_value(&task))
+    error_or_to_value(response, task_response_to_value)
 }
 
 async fn call_task_update(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: TaskUpdateParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
+    let project_id = project_id_for_path(state, project_path).await?;
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let Json(response) = shared_update_task(
+        &server,
+        &project_id,
+        SharedUpdateTaskRequest {
+            id: p.id,
+            title: p.title,
+            description: p.description,
+            design: p.design,
+            priority: p.priority,
+            owner: p.owner,
+            acceptance_criteria: p.acceptance_criteria.map(|criteria| {
+                criteria
+                    .into_iter()
+                    .map(|item| acceptance_criterion_to_string(&item))
+                    .collect()
+            }),
+            labels_add: p.labels_add.unwrap_or_default(),
+            labels_remove: p
+                .labels_remove
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            memory_refs_add: p.memory_refs_add.unwrap_or_default(),
+            memory_refs_remove: p
+                .memory_refs_remove
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            blocked_by_add_refs: p.blocked_by_add,
+            blocked_by_remove_refs: p.blocked_by_remove,
+            agent_type: None,
+            epic_ref: None,
+        },
+    )
+    .await;
 
-    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
-        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
-    };
-
-    let title = p.title.as_deref().unwrap_or(&task.title);
-    let description = p.description.as_deref().unwrap_or(&task.description);
-    let design = p.design.as_deref().unwrap_or(&task.design);
-    let priority = p.priority.unwrap_or(task.priority);
-    let owner = p.owner.as_deref().unwrap_or(&task.owner);
-
-    let labels_json = if p.labels_add.is_some() || p.labels_remove.is_some() {
-        let mut labels: Vec<String> = djinn_core::models::parse_json_array(&task.labels);
-        if let Some(add) = p.labels_add {
-            for label in add {
-                if !labels.contains(&label) {
-                    labels.push(label);
-                }
-            }
-        }
-        if let Some(remove) = p.labels_remove {
-            labels.retain(|v| !remove.contains(v));
-        }
-        serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string())
-    } else {
-        task.labels.clone()
-    };
-
-    let ac_json = p
-        .acceptance_criteria
-        .as_ref()
-        .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()))
-        .unwrap_or_else(|| task.acceptance_criteria.clone());
-
-    let mut updated = repo
-        .update(
-            &task.id,
-            title,
-            description,
-            design,
-            priority,
-            owner,
-            &labels_json,
-            &ac_json,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if p.memory_refs_add.is_some() || p.memory_refs_remove.is_some() {
-        let mut refs: Vec<String> = serde_json::from_str(&updated.memory_refs).unwrap_or_default();
-        if let Some(add) = p.memory_refs_add {
-            for r in add {
-                if !refs.contains(&r) {
-                    refs.push(r);
-                }
-            }
-        }
-        if let Some(remove) = p.memory_refs_remove {
-            refs.retain(|r| !remove.contains(r));
-        }
-        let refs_json = serde_json::to_string(&refs).unwrap_or_else(|_| "[]".to_string());
-        updated = repo
-            .update_memory_refs(&updated.id, &refs_json)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-
-    // Handle blocked_by_add / blocked_by_remove
-    if p.blocked_by_add.is_some() || p.blocked_by_remove.is_some() {
-        let mut add_ids = Vec::new();
-        if let Some(refs) = p.blocked_by_add {
-            for blocker_ref in &refs {
-                let blocker = repo
-                    .resolve(blocker_ref)
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("blocker task not found: {blocker_ref}"))?;
-                add_ids.push(blocker.id);
-            }
-        }
-        let mut remove_ids = Vec::new();
-        if let Some(refs) = p.blocked_by_remove {
-            for blocker_ref in &refs {
-                let blocker = repo
-                    .resolve(blocker_ref)
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("blocker task not found: {blocker_ref}"))?;
-                remove_ids.push(blocker.id);
-            }
-        }
-        repo.update_blockers_atomic(&updated.id, &add_ids, &remove_ids)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-
-    Ok(task_to_value(&updated))
+    error_or_to_value(response, task_response_to_value)
 }
 
 async fn call_task_update_ac(
@@ -941,33 +897,25 @@ async fn call_task_comment_add(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     session_role: Option<&str>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: TaskCommentAddParams = parse_args(arguments)?;
-    let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
-
-    let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
-        return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
-    };
-
-    let payload = serde_json::json!({ "body": p.body }).to_string();
     let default_role = session_role.unwrap_or("system");
-    let actor_id = p.actor_id.as_deref().unwrap_or(default_role);
-    let actor_role = p.actor_role.as_deref().unwrap_or(default_role);
+    let project_id = project_id_for_path(state, project_path).await?;
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let Json(response) = shared_add_task_comment(
+        &server,
+        &project_id,
+        SharedCommentTaskRequest {
+            id: p.id,
+            body: p.body,
+            actor_id: p.actor_id.unwrap_or_else(|| default_role.to_string()),
+            actor_role: p.actor_role.unwrap_or_else(|| default_role.to_string()),
+        },
+    )
+    .await;
 
-    let entry = repo
-        .log_activity(Some(&task.id), actor_id, actor_role, "comment", &payload)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(serde_json::json!({
-        "id": entry.id,
-        "task_id": entry.task_id,
-        "actor_id": entry.actor_id,
-        "actor_role": entry.actor_role,
-        "event_type": entry.event_type,
-        "payload": serde_json::from_str::<serde_json::Value>(&entry.payload).unwrap_or(serde_json::json!({})),
-        "created_at": entry.created_at,
-    }))
+    error_or_to_value(response, activity_entry_to_value)
 }
 
 async fn call_memory_read(
@@ -2135,14 +2083,6 @@ fn merge_acceptance_criteria(existing_json: &str, incoming: &[serde_json::Value]
     serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
 }
 
-async fn project_id_for_path(state: &AgentContext, project_path: &str) -> Result<String, String> {
-    let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
-    repo.resolve(project_path)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("project not found: {project_path}"))
-}
-
 fn resolve_project_path(project: Option<String>) -> String {
     match project {
         Some(path) => path,
@@ -2233,6 +2173,7 @@ struct TaskResetCountersParams {
 async fn call_task_transition(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
     use djinn_core::models::{TaskStatus, TransitionAction};
     let p: TaskTransitionParams = parse_args(arguments)?;
@@ -2328,18 +2269,22 @@ async fn call_task_transition(
         .map(TaskStatus::parse)
         .transpose()
         .map_err(|e| e.to_string())?;
-    let updated = repo
-        .transition(
-            &task.id,
+    let project_id = project_id_for_path(state, project_path).await?;
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let Json(response) = shared_transition_task(
+        &server,
+        &project_id,
+        SharedTransitionTaskRequest {
+            id: task.id,
             action,
-            "lead-agent",
-            "lead",
-            p.reason.as_deref(),
-            target,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(task_to_value(&updated))
+            actor_id: "lead-agent".to_string(),
+            actor_role: "lead".to_string(),
+            reason: p.reason,
+            target_override: target,
+        },
+    )
+    .await;
+    error_or_to_value(response, task_response_to_value)
 }
 
 async fn call_task_delete_branch(
@@ -3373,7 +3318,8 @@ mod tests {
         let db = create_test_db();
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
-        let state = agent_context_from_db(db.clone(), CancellationToken::new());
+        let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
+        state.task_ops_project_path_override = Some(project.path.clone().into());
 
         let response = call_tool(
             &state,
@@ -3424,8 +3370,9 @@ mod tests {
                 .get("acceptance_criteria")
                 .and_then(|v| v.as_array())
                 .and_then(|items| items.first())
-                .and_then(|item| item.get("criterion"))
-                .and_then(|v| v.as_str()),
+                .and_then(|item| item
+                    .as_str()
+                    .or_else(|| item.get("criterion").and_then(|v| v.as_str()))),
             Some("first criterion")
         );
         assert_eq!(
@@ -3444,7 +3391,8 @@ mod tests {
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
         let task = create_test_task(&db, &project.id, &epic.id).await;
-        let state = agent_context_from_db(db.clone(), CancellationToken::new());
+        let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
+        state.task_ops_project_path_override = Some(project.path.clone().into());
 
         let response = call_tool(
             &state,
@@ -3512,8 +3460,9 @@ mod tests {
                 .get("acceptance_criteria")
                 .and_then(|v| v.as_array())
                 .and_then(|items| items.first())
-                .and_then(|item| item.get("criterion"))
-                .and_then(|v| v.as_str()),
+                .and_then(|item| item
+                    .as_str()
+                    .or_else(|| item.get("criterion").and_then(|v| v.as_str()))),
             Some("updated criterion")
         );
         assert_eq!(
@@ -3532,7 +3481,8 @@ mod tests {
         let project = create_test_project(&db).await;
         let epic = create_test_epic(&db, &project.id).await;
         let task = create_test_task(&db, &project.id, &epic.id).await;
-        let state = agent_context_from_db(db.clone(), CancellationToken::new());
+        let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
+        state.task_ops_project_path_override = Some(project.path.clone().into());
 
         let comment = call_tool(
             &state,
