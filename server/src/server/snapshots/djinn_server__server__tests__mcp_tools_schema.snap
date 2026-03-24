@@ -6076,6 +6076,10 @@ expression: signatures
             "id": {
               "type": "string"
             },
+            "intervention_count": {
+              "format": "int64",
+              "type": "integer"
+            },
             "issue_type": {
               "type": "string"
             },
@@ -6084,6 +6088,10 @@ expression: signatures
                 "type": "string"
               },
               "type": "array"
+            },
+            "last_intervention_at": {
+              "nullable": true,
+              "type": "string"
             },
             "memory_refs": {
               "items": {
@@ -6126,6 +6134,14 @@ expression: signatures
             "title": {
               "type": "string"
             },
+            "total_reopen_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "total_verification_failure_count": {
+              "format": "int64",
+              "type": "integer"
+            },
             "unresolved_blocker_count": {
               "format": "int64",
               "type": "integer"
@@ -6154,6 +6170,9 @@ expression: signatures
             "reopen_count",
             "continuation_count",
             "verification_failure_count",
+            "total_reopen_count",
+            "total_verification_failure_count",
+            "intervention_count",
             "created_at",
             "updated_at",
             "unresolved_blocker_count",

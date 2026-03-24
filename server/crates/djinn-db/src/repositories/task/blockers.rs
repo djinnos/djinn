@@ -206,6 +206,8 @@ impl TaskRepository {
                     t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.verification_failure_count,
+                    t.total_reopen_count, t.total_verification_failure_count,
+                    t.intervention_count, t.last_intervention_at,
                     t.created_at, t.updated_at, t.closed_at,
                     t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs
              FROM blockers b
