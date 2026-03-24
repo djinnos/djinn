@@ -260,8 +260,12 @@ async fn wait_for_daemon(mut child: std::process::Child) -> Result<DaemonInfo, S
     };
 
     match child.try_wait() {
-        Ok(Some(status)) => Err(format!("daemon process exited early: {status}{stderr_hint}")),
-        Ok(None) => Err(format!("daemon did not become healthy in time{stderr_hint}")),
+        Ok(Some(status)) => Err(format!(
+            "daemon process exited early: {status}{stderr_hint}"
+        )),
+        Ok(None) => Err(format!(
+            "daemon did not become healthy in time{stderr_hint}"
+        )),
         Err(e) => Err(format!("check daemon process status: {e}{stderr_hint}")),
     }
 }
